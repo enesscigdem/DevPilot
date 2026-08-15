@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.Api
+    container_name: devpilot-api
+    ports:
+      - "5000:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+    networks:
+      - devpilot-network
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.Web
+    container_name: devpilot-web
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    networks:
+      - devpilot-network
+
+networks:
+  devpilot-network:
+    driver: bridge

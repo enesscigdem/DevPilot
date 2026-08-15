@@ -1,0 +1,22 @@
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
+WORKDIR /app
+EXPOSE 8080
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY ["src/DevPilot.Api/DevPilot.Api.csproj", "src/DevPilot.Api/"]
+COPY ["src/DevPilot.Application/DevPilot.Application.csproj", "src/DevPilot.Application/"]
+COPY ["src/DevPilot.Domain/DevPilot.Domain.csproj", "src/DevPilot.Domain/"]
+COPY ["src/DevPilot.Infrastructure/DevPilot.Infrastructure.csproj", "src/DevPilot.Infrastructure/"]
+RUN dotnet restore "src/DevPilot.Api/DevPilot.Api.csproj"
+COPY . .
+WORKDIR "/src/src/DevPilot.Api"
+RUN dotnet build "DevPilot.Api.csproj" -c Release -o /app/build
+
+FROM build AS publish
+RUN dotnet publish "DevPilot.Api.csproj" -c Release -o /app/publish /p:UseAppHost=false
+
+FROM base AS final
+WORKDIR /app
+COPY --from=publish /app/publish .
+ENTRYPOINT ["dotnet", "DevPilot.Api.dll"]
