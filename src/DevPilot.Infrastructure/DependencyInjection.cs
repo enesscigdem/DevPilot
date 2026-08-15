@@ -28,6 +28,14 @@ public static class DependencyInjection
     {
         var providerName = configuration["AiProvider:Provider"] ?? string.Empty;
 
+        if (providerName == AiProviderNames.Kimi)
+        {
+            services.AddHttpClient("Kimi", client =>
+            {
+                client.Timeout = TimeSpan.FromSeconds(60);
+            });
+        }
+
         switch (providerName)
         {
             case AiProviderNames.Kimi:
