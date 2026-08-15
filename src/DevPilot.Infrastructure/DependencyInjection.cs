@@ -1,7 +1,9 @@
 using DevPilot.Application.AiProviders;
+using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.GitProviders;
 using DevPilot.Application.RepositoryClone;
 using DevPilot.Infrastructure.AiProviders;
+using DevPilot.Infrastructure.CodeAnalysis;
 using DevPilot.Infrastructure.GitProviders;
 using DevPilot.Infrastructure.RepositoryClone;
 using Microsoft.EntityFrameworkCore;
@@ -26,6 +28,7 @@ public static class DependencyInjection
         services.AddAiProviders(configuration);
         services.AddGitProviders(configuration);
         services.AddRepositoryClone(configuration);
+        services.AddScoped<IRepositoryAnalyzer, RoslynRepositoryAnalyzer>();
 
         return services;
     }
