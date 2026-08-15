@@ -1,6 +1,26 @@
 version: "3.8"
 
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: devpilot-postgres
+    environment:
+      POSTGRES_USER: devpilot
+      POSTGRES_PASSWORD: devpilot
+      POSTGRES_DB: devpilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - devpilot-postgres-data:/var/lib/postgresql/data
+    networks:
+      - devpilot-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devpilot -d devpilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   api:
     build:
       context: .
@@ -10,6 +30,10 @@ services:
       - "5000:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__DevPilotDb: "Host=postgres;Port=5432;Database=devpilot;Username=devpilot;Password=devpilot"
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - devpilot-network
 
@@ -24,6 +48,9 @@ services:
       - api
     networks:
       - devpilot-network
+
+volumes:
+  devpilot-postgres-data:
 
 networks:
   devpilot-network:
