@@ -1,5 +1,7 @@
 using DevPilot.Application.AiProviders;
+using DevPilot.Application.GitProviders;
 using DevPilot.Infrastructure.AiProviders;
+using DevPilot.Infrastructure.GitProviders;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,6 +22,7 @@ public static class DependencyInjection
                 npgsql.MigrationsAssembly(typeof(DependencyInjection).Assembly.FullName)));
 
         services.AddAiProviders(configuration);
+        services.AddGitProviders(configuration);
 
         return services;
     }
@@ -53,6 +56,27 @@ public static class DependencyInjection
             default:
                 throw new InvalidOperationException(
                     $"Unsupported AI provider '{providerName}'. Supported providers: {AiProviderNames.Kimi}, {AiProviderNames.OpenAI}, {AiProviderNames.Claude}, {AiProviderNames.Gemini}.");
+        }
+
+        return services;
+    }
+
+    private static IServiceCollection AddGitProviders(this IServiceCollection services, IConfiguration configuration)
+    {
+        var providerName = configuration["GitProvider:Provider"] ?? string.Empty;
+
+        switch (providerName)
+        {
+            case GitProviderNames.GitHub:
+                services.AddHttpClient(GitHubGitProvider.HttpClientName, client =>
+                {
+                    client.Timeout = TimeSpan.FromSeconds(30);
+                });
+                services.AddScoped<IGitProvider, GitHubGitProvider>();
+                break;
+            default:
+                throw new InvalidOperationException(
+                    $"Unsupported Git provider '{providerName}'. Supported providers: {GitProviderNames.GitHub}.");
         }
 
         return services;
