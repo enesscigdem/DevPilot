@@ -1,6 +1,6 @@
 # .NET
-bin/
-obj/
+**/bin/
+**/obj/
 *.user
 *.suo
 *.userosscache
@@ -12,13 +12,15 @@ obj/
 *.swo
 
 # Node
-node_modules/
-dist/
-dist-ssr/
+**/node_modules/
+**/dist/
+**/dist-ssr/
 *.local
+
+# Environment / secrets
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Logs
 *.log
@@ -30,10 +32,14 @@ pnpm-debug.log*
 # Docker
 **/Dockerfile.local
 
+# DevPilot runtime workspaces
+devpilot-workspaces/
+**/devpilot-workspaces/
+
 # OS
 .DS_Store
 Thumbs.db
 
 # Test results
-TestResults/
-coverage/
+**/TestResults/
+**/coverage/

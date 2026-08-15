@@ -1,7 +1,9 @@
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.GitProviders;
+using DevPilot.Application.RepositoryClone;
 using DevPilot.Infrastructure.AiProviders;
 using DevPilot.Infrastructure.GitProviders;
+using DevPilot.Infrastructure.RepositoryClone;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,6 +25,19 @@ public static class DependencyInjection
 
         services.AddAiProviders(configuration);
         services.AddGitProviders(configuration);
+        services.AddRepositoryClone(configuration);
+
+        return services;
+    }
+
+    private static IServiceCollection AddRepositoryClone(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.Configure<RepositoryCloneOptions>(
+            configuration.GetSection(RepositoryCloneOptions.SectionName));
+
+        services.AddScoped<IRepositoryCloneService, RepositoryCloneService>();
 
         return services;
     }
