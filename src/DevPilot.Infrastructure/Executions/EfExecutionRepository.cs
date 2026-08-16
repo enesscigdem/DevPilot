@@ -190,4 +190,21 @@ public sealed class EfExecutionRepository : IExecutionRepository
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task UpdateWorkspaceDetailsAsync(
+        Guid executionId,
+        string workspacePath,
+        string branchName,
+        CancellationToken cancellationToken = default)
+    {
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.WorkspacePath, workspacePath)
+                    .SetProperty(e => e.BranchName, branchName),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

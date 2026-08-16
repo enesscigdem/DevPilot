@@ -19,4 +19,8 @@ public class TaskExecution
     public DateTime? CompletedAt { get; set; }
 
     public string? ErrorMessage { get; set; }
+
+    public string? WorkspacePath { get; set; }
+
+    public string? BranchName { get; set; }
 }

@@ -143,6 +143,8 @@ public class DevPilotDbContext : DbContext
 
             entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.ErrorMessage).HasMaxLength(4000);
+            entity.Property(e => e.WorkspacePath).HasMaxLength(500);
+            entity.Property(e => e.BranchName).HasMaxLength(200);
             entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.StartedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CompletedAt).HasColumnType("timestamp with time zone");

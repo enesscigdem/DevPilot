@@ -55,4 +55,13 @@ public interface IExecutionRepository
         Guid executionId,
         string errorMessage,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Persists the isolated workspace local path and dedicated branch name for an execution.
+    /// </summary>
+    Task UpdateWorkspaceDetailsAsync(
+        Guid executionId,
+        string workspacePath,
+        string branchName,
+        CancellationToken cancellationToken = default);
 }
