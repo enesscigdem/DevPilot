@@ -65,7 +65,8 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
 
             if (!File.Exists(resolvedPath))
             {
-                throw new InvalidOperationException($"Context file does not exist: '{relativePath}'.");
+                _logger.LogWarning("Context file does not exist and will be skipped: '{RelativePath}'.", relativePath);
+                continue;
             }
 
             var fileInfo = new FileInfo(resolvedPath);
@@ -90,6 +91,11 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
 
             var content = System.Text.Encoding.UTF8.GetString(bytes);
             result[relativePath] = content;
+        }
+
+        if (result.Count == 0)
+        {
+            throw new InvalidOperationException("No valid context files could be loaded from the requested paths.");
         }
 
         return result;

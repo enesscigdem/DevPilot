@@ -123,6 +123,72 @@ public class DeveloperAgentTests : IDisposable
         File.Exists(Path.Combine(_originalRepoDir, "Calculator.cs")).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_OneMissingAndOneValidImpactedFile_SucceedsAndCallsAiProviderWithValidContext()
+    {
+        var targetFile = Path.Combine(_worktreeDir, "Calculator.cs");
+        await File.WriteAllTextAsync(targetFile, "public class Calculator { public int Add(int a, int b) => a - b; }");
+
+        _fakeAiProvider.ResponseToReturn = """
+            {
+              "files": [
+                {
+                  "filePath": "Calculator.cs",
+                  "action": "Modify",
+                  "searchReplaceEdits": [
+                    {
+                      "search": "a - b",
+                      "replace": "a + b"
+                    }
+                  ]
+                }
+              ]
+            }
+            """;
+
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Fix Add method in Calculator",
+            TaskDescription: "Add method should perform addition, not subtraction.",
+            AcceptanceCriteria: "Calculator.Add returns a + b",
+            ImpactAnalysisSummary: "Impacts Calculator.cs and a missing file",
+            ProposedPlan: "Change - to + in Calculator.cs",
+            ImpactedFilePaths: new[] { "NonExistentPlausibleFile.cs", "Calculator.cs" },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
+
+        result.Success.Should().BeTrue();
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+        (await File.ReadAllTextAsync(targetFile)).Should().Be("public class Calculator { public int Add(int a, int b) => a + b; }");
+    }
+
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_AllImpactedFilesMissing_FailsBeforeAiProviderCall()
+    {
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Fix NonExistent Task",
+            TaskDescription: "Task description",
+            AcceptanceCriteria: "Criteria",
+            ImpactAnalysisSummary: "Impacts non-existent files",
+            ProposedPlan: "Plan",
+            ImpactedFilePaths: new[] { "NonExistent1.cs", "NonExistent2.cs" },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("Context loading failed");
+
+        // CRITICAL REQUIREMENT: Assert failure occurs before any AI provider call
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(0);
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");

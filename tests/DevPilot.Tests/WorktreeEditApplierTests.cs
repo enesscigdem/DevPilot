@@ -290,6 +290,62 @@ public class WorktreeEditApplierTests : IDisposable
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*exceeds maximum context limit*");
     }
 
+    [Fact]
+    public async Task ReadContextFiles_OneMissingAndOneValidContextFile_LoadsValidFileSuccessfully()
+    {
+        var validFile = Path.Combine(_worktreeDir, "valid.txt");
+        await File.WriteAllTextAsync(validFile, "valid content");
+
+        var result = await _applier.ReadContextFilesAsync(
+            _worktreeDir,
+            _branchName,
+            new[] { "nonexistent_file.txt", "valid.txt" });
+
+        result.Should().HaveCount(1);
+        result.Should().ContainKey("valid.txt");
+        result["valid.txt"].Should().Be("valid content");
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_AllContextFilesMissing_ThrowsInvalidOperationException()
+    {
+        var act = () => _applier.ReadContextFilesAsync(
+            _worktreeDir,
+            _branchName,
+            new[] { "missing1.txt", "missing2.txt" });
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*No valid context files could be loaded*");
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_UnsafeMissingPath_ThrowsInvalidOperationException()
+    {
+        var act = () => _applier.ReadContextFilesAsync(
+            _worktreeDir,
+            _branchName,
+            new[] { "../missing_outside.cs" });
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Path safety violation*");
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_GitOrSensitiveMissingPath_ThrowsInvalidOperationException()
+    {
+        var actGit = () => _applier.ReadContextFilesAsync(
+            _worktreeDir,
+            _branchName,
+            new[] { ".git/config" });
+
+        await actGit.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Modification of .git directory or files is rejected*");
+
+        var actEnv = () => _applier.ReadContextFilesAsync(
+            _worktreeDir,
+            _branchName,
+            new[] { ".env" });
+
+        await actEnv.Should().ThrowAsync<InvalidOperationException>().WithMessage("*sensitive configuration/credential file*");
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");
