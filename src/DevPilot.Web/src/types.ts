@@ -219,3 +219,33 @@ export interface ExecutionDetail {
   completedAt: string | null;
   errorMessage: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Execution Review — DTOs
+// ---------------------------------------------------------------------------
+export type ExecutionReviewStageResult = "Passed" | "Failed" | "Unknown";
+
+export interface ExecutionReviewStageStatus {
+  status: ExecutionReviewStageResult;
+}
+
+export interface ExecutionReviewFile {
+  path: string;
+  changeType: string;
+  additions: number | null;
+  deletions: number | null;
+}
+
+export interface ExecutionReview {
+  executionId: string;
+  taskId: string;
+  taskTitle: string;
+  executionStatus: string;
+  branchName: string;
+  changedFileCount: number;
+  changedFiles: ExecutionReviewFile[];
+  diff: string;
+  diffTruncated: boolean;
+  build: ExecutionReviewStageStatus;
+  test: ExecutionReviewStageStatus;
+}

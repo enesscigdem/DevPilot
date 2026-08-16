@@ -2,6 +2,7 @@ import type {
   CreateTaskRequest,
   ExecutionDetail,
   ExecutionListItem,
+  ExecutionReview,
   ImpactAnalysis,
   Task,
   TaskListItem,
@@ -112,4 +113,8 @@ export async function getExecutions(): Promise<ExecutionListItem[]> {
 
 export async function getExecution(id: string): Promise<ExecutionDetail> {
   return http<ExecutionDetail>(`/executions/${id}`);
+}
+
+export async function getExecutionReview(id: string, init?: RequestInit): Promise<ExecutionReview> {
+  return http<ExecutionReview>(`/executions/${id}/review`, init);
 }

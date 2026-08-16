@@ -6,6 +6,7 @@ import {
   CircleDot,
   Clock,
   Eye,
+  FileCode2,
   FileText,
   GitBranch,
   Hammer,
@@ -27,9 +28,12 @@ import {
 } from "@/types"
 import { stages } from "@/data/mock"
 
+
 function getStageState(stageIndex: number, status: number): "done" | "active" | "todo" | "failed" | "blocked" {
   if (status === TaskExecutionStatus.Completed) {
-    return "done"
+    if (stageIndex <= 4) return "done"
+    if (stageIndex === 5) return "active"
+    return "todo"
   }
   if (status === TaskExecutionStatus.Failed) {
     if (stageIndex < 4) return "done"
@@ -154,15 +158,25 @@ export function ExecutionWorkspace() {
               {execution.repositoryOwner}/{execution.repositoryName}
             </div>
           </div>
-          <Button
-            variant="primary"
-            size="sm"
-            disabled={!isCompleted}
-            onClick={() => navigate(`/tasks/${execution.developmentTaskId}`)}
-          >
-            <Eye className="h-3.5 w-3.5" />
-            View task details
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="default"
+              size="sm"
+              onClick={() => navigate(`/tasks/${execution.developmentTaskId}`)}
+            >
+              <Eye className="h-3.5 w-3.5" />
+              View task
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={isPending || isRunning}
+              onClick={() => navigate(`/review/${execution.id}`)}
+            >
+              <FileCode2 className="h-3.5 w-3.5" />
+              Code review
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -219,7 +233,11 @@ export function ExecutionWorkspace() {
                     >
                       {st.label}
                     </div>
-                    {state === "active" && <span className="font-mono text-[10.5px] text-primary">in progress</span>}
+                    {state === "active" && (
+                      <span className="font-mono text-[10.5px] text-primary">
+                        {i === 5 ? "review ready" : "in progress"}
+                      </span>
+                    )}
                     {state === "failed" && <span className="font-mono text-[10.5px] text-danger">failed here</span>}
                     {state === "blocked" && <span className="font-mono text-[10.5px] text-accent">cancelled</span>}
                   </div>
@@ -270,8 +288,18 @@ export function ExecutionWorkspace() {
                   <p className="text-[14px] font-medium text-foreground">Execution completed successfully</p>
                   <p className="mt-0.5 font-mono text-[11px]">Finished at {formatDateTime(execution.completedAt)}</p>
                 </div>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  className="mt-2"
+                  onClick={() => navigate(`/review/${execution.id}`)}
+                >
+                  <FileCode2 className="h-3.5 w-3.5" />
+                  Review execution changes
+                </Button>
               </div>
             )}
+
 
             {isFailed && (
               <div className="overflow-hidden rounded-[var(--radius-lg)] border border-danger/40 bg-danger-soft p-4">
