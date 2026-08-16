@@ -20,7 +20,7 @@ import {
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Panel, Badge, Meter, StatusDot, IconChip } from "@/components/ui/primitives"
-import { getTask, getTaskImpactAnalysis, analyzeTaskImpact } from "@/api"
+import { getTask, getTaskImpactAnalysis, analyzeTaskImpact, approveTask, rejectTask } from "@/api"
 import {
   TaskStatus,
   TaskPriority,
@@ -99,6 +99,11 @@ export function TaskImpact() {
 
   const [selectedFileIndex, setSelectedFileIndex] = useState(0)
 
+  const [isApproving, setIsApproving] = useState(false)
+  const [isRejecting, setIsRejecting] = useState(false)
+  const [approvalError, setApprovalError] = useState<string | null>(null)
+  const [mockStatus, setMockStatus] = useState<string>("awaiting-approval")
+
   const loadData = useCallback(async () => {
     if (!id) return
     setIsLoading(true)
@@ -159,6 +164,62 @@ export function TaskImpact() {
   // Fallback to mock data if viewing mock task ID
   const isMockView = !id || id === activeTask.id || id === "TASK-142"
 
+  const handleApprove = async () => {
+    if (!id || isApproving || isRejecting) return
+    if (isMockView) {
+      setMockStatus("approved")
+      return
+    }
+
+    setIsApproving(true)
+    setApprovalError(null)
+
+    try {
+      await approveTask(id)
+      const updatedTask = await getTask(id)
+      setTask(updatedTask)
+    } catch (err) {
+      setApprovalError(err instanceof Error ? err.message : "Failed to approve task.")
+      // Sync latest task status from backend in case of 409 Conflict
+      try {
+        const currentTask = await getTask(id)
+        setTask(currentTask)
+      } catch {
+        // ignore secondary fetch failure
+      }
+    } finally {
+      setIsApproving(false)
+    }
+  }
+
+  const handleReject = async () => {
+    if (!id || isApproving || isRejecting) return
+    if (isMockView) {
+      setMockStatus("rejected")
+      return
+    }
+
+    setIsRejecting(true)
+    setApprovalError(null)
+
+    try {
+      await rejectTask(id)
+      const updatedTask = await getTask(id)
+      setTask(updatedTask)
+    } catch (err) {
+      setApprovalError(err instanceof Error ? err.message : "Failed to reject task.")
+      // Sync latest task status from backend in case of 409 Conflict
+      try {
+        const currentTask = await getTask(id)
+        setTask(currentTask)
+      } catch {
+        // ignore secondary fetch failure
+      }
+    } finally {
+      setIsRejecting(false)
+    }
+  }
+
   if (isLoading) {
     return (
       <PageContainer className="flex flex-col items-center justify-center py-24">
@@ -198,8 +259,24 @@ export function TaskImpact() {
       ? `${task.repositoryOwner}/${task.repositoryName}`
       : "master"
 
+  const isAwaitingApproval = isMockView
+    ? mockStatus === "awaiting-approval"
+    : task?.status === TaskStatus.AwaitingApproval
+
+  const isApproved = isMockView
+    ? mockStatus === "approved"
+    : task?.status === TaskStatus.Approved
+
+  const isRejected = isMockView
+    ? mockStatus === "rejected"
+    : task?.status === TaskStatus.Rejected
+
   const statusInfo = isMockView
-    ? statusMeta[activeTask.status]
+    ? (mockStatus === "approved"
+        ? { tone: "blue" as Tone, label: "Approved" }
+        : mockStatus === "rejected"
+          ? { tone: "red" as Tone, label: "Rejected" }
+          : statusMeta[mockStatus as keyof typeof statusMeta] || { tone: "amber" as Tone, label: "Awaiting approval" })
     : task
       ? getStatusToneAndLabel(task.status)
       : { tone: "neutral" as Tone, label: "Unknown" }
@@ -606,30 +683,95 @@ export function TaskImpact() {
 
           {hasCompletedAnalysis && (
             <div className="mt-6 rounded-[var(--radius-lg)] border border-primary-ring/50 bg-primary-soft/50 p-4 min-w-0">
-              <div className="flex items-center gap-2 min-w-0">
-                <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
-                <span className="text-[13px] font-semibold text-foreground truncate">Ready for your approval</span>
-              </div>
-              <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground break-words">
-                DevPilot will implement the plan on branch{" "}
-                <span className="font-mono text-foreground break-all">{displayBranch}</span>, run the build and tests, then hand the
-                diff back for review. Nothing merges without you.
-              </p>
-              <div className="mt-3 flex flex-col gap-2">
-                <Button variant="primary" size="lg" className="w-full" onClick={() => navigate("/executions/EXEC-142")}>
-                  <Play className="h-4 w-4" />
-                  Approve &amp; execute
-                </Button>
-                <div className="flex gap-2">
-                  <Button variant="default" size="md" className="flex-1">
-                    <Pencil className="h-3.5 w-3.5" />
-                    Edit plan
-                  </Button>
-                  <Button variant="danger" size="md" className="flex-1">
-                    Reject
-                  </Button>
+              {isAwaitingApproval ? (
+                <>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
+                    <span className="text-[13px] font-semibold text-foreground truncate">Ready for your approval</span>
+                  </div>
+                  <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground break-words">
+                    DevPilot will implement the plan on branch{" "}
+                    <span className="font-mono text-foreground break-all">{displayBranch}</span>, run the build and tests, then hand the
+                    diff back for review. Nothing merges without you.
+                  </p>
+
+                  {approvalError && (
+                    <div className="mt-3 flex items-center gap-1.5 text-[12px] text-danger font-medium">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span className="break-words">{approvalError}</span>
+                    </div>
+                  )}
+
+                  <div className="mt-3 flex flex-col gap-2">
+                    <Button
+                      variant="primary"
+                      size="lg"
+                      className="w-full"
+                      disabled={isApproving || isRejecting}
+                      onClick={handleApprove}
+                    >
+                      {isApproving ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Approving plan…
+                        </>
+                      ) : (
+                        <>
+                          <Check className="h-4 w-4" />
+                          Approve plan
+                        </>
+                      )}
+                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="default"
+                        size="md"
+                        className="flex-1"
+                        disabled={isApproving || isRejecting}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit plan
+                      </Button>
+                      <Button
+                        variant="danger"
+                        size="md"
+                        className="flex-1"
+                        disabled={isApproving || isRejecting}
+                        onClick={handleReject}
+                      >
+                        {isRejecting ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Rejecting…
+                          </>
+                        ) : (
+                          "Reject"
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                </>
+              ) : isApproved ? (
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <IconChip tone="blue" className="shrink-0">
+                    <Check className="h-4 w-4" />
+                  </IconChip>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-semibold text-foreground">Plan approved</div>
+                    <div className="text-[12px] text-muted-foreground">This task has been approved and is ready for execution.</div>
+                  </div>
                 </div>
-              </div>
+              ) : isRejected ? (
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <IconChip tone="red" className="shrink-0">
+                    <AlertCircle className="h-4 w-4 text-danger" />
+                  </IconChip>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-semibold text-foreground">Plan rejected</div>
+                    <div className="text-[12px] text-muted-foreground">This task plan was rejected.</div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           )}
         </aside>

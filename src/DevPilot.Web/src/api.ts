@@ -84,3 +84,15 @@ export async function analyzeTaskImpact(id: string): Promise<ImpactAnalysis> {
     method: 'POST',
   });
 }
+
+export async function approveTask(id: string): Promise<Task> {
+  return http<Task>(`/tasks/${id}/approve`, {
+    method: 'POST',
+  });
+}
+
+export async function rejectTask(id: string): Promise<Task> {
+  return http<Task>(`/tasks/${id}/reject`, {
+    method: 'POST',
+  });
+}
