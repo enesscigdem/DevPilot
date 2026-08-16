@@ -64,4 +64,16 @@ public interface IExecutionRepository
         string workspacePath,
         string branchName,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically updates the review decision for a completed execution if the current review status matches expected.
+    /// Returns true if exactly one row was updated, false otherwise.
+    /// </summary>
+    Task<bool> TrySetReviewDecisionAsync(
+        Guid executionId,
+        DevPilot.Domain.Enums.ExecutionReviewStatus expectedStatus,
+        DevPilot.Domain.Enums.ExecutionReviewStatus newStatus,
+        DateTime decidedAt,
+        string? rejectionReason,
+        CancellationToken cancellationToken = default);
 }

@@ -11,10 +11,12 @@ import {
   AlertCircle,
   AlertTriangle,
   Info,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { getExecutionReview } from "@/api"
+import { approveExecutionReview, getExecutionReview, rejectExecutionReview } from "@/api"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
@@ -200,6 +202,11 @@ export function CodeReview() {
   const [error, setError] = useState<string | null>(null)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
 
+  const [isSubmittingDecision, setIsSubmittingDecision] = useState(false)
+  const [decisionError, setDecisionError] = useState<string | null>(null)
+  const [showRejectModal, setShowRejectModal] = useState(false)
+  const [rejectionReasonInput, setRejectionReasonInput] = useState("")
+
   useEffect(() => {
     if (!id) return
     const controller = new AbortController()
@@ -227,6 +234,48 @@ export function CodeReview() {
       controller.abort()
     }
   }, [id])
+
+  const handleApprove = async () => {
+    if (!id || !review || isSubmittingDecision) return
+    setIsSubmittingDecision(true)
+    setDecisionError(null)
+
+    try {
+      const decision = await approveExecutionReview(id)
+      setReview({
+        ...review,
+        reviewStatus: decision.reviewStatus,
+        decidedAt: decision.decidedAt,
+        rejectionReason: decision.rejectionReason,
+      })
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : "Failed to approve review.")
+    } finally {
+      setIsSubmittingDecision(false)
+    }
+  }
+
+  const handleRejectSubmit = async () => {
+    if (!id || !review || isSubmittingDecision) return
+    setIsSubmittingDecision(true)
+    setDecisionError(null)
+
+    try {
+      const decision = await rejectExecutionReview(id, rejectionReasonInput)
+      setReview({
+        ...review,
+        reviewStatus: decision.reviewStatus,
+        decidedAt: decision.decidedAt,
+        rejectionReason: decision.rejectionReason,
+      })
+      setShowRejectModal(false)
+      setRejectionReasonInput("")
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : "Failed to reject review.")
+    } finally {
+      setIsSubmittingDecision(false)
+    }
+  }
 
   if (isLoading) {
     return (
@@ -276,6 +325,10 @@ export function CodeReview() {
   const statusMeta = getExecutionStatusMeta(review.executionStatus)
   const diffLines = parseGitDiff(review.diff)
 
+  const isPendingDecision = review.reviewStatus === "Pending"
+  const isApproved = review.reviewStatus === "Approved"
+  const isRejected = review.reviewStatus === "Rejected"
+
   const handleSelectFile = (filePath: string) => {
     setSelectedFile(filePath)
     const el = document.getElementById(`file-diff-${filePath}`)
@@ -300,21 +353,63 @@ export function CodeReview() {
               <span className="font-mono text-[11px] text-subtle-foreground">{review.taskId ? `TASK-${review.taskId.slice(0, 8)}` : review.executionId.slice(0, 8)}</span>
               <h1 className="truncate text-[14.5px] font-semibold text-foreground">{review.taskTitle || "Code review"}</h1>
               <Badge tone={statusMeta.tone}>{review.executionStatus}</Badge>
+              {isApproved && <Badge tone="green">Approved</Badge>}
+              {isRejected && <Badge tone="red">Rejected</Badge>}
             </div>
             <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-subtle-foreground">
               <GitBranch className="h-3 w-3" />
               {review.branchName}
             </div>
           </div>
-          <Button variant="default" size="sm" disabled className="opacity-50 cursor-not-allowed" title="Action unavailable in read-only review mode">
-            Request changes
-          </Button>
-          <Button variant="default" size="sm" disabled className="opacity-50 cursor-not-allowed text-muted-foreground" title="Action unavailable in read-only review mode">
+          {isPendingDecision && (
+            <>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={isSubmittingDecision}
+                onClick={() => setShowRejectModal(true)}
+                className="border-danger/30 text-danger hover:bg-danger-soft"
+              >
+                Reject changes
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={isSubmittingDecision}
+                onClick={handleApprove}
+              >
+                {isSubmittingDecision ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                )}
+                Approve changes
+              </Button>
+            </>
+          )}
+          <Button
+            variant="default"
+            size="sm"
+            disabled
+            className="opacity-50 cursor-not-allowed text-muted-foreground"
+            title="Pull request creation is a future feature"
+          >
             <GitPullRequest className="h-3.5 w-3.5" />
             Open pull request
           </Button>
         </div>
       </div>
+
+      {decisionError && (
+        <div className="mx-auto max-w-[1600px] px-6 pt-3">
+          <div className="flex items-center justify-between rounded-[var(--radius-md)] border border-danger/30 bg-danger-soft/80 px-4 py-2 text-[12.5px] text-danger">
+            <span>{decisionError}</span>
+            <button onClick={() => setDecisionError(null)} className="text-subtle-foreground hover:text-foreground">
+              &times;
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-0 lg:grid-cols-[260px_minmax(0,1fr)_360px]">
         {/* LEFT — file tree */}
@@ -386,7 +481,7 @@ export function CodeReview() {
           </div>
         </section>
 
-        {/* RIGHT — stage status */}
+        {/* RIGHT — stage status & decision */}
         <aside className="p-5 lg:border-l lg:border-border">
           <div className="tech-label mb-3">Reviewer verdict</div>
 
@@ -447,11 +542,116 @@ export function CodeReview() {
             </Panel>
           </div>
 
-          <Button variant="default" size="lg" disabled className="mt-5 w-full opacity-50 cursor-not-allowed text-muted-foreground">
-            Approve &amp; open PR (Read-only)
-          </Button>
+          <div className="mt-5 space-y-3">
+            <div className="tech-label">Review decision</div>
+            {isPendingDecision && (
+              <div className="space-y-2">
+                <Panel className="p-3 text-[12px] text-muted-foreground">
+                  Review is pending developer decision. You may inspect the diff and approve or reject the changes.
+                </Panel>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button
+                    variant="default"
+                    size="md"
+                    disabled={isSubmittingDecision}
+                    onClick={() => setShowRejectModal(true)}
+                    className="w-full border-danger/30 text-danger hover:bg-danger-soft"
+                  >
+                    Reject
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="md"
+                    disabled={isSubmittingDecision}
+                    onClick={handleApprove}
+                    className="w-full"
+                  >
+                    {isSubmittingDecision ? <Loader2 className="h-4 w-4 animate-spin" /> : "Approve"}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {isApproved && (
+              <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
+                <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  <span>Review Approved</span>
+                </div>
+                {review.decidedAt && (
+                  <div className="font-mono text-[11px] text-subtle-foreground">
+                    Decided at {new Date(review.decidedAt).toLocaleString()}
+                  </div>
+                )}
+                <p className="text-[12px] text-muted-foreground">
+                  Execution changes approved. Next future step: Commit & Open Pull Request.
+                </p>
+              </Panel>
+            )}
+
+            {isRejected && (
+              <Panel className="border-danger/30 bg-danger-soft/30 p-4 space-y-2">
+                <div className="flex items-center gap-2 text-danger font-semibold text-[13.5px]">
+                  <XCircle className="h-4 w-4 shrink-0" />
+                  <span>Review Rejected</span>
+                </div>
+                {review.decidedAt && (
+                  <div className="font-mono text-[11px] text-subtle-foreground">
+                    Decided at {new Date(review.decidedAt).toLocaleString()}
+                  </div>
+                )}
+                {review.rejectionReason && (
+                  <div className="mt-2 rounded-[var(--radius-md)] border border-danger/20 bg-surface p-2.5 text-[12px] text-foreground">
+                    <span className="font-semibold block mb-0.5 text-danger text-[11px] uppercase tracking-wider">Reason</span>
+                    {review.rejectionReason}
+                  </div>
+                )}
+              </Panel>
+            )}
+          </div>
         </aside>
       </div>
+
+      {/* Reject Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-[480px] rounded-[var(--radius-lg)] border border-border bg-canvas p-6 shadow-xl space-y-4">
+            <h3 className="text-[15px] font-semibold text-foreground">Reject Execution Changes</h3>
+            <p className="text-[12.5px] text-muted-foreground">
+              Optional: provide a short reason for rejecting these changes. This will be persisted with the audit record.
+            </p>
+            <textarea
+              className="w-full h-24 rounded-[var(--radius-md)] border border-border bg-surface p-3 font-sans text-[13px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder="Reason for rejection (optional, max 1000 characters)"
+              maxLength={1000}
+              value={rejectionReasonInput}
+              onChange={(e) => setRejectionReasonInput(e.target.value)}
+            />
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                variant="default"
+                size="sm"
+                disabled={isSubmittingDecision}
+                onClick={() => {
+                  setShowRejectModal(false)
+                  setRejectionReasonInput("")
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={isSubmittingDecision}
+                onClick={handleRejectSubmit}
+                className="bg-danger text-white hover:bg-danger/90 border-transparent"
+              >
+                {isSubmittingDecision ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Confirm Rejection"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </PageContainer>
   )
 }

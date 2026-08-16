@@ -214,6 +214,7 @@ export interface ExecutionDetail {
   repositoryOwner: string;
   repositoryName: string;
   status: number;
+  reviewStatus: string;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -266,4 +267,14 @@ export interface ExecutionReview {
   diffTruncated: boolean;
   build: ExecutionReviewStageStatus;
   test: ExecutionReviewStageStatus;
+  reviewStatus: string;
+  decidedAt: string | null;
+  rejectionReason: string | null;
+}
+
+export interface ExecutionReviewDecision {
+  executionId: string;
+  reviewStatus: string;
+  decidedAt: string;
+  rejectionReason: string | null;
 }

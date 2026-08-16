@@ -4,5 +4,6 @@ public enum ExecutionActivityStatus
 {
     Started = 0,
     Completed = 1,
-    Failed = 2
+    Failed = 2,
+    Rejected = 3
 }

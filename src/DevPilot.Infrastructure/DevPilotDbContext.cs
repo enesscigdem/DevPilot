@@ -1,5 +1,6 @@
 using System.Text.Json;
 using DevPilot.Domain.Entities;
+using DevPilot.Domain.Enums;
 using DevPilot.Domain.ProjectBrain;
 using DevPilot.Domain.ProjectBrain.Entities;
 using DevPilot.Domain.ValueObjects;
@@ -150,6 +151,12 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.StartedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CompletedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.ReviewStatus)
+                .HasConversion<string>()
+                .HasMaxLength(50)
+                .HasDefaultValue(ExecutionReviewStatus.Pending);
+            entity.Property(e => e.ReviewDecidedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.ReviewRejectionReason).HasMaxLength(1000);
 
             entity.HasOne(e => e.DevelopmentTask)
                 .WithMany()

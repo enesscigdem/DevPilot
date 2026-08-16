@@ -22,4 +22,7 @@ public sealed record ExecutionReviewDto(
     string Diff,
     bool DiffTruncated,
     ExecutionReviewStageStatusDto Build,
-    ExecutionReviewStageStatusDto Test);
+    ExecutionReviewStageStatusDto Test,
+    string ReviewStatus = "Pending",
+    DateTime? DecidedAt = null,
+    string? RejectionReason = null);

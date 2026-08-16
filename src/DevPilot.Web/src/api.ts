@@ -4,6 +4,7 @@ import type {
   ExecutionDetail,
   ExecutionListItem,
   ExecutionReview,
+  ExecutionReviewDecision,
   ImpactAnalysis,
   Task,
   TaskListItem,
@@ -122,4 +123,17 @@ export async function getExecutionActivity(id: string): Promise<ExecutionActivit
 
 export async function getExecutionReview(id: string, init?: RequestInit): Promise<ExecutionReview> {
   return http<ExecutionReview>(`/executions/${id}/review`, init);
+}
+
+export async function approveExecutionReview(id: string): Promise<ExecutionReviewDecision> {
+  return http<ExecutionReviewDecision>(`/executions/${id}/review/approve`, {
+    method: 'POST',
+  });
+}
+
+export async function rejectExecutionReview(id: string, reason?: string): Promise<ExecutionReviewDecision> {
+  return http<ExecutionReviewDecision>(`/executions/${id}/review/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  });
 }

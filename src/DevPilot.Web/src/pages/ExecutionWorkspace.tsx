@@ -29,10 +29,15 @@ import {
 } from "@/types"
 import { stages } from "@/data/mock"
 
-function getStageState(stageIndex: number, status: number): "done" | "active" | "todo" | "failed" | "blocked" {
+function getStageState(stageIndex: number, status: number, reviewStatus?: string): "done" | "active" | "todo" | "failed" | "blocked" {
   if (status === TaskExecutionStatus.Completed) {
     if (stageIndex <= 4) return "done"
-    if (stageIndex === 5) return "active"
+    if (stageIndex === 5) {
+      const r = String(reviewStatus || "").toLowerCase()
+      if (r === "approved") return "done"
+      if (r === "rejected") return "failed"
+      return "active"
+    }
     return "todo"
   }
   if (status === TaskExecutionStatus.Failed) {
@@ -248,7 +253,7 @@ export function ExecutionWorkspace() {
           <div className="tech-label mb-3">Pipeline</div>
           <ol className="relative">
             {stages.map((st, i) => {
-              const state = getStageState(i, execution.status)
+              const state = getStageState(i, execution.status, execution.reviewStatus)
 
               return (
                 <li key={st.key} className="relative flex gap-3 pb-5 last:pb-0">
@@ -300,7 +305,14 @@ export function ExecutionWorkspace() {
                         {i === 5 ? "review ready" : "in progress"}
                       </span>
                     )}
-                    {state === "failed" && <span className="font-mono text-[10.5px] text-danger">failed here</span>}
+                    {state === "done" && i === 5 && (
+                      <span className="font-mono text-[10.5px] text-success">approved</span>
+                    )}
+                    {state === "failed" && (
+                      <span className="font-mono text-[10.5px] text-danger">
+                        {i === 5 ? "rejected" : "failed here"}
+                      </span>
+                    )}
                     {state === "blocked" && <span className="font-mono text-[10.5px] text-accent">cancelled</span>}
                   </div>
                 </li>
@@ -351,6 +363,7 @@ export function ExecutionWorkspace() {
                 {activities.map((act) => {
                   const isDone = act.status === "Completed"
                   const isFailedStatus = act.status === "Failed"
+                  const isRejectedStatus = act.status === "Rejected"
                   const formattedTime = formatTimeOnly(act.createdAt)
                   const metaText = getMetadataDisplay(act)
 
@@ -364,7 +377,7 @@ export function ExecutionWorkspace() {
                           <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success/15 text-success">
                             <Check className="h-3 w-3" />
                           </span>
-                        ) : isFailedStatus ? (
+                        ) : isFailedStatus || isRejectedStatus ? (
                           <span className="flex h-5 w-5 items-center justify-center rounded-full bg-danger/15 text-danger">
                             <X className="h-3 w-3" />
                           </span>

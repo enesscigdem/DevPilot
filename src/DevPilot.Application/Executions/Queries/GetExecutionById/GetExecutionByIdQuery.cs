@@ -69,5 +69,6 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             StartedAt = execution.StartedAt,
             CompletedAt = execution.CompletedAt,
             ErrorMessage = execution.ErrorMessage,
+            ReviewStatus = execution.ReviewStatus.ToString(),
         };
 }

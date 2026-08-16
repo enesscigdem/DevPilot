@@ -89,7 +89,10 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             Diff: diffResult.DiffText,
             DiffTruncated: diffResult.DiffTruncated,
             Build: new ExecutionReviewStageStatusDto(buildStatus),
-            Test: new ExecutionReviewStageStatusDto(testStatus));
+            Test: new ExecutionReviewStageStatusDto(testStatus),
+            ReviewStatus: execution.ReviewStatus.ToString(),
+            DecidedAt: execution.ReviewDecidedAt,
+            RejectionReason: execution.ReviewRejectionReason);
 
         return GetExecutionReviewResult.Ok(review);
     }

@@ -25,6 +25,8 @@ public sealed class ExecutionDto
     public DateTime? CompletedAt { get; set; }
 
     public string? ErrorMessage { get; set; }
+
+    public string ReviewStatus { get; set; } = ExecutionReviewStatus.Pending.ToString();
 }
 
 public sealed class ExecutionListItemDto

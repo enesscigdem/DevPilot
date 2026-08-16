@@ -23,4 +23,10 @@ public class TaskExecution
     public string? WorkspacePath { get; set; }
 
     public string? BranchName { get; set; }
+
+    public ExecutionReviewStatus ReviewStatus { get; set; } = ExecutionReviewStatus.Pending;
+
+    public DateTime? ReviewDecidedAt { get; set; }
+
+    public string? ReviewRejectionReason { get; set; }
 }

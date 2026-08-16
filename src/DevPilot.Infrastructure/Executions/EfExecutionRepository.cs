@@ -207,4 +207,28 @@ public sealed class EfExecutionRepository : IExecutionRepository
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<bool> TrySetReviewDecisionAsync(
+        Guid executionId,
+        ExecutionReviewStatus expectedStatus,
+        ExecutionReviewStatus newStatus,
+        DateTime decidedAt,
+        string? rejectionReason,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == expectedStatus)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.ReviewStatus, newStatus)
+                    .SetProperty(e => e.ReviewDecidedAt, decidedAt)
+                    .SetProperty(e => e.ReviewRejectionReason, rejectionReason),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
 }

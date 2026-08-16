@@ -453,6 +453,9 @@ public class FakeExecutionRepository : IExecutionRepository
 
     public Task FailAsync(Guid executionId, string errorMessage, CancellationToken cancellationToken = default)
         => Task.CompletedTask;
+
+    public Task<bool> TrySetReviewDecisionAsync(Guid executionId, DevPilot.Domain.Enums.ExecutionReviewStatus expectedStatus, DevPilot.Domain.Enums.ExecutionReviewStatus newStatus, DateTime decidedAt, string? rejectionReason, CancellationToken cancellationToken = default)
+        => Task.FromResult(false);
 }
 
 public class FakeImpactAnalysisRepository : IImpactAnalysisRepository

@@ -532,6 +532,7 @@ public class ExecutionReviewTests : IDisposable
         public Task CompleteAsync(Guid executionId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task FailAsync(Guid executionId, string errorMessage, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task UpdateWorkspaceDetailsAsync(Guid executionId, string workspacePath, string branchName, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<bool> TrySetReviewDecisionAsync(Guid executionId, DevPilot.Domain.Enums.ExecutionReviewStatus expectedStatus, DevPilot.Domain.Enums.ExecutionReviewStatus newStatus, DateTime decidedAt, string? rejectionReason, CancellationToken cancellationToken = default) => Task.FromResult(false);
     }
 
     private sealed class FakeWorkspaceManager : IExecutionWorkspaceManager

@@ -6,5 +6,6 @@ public enum ExecutionStage
     Workspace = 1,
     DeveloperAgent = 2,
     Build = 3,
-    Test = 4
+    Test = 4,
+    Review = 5
 }
