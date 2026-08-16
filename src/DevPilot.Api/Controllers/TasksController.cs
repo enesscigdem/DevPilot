@@ -1,7 +1,9 @@
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
+using DevPilot.Application.Tasks.Commands.ApproveTask;
 using DevPilot.Application.Tasks.Commands.CreateTask;
 using DevPilot.Application.Tasks.Commands.DeleteTask;
+using DevPilot.Application.Tasks.Commands.RejectTask;
 using DevPilot.Application.Tasks.Commands.UpdateTask;
 using DevPilot.Application.Tasks.Commands.UpdateTaskStatus;
 using DevPilot.Application.Tasks.Dtos;
@@ -25,6 +27,8 @@ public class TasksController : ControllerBase
     private readonly IGetTasksQueryHandler _getTasksHandler;
     private readonly IAnalyzeTaskImpactCommandHandler _analyzeImpactHandler;
     private readonly IGetTaskImpactAnalysisQueryHandler _getImpactAnalysisHandler;
+    private readonly IApproveTaskCommandHandler _approveHandler;
+    private readonly IRejectTaskCommandHandler _rejectHandler;
 
     public TasksController(
         ICreateTaskCommandHandler createHandler,
@@ -34,7 +38,9 @@ public class TasksController : ControllerBase
         IGetTaskByIdQueryHandler getByIdHandler,
         IGetTasksQueryHandler getTasksHandler,
         IAnalyzeTaskImpactCommandHandler analyzeImpactHandler,
-        IGetTaskImpactAnalysisQueryHandler getImpactAnalysisHandler)
+        IGetTaskImpactAnalysisQueryHandler getImpactAnalysisHandler,
+        IApproveTaskCommandHandler approveHandler,
+        IRejectTaskCommandHandler rejectHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -44,6 +50,8 @@ public class TasksController : ControllerBase
         _getTasksHandler = getTasksHandler;
         _analyzeImpactHandler = analyzeImpactHandler;
         _getImpactAnalysisHandler = getImpactAnalysisHandler;
+        _approveHandler = approveHandler;
+        _rejectHandler = rejectHandler;
     }
 
     [HttpGet]
@@ -219,5 +227,59 @@ public class TasksController : ControllerBase
         }
 
         return Ok(result.Analysis);
+    }
+
+    [HttpPost("{id:guid}/approve")]
+    public async Task<IActionResult> ApproveTask(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _approveHandler
+            .HandleAsync(new ApproveTaskCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Success)
+        {
+            if (result.NotFound)
+            {
+                return NotFound(new { error = result.ErrorMessage ?? "Task not found." });
+            }
+
+            if (result.Conflict)
+            {
+                return Conflict(new { error = result.ErrorMessage });
+            }
+
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Task);
+    }
+
+    [HttpPost("{id:guid}/reject")]
+    public async Task<IActionResult> RejectTask(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _rejectHandler
+            .HandleAsync(new RejectTaskCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Success)
+        {
+            if (result.NotFound)
+            {
+                return NotFound(new { error = result.ErrorMessage ?? "Task not found." });
+            }
+
+            if (result.Conflict)
+            {
+                return Conflict(new { error = result.ErrorMessage });
+            }
+
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Task);
     }
 }

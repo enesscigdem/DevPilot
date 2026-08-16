@@ -8,8 +8,10 @@ using DevPilot.Application.RepositoryClone;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
+using DevPilot.Application.Tasks.Commands.ApproveTask;
 using DevPilot.Application.Tasks.Commands.CreateTask;
 using DevPilot.Application.Tasks.Commands.DeleteTask;
+using DevPilot.Application.Tasks.Commands.RejectTask;
 using DevPilot.Application.Tasks.Commands.UpdateTask;
 using DevPilot.Application.Tasks.Commands.UpdateTaskStatus;
 using DevPilot.Application.Tasks.Ports;
@@ -72,6 +74,8 @@ public static class DependencyInjection
         services.AddScoped<IGetTasksQueryHandler, GetTasksQueryHandler>();
         services.AddScoped<IAnalyzeTaskImpactCommandHandler, AnalyzeTaskImpactCommandHandler>();
         services.AddScoped<IGetTaskImpactAnalysisQueryHandler, GetTaskImpactAnalysisQueryHandler>();
+        services.AddScoped<IApproveTaskCommandHandler, ApproveTaskCommandHandler>();
+        services.AddScoped<IRejectTaskCommandHandler, RejectTaskCommandHandler>();
 
         return services;
     }
