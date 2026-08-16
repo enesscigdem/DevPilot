@@ -1,3 +1,4 @@
+using DevPilot.Application.Executions.Commands.StartExecution;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
 using DevPilot.Application.Tasks.Commands.ApproveTask;
@@ -29,6 +30,7 @@ public class TasksController : ControllerBase
     private readonly IGetTaskImpactAnalysisQueryHandler _getImpactAnalysisHandler;
     private readonly IApproveTaskCommandHandler _approveHandler;
     private readonly IRejectTaskCommandHandler _rejectHandler;
+    private readonly IStartExecutionCommandHandler _startExecutionHandler;
 
     public TasksController(
         ICreateTaskCommandHandler createHandler,
@@ -40,7 +42,8 @@ public class TasksController : ControllerBase
         IAnalyzeTaskImpactCommandHandler analyzeImpactHandler,
         IGetTaskImpactAnalysisQueryHandler getImpactAnalysisHandler,
         IApproveTaskCommandHandler approveHandler,
-        IRejectTaskCommandHandler rejectHandler)
+        IRejectTaskCommandHandler rejectHandler,
+        IStartExecutionCommandHandler startExecutionHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -52,6 +55,7 @@ public class TasksController : ControllerBase
         _getImpactAnalysisHandler = getImpactAnalysisHandler;
         _approveHandler = approveHandler;
         _rejectHandler = rejectHandler;
+        _startExecutionHandler = startExecutionHandler;
     }
 
     [HttpGet]
@@ -281,5 +285,35 @@ public class TasksController : ControllerBase
         }
 
         return Ok(result.Task);
+    }
+
+    [HttpPost("{id:guid}/executions")]
+    public async Task<IActionResult> StartExecution(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _startExecutionHandler
+            .HandleAsync(new StartExecutionCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Success)
+        {
+            if (result.NotFound)
+            {
+                return NotFound(new { error = result.ErrorMessage ?? "Task not found." });
+            }
+
+            if (result.Conflict)
+            {
+                return Conflict(new { error = result.ErrorMessage });
+            }
+
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return CreatedAtRoute(
+            nameof(ExecutionsController.GetExecutionById),
+            new { id = result.Execution!.Id },
+            result.Execution);
     }
 }

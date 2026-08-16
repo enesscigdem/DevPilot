@@ -9,6 +9,10 @@ using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
 using DevPilot.Application.Tasks.Commands.ApproveTask;
+using DevPilot.Application.Executions.Commands.StartExecution;
+using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Queries.GetExecutionById;
+using DevPilot.Application.Executions.Queries.GetExecutions;
 using DevPilot.Application.Tasks.Commands.CreateTask;
 using DevPilot.Application.Tasks.Commands.DeleteTask;
 using DevPilot.Application.Tasks.Commands.RejectTask;
@@ -28,6 +32,7 @@ using DevPilot.Infrastructure.ProjectBrain.SemanticSearch;
 using DevPilot.Infrastructure.RepositoryClone;
 using DevPilot.Infrastructure.ImpactAnalysis;
 using DevPilot.Infrastructure.Tasks;
+using DevPilot.Infrastructure.Executions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -76,6 +81,10 @@ public static class DependencyInjection
         services.AddScoped<IGetTaskImpactAnalysisQueryHandler, GetTaskImpactAnalysisQueryHandler>();
         services.AddScoped<IApproveTaskCommandHandler, ApproveTaskCommandHandler>();
         services.AddScoped<IRejectTaskCommandHandler, RejectTaskCommandHandler>();
+        services.AddScoped<IExecutionRepository, EfExecutionRepository>();
+        services.AddScoped<IStartExecutionCommandHandler, StartExecutionCommandHandler>();
+        services.AddScoped<IGetExecutionByIdQueryHandler, GetExecutionByIdQueryHandler>();
+        services.AddScoped<IGetExecutionsQueryHandler, GetExecutionsQueryHandler>();
 
         return services;
     }

@@ -31,6 +31,8 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<TaskImpactAnalysis> TaskImpactAnalyses => Set<TaskImpactAnalysis>();
 
+    public DbSet<TaskExecution> TaskExecutions => Set<TaskExecution>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -116,6 +118,34 @@ public class DevPilotDbContext : DbContext
                     v => v == null ? null : JsonSerializer.Serialize(v, StructuredResultJsonOptions),
                     v => string.IsNullOrEmpty(v) ? null : JsonSerializer.Deserialize<ImpactAnalysisResultData>(v, StructuredResultJsonOptions)))
                 .HasColumnType("jsonb");
+
+            entity.HasOne(e => e.DevelopmentTask)
+                .WithMany()
+                .HasForeignKey(e => e.DevelopmentTaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<TaskExecution>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+
+            // General lookup index — all executions for a given task.
+            entity.HasIndex(e => new { e.DevelopmentTaskId, e.Status })
+                .HasDatabaseName("IX_TaskExecutions_DevelopmentTaskId_Status");
+
+            // Unique partial index: at most one Pending or Running execution per task.
+            // This is the authoritative concurrent-request guard; SqlState 23505 is caught
+            // in EfExecutionRepository.StartExecutionAtomicAsync and translated to a conflict.
+            entity.HasIndex(e => e.DevelopmentTaskId)
+                .HasFilter("\"Status\" IN ('Pending', 'Running')")
+                .IsUnique()
+                .HasDatabaseName("IX_TaskExecutions_ActivePerTask");
+
+            entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.ErrorMessage).HasMaxLength(4000);
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.StartedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CompletedAt).HasColumnType("timestamp with time zone");
 
             entity.HasOne(e => e.DevelopmentTask)
                 .WithMany()

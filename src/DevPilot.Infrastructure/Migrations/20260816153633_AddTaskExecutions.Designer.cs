@@ -3,6 +3,7 @@ using System;
 using DevPilot.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -12,9 +13,11 @@ using Pgvector;
 namespace DevPilot.Infrastructure.Migrations
 {
     [DbContext(typeof(DevPilotDbContext))]
-    partial class DevPilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260816153633_AddTaskExecutions")]
+    partial class AddTaskExecutions
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -128,6 +131,46 @@ namespace DevPilot.Infrastructure.Migrations
                     b.ToTable("RepositoryWorkspaces");
                 });
 
+            modelBuilder.Entity("DevPilot.Domain.Entities.TaskExecution", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("DevelopmentTaskId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<DateTime?>("StartedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DevelopmentTaskId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_TaskExecutions_ActivePerTask")
+                        .HasFilter("\"Status\" IN ('Pending', 'Running')");
+
+                    b.HasIndex("DevelopmentTaskId", "Status")
+                        .HasDatabaseName("IX_TaskExecutions_DevelopmentTaskId_Status");
+
+                    b.ToTable("TaskExecutions");
+                });
+
             modelBuilder.Entity("DevPilot.Domain.Entities.TaskImpactAnalysis", b =>
                 {
                     b.Property<Guid>("Id")
@@ -181,46 +224,6 @@ namespace DevPilot.Infrastructure.Migrations
                     b.HasIndex("DevelopmentTaskId", "CreatedAt");
 
                     b.ToTable("TaskImpactAnalyses");
-                });
-
-            modelBuilder.Entity("DevPilot.Domain.Entities.TaskExecution", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("DevelopmentTaskId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("ErrorMessage")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
-
-                    b.Property<DateTime?>("StartedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("character varying(50)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("DevelopmentTaskId")
-                        .IsUnique()
-                        .HasDatabaseName("IX_TaskExecutions_ActivePerTask")
-                        .HasFilter("\"Status\" IN ('Pending', 'Running')");
-
-                    b.HasIndex("DevelopmentTaskId", "Status")
-                        .HasDatabaseName("IX_TaskExecutions_DevelopmentTaskId_Status");
-
-                    b.ToTable("TaskExecutions");
                 });
 
             modelBuilder.Entity("DevPilot.Domain.ProjectBrain.Entities.CodeChunk", b =>
@@ -397,7 +400,7 @@ namespace DevPilot.Infrastructure.Migrations
                     b.Navigation("RepositoryWorkspace");
                 });
 
-            modelBuilder.Entity("DevPilot.Domain.Entities.TaskImpactAnalysis", b =>
+            modelBuilder.Entity("DevPilot.Domain.Entities.TaskExecution", b =>
                 {
                     b.HasOne("DevPilot.Domain.Entities.DevelopmentTask", "DevelopmentTask")
                         .WithMany()
@@ -408,7 +411,7 @@ namespace DevPilot.Infrastructure.Migrations
                     b.Navigation("DevelopmentTask");
                 });
 
-            modelBuilder.Entity("DevPilot.Domain.Entities.TaskExecution", b =>
+            modelBuilder.Entity("DevPilot.Domain.Entities.TaskImpactAnalysis", b =>
                 {
                     b.HasOne("DevPilot.Domain.Entities.DevelopmentTask", "DevelopmentTask")
                         .WithMany()
