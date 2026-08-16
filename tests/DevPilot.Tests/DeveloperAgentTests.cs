@@ -189,6 +189,61 @@ public class DeveloperAgentTests : IDisposable
         _fakeAiProvider.SendAsyncCallCount.Should().Be(0);
     }
 
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_AiProviderThrowsException_ReturnsControlledErrorWithoutExMessage()
+    {
+        var targetFile = Path.Combine(_worktreeDir, "App.cs");
+        await File.WriteAllTextAsync(targetFile, "public class App {}");
+
+        _fakeAiProvider.ExceptionToThrow = new InvalidOperationException("SECRET_API_KEY_EXPOSED_HTTP_500_INTERNAL_SERVER_ERROR");
+
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Title",
+            TaskDescription: "Desc",
+            AcceptanceCriteria: null,
+            ImpactAnalysisSummary: "Summary",
+            ProposedPlan: "Plan",
+            ImpactedFilePaths: new[] { "App.cs" },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Be("AI provider request failed.");
+        result.ErrorMessage.Should().NotContain("SECRET_API_KEY_EXPOSED_HTTP_500_INTERNAL_SERVER_ERROR");
+    }
+
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_MalformedAiResponse_ReturnsControlledErrorWithoutExMessage()
+    {
+        var targetFile = Path.Combine(_worktreeDir, "App.cs");
+        await File.WriteAllTextAsync(targetFile, "public class App {}");
+
+        _fakeAiProvider.ResponseToReturn = "THIS IS NOT VALID JSON: { secret_key: '12345' }";
+
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Title",
+            TaskDescription: "Desc",
+            AcceptanceCriteria: null,
+            ImpactAnalysisSummary: "Summary",
+            ProposedPlan: "Plan",
+            ImpactedFilePaths: new[] { "App.cs" },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Be("AI provider returned an invalid structured edit response.");
+        result.ErrorMessage.Should().NotContain("secret_key");
+        result.ErrorMessage.Should().NotContain("THIS IS NOT VALID JSON");
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");

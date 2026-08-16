@@ -152,12 +152,12 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
         }
         catch (Exception ex)
         {
-            var processorError = $"Processor raised an exception: {ex.Message}";
+            var sanitizedError = SanitizeErrorMessage(ex.Message);
             _logger.LogError(ex,
                 "ProcessExecution: processor failed for execution {ExecutionId}.",
                 executionId);
-            await FailExecutionAsync(executionId, processorError, cancellationToken).ConfigureAwait(false);
-            return new ProcessExecutionResult { Success = false, ErrorMessage = processorError };
+            await FailExecutionAsync(executionId, sanitizedError, cancellationToken).ConfigureAwait(false);
+            return new ProcessExecutionResult { Success = false, ErrorMessage = sanitizedError };
         }
 
         // ── 6. Persist completion ─────────────────────────────────────────────────
@@ -170,9 +170,27 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
         return new ProcessExecutionResult { Success = true };
     }
 
+    public static string SanitizeErrorMessage(string rawMessage)
+    {
+        if (string.IsNullOrWhiteSpace(rawMessage))
+        {
+            return "Execution failed with an unspecified error.";
+        }
+
+        var firstLine = rawMessage.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim()
+                        ?? rawMessage.Trim();
+
+        if (firstLine.Length > 500)
+        {
+            firstLine = firstLine[..500].TrimEnd();
+        }
+
+        return firstLine;
+    }
+
     private Task FailExecutionAsync(
         Guid executionId,
         string errorMessage,
         CancellationToken cancellationToken) =>
-        _executionRepository.FailAsync(executionId, errorMessage, cancellationToken);
+        _executionRepository.FailAsync(executionId, SanitizeErrorMessage(errorMessage), cancellationToken);
 }

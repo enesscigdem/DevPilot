@@ -28,10 +28,11 @@ public interface IExecutionWorkspaceManager
 
     /// <summary>
     /// Verifies that an execution workspace exists on disk, is checked out on the expected branch,
-    /// and has a clean worktree (no uncommitted or untracked changes).
+    /// and optionally has a clean worktree (no uncommitted or untracked changes).
     /// </summary>
     Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(
         string workspacePath,
         string expectedBranchName,
+        bool requireClean = true,
         CancellationToken cancellationToken = default);
 }

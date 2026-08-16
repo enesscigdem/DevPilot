@@ -73,8 +73,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "DeveloperAgent: AI provider call failed for task {TaskId}.", request.TaskId);
-            return DeveloperAgentResult.Fail($"AI provider call failed: {ex.Message}");
+            _logger.LogError(
+                ex,
+                "DeveloperAgent: AI provider call failed for task {TaskId}.",
+                request.TaskId);
+
+            return DeveloperAgentResult.Fail(
+                "AI provider request failed.");
         }
 
         if (string.IsNullOrWhiteSpace(aiResponse.Content))
@@ -90,8 +95,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "DeveloperAgent: failed to parse structured JSON response from AI provider.");
-            return DeveloperAgentResult.Fail($"Failed to parse AI response into structured edit plan: {ex.Message}");
+            _logger.LogError(
+                ex,
+                "DeveloperAgent: failed to parse structured JSON response from AI provider.");
+
+            return DeveloperAgentResult.Fail(
+                "AI provider returned an invalid structured edit response.");
         }
 
         // 5. Apply edits safely

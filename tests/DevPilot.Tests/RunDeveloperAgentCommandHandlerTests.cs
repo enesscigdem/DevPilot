@@ -2,6 +2,7 @@ using System.Diagnostics;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.Executions.Commands.ProcessExecution;
 using DevPilot.Application.Executions.Commands.RunDeveloperAgent;
+using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
@@ -105,6 +106,7 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
             DevelopmentTaskId = taskId,
             WorkspacePath = null,
             BranchName = null,
+            Status = TaskExecutionStatus.Completed,
             DevelopmentTask = new DevelopmentTask { Id = taskId, Title = "Test Task" }
         };
 
@@ -113,6 +115,32 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
         result.Success.Should().BeFalse();
         result.Conflict.Should().BeTrue();
         result.ErrorMessage.Should().Contain("persisted workspace path");
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(TaskExecutionStatus.Pending)]
+    [InlineData(TaskExecutionStatus.Running)]
+    public async Task HandleAsync_ExecutionIsPendingOrRunning_ReturnsConflict_AndDoesNotCallAi(TaskExecutionStatus status)
+    {
+        var executionId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+
+        _executionRepository.ExecutionToReturn = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = taskId,
+            WorkspacePath = _worktreeDir,
+            BranchName = _branchName,
+            Status = status,
+            DevelopmentTask = new DevelopmentTask { Id = taskId, Title = "Test Task" }
+        };
+
+        var result = await _handler.HandleAsync(new RunDeveloperAgentCommand(executionId));
+
+        result.Success.Should().BeFalse();
+        result.Conflict.Should().BeTrue();
+        result.ErrorMessage.Should().Contain("owned by the automatic execution pipeline");
         _fakeAiProvider.SendAsyncCallCount.Should().Be(0);
     }
 
@@ -128,6 +156,7 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
             DevelopmentTaskId = taskId,
             WorkspacePath = _worktreeDir,
             BranchName = _branchName,
+            Status = TaskExecutionStatus.Completed,
             DevelopmentTask = new DevelopmentTask { Id = taskId, Title = "Test Task" }
         };
 
@@ -153,6 +182,7 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
             DevelopmentTaskId = taskId,
             WorkspacePath = _worktreeDir,
             BranchName = "devpilot/different-branch",
+            Status = TaskExecutionStatus.Completed,
             DevelopmentTask = new DevelopmentTask { Id = taskId, Title = "Test Task" }
         };
 
@@ -184,6 +214,7 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
             DevelopmentTaskId = taskId,
             WorkspacePath = _worktreeDir,
             BranchName = _branchName,
+            Status = TaskExecutionStatus.Completed,
             DevelopmentTask = new DevelopmentTask { Id = taskId, Title = "Test Task" }
         };
 
@@ -217,6 +248,7 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
             DevelopmentTaskId = taskId,
             WorkspacePath = _worktreeDir,
             BranchName = _branchName,
+            Status = TaskExecutionStatus.Completed,
             DevelopmentTask = new DevelopmentTask
             {
                 Id = taskId,
@@ -279,14 +311,52 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
     }
 
     [Fact]
-    public async Task NormalGitWorkspaceExecutionProcessor_MakesZeroAiCalls()
+    public async Task NormalGitWorkspaceExecutionProcessor_PreparesWorkspaceAndPersistsDetails()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
 
+        var validationRunner = new FakeExecutionValidationRunner();
+
+        _analysisRepository.AnalysisToReturn = new TaskImpactAnalysis
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = taskId,
+            Status = ImpactAnalysisStatus.Completed,
+            Summary = "Summary",
+            StructuredResult = new ImpactAnalysisResultData
+            {
+                Summary = "Summary",
+                ImpactedFiles = new List<ImpactedFile>
+                {
+                    new() { FilePath = "App.cs" }
+                }
+            }
+        };
+
+        _fakeAiProvider.ResponseToReturn = """
+            {
+              "files": [
+                {
+                  "filePath": "App.cs",
+                  "action": "Modify",
+                  "searchReplaceEdits": [
+                    {
+                      "search": "public class App {}",
+                      "replace": "public class App { public string Hello() => \"World\"; }"
+                    }
+                  ]
+                }
+              ]
+            }
+            """;
+
         var processor = new GitWorkspaceExecutionProcessor(
             _workspaceManager,
             _executionRepository,
+            _analysisRepository,
+            _developerAgent,
+            validationRunner,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
         var context = new ExecutionProcessingContext(
@@ -301,7 +371,6 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
 
         await processor.ProcessAsync(context);
 
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(0);
         _executionRepository.UpdatedWorkspacePath.Should().NotBeNullOrWhiteSpace();
         _executionRepository.UpdatedBranchName.Should().NotBeNullOrWhiteSpace();
     }
@@ -398,4 +467,13 @@ public class FakeImpactAnalysisRepository : IImpactAnalysisRepository
     {
         return Task.CompletedTask;
     }
+}
+
+public class FakeExecutionValidationRunner : IExecutionValidationRunner
+{
+    public Task<BuildValidationResult> ValidateBuildAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
+        => Task.FromResult(new BuildValidationResult { Success = true });
+
+    public Task<TestValidationResult> ValidateTestAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
+        => Task.FromResult(new TestValidationResult { Success = true });
 }

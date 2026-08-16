@@ -140,6 +140,7 @@ public sealed class GitExecutionWorkspaceManager : IExecutionWorkspaceManager
     public async Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(
         string workspacePath,
         string expectedBranchName,
+        bool requireClean = true,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(workspacePath))
@@ -188,7 +189,8 @@ public sealed class GitExecutionWorkspaceManager : IExecutionWorkspaceManager
                 ErrorMessage: $"Failed to check Git worktree status at '{fullPath}': {statusError}");
         }
 
-        if (!string.IsNullOrWhiteSpace(statusOutput))
+        var isClean = string.IsNullOrWhiteSpace(statusOutput);
+        if (!isClean && requireClean)
         {
             return new WorkspaceVerificationResult(
                 IsValid: false, WorkspaceExists: true, BranchMatches: true, IsClean: false,
@@ -196,7 +198,7 @@ public sealed class GitExecutionWorkspaceManager : IExecutionWorkspaceManager
         }
 
         return new WorkspaceVerificationResult(
-            IsValid: true, WorkspaceExists: true, BranchMatches: true, IsClean: true);
+            IsValid: true, WorkspaceExists: true, BranchMatches: true, IsClean: isClean);
     }
 
     private static ExecutionWorkspaceResult Failure(string errorMessage)

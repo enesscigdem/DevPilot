@@ -73,6 +73,17 @@ public sealed class RunDeveloperAgentCommandHandler : IRunDeveloperAgentCommandH
             };
         }
 
+        // Prevent manual endpoint from interfering with an automatic Pending/Running execution owned by worker
+        if (execution.Status == TaskExecutionStatus.Pending || execution.Status == TaskExecutionStatus.Running)
+        {
+            return new RunDeveloperAgentResult
+            {
+                Success = false,
+                Conflict = true,
+                ErrorMessage = $"Task execution '{command.ExecutionId}' is currently '{execution.Status}' and owned by the automatic execution pipeline.",
+            };
+        }
+
         // 2. Verify WorkspacePath and BranchName exist on record
         if (string.IsNullOrWhiteSpace(execution.WorkspacePath) || string.IsNullOrWhiteSpace(execution.BranchName))
         {
@@ -113,7 +124,7 @@ public sealed class RunDeveloperAgentCommandHandler : IRunDeveloperAgentCommandH
 
         // 5. Verify execution worktree via workspace manager abstraction (exists, branch match, clean worktree)
         var verification = await _workspaceManager
-            .VerifyWorkspaceStateAsync(execution.WorkspacePath, execution.BranchName, cancellationToken)
+            .VerifyWorkspaceStateAsync(execution.WorkspacePath, execution.BranchName, requireClean: true, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         if (!verification.IsValid)

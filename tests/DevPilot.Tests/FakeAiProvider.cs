@@ -10,9 +10,16 @@ public sealed class FakeAiProvider : IAiProvider
 
     public string ResponseToReturn { get; set; } = string.Empty;
 
+    public Exception? ExceptionToThrow { get; set; }
+
     public Task<AiResponse> SendAsync(AiRequest request, CancellationToken cancellationToken = default)
     {
         SendAsyncCallCount++;
+
+        if (ExceptionToThrow != null)
+        {
+            throw ExceptionToThrow;
+        }
 
         if (string.IsNullOrWhiteSpace(ResponseToReturn))
         {

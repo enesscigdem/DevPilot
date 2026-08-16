@@ -166,9 +166,9 @@ public sealed class DotnetExecutionValidationRunner : IExecutionValidationRunner
             timeout = request.Timeout.Value;
         }
 
-        // Reuse existing IExecutionWorkspaceManager abstraction for workspace existence & branch verification
+        // Reuse existing IExecutionWorkspaceManager abstraction for workspace existence & branch verification (dirty worktree allowed for build/test)
         var workspaceVerification = await _workspaceManager.VerifyWorkspaceStateAsync(
-            request.WorkspacePath, request.BranchName, cancellationToken).ConfigureAwait(false);
+            request.WorkspacePath, request.BranchName, requireClean: false, cancellationToken).ConfigureAwait(false);
 
         if (!workspaceVerification.WorkspaceExists)
         {

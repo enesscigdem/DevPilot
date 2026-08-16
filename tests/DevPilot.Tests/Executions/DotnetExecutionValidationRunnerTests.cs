@@ -469,6 +469,7 @@ public class FakeWorkspaceManager : IExecutionWorkspaceManager
     public Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(
         string workspacePath,
         string expectedBranchName,
+        bool requireClean = true,
         CancellationToken cancellationToken = default)
     {
         if (!WorkspaceExists)
