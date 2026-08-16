@@ -61,5 +61,7 @@ public class DevExecutionsController : ControllerBase
         public string? ErrorMessage { get; set; }
 
         public IReadOnlyList<string> ModifiedFiles { get; set; } = Array.Empty<string>();
+
+        public string ResponseVersion { get; set; } = "1";
     }
 }
