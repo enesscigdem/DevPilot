@@ -114,7 +114,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 CommitEligible: false,
                 CommitStatus: execution.CommitStatus.ToString(),
                 CommitSha: execution.CommitSha,
-                CommittedAt: execution.CommittedAt);
+                CommittedAt: execution.CommittedAt,
+                PushStatus: execution.PushStatus.ToString(),
+                RemoteBranchName: execution.RemoteBranchName,
+                RemoteCommitSha: execution.RemoteCommitSha,
+                PushedAt: execution.PushedAt,
+                CanRequestPush: CalculateCanRequestPush(execution));
 
             return GetExecutionReviewResult.Ok(committedReview);
         }
@@ -199,7 +204,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             RemoteBranchName: execution.RemoteBranchName,
             RemoteCommitSha: execution.RemoteCommitSha,
             PushedAt: execution.PushedAt,
-            CanRequestPush: isApproved && isCommitted && (execution.PushStatus == Domain.Enums.ExecutionPushStatus.None || execution.PushStatus == Domain.Enums.ExecutionPushStatus.Failed));
+            CanRequestPush: CalculateCanRequestPush(execution));
 
         return GetExecutionReviewResult.Ok(review);
     }
@@ -226,6 +231,13 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         }
 
         return ("Unknown", "Unknown");
+    }
+
+    private static bool CalculateCanRequestPush(Domain.Entities.TaskExecution execution)
+    {
+        return execution.ReviewStatus == ExecutionReviewStatus.Approved &&
+               execution.CommitStatus == ExecutionCommitStatus.Committed &&
+               (execution.PushStatus == ExecutionPushStatus.None || execution.PushStatus == ExecutionPushStatus.Failed);
     }
 
     private static readonly System.Text.RegularExpressions.Regex GitShaRegex =

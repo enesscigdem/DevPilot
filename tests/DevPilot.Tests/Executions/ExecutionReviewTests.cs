@@ -786,6 +786,63 @@ public class ExecutionReviewTests : IDisposable
         result.DiffText.Should().Contain("[Redacted sensitive file content:");
     }
 
+    [Theory]
+    [InlineData(ExecutionReviewStatus.Approved, ExecutionCommitStatus.Committed, ExecutionPushStatus.None, true)]
+    [InlineData(ExecutionReviewStatus.Approved, ExecutionCommitStatus.Committed, ExecutionPushStatus.Failed, true)]
+    [InlineData(ExecutionReviewStatus.Approved, ExecutionCommitStatus.Committed, ExecutionPushStatus.InProgress, false)]
+    [InlineData(ExecutionReviewStatus.Approved, ExecutionCommitStatus.Committed, ExecutionPushStatus.Pushed, false)]
+    [InlineData(ExecutionReviewStatus.Pending, ExecutionCommitStatus.Committed, ExecutionPushStatus.None, false)]
+    [InlineData(ExecutionReviewStatus.Rejected, ExecutionCommitStatus.Committed, ExecutionPushStatus.None, false)]
+    [InlineData(ExecutionReviewStatus.Approved, ExecutionCommitStatus.None, ExecutionPushStatus.None, false)]
+    public async Task GetExecutionReview_CommittedExecution_CanRequestPushGating(
+        ExecutionReviewStatus reviewStatus,
+        ExecutionCommitStatus commitStatus,
+        ExecutionPushStatus pushStatus,
+        bool expectedCanRequestPush)
+    {
+        // Arrange
+        File.WriteAllText(Path.Combine(_workspaceDir, "file.txt"), "v1");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "initial");
+        var baseSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        var executionId = Guid.NewGuid();
+        File.WriteAllText(Path.Combine(_workspaceDir, "file.txt"), "v2");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "devpilot: test", "-m", $"DevPilot-Execution: {executionId}");
+        var commitSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Test Task" },
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = reviewStatus,
+            CommitStatus = commitStatus,
+            PushStatus = pushStatus,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            BaseCommitSha = baseSha,
+            CommitSha = commitSha,
+            ApprovedChangeFingerprint = "sha256:test"
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator { SampleFingerprint = "sha256:test" };
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.CanRequestPush.Should().Be(expectedCanRequestPush);
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");
