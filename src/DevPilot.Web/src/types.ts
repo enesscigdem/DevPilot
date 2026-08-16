@@ -220,6 +220,24 @@ export interface ExecutionDetail {
   errorMessage: string | null;
 }
 
+export interface ExecutionActivityMetadata {
+  branchName?: string | null;
+  modifiedFileCount?: number | null;
+  buildPassed?: boolean | null;
+  testPassed?: boolean | null;
+}
+
+export interface ExecutionActivityItem {
+  id: string;
+  executionId: string;
+  stage: string;
+  status: string;
+  createdAt: string;
+  message: string;
+  metadata?: ExecutionActivityMetadata | null;
+}
+
+
 // ---------------------------------------------------------------------------
 // Execution Review — DTOs
 // ---------------------------------------------------------------------------

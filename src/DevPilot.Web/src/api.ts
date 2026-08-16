@@ -1,5 +1,6 @@
 import type {
   CreateTaskRequest,
+  ExecutionActivityItem,
   ExecutionDetail,
   ExecutionListItem,
   ExecutionReview,
@@ -113,6 +114,10 @@ export async function getExecutions(): Promise<ExecutionListItem[]> {
 
 export async function getExecution(id: string): Promise<ExecutionDetail> {
   return http<ExecutionDetail>(`/executions/${id}`);
+}
+
+export async function getExecutionActivity(id: string): Promise<ExecutionActivityItem[]> {
+  return http<ExecutionActivityItem[]>(`/executions/${id}/activity`);
 }
 
 export async function getExecutionReview(id: string, init?: RequestInit): Promise<ExecutionReview> {

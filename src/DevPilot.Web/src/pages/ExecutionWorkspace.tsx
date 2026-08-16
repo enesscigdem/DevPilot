@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import {
   ArrowLeft,
@@ -20,14 +20,14 @@ import {
 } from "lucide-react"
 import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
 import { cn } from "@/lib/utils"
-import { getExecution } from "@/api"
+import { getExecution, getExecutionActivity } from "@/api"
 import {
   TaskExecutionStatus,
   getExecutionStatusMeta,
   type ExecutionDetail,
+  type ExecutionActivityItem,
 } from "@/types"
 import { stages } from "@/data/mock"
-
 
 function getStageState(stageIndex: number, status: number): "done" | "active" | "todo" | "failed" | "blocked" {
   if (status === TaskExecutionStatus.Completed) {
@@ -64,31 +64,88 @@ function formatDateTime(dateStr: string | null): string {
   }
 }
 
+function formatTimeOnly(dateStr: string): string {
+  try {
+    const d = new Date(dateStr)
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+  } catch {
+    return dateStr
+  }
+}
+
+function getMetadataDisplay(act: ExecutionActivityItem): string | null {
+  if (act.metadata) {
+    const m = act.metadata
+    if (m.modifiedFileCount !== undefined && m.modifiedFileCount !== null) {
+      return `${m.modifiedFileCount} ${m.modifiedFileCount === 1 ? "file" : "files"} modified`
+    }
+    if (m.branchName) {
+      return `Branch: ${m.branchName}`
+    }
+  }
+  if (act.stage === "Execution" && act.status === "Completed") {
+    return "Ready for review"
+  }
+  return null
+}
+
 export function ExecutionWorkspace() {
   const navigate = useNavigate()
   const { id } = useParams<{ id: string }>()
 
   const [execution, setExecution] = useState<ExecutionDetail | null>(null)
+  const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const fetchExecution = useCallback(async () => {
-    if (!id) return
-    setIsLoading(true)
-    setError(null)
+  const isFetchingRef = useRef(false)
+
+  const fetchData = useCallback(async (showLoadingSpinner = false) => {
+    if (!id || isFetchingRef.current) return
+    isFetchingRef.current = true
+    if (showLoadingSpinner) {
+      setIsLoading(true)
+      setError(null)
+    }
+
     try {
-      const data = await getExecution(id)
-      setExecution(data)
+      const [execData, actData] = await Promise.all([
+        getExecution(id),
+        getExecutionActivity(id).catch(() => []),
+      ])
+      setExecution(execData)
+      setActivities(actData)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load execution detail.")
+      if (showLoadingSpinner) {
+        setError(err instanceof Error ? err.message : "Failed to load execution detail.")
+      }
     } finally {
-      setIsLoading(false)
+      if (showLoadingSpinner) {
+        setIsLoading(false)
+      }
+      isFetchingRef.current = false
     }
   }, [id])
 
   useEffect(() => {
-    fetchExecution()
-  }, [fetchExecution])
+    fetchData(true)
+  }, [fetchData])
+
+  // Polling loop while execution is Pending (0) or Running (1)
+  useEffect(() => {
+    if (!execution) return
+    const isRunningOrPending =
+      execution.status === TaskExecutionStatus.Pending ||
+      execution.status === TaskExecutionStatus.Running
+
+    if (!isRunningOrPending) return
+
+    const interval = setInterval(() => {
+      fetchData(false)
+    }, 2000)
+
+    return () => clearInterval(interval)
+  }, [execution, fetchData])
 
   if (isLoading) {
     return (
@@ -113,7 +170,7 @@ export function ExecutionWorkspace() {
             </p>
           </div>
           <div className="mt-2 flex items-center gap-3">
-            <Button variant="default" size="sm" onClick={fetchExecution}>
+            <Button variant="default" size="sm" onClick={() => fetchData(true)}>
               Retry
             </Button>
             <Link to="/executions">
@@ -134,6 +191,11 @@ export function ExecutionWorkspace() {
   const isCompleted = execution.status === TaskExecutionStatus.Completed
   const isPending = execution.status === TaskExecutionStatus.Pending
   const isCancelled = execution.status === TaskExecutionStatus.Cancelled
+
+  const buildPassed = activities.some((a) => a.stage === "Build" && a.status === "Completed")
+  const buildFailed = activities.some((a) => a.stage === "Build" && a.status === "Failed")
+  const testPassed = activities.some((a) => a.stage === "Test" && a.status === "Completed")
+  const testFailed = activities.some((a) => a.stage === "Test" && a.status === "Failed")
 
   return (
     <div className="w-full">
@@ -260,65 +322,77 @@ export function ExecutionWorkspace() {
               <span className="text-[13px] font-semibold text-foreground">Execution activity</span>
             </div>
             <span className="font-mono text-[11px] text-subtle-foreground">
-              0 events
+              {activities.length} {activities.length === 1 ? "event" : "events"}
             </span>
           </div>
 
           <div className="flex-1 overflow-y-auto px-5 py-6">
-            {isPending && (
-              <div className="flex flex-col items-center justify-center gap-2 py-16 text-center text-subtle-foreground">
-                <Clock className="h-6 w-6" />
-                <p className="text-[13.5px] font-medium text-foreground">Execution has not started yet</p>
-                <p className="font-mono text-[11px]">Created on {formatDateTime(execution.createdAt)}</p>
-              </div>
-            )}
-
-            {isRunning && (
-              <div className="flex flex-col items-center justify-center gap-2 py-16 text-center text-subtle-foreground">
-                <Loader2 className="h-6 w-6 animate-spin text-primary" />
-                <p className="text-[13.5px] font-medium text-foreground">Execution is currently running…</p>
-                <p className="font-mono text-[11px]">Started at {formatDateTime(execution.startedAt)}</p>
-              </div>
-            )}
-
-            {isCompleted && (
-              <div className="flex flex-col items-center justify-center gap-3 py-16 text-center text-subtle-foreground">
-                <CircleCheck className="h-8 w-8 text-success" />
-                <div>
-                  <p className="text-[14px] font-medium text-foreground">Execution completed successfully</p>
-                  <p className="mt-0.5 font-mono text-[11px]">Finished at {formatDateTime(execution.completedAt)}</p>
+            {activities.length === 0 ? (
+              isPending || isRunning ? (
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center text-subtle-foreground">
+                  <Clock className="h-6 w-6 animate-pulse text-primary" />
+                  <p className="text-[13.5px] font-medium text-foreground">Waiting for execution activity...</p>
+                  <p className="font-mono text-[11px]">
+                    {isRunning
+                      ? `Started at ${formatDateTime(execution.startedAt)}`
+                      : `Created on ${formatDateTime(execution.createdAt)}`}
+                  </p>
                 </div>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  className="mt-2"
-                  onClick={() => navigate(`/review/${execution.id}`)}
-                >
-                  <FileCode2 className="h-3.5 w-3.5" />
-                  Review execution changes
-                </Button>
-              </div>
-            )}
-
-
-            {isFailed && (
-              <div className="overflow-hidden rounded-[var(--radius-lg)] border border-danger/40 bg-danger-soft p-4">
-                <div className="flex items-start gap-2.5">
-                  <OctagonAlert className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold text-danger">Execution failed</div>
-                    <p className="mt-1 text-[12.5px] leading-relaxed text-foreground">
-                      {execution.errorMessage || "An error occurred during execution."}
-                    </p>
-                  </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center text-subtle-foreground">
+                  <Clock className="h-6 w-6 text-subtle-foreground" />
+                  <p className="text-[13.5px] font-medium text-foreground">
+                    Detailed activity was not recorded for this execution.
+                  </p>
                 </div>
-              </div>
-            )}
+              )
+            ) : (
+              <div className="space-y-3">
+                {activities.map((act) => {
+                  const isDone = act.status === "Completed"
+                  const isFailedStatus = act.status === "Failed"
+                  const formattedTime = formatTimeOnly(act.createdAt)
+                  const metaText = getMetadataDisplay(act)
 
-            {isCancelled && (
-              <div className="flex flex-col items-center justify-center gap-2 py-16 text-center text-subtle-foreground">
-                <X className="h-6 w-6 text-muted-foreground" />
-                <p className="text-[13.5px] font-medium text-foreground">Execution was cancelled</p>
+                  return (
+                    <div
+                      key={act.id}
+                      className="flex items-start gap-3 rounded-[var(--radius-md)] border border-border/60 bg-surface p-3 transition-colors"
+                    >
+                      <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full">
+                        {isDone ? (
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success/15 text-success">
+                            <Check className="h-3 w-3" />
+                          </span>
+                        ) : isFailedStatus ? (
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-danger/15 text-danger">
+                            <X className="h-3 w-3" />
+                          </span>
+                        ) : (
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/15 text-primary">
+                            <CircleDot className="h-3 w-3 animate-pulse-dot" />
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[13px] font-medium text-foreground">
+                            {act.message}
+                          </span>
+                          <span className="font-mono text-[11px] text-subtle-foreground">
+                            {formattedTime}
+                          </span>
+                        </div>
+                        {metaText && (
+                          <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                            {metaText}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -356,20 +430,23 @@ export function ExecutionWorkspace() {
             <div className="flex items-center gap-2 text-[12.5px]">
               <Hammer className="h-3.5 w-3.5 text-subtle-foreground" />
               <span className="text-foreground">Build</span>
-              <Badge tone="neutral" className="ml-auto">
-                —
+              <Badge
+                tone={buildPassed ? "green" : buildFailed ? "red" : "neutral"}
+                className="ml-auto"
+              >
+                {buildPassed ? "Passed" : buildFailed ? "Failed" : "—"}
               </Badge>
             </div>
             <div className="mt-1.5 flex items-center gap-2 text-[12.5px]">
               <FlaskConical className="h-3.5 w-3.5 text-subtle-foreground" />
               <span className="text-foreground">Tests</span>
-              <Badge tone="neutral" className="ml-auto">
-                —
+              <Badge
+                tone={testPassed ? "green" : testFailed ? "red" : "neutral"}
+                className="ml-auto"
+              >
+                {testPassed ? "Passed" : testFailed ? "Failed" : "—"}
               </Badge>
             </div>
-            <p className="mt-3 font-mono text-[10.5px] text-subtle-foreground">
-              No build or test telemetry reported.
-            </p>
           </Panel>
 
           <Button

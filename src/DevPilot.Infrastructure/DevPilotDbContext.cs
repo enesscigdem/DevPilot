@@ -33,6 +33,8 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<TaskExecution> TaskExecutions => Set<TaskExecution>();
 
+    public DbSet<ExecutionActivity> ExecutionActivities => Set<ExecutionActivity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -152,6 +154,25 @@ public class DevPilotDbContext : DbContext
             entity.HasOne(e => e.DevelopmentTask)
                 .WithMany()
                 .HasForeignKey(e => e.DevelopmentTaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ExecutionActivity>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+
+            entity.HasIndex(e => new { e.ExecutionId, e.CreatedAt, e.Id })
+                .HasDatabaseName("IX_ExecutionActivities_ExecutionId_CreatedAt_Id");
+
+            entity.Property(e => e.Stage).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.Message).HasMaxLength(500);
+            entity.Property(e => e.MetadataJson).HasColumnType("jsonb");
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+
+            entity.HasOne(e => e.Execution)
+                .WithMany()
+                .HasForeignKey(e => e.ExecutionId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

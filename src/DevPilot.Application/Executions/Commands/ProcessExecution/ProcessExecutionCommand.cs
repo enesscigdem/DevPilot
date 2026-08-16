@@ -1,3 +1,4 @@
+using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Enums;
@@ -40,17 +41,20 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
     private readonly IExecutionRepository _executionRepository;
     private readonly IImpactAnalysisRepository _impactAnalysisRepository;
     private readonly IExecutionProcessor _processor;
+    private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly ILogger<ProcessExecutionCommandHandler> _logger;
 
     public ProcessExecutionCommandHandler(
         IExecutionRepository executionRepository,
         IImpactAnalysisRepository impactAnalysisRepository,
         IExecutionProcessor processor,
+        IExecutionActivityRecorder activityRecorder,
         ILogger<ProcessExecutionCommandHandler> logger)
     {
         _executionRepository = executionRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
         _processor = processor;
+        _activityRecorder = activityRecorder;
         _logger = logger;
     }
 
@@ -96,6 +100,14 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
             task.Title,
             task.Id);
 
+        // Record Execution Started ONLY AFTER successful claim
+        await SafeRecordActivityAsync(
+            executionId,
+            ExecutionStage.Execution,
+            ExecutionActivityStatus.Started,
+            "Execution started.",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
         // ── 3. Verify workspace local path ────────────────────────────────────────
         if (string.IsNullOrWhiteSpace(workspace.LocalPath))
         {
@@ -135,7 +147,7 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
             return new ProcessExecutionResult { Success = false, ErrorMessage = analysisError };
         }
 
-        // ── 5. Execute via processor (no-op in MVP) ───────────────────────────────
+        // ── 5. Execute via processor ──────────────────────────────────────────────
         try
         {
             var context = new ExecutionProcessingContext(
@@ -161,7 +173,16 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
         }
 
         // ── 6. Persist completion ─────────────────────────────────────────────────
+        // First persist TaskExecution / DevelopmentTask completed state...
         await _executionRepository.CompleteAsync(executionId, cancellationToken).ConfigureAwait(false);
+
+        // ...THEN record final Execution Completed activity
+        await SafeRecordActivityAsync(
+            executionId,
+            ExecutionStage.Execution,
+            ExecutionActivityStatus.Completed,
+            "Execution completed.",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "ProcessExecution: execution {ExecutionId} completed successfully.",
@@ -188,9 +209,49 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
         return firstLine;
     }
 
-    private Task FailExecutionAsync(
+    private async Task FailExecutionAsync(
         Guid executionId,
         string errorMessage,
-        CancellationToken cancellationToken) =>
-        _executionRepository.FailAsync(executionId, SanitizeErrorMessage(errorMessage), cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        var sanitized = SanitizeErrorMessage(errorMessage);
+
+        // First persist TaskExecution / DevelopmentTask failed state...
+        await _executionRepository.FailAsync(executionId, sanitized, cancellationToken).ConfigureAwait(false);
+
+        // ...THEN record final Execution Failed activity
+        await SafeRecordActivityAsync(
+            executionId,
+            ExecutionStage.Execution,
+            ExecutionActivityStatus.Failed,
+            $"Execution failed: {sanitized}",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SafeRecordActivityAsync(
+        Guid executionId,
+        ExecutionStage stage,
+        ExecutionActivityStatus status,
+        string message,
+        ExecutionActivityMetadata? metadata = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _activityRecorder.RecordActivityAsync(
+                executionId, stage, status, message, metadata, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "ProcessExecutionCommandHandler: unexpected error recording activity for execution {ExecutionId}.",
+                executionId);
+        }
+    }
 }

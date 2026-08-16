@@ -1,3 +1,4 @@
+using DevPilot.Application.Executions.Queries.GetExecutionActivity;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
 using DevPilot.Application.Executions.Queries.GetExecutionReview;
 using DevPilot.Application.Executions.Queries.GetExecutions;
@@ -13,15 +14,18 @@ public class ExecutionsController : ControllerBase
     private readonly IGetExecutionsQueryHandler _getExecutionsHandler;
     private readonly IGetExecutionByIdQueryHandler _getExecutionByIdHandler;
     private readonly IGetExecutionReviewQueryHandler _getExecutionReviewHandler;
+    private readonly IGetExecutionActivityQueryHandler _getExecutionActivityHandler;
 
     public ExecutionsController(
         IGetExecutionsQueryHandler getExecutionsHandler,
         IGetExecutionByIdQueryHandler getExecutionByIdHandler,
-        IGetExecutionReviewQueryHandler getExecutionReviewHandler)
+        IGetExecutionReviewQueryHandler getExecutionReviewHandler,
+        IGetExecutionActivityQueryHandler getExecutionActivityHandler)
     {
         _getExecutionsHandler = getExecutionsHandler;
         _getExecutionByIdHandler = getExecutionByIdHandler;
         _getExecutionReviewHandler = getExecutionReviewHandler;
+        _getExecutionActivityHandler = getExecutionActivityHandler;
     }
 
     [HttpGet]
@@ -49,6 +53,23 @@ public class ExecutionsController : ControllerBase
         }
 
         return Ok(result.Execution);
+    }
+
+    [HttpGet("{id:guid}/activity", Name = nameof(GetExecutionActivity))]
+    public async Task<IActionResult> GetExecutionActivity(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _getExecutionActivityHandler
+            .HandleAsync(new GetExecutionActivityQuery(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Found)
+        {
+            return NotFound(new { error = result.ErrorMessage ?? "Execution not found." });
+        }
+
+        return Ok(result.Activities);
     }
 
     [HttpGet("{id:guid}/review", Name = nameof(GetExecutionReview))]

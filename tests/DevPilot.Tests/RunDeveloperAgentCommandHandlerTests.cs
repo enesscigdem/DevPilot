@@ -357,6 +357,7 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
             _analysisRepository,
             _developerAgent,
             validationRunner,
+            new NullActivityRecorder(),
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
         var context = new ExecutionProcessingContext(
@@ -476,4 +477,18 @@ public class FakeExecutionValidationRunner : IExecutionValidationRunner
 
     public Task<TestValidationResult> ValidateTestAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
         => Task.FromResult(new TestValidationResult { Success = true });
+}
+
+public class NullActivityRecorder : IExecutionActivityRecorder
+{
+    public Task RecordActivityAsync(
+        Guid executionId,
+        ExecutionStage stage,
+        ExecutionActivityStatus status,
+        string message,
+        ExecutionActivityMetadata? metadata = null,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.CompletedTask;
+    }
 }

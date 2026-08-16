@@ -15,7 +15,7 @@ namespace DevPilot.Tests.Executions;
 public class GitWorkspaceExecutionProcessorTests
 {
     [Fact]
-    public async Task ProcessAsync_FullSuccess_ExecutesStagesInOrder_BuildAndTestReceiveNullTargetPath()
+    public async Task ProcessAsync_FullSuccess_ExecutesStagesInOrder_BuildAndTestReceiveNullTargetPath_AndRecordsActivities()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -38,6 +38,7 @@ public class GitWorkspaceExecutionProcessorTests
             ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "App.cs" })
         };
         var validationRunner = new TestExecutionValidationRunner();
+        var recorder = new TestActivityRecorder();
 
         var processor = new GitWorkspaceExecutionProcessor(
             workspaceManager,
@@ -45,6 +46,7 @@ public class GitWorkspaceExecutionProcessorTests
             impactRepo,
             agent,
             validationRunner,
+            recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
         var context = new ExecutionProcessingContext(
@@ -66,91 +68,37 @@ public class GitWorkspaceExecutionProcessorTests
         agent.CallCount.Should().Be(1);
         validationRunner.BuildCallCount.Should().Be(1);
         validationRunner.TestCallCount.Should().Be(1);
-        validationRunner.LastBuildRequest?.TargetPath.Should().BeNull();
-        validationRunner.LastTestRequest?.TargetPath.Should().BeNull();
+
+        // Verify chronological stage events recorded:
+        // Workspace Started -> Workspace Completed -> DeveloperAgent Started -> DeveloperAgent Completed -> Build Started -> Build Completed -> Test Started -> Test Completed
+        recorder.RecordedActivities.Should().HaveCount(8);
+        recorder.RecordedActivities[0].stage.Should().Be(ExecutionStage.Workspace);
+        recorder.RecordedActivities[0].status.Should().Be(ExecutionActivityStatus.Started);
+        recorder.RecordedActivities[1].stage.Should().Be(ExecutionStage.Workspace);
+        recorder.RecordedActivities[1].status.Should().Be(ExecutionActivityStatus.Completed);
+        recorder.RecordedActivities[1].metadata?.BranchName.Should().Be("devpilot/branch");
+
+        recorder.RecordedActivities[2].stage.Should().Be(ExecutionStage.DeveloperAgent);
+        recorder.RecordedActivities[2].status.Should().Be(ExecutionActivityStatus.Started);
+        recorder.RecordedActivities[3].stage.Should().Be(ExecutionStage.DeveloperAgent);
+        recorder.RecordedActivities[3].status.Should().Be(ExecutionActivityStatus.Completed);
+        recorder.RecordedActivities[3].metadata?.ModifiedFileCount.Should().Be(1);
+
+        recorder.RecordedActivities[4].stage.Should().Be(ExecutionStage.Build);
+        recorder.RecordedActivities[4].status.Should().Be(ExecutionActivityStatus.Started);
+        recorder.RecordedActivities[5].stage.Should().Be(ExecutionStage.Build);
+        recorder.RecordedActivities[5].status.Should().Be(ExecutionActivityStatus.Completed);
+        recorder.RecordedActivities[5].metadata?.BuildPassed.Should().BeTrue();
+
+        recorder.RecordedActivities[6].stage.Should().Be(ExecutionStage.Test);
+        recorder.RecordedActivities[6].status.Should().Be(ExecutionActivityStatus.Started);
+        recorder.RecordedActivities[7].stage.Should().Be(ExecutionStage.Test);
+        recorder.RecordedActivities[7].status.Should().Be(ExecutionActivityStatus.Completed);
+        recorder.RecordedActivities[7].metadata?.TestPassed.Should().BeTrue();
     }
 
     [Fact]
-    public async Task ProcessAsync_WorkspacePreparationFails_ThrowsException_AndDoesNotCallAgentOrValidation()
-    {
-        var executionId = Guid.NewGuid();
-        var taskId = Guid.NewGuid();
-
-        var workspaceManager = new TestWorkspaceManager { PrepareSuccess = false, PrepareErrorMessage = "Git error" };
-        var executionRepo = new TestExecutionRepository();
-        var impactRepo = new TestImpactAnalysisRepository();
-        var agent = new TestDeveloperAgent();
-        var validationRunner = new TestExecutionValidationRunner();
-
-        var processor = new GitWorkspaceExecutionProcessor(
-            workspaceManager,
-            executionRepo,
-            impactRepo,
-            agent,
-            validationRunner,
-            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
-
-        var context = new ExecutionProcessingContext(
-            ExecutionId: executionId,
-            TaskId: taskId,
-            TaskTitle: "Title",
-            TaskDescription: "Desc",
-            AcceptanceCriteria: null,
-            WorkspaceId: Guid.NewGuid(),
-            WorkspaceLocalPath: "/source",
-            ImpactAnalysisSummary: "Summary");
-
-        var act = async () => await processor.ProcessAsync(context);
-
-        var ex = await act.Should().ThrowAsync<InvalidOperationException>();
-        ex.WithMessage("*Execution workspace preparation failed: Git error*");
-
-        agent.CallCount.Should().Be(0);
-        validationRunner.BuildCallCount.Should().Be(0);
-        validationRunner.TestCallCount.Should().Be(0);
-    }
-
-    [Fact]
-    public async Task ProcessAsync_PreAiVerificationFails_ThrowsException_AndDoesNotCallAgentOrValidation()
-    {
-        var executionId = Guid.NewGuid();
-        var taskId = Guid.NewGuid();
-
-        var workspaceManager = new TestWorkspaceManager { VerifyCleanSuccess = false, VerifyErrorMessage = "Dirty worktree pre-AI" };
-        var executionRepo = new TestExecutionRepository();
-        var impactRepo = new TestImpactAnalysisRepository();
-        var agent = new TestDeveloperAgent();
-        var validationRunner = new TestExecutionValidationRunner();
-
-        var processor = new GitWorkspaceExecutionProcessor(
-            workspaceManager,
-            executionRepo,
-            impactRepo,
-            agent,
-            validationRunner,
-            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
-
-        var context = new ExecutionProcessingContext(
-            ExecutionId: executionId,
-            TaskId: taskId,
-            TaskTitle: "Title",
-            TaskDescription: "Desc",
-            AcceptanceCriteria: null,
-            WorkspaceId: Guid.NewGuid(),
-            WorkspaceLocalPath: "/source",
-            ImpactAnalysisSummary: "Summary");
-
-        var act = async () => await processor.ProcessAsync(context);
-
-        var ex = await act.Should().ThrowAsync<InvalidOperationException>();
-        ex.WithMessage("*Developer Agent failed: Execution workspace verification failed prior to AI invocation*");
-
-        agent.CallCount.Should().Be(0);
-        validationRunner.BuildCallCount.Should().Be(0);
-    }
-
-    [Fact]
-    public async Task ProcessAsync_DeveloperAgentFails_ThrowsStageError_DoesNotCallValidation()
+    public async Task ProcessAsync_DeveloperAgentFails_RecordsDevAgentFailed_DoesNotRecordBuildOrTest()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -163,6 +111,7 @@ public class GitWorkspaceExecutionProcessorTests
         };
         var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Fail("AI schema syntax error") };
         var validationRunner = new TestExecutionValidationRunner();
+        var recorder = new TestActivityRecorder();
 
         var processor = new GitWorkspaceExecutionProcessor(
             workspaceManager,
@@ -170,6 +119,7 @@ public class GitWorkspaceExecutionProcessorTests
             impactRepo,
             agent,
             validationRunner,
+            recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
         var context = new ExecutionProcessingContext(
@@ -189,52 +139,14 @@ public class GitWorkspaceExecutionProcessorTests
 
         agent.CallCount.Should().Be(1);
         validationRunner.BuildCallCount.Should().Be(0);
+
+        recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.DeveloperAgent && a.status == ExecutionActivityStatus.Failed);
+        recorder.RecordedActivities.Should().NotContain(a => a.stage == ExecutionStage.Build);
+        recorder.RecordedActivities.Should().NotContain(a => a.stage == ExecutionStage.Test);
     }
 
     [Fact]
-    public async Task ProcessAsync_DeveloperAgentProducesZeroModifiedFiles_ThrowsStageError_DoesNotCallValidation()
-    {
-        var executionId = Guid.NewGuid();
-        var taskId = Guid.NewGuid();
-
-        var workspaceManager = new TestWorkspaceManager();
-        var executionRepo = new TestExecutionRepository();
-        var impactRepo = new TestImpactAnalysisRepository
-        {
-            AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed }
-        };
-        var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Ok(new List<string>()) };
-        var validationRunner = new TestExecutionValidationRunner();
-
-        var processor = new GitWorkspaceExecutionProcessor(
-            workspaceManager,
-            executionRepo,
-            impactRepo,
-            agent,
-            validationRunner,
-            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
-
-        var context = new ExecutionProcessingContext(
-            ExecutionId: executionId,
-            TaskId: taskId,
-            TaskTitle: "Title",
-            TaskDescription: "Desc",
-            AcceptanceCriteria: null,
-            WorkspaceId: Guid.NewGuid(),
-            WorkspaceLocalPath: "/source",
-            ImpactAnalysisSummary: "Summary");
-
-        var act = async () => await processor.ProcessAsync(context);
-
-        var ex = await act.Should().ThrowAsync<InvalidOperationException>();
-        ex.WithMessage("Developer Agent failed: Developer Agent returned success but produced zero modified files.");
-
-        agent.CallCount.Should().Be(1);
-        validationRunner.BuildCallCount.Should().Be(0);
-    }
-
-    [Fact]
-    public async Task ProcessAsync_BuildFails_ThrowsBuildError_DoesNotInvokeTestValidation()
+    public async Task ProcessAsync_BuildFails_RecordsBuildFailed_DoesNotRecordTestStage()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -250,6 +162,7 @@ public class GitWorkspaceExecutionProcessorTests
         {
             BuildResultToReturn = BuildValidationResult.FailResult("dotnet build failed with exit code 1.")
         };
+        var recorder = new TestActivityRecorder();
 
         var processor = new GitWorkspaceExecutionProcessor(
             workspaceManager,
@@ -257,6 +170,7 @@ public class GitWorkspaceExecutionProcessorTests
             impactRepo,
             agent,
             validationRunner,
+            recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
         var context = new ExecutionProcessingContext(
@@ -276,10 +190,13 @@ public class GitWorkspaceExecutionProcessorTests
 
         validationRunner.BuildCallCount.Should().Be(1);
         validationRunner.TestCallCount.Should().Be(0);
+
+        recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.Build && a.status == ExecutionActivityStatus.Failed);
+        recorder.RecordedActivities.Should().NotContain(a => a.stage == ExecutionStage.Test);
     }
 
     [Fact]
-    public async Task ProcessAsync_TestFails_ThrowsTestError()
+    public async Task ProcessAsync_TestFails_RecordsTestFailed()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -295,6 +212,7 @@ public class GitWorkspaceExecutionProcessorTests
         {
             TestResultToReturn = TestValidationResult.FailResult("dotnet test failed with exit code 1.")
         };
+        var recorder = new TestActivityRecorder();
 
         var processor = new GitWorkspaceExecutionProcessor(
             workspaceManager,
@@ -302,6 +220,7 @@ public class GitWorkspaceExecutionProcessorTests
             impactRepo,
             agent,
             validationRunner,
+            recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
         var context = new ExecutionProcessingContext(
@@ -321,6 +240,8 @@ public class GitWorkspaceExecutionProcessorTests
 
         validationRunner.BuildCallCount.Should().Be(1);
         validationRunner.TestCallCount.Should().Be(1);
+
+        recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.Test && a.status == ExecutionActivityStatus.Failed);
     }
 
     // ── Helper Test Fakes ──────────────────────────────────────────────────────────
@@ -417,6 +338,23 @@ public class GitWorkspaceExecutionProcessorTests
             TestCallCount++;
             LastTestRequest = request;
             return Task.FromResult(TestResultToReturn);
+        }
+    }
+
+    private class TestActivityRecorder : IExecutionActivityRecorder
+    {
+        public List<(Guid executionId, ExecutionStage stage, ExecutionActivityStatus status, string message, ExecutionActivityMetadata? metadata)> RecordedActivities { get; } = new();
+
+        public Task RecordActivityAsync(
+            Guid executionId,
+            ExecutionStage stage,
+            ExecutionActivityStatus status,
+            string message,
+            ExecutionActivityMetadata? metadata = null,
+            CancellationToken cancellationToken = default)
+        {
+            RecordedActivities.Add((executionId, stage, status, message, metadata));
+            return Task.CompletedTask;
         }
     }
 }

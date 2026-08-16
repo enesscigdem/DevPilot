@@ -21,6 +21,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IImpactAnalysisRepository _impactAnalysisRepository;
     private readonly IDeveloperAgent _developerAgent;
     private readonly IExecutionValidationRunner _validationRunner;
+    private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
 
     public GitWorkspaceExecutionProcessor(
@@ -29,6 +30,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IImpactAnalysisRepository impactAnalysisRepository,
         IDeveloperAgent developerAgent,
         IExecutionValidationRunner validationRunner,
+        IExecutionActivityRecorder activityRecorder,
         ILogger<GitWorkspaceExecutionProcessor> logger)
     {
         _workspaceManager = workspaceManager;
@@ -36,6 +38,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         _impactAnalysisRepository = impactAnalysisRepository;
         _developerAgent = developerAgent;
         _validationRunner = validationRunner;
+        _activityRecorder = activityRecorder;
         _logger = logger;
     }
 
@@ -50,6 +53,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             context.TaskId);
 
         // ── Stage 1. Prepare isolated workspace & dedicated branch ──────────────────
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Workspace,
+            ExecutionActivityStatus.Started,
+            "Workspace preparation started.",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
         var prepResult = await _workspaceManager.PrepareWorkspaceAsync(
             executionId: context.ExecutionId,
             taskId: context.TaskId,
@@ -66,6 +76,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 context.ExecutionId,
                 errorMessage);
 
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Workspace,
+                ExecutionActivityStatus.Failed,
+                errorMessage,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
             throw new InvalidOperationException(errorMessage);
         }
 
@@ -77,6 +94,14 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 prepResult.BranchName,
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Workspace,
+            ExecutionActivityStatus.Completed,
+            "Workspace prepared.",
+            new ExecutionActivityMetadata(BranchName: prepResult.BranchName),
+            cancellationToken).ConfigureAwait(false);
 
         // ── Stage 3. Verify workspace state immediately before AI call (clean required)
         var preAiVerification = await _workspaceManager
@@ -95,6 +120,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 context.ExecutionId,
                 errorMessage);
 
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Failed,
+                errorMessage,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
             throw new InvalidOperationException(errorMessage);
         }
 
@@ -111,6 +143,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 analysisError,
                 context.ExecutionId,
                 context.TaskId);
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Failed,
+                analysisError,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
 
             throw new InvalidOperationException(analysisError);
         }
@@ -144,6 +183,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             context.ExecutionId,
             context.TaskId);
 
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Started,
+            "Developer Agent started.",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
         var agentResult = await _developerAgent
             .GenerateAndApplyEditsAsync(agentRequest, cancellationToken)
             .ConfigureAwait(false);
@@ -155,6 +201,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 "GitWorkspaceExecutionProcessor: DeveloperAgent execution failed for {ExecutionId}. Error: {Error}",
                 context.ExecutionId,
                 agentError);
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Failed,
+                agentError,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
 
             throw new InvalidOperationException(agentError);
         }
@@ -168,6 +221,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 zeroFilesError,
                 context.ExecutionId);
 
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Failed,
+                zeroFilesError,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
             throw new InvalidOperationException(zeroFilesError);
         }
 
@@ -176,7 +236,15 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             agentResult.ModifiedFiles.Count,
             context.ExecutionId);
 
-        // ── Stage 6. Validate Build (deterministic trusted target discovery, TargetPath = null) ──
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Completed,
+            "Developer Agent completed.",
+            new ExecutionActivityMetadata(ModifiedFileCount: agentResult.ModifiedFiles.Count),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        // ── Stage 6. Validate Build ───────────────────────────────────────────────
         var validationRequest = new ExecutionValidationRequest(
             WorkspacePath: prepResult.WorkspacePath,
             BranchName: prepResult.BranchName,
@@ -185,6 +253,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         _logger.LogInformation(
             "GitWorkspaceExecutionProcessor: starting build validation for execution {ExecutionId}.",
             context.ExecutionId);
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Build,
+            ExecutionActivityStatus.Started,
+            "Build started.",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var buildResult = await _validationRunner
             .ValidateBuildAsync(validationRequest, cancellationToken)
@@ -198,6 +273,14 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 context.ExecutionId,
                 buildError);
 
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                buildError,
+                new ExecutionActivityMetadata(BuildPassed: false),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
             // Halt immediately: DO NOT run test validation if build fails
             throw new InvalidOperationException(buildError);
         }
@@ -206,10 +289,25 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             "GitWorkspaceExecutionProcessor: build validation succeeded for execution {ExecutionId}.",
             context.ExecutionId);
 
-        // ── Stage 7. Validate Test (deterministic trusted target discovery, TargetPath = null) ──
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Build,
+            ExecutionActivityStatus.Completed,
+            "Build passed.",
+            new ExecutionActivityMetadata(BuildPassed: true),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        // ── Stage 7. Validate Test ────────────────────────────────────────────────
         _logger.LogInformation(
             "GitWorkspaceExecutionProcessor: starting test validation for execution {ExecutionId}.",
             context.ExecutionId);
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Test,
+            ExecutionActivityStatus.Started,
+            "Test started.",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var testResult = await _validationRunner
             .ValidateTestAsync(validationRequest, cancellationToken)
@@ -223,12 +321,28 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 context.ExecutionId,
                 testError);
 
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Failed,
+                testError,
+                new ExecutionActivityMetadata(TestPassed: false),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
             throw new InvalidOperationException(testError);
         }
 
         _logger.LogInformation(
-            "GitWorkspaceExecutionProcessor: all pipeline stages (workspace prep → developer agent → build → test) succeeded for execution {ExecutionId}.",
+            "GitWorkspaceExecutionProcessor: all pipeline stages succeeded for execution {ExecutionId}.",
             context.ExecutionId);
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Test,
+            ExecutionActivityStatus.Completed,
+            "Tests passed.",
+            new ExecutionActivityMetadata(TestPassed: true),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     private static string BuildProposedPlanText(TaskImpactAnalysis analysis)
@@ -244,5 +358,32 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         }
 
         return !string.IsNullOrWhiteSpace(analysis.Summary) ? analysis.Summary : "No detailed proposed plan provided.";
+    }
+
+    private async Task SafeRecordActivityAsync(
+        Guid executionId,
+        ExecutionStage stage,
+        ExecutionActivityStatus status,
+        string message,
+        ExecutionActivityMetadata? metadata = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _activityRecorder.RecordActivityAsync(
+                executionId, stage, status, message, metadata, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "GitWorkspaceExecutionProcessor: unexpected error recording activity for execution {ExecutionId}.",
+                executionId);
+        }
     }
 }

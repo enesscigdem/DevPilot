@@ -1,4 +1,5 @@
 using DevPilot.Application.Executions.Commands.ProcessExecution;
+using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
@@ -12,7 +13,7 @@ namespace DevPilot.Tests.Executions;
 public class ProcessExecutionCommandHandlerTests
 {
     [Fact]
-    public async Task HandleAsync_ExecutionNotPending_ReturnsSkipped_AndDoesNotInvokeProcessor()
+    public async Task HandleAsync_ExecutionNotPending_ReturnsSkipped_AndDoesNotRecordActivityOrInvokeProcessor()
     {
         var executionId = Guid.NewGuid();
         var execution = new TaskExecution
@@ -28,8 +29,9 @@ public class ProcessExecutionCommandHandlerTests
         var repo = new TestExecutionRepository { ExecutionToReturn = execution, ClaimResult = false };
         var impactRepo = new TestImpactAnalysisRepository();
         var processor = new TestExecutionProcessor();
+        var recorder = new TestActivityRecorder();
 
-        var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, NullLogger<ProcessExecutionCommandHandler>.Instance);
+        var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, NullLogger<ProcessExecutionCommandHandler>.Instance);
 
         var result = await handler.HandleAsync(new ProcessExecutionCommand(executionId));
 
@@ -38,10 +40,11 @@ public class ProcessExecutionCommandHandlerTests
         processor.ProcessCallCount.Should().Be(0);
         repo.CompletedExecutionId.Should().BeNull();
         repo.FailedExecutionId.Should().BeNull();
+        recorder.RecordedActivities.Should().BeEmpty();
     }
 
     [Fact]
-    public async Task HandleAsync_FullSuccess_CallsProcessor_AndPersistsCompleted()
+    public async Task HandleAsync_FullSuccess_CallsProcessor_AndPersistsExecutionStartedAndCompletedActivitiesInOrder()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -79,8 +82,9 @@ public class ProcessExecutionCommandHandlerTests
                 AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed, Summary = "Summary" }
             };
             var processor = new TestExecutionProcessor();
+            var recorder = new TestActivityRecorder();
 
-            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, NullLogger<ProcessExecutionCommandHandler>.Instance);
+            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, NullLogger<ProcessExecutionCommandHandler>.Instance);
 
             var result = await handler.HandleAsync(new ProcessExecutionCommand(executionId));
 
@@ -89,6 +93,12 @@ public class ProcessExecutionCommandHandlerTests
             processor.ProcessCallCount.Should().Be(1);
             repo.CompletedExecutionId.Should().Be(executionId);
             repo.FailedExecutionId.Should().BeNull();
+
+            recorder.RecordedActivities.Should().HaveCount(2);
+            recorder.RecordedActivities[0].stage.Should().Be(ExecutionStage.Execution);
+            recorder.RecordedActivities[0].status.Should().Be(ExecutionActivityStatus.Started);
+            recorder.RecordedActivities[1].stage.Should().Be(ExecutionStage.Execution);
+            recorder.RecordedActivities[1].status.Should().Be(ExecutionActivityStatus.Completed);
         }
         finally
         {
@@ -100,7 +110,7 @@ public class ProcessExecutionCommandHandlerTests
     }
 
     [Fact]
-    public async Task HandleAsync_ProcessorThrowsException_PersistsSanitizedErrorMessage_AndFailsExecution()
+    public async Task HandleAsync_ProcessorThrowsException_PersistsSanitizedErrorMessage_AndFailsExecutionWithFailedActivity()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -140,8 +150,9 @@ public class ProcessExecutionCommandHandlerTests
 
             const string rawErrorMessage = "Build validation failed: dotnet build failed with exit code 1.\r\nAt line 123 in /some/path/file.cs\r\n   at Method() in StackTrace.cs:line 45";
             var processor = new TestExecutionProcessor { ExceptionToThrow = new InvalidOperationException(rawErrorMessage) };
+            var recorder = new TestActivityRecorder();
 
-            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, NullLogger<ProcessExecutionCommandHandler>.Instance);
+            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, NullLogger<ProcessExecutionCommandHandler>.Instance);
 
             var result = await handler.HandleAsync(new ProcessExecutionCommand(executionId));
 
@@ -151,6 +162,70 @@ public class ProcessExecutionCommandHandlerTests
             repo.FailedExecutionId.Should().Be(executionId);
             repo.FailedErrorMessage.Should().Be("Build validation failed: dotnet build failed with exit code 1.");
             repo.CompletedExecutionId.Should().BeNull();
+
+            recorder.RecordedActivities.Should().HaveCount(2);
+            recorder.RecordedActivities[0].status.Should().Be(ExecutionActivityStatus.Started);
+            recorder.RecordedActivities[1].stage.Should().Be(ExecutionStage.Execution);
+            recorder.RecordedActivities[1].status.Should().Be(ExecutionActivityStatus.Failed);
+            recorder.RecordedActivities[1].message.Should().Contain("Build validation failed: dotnet build failed with exit code 1.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task HandleAsync_ActivityRecorderThrowsException_DoesNotFailPipelineOrThrow()
+    {
+        var executionId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "DevPilotTestDir_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var task = new DevelopmentTask
+            {
+                Id = taskId,
+                Title = "Task Title",
+                Description = "Task Desc",
+                AcceptanceCriteria = "AC",
+                RepositoryWorkspace = new RepositoryWorkspace
+                {
+                    Id = workspaceId,
+                    LocalPath = tempDir
+                }
+            };
+
+            var execution = new TaskExecution
+            {
+                Id = executionId,
+                DevelopmentTaskId = taskId,
+                DevelopmentTask = task,
+                Status = TaskExecutionStatus.Pending
+            };
+
+            var repo = new TestExecutionRepository { ExecutionToReturn = execution, ClaimResult = true };
+            var impactRepo = new TestImpactAnalysisRepository
+            {
+                AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed, Summary = "Summary" }
+            };
+            var processor = new TestExecutionProcessor();
+            var brokenRecorder = new BrokenActivityRecorder();
+
+            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, brokenRecorder, NullLogger<ProcessExecutionCommandHandler>.Instance);
+
+            var result = await handler.HandleAsync(new ProcessExecutionCommand(executionId));
+
+            result.Success.Should().BeTrue();
+            result.Skipped.Should().BeFalse();
+            repo.CompletedExecutionId.Should().Be(executionId);
         }
         finally
         {
@@ -225,6 +300,37 @@ public class ProcessExecutionCommandHandlerTests
                 throw ExceptionToThrow;
             }
             return Task.CompletedTask;
+        }
+    }
+
+    private class TestActivityRecorder : IExecutionActivityRecorder
+    {
+        public List<(Guid executionId, ExecutionStage stage, ExecutionActivityStatus status, string message, ExecutionActivityMetadata? metadata)> RecordedActivities { get; } = new();
+
+        public Task RecordActivityAsync(
+            Guid executionId,
+            ExecutionStage stage,
+            ExecutionActivityStatus status,
+            string message,
+            ExecutionActivityMetadata? metadata = null,
+            CancellationToken cancellationToken = default)
+        {
+            RecordedActivities.Add((executionId, stage, status, message, metadata));
+            return Task.CompletedTask;
+        }
+    }
+
+    private class BrokenActivityRecorder : IExecutionActivityRecorder
+    {
+        public Task RecordActivityAsync(
+            Guid executionId,
+            ExecutionStage stage,
+            ExecutionActivityStatus status,
+            string message,
+            ExecutionActivityMetadata? metadata = null,
+            CancellationToken cancellationToken = default)
+        {
+            throw new InvalidOperationException("DB disk space full - telemetry fail");
         }
     }
 }
