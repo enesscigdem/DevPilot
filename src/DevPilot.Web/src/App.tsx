@@ -1,68 +1,30 @@
-import { useState } from 'react'
-import { TaskList } from './components/TaskList'
-import { TaskForm } from './components/TaskForm'
-import { TaskDetail } from './components/TaskDetail'
-import { WorkspaceView } from './components/WorkspaceView'
+import { Routes, Route, Navigate } from "react-router-dom"
+import { AppShell } from "./components/AppShell"
+import { Workspace } from "./pages/Workspace"
+import { ProjectWorkspace } from "./pages/ProjectWorkspace"
+import { Tasks } from "./pages/Tasks"
+import { TaskImpact } from "./pages/TaskImpact"
+import { Executions } from "./pages/Executions"
+import { ExecutionWorkspace } from "./pages/ExecutionWorkspace"
+import { CodeReview } from "./pages/CodeReview"
+import { ProjectBrain } from "./pages/ProjectBrain"
+import { Architecture } from "./pages/Architecture"
 
-type View = 'list' | 'create' | 'detail' | 'workspace'
-
-function App() {
-  const [view, setView] = useState<View>('list')
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
-
+export default function App() {
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="app-brand">
-          <h1>DevPilot</h1>
-          <span className="app-tagline">AI-powered Software Development & Delivery</span>
-        </div>
-        <nav className="app-nav">
-          <button
-            className={view === 'list' || view === 'detail' ? 'active' : ''}
-            onClick={() => setView('list')}
-          >
-            Tasks
-          </button>
-          <button
-            className={view === 'workspace' ? 'active' : ''}
-            onClick={() => setView('workspace')}
-          >
-            Workspace
-          </button>
-        </nav>
-      </header>
-
-      <main className="app-main">
-        {view === 'list' && (
-          <TaskList
-            onCreate={() => setView('create')}
-            onSelect={(id) => {
-              setSelectedTaskId(id)
-              setView('detail')
-            }}
-          />
-        )}
-        {view === 'create' && (
-          <TaskForm
-            onCreated={(id) => {
-              setSelectedTaskId(id)
-              setView('detail')
-            }}
-            onCancel={() => setView('list')}
-          />
-        )}
-        {view === 'detail' && selectedTaskId && (
-          <TaskDetail
-            taskId={selectedTaskId}
-            onBack={() => setView('list')}
-            onDeleted={() => setView('list')}
-          />
-        )}
-        {view === 'workspace' && <WorkspaceView />}
-      </main>
-    </div>
+    <AppShell>
+      <Routes>
+        <Route path="/" element={<Workspace />} />
+        <Route path="/projects" element={<ProjectWorkspace />} />
+        <Route path="/tasks" element={<Tasks />} />
+        <Route path="/tasks/:id" element={<TaskImpact />} />
+        <Route path="/executions" element={<Executions />} />
+        <Route path="/executions/:id" element={<ExecutionWorkspace />} />
+        <Route path="/review/:id" element={<CodeReview />} />
+        <Route path="/brain" element={<ProjectBrain />} />
+        <Route path="/architecture" element={<Architecture />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AppShell>
   )
 }
-
-export default App
