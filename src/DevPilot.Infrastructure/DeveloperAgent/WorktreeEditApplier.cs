@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 using System.Text.RegularExpressions;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
@@ -32,11 +33,33 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         ".kdbx"
     };
 
+    private static readonly UTF8Encoding Utf8WithoutBom =
+        new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private static readonly UTF8Encoding Utf8WithBom =
+        new(encoderShouldEmitUTF8Identifier: true, throwOnInvalidBytes: true);
+
     private readonly ILogger<WorktreeEditApplier> _logger;
 
     public WorktreeEditApplier(ILogger<WorktreeEditApplier> logger)
     {
         _logger = logger;
+    }
+
+    private static bool HasUtf8Bom(byte[] bytes)
+    {
+        return bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+    }
+
+    private static string DecodeUtf8Text(byte[] bytes, out bool hasBom)
+    {
+        hasBom = HasUtf8Bom(bytes);
+        int offset = hasBom ? 3 : 0;
+        var text = Utf8WithoutBom.GetString(bytes, offset, bytes.Length - offset);
+        if (text.StartsWith('\uFEFF'))
+        {
+            text = text.Substring(1);
+        }
+        return text;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> ReadContextFilesAsync(
@@ -89,7 +112,7 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                     $"Total context file size ({totalContentBytes} bytes) exceeds maximum limit of {limits.MaxTotalContentSizeBytes} bytes.");
             }
 
-            var content = System.Text.Encoding.UTF8.GetString(bytes);
+            var content = DecodeUtf8Text(bytes, out _);
             result[relativePath] = content;
         }
 
@@ -127,7 +150,7 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
 
         // 2. Validate all paths & in-memory edits before writing
         var preparedCreates = new List<(string ResolvedPath, string RelativePath, string Content)>();
-        var preparedModifies = new List<(string ResolvedPath, string RelativePath, string NewContent, string OriginalContent)>();
+        var preparedModifies = new List<(string ResolvedPath, string RelativePath, string NewContent, string OriginalContent, bool HasBom)>();
         var modifiedRelativePaths = new List<string>();
 
         foreach (var spec in editPlan.Files)
@@ -186,7 +209,7 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                             $"Target file '{spec.FilePath}' is a binary file and cannot be modified.");
                     }
 
-                    var evolvingContent = System.Text.Encoding.UTF8.GetString(originalBytes);
+                    var evolvingContent = DecodeUtf8Text(originalBytes, out var hasBom);
                     var originalContent = evolvingContent;
 
                     // Apply search/replace edits sequentially in memory
@@ -215,7 +238,7 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                         evolvingContent = ReplaceFirstOccurrence(evolvingContent, edit.Search, edit.Replace ?? string.Empty);
                     }
 
-                    preparedModifies.Add((resolvedPath, spec.FilePath, evolvingContent, originalContent));
+                    preparedModifies.Add((resolvedPath, spec.FilePath, evolvingContent, originalContent, hasBom));
                     modifiedRelativePaths.Add(spec.FilePath);
                     break;
 
@@ -250,14 +273,14 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                     Directory.CreateDirectory(parentDir);
                 }
 
-                await File.WriteAllTextAsync(create.ResolvedPath, create.Content, System.Text.Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+                await File.WriteAllTextAsync(create.ResolvedPath, create.Content, Utf8WithoutBom, cancellationToken).ConfigureAwait(false);
                 createdDiskPaths.Add(create.ResolvedPath);
             }
 
             // Write Modifies
             foreach (var mod in preparedModifies)
             {
-                await File.WriteAllTextAsync(mod.ResolvedPath, mod.NewContent, System.Text.Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+                await File.WriteAllTextAsync(mod.ResolvedPath, mod.NewContent, mod.HasBom ? Utf8WithBom : Utf8WithoutBom, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (Exception ex)

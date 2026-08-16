@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Infrastructure.DeveloperAgent;
 using FluentAssertions;
@@ -344,6 +345,169 @@ public class WorktreeEditApplierTests : IDisposable
             new[] { ".env" });
 
         await actEnv.Should().ThrowAsync<InvalidOperationException>().WithMessage("*sensitive configuration/credential file*");
+    }
+
+    [Fact]
+    public async Task ApplyEdits_BomLessUtf8File_Modify_RemainsBomLess()
+    {
+        var filePath = Path.Combine(_worktreeDir, "bomless.cs");
+        var utf8WithoutBom = new UTF8Encoding(false);
+        await File.WriteAllTextAsync(filePath, "using DevPilot.Application;\npublic class App {}", utf8WithoutBom);
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec("bomless.cs", Action: FileEditAction.Modify, SearchReplaceEdits: new[]
+            {
+                new SearchReplaceEdit("using DevPilot.Application;", "using DevPilot.Application.Services;")
+            })
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeTrue();
+        var bytes = await File.ReadAllBytesAsync(filePath);
+        var hasBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+        hasBom.Should().BeFalse();
+        utf8WithoutBom.GetString(bytes).Should().StartWith("using DevPilot.Application.Services;");
+    }
+
+    [Fact]
+    public async Task ApplyEdits_Utf8WithBomFile_Modify_PreservesBom()
+    {
+        var filePath = Path.Combine(_worktreeDir, "withbom.cs");
+        var utf8WithBom = new UTF8Encoding(true);
+        await File.WriteAllTextAsync(filePath, "using DevPilot.Application;\npublic class App {}", utf8WithBom);
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec("withbom.cs", Action: FileEditAction.Modify, SearchReplaceEdits: new[]
+            {
+                new SearchReplaceEdit("using DevPilot.Application;", "using DevPilot.Application.Services;")
+            })
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeTrue();
+        var bytes = await File.ReadAllBytesAsync(filePath);
+        var hasBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+        hasBom.Should().BeTrue();
+        var contentWithoutBom = new UTF8Encoding(false).GetString(bytes, 3, bytes.Length - 3);
+        contentWithoutBom.Should().StartWith("using DevPilot.Application.Services;");
+    }
+
+    [Fact]
+    public async Task ApplyEdits_CreateAction_CreatesBomLessUtf8File()
+    {
+        var relativePath = "created.cs";
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(relativePath, Action: FileEditAction.Create, NewContent: "public class Created {}")
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeTrue();
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+        var bytes = await File.ReadAllBytesAsync(fullPath);
+        var hasBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+        hasBom.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ApplyEdits_ModifyBomLessFile_GitDiffShowsOnlySubstantiveChange()
+    {
+        var relativePath = "substantive.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+        var utf8WithoutBom = new UTF8Encoding(false);
+        await File.WriteAllTextAsync(fullPath, "using DevPilot.Application;\npublic class App {}", utf8WithoutBom);
+
+        RunGit(_worktreeDir, "add", relativePath);
+        RunGit(_worktreeDir, "commit", "-m", "Add substantive.cs");
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(relativePath, Action: FileEditAction.Modify, SearchReplaceEdits: new[]
+            {
+                new SearchReplaceEdit("using DevPilot.Application;", "using DevPilot.Application.Services;")
+            })
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeTrue();
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = _worktreeDir
+        };
+        psi.ArgumentList.Add("diff");
+        using var p = Process.Start(psi)!;
+        var diff = await p.StandardOutput.ReadToEndAsync();
+        await p.WaitForExitAsync();
+
+        diff.Should().NotContain("\uFEFF");
+        diff.Should().Contain("-using DevPilot.Application;");
+        diff.Should().Contain("+using DevPilot.Application.Services;");
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_Utf8FileWithBom_ReturnsContentWithoutLeadingBomCharacter()
+    {
+        var relativePath = "context_bom.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+        var utf8WithBom = new UTF8Encoding(true);
+        await File.WriteAllTextAsync(fullPath, "using DevPilot.Application;\npublic class ContextApp {}", utf8WithBom);
+
+        var result = await _applier.ReadContextFilesAsync(
+            _worktreeDir,
+            _branchName,
+            new[] { relativePath });
+
+        result.Should().ContainKey(relativePath);
+        var content = result[relativePath];
+        content.StartsWith("\uFEFF", StringComparison.Ordinal).Should().BeFalse();
+        content.Should().StartWith("using DevPilot.Application;");
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_InvalidUtf8Content_ThrowsDecoderFallbackException()
+    {
+        var relativePath = "invalid_utf8.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+        await File.WriteAllBytesAsync(fullPath, new byte[] { 0xC0, 0xAF, 0x80 });
+
+        var act = () => _applier.ReadContextFilesAsync(
+            _worktreeDir,
+            _branchName,
+            new[] { relativePath });
+
+        await act.Should().ThrowAsync<DecoderFallbackException>();
+    }
+
+    [Fact]
+    public async Task ApplyEdits_InvalidUtf8ModifyTarget_ThrowsDecoderFallbackException()
+    {
+        var relativePath = "invalid_utf8_modify.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+        await File.WriteAllBytesAsync(fullPath, new byte[] { 0xC0, 0xAF });
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(relativePath, Action: FileEditAction.Modify, SearchReplaceEdits: new[]
+            {
+                new SearchReplaceEdit("search", "replace")
+            })
+        });
+
+        var act = () => _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        await act.Should().ThrowAsync<DecoderFallbackException>();
     }
 
     private static void InitGitRepo(string path)
