@@ -92,4 +92,102 @@ public sealed class EfExecutionRepository : IExecutionRepository
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Uses a targeted <c>ExecuteUpdateAsync</c> (single UPDATE statement with a WHERE clause)
+    /// so that only a <c>Pending</c> row is mutated.  If the execution has already been
+    /// claimed (Running, Completed, Failed, or simply not found), zero rows are affected and
+    /// <c>false</c> is returned — providing a safe idempotency guard for re-delivered
+    /// Hangfire jobs.
+    /// </remarks>
+    public async Task<bool> ClaimAsRunningAsync(
+        Guid executionId,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.Status == TaskExecutionStatus.Pending)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.Status, TaskExecutionStatus.Running)
+                    .SetProperty(e => e.StartedAt, now),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task CompleteAsync(
+        Guid executionId,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+
+        // Load the execution so we know the linked task ID.
+        var execution = await _dbContext.TaskExecutions
+            .FirstOrDefaultAsync(e => e.Id == executionId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (execution is null)
+            return;
+
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.Status, TaskExecutionStatus.Completed)
+                    .SetProperty(e => e.CompletedAt, now),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        await _dbContext.DevelopmentTasks
+            .Where(t => t.Id == execution.DevelopmentTaskId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(t => t.Status, DevelopmentTaskStatus.Completed)
+                    .SetProperty(t => t.UpdatedAt, now),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task FailAsync(
+        Guid executionId,
+        string errorMessage,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var truncated = errorMessage.Length > 4000
+            ? errorMessage[..4000]
+            : errorMessage;
+
+        var execution = await _dbContext.TaskExecutions
+            .FirstOrDefaultAsync(e => e.Id == executionId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (execution is null)
+            return;
+
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.Status, TaskExecutionStatus.Failed)
+                    .SetProperty(e => e.CompletedAt, now)
+                    .SetProperty(e => e.ErrorMessage, truncated),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        await _dbContext.DevelopmentTasks
+            .Where(t => t.Id == execution.DevelopmentTaskId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(t => t.Status, DevelopmentTaskStatus.Failed)
+                    .SetProperty(t => t.UpdatedAt, now),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

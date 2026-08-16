@@ -29,4 +29,30 @@ public interface IExecutionRepository
     /// The database unique partial index provides the authoritative concurrent guard.
     /// </summary>
     Task<bool> HasActiveExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically transitions a <c>Pending</c> execution to <c>Running</c> and returns
+    /// <c>true</c>.  Returns <c>false</c> if the execution is not in <c>Pending</c> status
+    /// (idempotency guard — safe to call from a re-queued Hangfire job).
+    /// Sets <see cref="TaskExecution.StartedAt"/> to UTC now.
+    /// </summary>
+    Task<bool> ClaimAsRunningAsync(Guid executionId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Transitions a <c>Running</c> execution to <c>Completed</c>.
+    /// Sets <see cref="TaskExecution.CompletedAt"/> and advances the linked
+    /// <see cref="DevelopmentTask"/> status to <c>Completed</c>.
+    /// </summary>
+    Task CompleteAsync(Guid executionId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Transitions a <c>Running</c> execution to <c>Failed</c>.
+    /// Sets <see cref="TaskExecution.CompletedAt"/>, persists the
+    /// <paramref name="errorMessage"/>, and advances the linked
+    /// <see cref="DevelopmentTask"/> status to <c>Failed</c>.
+    /// </summary>
+    Task FailAsync(
+        Guid executionId,
+        string errorMessage,
+        CancellationToken cancellationToken = default);
 }

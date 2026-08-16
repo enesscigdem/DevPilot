@@ -37,17 +37,20 @@ public sealed class StartExecutionCommandHandler : IStartExecutionCommandHandler
     private readonly ITaskRepository _taskRepository;
     private readonly IImpactAnalysisRepository _analysisRepository;
     private readonly IExecutionRepository _executionRepository;
+    private readonly IExecutionDispatcher _dispatcher;
     private readonly ILogger<StartExecutionCommandHandler> _logger;
 
     public StartExecutionCommandHandler(
         ITaskRepository taskRepository,
         IImpactAnalysisRepository analysisRepository,
         IExecutionRepository executionRepository,
+        IExecutionDispatcher dispatcher,
         ILogger<StartExecutionCommandHandler> logger)
     {
         _taskRepository = taskRepository;
         _analysisRepository = analysisRepository;
         _executionRepository = executionRepository;
+        _dispatcher = dispatcher;
         _logger = logger;
     }
 
@@ -146,6 +149,37 @@ public sealed class StartExecutionCommandHandler : IStartExecutionCommandHandler
             "Started execution {ExecutionId} for development task {TaskId}.",
             execution.Id,
             task.Id);
+
+        // Enqueue the background worker; the HTTP response returns immediately.
+        // If the enqueue itself fails we compensate immediately: transition the
+        // execution to Failed and the task back to Failed so the DB reflects truth.
+        // This is a best-effort compensation — if FailAsync also throws the caller
+        // will see a 500, which is still more honest than leaving the row Pending forever.
+        try
+        {
+            _dispatcher.EnqueueProcessExecution(execution.Id);
+        }
+        catch (Exception ex)
+        {
+            const string enqueueError = "Failed to enqueue background processing job.";
+            _logger.LogError(ex,
+                "StartExecution: dispatch failed for execution {ExecutionId}. Compensating.",
+                execution.Id);
+
+            await _executionRepository
+                .FailAsync(execution.Id, enqueueError, cancellationToken)
+                .ConfigureAwait(false);
+
+            return new StartExecutionResult
+            {
+                Success = false,
+                ErrorMessage = enqueueError,
+            };
+        }
+
+        _logger.LogInformation(
+            "Enqueued background processing for execution {ExecutionId}.",
+            execution.Id);
 
         return new StartExecutionResult
         {
