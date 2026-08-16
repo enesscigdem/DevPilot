@@ -8,5 +8,6 @@ public enum ExecutionStage
     Build = 3,
     Test = 4,
     Review = 5,
-    Commit = 6
+    Commit = 6,
+    Push = 7
 }

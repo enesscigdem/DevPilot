@@ -7,6 +7,7 @@ import type {
   ExecutionReview,
   ExecutionReviewDecision,
   ImpactAnalysis,
+  PushExecutionResult,
   Task,
   TaskListItem,
   UpdateTaskStatusRequest,
@@ -142,6 +143,12 @@ export async function rejectExecutionReview(id: string, reason?: string): Promis
 
 export async function commitExecution(id: string): Promise<CommitExecutionResult> {
   return http<CommitExecutionResult>(`/executions/${id}/commit`, {
+    method: 'POST',
+  });
+}
+
+export async function pushExecution(id: string): Promise<PushExecutionResult> {
+  return http<PushExecutionResult>(`/executions/${id}/push`, {
     method: 'POST',
   });
 }

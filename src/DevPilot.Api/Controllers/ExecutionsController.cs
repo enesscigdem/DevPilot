@@ -1,5 +1,6 @@
 using DevPilot.Application.Executions.Commands.ApproveExecutionReview;
 using DevPilot.Application.Executions.Commands.CommitExecution;
+using DevPilot.Application.Executions.Commands.PushExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
 using DevPilot.Application.Executions.Queries.GetExecutionActivity;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
@@ -24,6 +25,7 @@ public class ExecutionsController : ControllerBase
     private readonly IApproveExecutionReviewCommandHandler _approveReviewHandler;
     private readonly IRejectExecutionReviewCommandHandler _rejectReviewHandler;
     private readonly ICommitExecutionCommandHandler _commitExecutionHandler;
+    private readonly IPushExecutionCommandHandler _pushExecutionHandler;
 
     public ExecutionsController(
         IGetExecutionsQueryHandler getExecutionsHandler,
@@ -32,7 +34,8 @@ public class ExecutionsController : ControllerBase
         IGetExecutionActivityQueryHandler getExecutionActivityHandler,
         IApproveExecutionReviewCommandHandler approveReviewHandler,
         IRejectExecutionReviewCommandHandler rejectReviewHandler,
-        ICommitExecutionCommandHandler commitExecutionHandler)
+        ICommitExecutionCommandHandler commitExecutionHandler,
+        IPushExecutionCommandHandler pushExecutionHandler)
     {
         _getExecutionsHandler = getExecutionsHandler;
         _getExecutionByIdHandler = getExecutionByIdHandler;
@@ -41,6 +44,7 @@ public class ExecutionsController : ControllerBase
         _approveReviewHandler = approveReviewHandler;
         _rejectReviewHandler = rejectReviewHandler;
         _commitExecutionHandler = commitExecutionHandler;
+        _pushExecutionHandler = pushExecutionHandler;
     }
 
     [HttpGet]
@@ -158,6 +162,24 @@ public class ExecutionsController : ControllerBase
             CommitExecutionResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
             CommitExecutionResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be committed." }),
             CommitExecutionResultStatus.Success => Ok(result.Response),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
+    [HttpPost("{id:guid}/push", Name = nameof(PushExecution))]
+    public async Task<IActionResult> PushExecution(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _pushExecutionHandler
+            .HandleAsync(new PushExecutionCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            PushExecutionResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            PushExecutionResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be pushed." }),
+            PushExecutionResultStatus.Success => Ok(result.Response),
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }

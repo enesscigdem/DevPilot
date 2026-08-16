@@ -434,6 +434,12 @@ export function ExecutionWorkspace() {
                   <span className="text-success font-semibold">{execution.commitSha?.slice(0, 7) ?? "Committed"}</span>
                 </div>
               )}
+              {execution.pushStatus === "Pushed" && (
+                <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
+                  <span>Remote Push</span>
+                  <span className="text-success font-semibold">{execution.remoteCommitSha?.slice(0, 7) ?? "Pushed"}</span>
+                </div>
+              )}
             </Panel>
 
             <Panel className="p-3.5">

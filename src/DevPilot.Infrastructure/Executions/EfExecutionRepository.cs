@@ -343,4 +343,92 @@ public sealed class EfExecutionRepository : IExecutionRepository
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<bool> TryClaimNewPushLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == ExecutionReviewStatus.Approved &&
+                        e.CommitStatus == ExecutionCommitStatus.Committed &&
+                        (e.PushStatus == ExecutionPushStatus.None || e.PushStatus == ExecutionPushStatus.Failed))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PushStatus, ExecutionPushStatus.InProgress)
+                    .SetProperty(e => e.PushAttemptId, attemptId)
+                    .SetProperty(e => e.PushClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryReclaimStalePushLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan leaseTimeout,
+        CancellationToken cancellationToken = default)
+    {
+        var threshold = claimedAt - leaseTimeout;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == ExecutionReviewStatus.Approved &&
+                        e.CommitStatus == ExecutionCommitStatus.Committed &&
+                        e.PushStatus == ExecutionPushStatus.InProgress &&
+                        (e.PushClaimedAt == null || e.PushClaimedAt < threshold))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PushAttemptId, attemptId)
+                    .SetProperty(e => e.PushClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task SetPushCompletedAsync(
+        Guid executionId,
+        Guid attemptId,
+        string remoteBranchName,
+        string remoteCommitSha,
+        DateTime pushedAt,
+        CancellationToken cancellationToken = default)
+    {
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        (e.PushAttemptId == attemptId || e.PushStatus == ExecutionPushStatus.InProgress))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PushStatus, ExecutionPushStatus.Pushed)
+                    .SetProperty(e => e.RemoteBranchName, remoteBranchName)
+                    .SetProperty(e => e.RemoteCommitSha, remoteCommitSha)
+                    .SetProperty(e => e.PushedAt, pushedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SetPushFailedAsync(
+        Guid executionId,
+        Guid attemptId,
+        CancellationToken cancellationToken = default)
+    {
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.PushAttemptId == attemptId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PushStatus, ExecutionPushStatus.Failed),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

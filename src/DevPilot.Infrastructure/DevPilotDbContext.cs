@@ -167,6 +167,15 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.CommitClaimedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CommitSha).HasMaxLength(100);
             entity.Property(e => e.CommittedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.PushStatus)
+                .HasConversion<string>()
+                .HasMaxLength(50)
+                .HasDefaultValue(ExecutionPushStatus.None);
+            entity.Property(e => e.PushAttemptId).HasColumnType("uuid");
+            entity.Property(e => e.PushClaimedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.RemoteBranchName).HasMaxLength(200);
+            entity.Property(e => e.RemoteCommitSha).HasMaxLength(100);
+            entity.Property(e => e.PushedAt).HasColumnType("timestamp with time zone");
 
             entity.HasOne(e => e.DevelopmentTask)
                 .WithMany()

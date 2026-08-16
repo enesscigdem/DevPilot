@@ -218,6 +218,11 @@ export interface ExecutionDetail {
   commitStatus?: string;
   commitSha?: string | null;
   committedAt?: string | null;
+  pushStatus?: string;
+  remoteBranchName?: string | null;
+  remoteCommitSha?: string | null;
+  pushedAt?: string | null;
+  canRequestPush?: boolean;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -279,6 +284,11 @@ export interface ExecutionReview {
   commitStatus: string;
   commitSha: string | null;
   committedAt: string | null;
+  pushStatus: string;
+  remoteBranchName: string | null;
+  remoteCommitSha: string | null;
+  pushedAt: string | null;
+  canRequestPush: boolean;
 }
 
 export interface ExecutionReviewDecision {
@@ -294,4 +304,12 @@ export interface CommitExecutionResult {
   commitStatus: string;
   commitSha: string;
   committedAt: string;
+}
+
+export interface PushExecutionResult {
+  executionId: string;
+  branchName: string;
+  pushStatus: string;
+  remoteCommitSha: string;
+  pushedAt: string;
 }

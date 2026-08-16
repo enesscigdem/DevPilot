@@ -166,8 +166,9 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             approvedMatchesCurrent = string.Equals(execution.ApprovedChangeFingerprint, currentFingerprint, StringComparison.Ordinal);
         }
 
+        var isApproved = execution.ReviewStatus == ExecutionReviewStatus.Approved;
         var isCommitted = execution.CommitStatus == ExecutionCommitStatus.Committed;
-        var commitEligible = execution.ReviewStatus == ExecutionReviewStatus.Approved
+        var commitEligible = isApproved
                              && approvedMatchesCurrent
                              && !isCommitted
                              && !fingerprintResult.HasSensitiveFiles
@@ -193,7 +194,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             CommitEligible: commitEligible,
             CommitStatus: execution.CommitStatus.ToString(),
             CommitSha: execution.CommitSha,
-            CommittedAt: execution.CommittedAt);
+            CommittedAt: execution.CommittedAt,
+            PushStatus: execution.PushStatus.ToString(),
+            RemoteBranchName: execution.RemoteBranchName,
+            RemoteCommitSha: execution.RemoteCommitSha,
+            PushedAt: execution.PushedAt,
+            CanRequestPush: isApproved && isCommitted && (execution.PushStatus == Domain.Enums.ExecutionPushStatus.None || execution.PushStatus == Domain.Enums.ExecutionPushStatus.Failed));
 
         return GetExecutionReviewResult.Ok(review);
     }

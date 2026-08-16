@@ -111,4 +111,30 @@ public interface IExecutionRepository
         Guid executionId,
         Guid attemptId,
         CancellationToken cancellationToken = default);
+
+    Task<bool> TryClaimNewPushLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> TryReclaimStalePushLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan leaseTimeout,
+        CancellationToken cancellationToken = default);
+
+    Task SetPushCompletedAsync(
+        Guid executionId,
+        Guid attemptId,
+        string remoteBranchName,
+        string remoteCommitSha,
+        DateTime pushedAt,
+        CancellationToken cancellationToken = default);
+
+    Task SetPushFailedAsync(
+        Guid executionId,
+        Guid attemptId,
+        CancellationToken cancellationToken = default);
 }

@@ -73,5 +73,12 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             CommitStatus = execution.CommitStatus.ToString(),
             CommitSha = execution.CommitSha,
             CommittedAt = execution.CommittedAt,
+            PushStatus = execution.PushStatus.ToString(),
+            RemoteBranchName = execution.RemoteBranchName,
+            RemoteCommitSha = execution.RemoteCommitSha,
+            PushedAt = execution.PushedAt,
+            CanRequestPush = execution.ReviewStatus == DevPilot.Domain.Enums.ExecutionReviewStatus.Approved &&
+                             execution.CommitStatus == DevPilot.Domain.Enums.ExecutionCommitStatus.Committed &&
+                             (execution.PushStatus == DevPilot.Domain.Enums.ExecutionPushStatus.None || execution.PushStatus == DevPilot.Domain.Enums.ExecutionPushStatus.Failed),
         };
 }

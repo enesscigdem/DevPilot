@@ -43,4 +43,16 @@ public class TaskExecution
     public string? CommitSha { get; set; }
 
     public DateTime? CommittedAt { get; set; }
+
+    public ExecutionPushStatus PushStatus { get; set; } = ExecutionPushStatus.None;
+
+    public Guid? PushAttemptId { get; set; }
+
+    public DateTime? PushClaimedAt { get; set; }
+
+    public string? RemoteBranchName { get; set; }
+
+    public string? RemoteCommitSha { get; set; }
+
+    public DateTime? PushedAt { get; set; }
 }

@@ -13,10 +13,11 @@ import {
   Info,
   CheckCircle2,
   XCircle,
+  UploadCloud,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, getExecutionReview, rejectExecutionReview } from "@/api"
+import { approveExecutionReview, commitExecution, pushExecution, getExecutionReview, rejectExecutionReview } from "@/api"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
@@ -236,6 +237,7 @@ export function CodeReview() {
   }, [id])
 
   const [isSubmittingCommit, setIsSubmittingCommit] = useState(false)
+  const [isSubmittingPush, setIsSubmittingPush] = useState(false)
 
   const handleApprove = async () => {
     if (!id || !review || isSubmittingDecision) return
@@ -270,11 +272,34 @@ export function CodeReview() {
         commitSha: res.commitSha,
         committedAt: res.committedAt,
         commitEligible: false,
+        canRequestPush: true,
       })
     } catch (err) {
       setDecisionError(err instanceof Error ? err.message : "Failed to commit changes.")
     } finally {
       setIsSubmittingCommit(false)
+    }
+  }
+
+  const handlePush = async () => {
+    if (!id || !review || isSubmittingPush) return
+    setIsSubmittingPush(true)
+    setDecisionError(null)
+
+    try {
+      const res = await pushExecution(id)
+      setReview({
+        ...review,
+        pushStatus: res.pushStatus,
+        remoteBranchName: res.branchName,
+        remoteCommitSha: res.remoteCommitSha,
+        pushedAt: res.pushedAt,
+        canRequestPush: false,
+      })
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : "Failed to push execution branch.")
+    } finally {
+      setIsSubmittingPush(false)
     }
   }
 
@@ -613,21 +638,52 @@ export function CodeReview() {
                 </Panel>
 
                 {review.commitStatus === "Committed" ? (
-                  <Panel className="border-primary/30 bg-primary-soft/30 p-4 space-y-2">
-                    <div className="flex items-center gap-2 text-primary font-semibold text-[13.5px]">
-                      <GitBranch className="h-4 w-4 shrink-0" />
-                      <span>Committed</span>
-                      <span className="font-mono text-[11px] text-muted-foreground">({review.commitSha?.slice(0, 7)})</span>
-                    </div>
-                    {review.committedAt && (
-                      <div className="font-mono text-[11px] text-subtle-foreground">
-                        Committed at {new Date(review.committedAt).toLocaleString()}
+                  <div className="space-y-3">
+                    <Panel className="border-primary/30 bg-primary-soft/30 p-4 space-y-2">
+                      <div className="flex items-center gap-2 text-primary font-semibold text-[13.5px]">
+                        <GitBranch className="h-4 w-4 shrink-0" />
+                        <span>Committed locally</span>
+                        <span className="font-mono text-[11px] text-muted-foreground">({review.commitSha?.slice(0, 7)})</span>
                       </div>
+                      {review.committedAt && (
+                        <div className="font-mono text-[11px] text-subtle-foreground">
+                          Committed at {new Date(review.committedAt).toLocaleString()}
+                        </div>
+                      )}
+                    </Panel>
+
+                    {review.pushStatus === "Pushed" ? (
+                      <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
+                        <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
+                          <UploadCloud className="h-4 w-4 shrink-0" />
+                          <span>Pushed remotely</span>
+                        </div>
+                        <div className="font-mono text-[11.5px] text-foreground">
+                          {review.remoteBranchName || review.branchName} <span className="text-subtle-foreground">({review.remoteCommitSha?.slice(0, 7)})</span>
+                        </div>
+                        {review.pushedAt && (
+                          <div className="font-mono text-[11px] text-subtle-foreground">
+                            Pushed at {new Date(review.pushedAt).toLocaleString()}
+                          </div>
+                        )}
+                      </Panel>
+                    ) : (
+                      <Button
+                        variant="primary"
+                        size="md"
+                        disabled={!review.canRequestPush || isSubmittingPush}
+                        onClick={handlePush}
+                        className="w-full"
+                      >
+                        {isSubmittingPush ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <UploadCloud className="h-4 w-4" />
+                        )}
+                        Push branch
+                      </Button>
                     )}
-                    <p className="text-[12px] text-muted-foreground">
-                      Changes committed to local execution branch. Remote push is a future next step.
-                    </p>
-                  </Panel>
+                  </div>
                 ) : !review.approvedSnapshotMatchesCurrent ? (
                   <Panel className="border-amber/30 bg-amber-soft/40 p-4 space-y-2">
                     <div className="flex items-center gap-2 text-accent font-semibold text-[13px]">

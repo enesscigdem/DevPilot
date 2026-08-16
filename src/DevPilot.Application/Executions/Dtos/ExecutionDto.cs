@@ -33,6 +33,16 @@ public sealed class ExecutionDto
     public string? CommitSha { get; set; }
 
     public DateTime? CommittedAt { get; set; }
+
+    public string PushStatus { get; set; } = ExecutionPushStatus.None.ToString();
+
+    public string? RemoteBranchName { get; set; }
+
+    public string? RemoteCommitSha { get; set; }
+
+    public DateTime? PushedAt { get; set; }
+
+    public bool CanRequestPush { get; set; }
 }
 
 public sealed class ExecutionListItemDto

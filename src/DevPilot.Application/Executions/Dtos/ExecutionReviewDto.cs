@@ -31,4 +31,9 @@ public sealed record ExecutionReviewDto(
     bool CommitEligible = false,
     string CommitStatus = "None",
     string? CommitSha = null,
-    DateTime? CommittedAt = null);
+    DateTime? CommittedAt = null,
+    string PushStatus = "None",
+    string? RemoteBranchName = null,
+    string? RemoteCommitSha = null,
+    DateTime? PushedAt = null,
+    bool CanRequestPush = false);
