@@ -8,6 +8,7 @@ import type {
   ExecutionReviewDecision,
   ImpactAnalysis,
   PushExecutionResult,
+  PullRequestResult,
   Task,
   TaskListItem,
   UpdateTaskStatusRequest,
@@ -149,6 +150,12 @@ export async function commitExecution(id: string): Promise<CommitExecutionResult
 
 export async function pushExecution(id: string): Promise<PushExecutionResult> {
   return http<PushExecutionResult>(`/executions/${id}/push`, {
+    method: 'POST',
+  });
+}
+
+export async function createPullRequest(id: string): Promise<PullRequestResult> {
+  return http<PullRequestResult>(`/executions/${id}/pull-request`, {
     method: 'POST',
   });
 }

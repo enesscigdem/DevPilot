@@ -36,4 +36,9 @@ public sealed record ExecutionReviewDto(
     string? RemoteBranchName = null,
     string? RemoteCommitSha = null,
     DateTime? PushedAt = null,
-    bool CanRequestPush = false);
+    bool CanRequestPush = false,
+    string PullRequestStatus = "None",
+    int? PullRequestNumber = null,
+    string? PullRequestUrl = null,
+    DateTime? PullRequestCreatedAt = null,
+    bool CanRequestPullRequest = false);

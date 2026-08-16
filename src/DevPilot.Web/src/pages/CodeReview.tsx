@@ -17,7 +17,7 @@ import {
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, pushExecution, getExecutionReview, rejectExecutionReview } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview } from "@/api"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
@@ -303,6 +303,30 @@ export function CodeReview() {
     }
   }
 
+  const [isSubmittingPr, setIsSubmittingPr] = useState(false)
+
+  const handleCreatePullRequest = async () => {
+    if (!id || !review || isSubmittingPr) return
+    setIsSubmittingPr(true)
+    setDecisionError(null)
+
+    try {
+      const res = await createPullRequest(id)
+      setReview({
+        ...review,
+        pullRequestStatus: res.pullRequestStatus,
+        pullRequestNumber: res.pullRequestNumber,
+        pullRequestUrl: res.pullRequestUrl,
+        pullRequestCreatedAt: res.createdAt,
+        canRequestPullRequest: false,
+      })
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : "Failed to open pull request.")
+    } finally {
+      setIsSubmittingPr(false)
+    }
+  }
+
   const handleRejectSubmit = async () => {
     if (!id || !review || isSubmittingDecision) return
     setIsSubmittingDecision(true)
@@ -435,16 +459,32 @@ export function CodeReview() {
               </Button>
             </>
           )}
-          <Button
-            variant="default"
-            size="sm"
-            disabled
-            className="opacity-50 cursor-not-allowed text-muted-foreground"
-            title="Pull request creation is a future feature"
-          >
-            <GitPullRequest className="h-3.5 w-3.5" />
-            Open pull request
-          </Button>
+          {review.pullRequestStatus === "Open" && review.pullRequestUrl ? (
+            <a
+              href={review.pullRequestUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-[var(--radius-md)] bg-success-soft px-3 py-1.5 font-mono text-[12px] font-semibold text-success hover:bg-success-soft/80"
+            >
+              <GitPullRequest className="h-3.5 w-3.5" />
+              PR #{review.pullRequestNumber}
+            </a>
+          ) : (
+            <Button
+              variant="default"
+              size="sm"
+              disabled={!review.canRequestPullRequest || isSubmittingPr}
+              onClick={handleCreatePullRequest}
+              className={cn(!review.canRequestPullRequest && "opacity-50 cursor-not-allowed text-muted-foreground")}
+            >
+              {isSubmittingPr ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <GitPullRequest className="h-3.5 w-3.5" />
+              )}
+              {isSubmittingPr ? "Opening pull request..." : "Open pull request"}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -653,20 +693,57 @@ export function CodeReview() {
                     </Panel>
 
                     {review.pushStatus === "Pushed" ? (
-                      <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
-                        <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
-                          <UploadCloud className="h-4 w-4 shrink-0" />
-                          <span>Pushed remotely</span>
-                        </div>
-                        <div className="font-mono text-[11.5px] text-foreground">
-                          {review.remoteBranchName || review.branchName} <span className="text-subtle-foreground">({review.remoteCommitSha?.slice(0, 7)})</span>
-                        </div>
-                        {review.pushedAt && (
-                          <div className="font-mono text-[11px] text-subtle-foreground">
-                            Pushed at {new Date(review.pushedAt).toLocaleString()}
+                      <div className="space-y-3">
+                        <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
+                          <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
+                            <UploadCloud className="h-4 w-4 shrink-0" />
+                            <span>Pushed remotely</span>
                           </div>
+                          <div className="font-mono text-[11.5px] text-foreground">
+                            {review.remoteBranchName || review.branchName} <span className="text-subtle-foreground">({review.remoteCommitSha?.slice(0, 7)})</span>
+                          </div>
+                          {review.pushedAt && (
+                            <div className="font-mono text-[11px] text-subtle-foreground">
+                              Pushed at {new Date(review.pushedAt).toLocaleString()}
+                            </div>
+                          )}
+                        </Panel>
+
+                        {review.pullRequestStatus === "Open" ? (
+                          <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
+                            <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
+                              <GitPullRequest className="h-4 w-4 shrink-0" />
+                              <span>Pull Request Open</span>
+                              <span className="font-mono text-[11.5px]">#{review.pullRequestNumber}</span>
+                            </div>
+                            {review.pullRequestUrl && (
+                              <a
+                                href={review.pullRequestUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 font-mono text-[12px] text-primary hover:underline"
+                              >
+                                View on GitHub &rarr;
+                              </a>
+                            )}
+                          </Panel>
+                        ) : (
+                          <Button
+                            variant="primary"
+                            size="md"
+                            disabled={!review.canRequestPullRequest || isSubmittingPr}
+                            onClick={handleCreatePullRequest}
+                            className="w-full"
+                          >
+                            {isSubmittingPr ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <GitPullRequest className="h-4 w-4" />
+                            )}
+                            Open pull request
+                          </Button>
                         )}
-                      </Panel>
+                      </div>
                     ) : (
                       <Button
                         variant="primary"

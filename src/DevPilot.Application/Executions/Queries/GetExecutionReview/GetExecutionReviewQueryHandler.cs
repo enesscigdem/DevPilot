@@ -119,7 +119,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 RemoteBranchName: execution.RemoteBranchName,
                 RemoteCommitSha: execution.RemoteCommitSha,
                 PushedAt: execution.PushedAt,
-                CanRequestPush: CalculateCanRequestPush(execution));
+                CanRequestPush: CalculateCanRequestPush(execution),
+                PullRequestStatus: execution.PullRequestStatus.ToString(),
+                PullRequestNumber: execution.PullRequestNumber,
+                PullRequestUrl: execution.PullRequestUrl,
+                PullRequestCreatedAt: execution.PullRequestCreatedAt,
+                CanRequestPullRequest: DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution));
 
             return GetExecutionReviewResult.Ok(committedReview);
         }
@@ -204,7 +209,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             RemoteBranchName: execution.RemoteBranchName,
             RemoteCommitSha: execution.RemoteCommitSha,
             PushedAt: execution.PushedAt,
-            CanRequestPush: CalculateCanRequestPush(execution));
+            CanRequestPush: CalculateCanRequestPush(execution),
+            PullRequestStatus: execution.PullRequestStatus.ToString(),
+            PullRequestNumber: execution.PullRequestNumber,
+            PullRequestUrl: execution.PullRequestUrl,
+            PullRequestCreatedAt: execution.PullRequestCreatedAt,
+            CanRequestPullRequest: DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution));
 
         return GetExecutionReviewResult.Ok(review);
     }

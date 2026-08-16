@@ -55,4 +55,18 @@ public class TaskExecution
     public string? RemoteCommitSha { get; set; }
 
     public DateTime? PushedAt { get; set; }
+
+    public ExecutionPullRequestStatus PullRequestStatus { get; set; } = ExecutionPullRequestStatus.None;
+
+    public Guid? PullRequestAttemptId { get; set; }
+
+    public DateTime? PullRequestClaimedAt { get; set; }
+
+    public int? PullRequestNumber { get; set; }
+
+    public string? PullRequestUrl { get; set; }
+
+    public DateTime? PullRequestCreatedAt { get; set; }
+
+    public string? PullRequestBaseBranch { get; set; }
 }

@@ -80,5 +80,10 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             CanRequestPush = execution.ReviewStatus == DevPilot.Domain.Enums.ExecutionReviewStatus.Approved &&
                              execution.CommitStatus == DevPilot.Domain.Enums.ExecutionCommitStatus.Committed &&
                              (execution.PushStatus == DevPilot.Domain.Enums.ExecutionPushStatus.None || execution.PushStatus == DevPilot.Domain.Enums.ExecutionPushStatus.Failed),
+            PullRequestStatus = execution.PullRequestStatus.ToString(),
+            PullRequestNumber = execution.PullRequestNumber,
+            PullRequestUrl = execution.PullRequestUrl,
+            PullRequestCreatedAt = execution.PullRequestCreatedAt,
+            CanRequestPullRequest = DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution),
         };
 }

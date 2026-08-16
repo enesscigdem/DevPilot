@@ -431,4 +431,96 @@ public sealed class EfExecutionRepository : IExecutionRepository
                 cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <inheritdoc />
+    public async Task<bool> TryClaimNewPullRequestLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == ExecutionReviewStatus.Approved &&
+                        e.CommitStatus == ExecutionCommitStatus.Committed &&
+                        e.PushStatus == ExecutionPushStatus.Pushed &&
+                        (e.PullRequestStatus == ExecutionPullRequestStatus.None || e.PullRequestStatus == ExecutionPullRequestStatus.Failed))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PullRequestStatus, ExecutionPullRequestStatus.InProgress)
+                    .SetProperty(e => e.PullRequestAttemptId, attemptId)
+                    .SetProperty(e => e.PullRequestClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryReclaimStalePullRequestLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan leaseTimeout,
+        CancellationToken cancellationToken = default)
+    {
+        var threshold = claimedAt - leaseTimeout;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == ExecutionReviewStatus.Approved &&
+                        e.CommitStatus == ExecutionCommitStatus.Committed &&
+                        e.PushStatus == ExecutionPushStatus.Pushed &&
+                        e.PullRequestStatus == ExecutionPullRequestStatus.InProgress &&
+                        (e.PullRequestClaimedAt == null || e.PullRequestClaimedAt < threshold))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PullRequestAttemptId, attemptId)
+                    .SetProperty(e => e.PullRequestClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task SetPullRequestOpenedAsync(
+        Guid executionId,
+        Guid attemptId,
+        int pullRequestNumber,
+        string pullRequestUrl,
+        string baseBranch,
+        DateTime createdAt,
+        CancellationToken cancellationToken = default)
+    {
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        (e.PullRequestAttemptId == attemptId || e.PullRequestStatus == ExecutionPullRequestStatus.InProgress))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PullRequestStatus, ExecutionPullRequestStatus.Open)
+                    .SetProperty(e => e.PullRequestNumber, pullRequestNumber)
+                    .SetProperty(e => e.PullRequestUrl, pullRequestUrl)
+                    .SetProperty(e => e.PullRequestBaseBranch, baseBranch)
+                    .SetProperty(e => e.PullRequestCreatedAt, createdAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SetPullRequestFailedAsync(
+        Guid executionId,
+        Guid attemptId,
+        CancellationToken cancellationToken = default)
+    {
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.PullRequestAttemptId == attemptId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PullRequestStatus, ExecutionPullRequestStatus.Failed),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

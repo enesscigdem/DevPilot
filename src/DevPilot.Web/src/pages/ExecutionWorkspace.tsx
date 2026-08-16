@@ -29,7 +29,14 @@ import {
 } from "@/types"
 import { stages } from "@/data/mock"
 
-function getStageState(stageIndex: number, status: number, reviewStatus?: string): "done" | "active" | "todo" | "failed" | "blocked" {
+function getStageState(stageIndex: number, status: number, reviewStatus?: string, pullRequestStatus?: string): "done" | "active" | "todo" | "failed" | "blocked" {
+  if (stageIndex === 6) {
+    const pr = String(pullRequestStatus || "").toLowerCase()
+    if (pr === "open") return "done"
+    if (pr === "inprogress") return "active"
+    if (pr === "failed") return "failed"
+    return "todo"
+  }
   if (status === TaskExecutionStatus.Completed) {
     if (stageIndex <= 4) return "done"
     if (stageIndex === 5) {
@@ -253,7 +260,7 @@ export function ExecutionWorkspace() {
           <div className="tech-label mb-3">Pipeline</div>
           <ol className="relative">
             {stages.map((st, i) => {
-              const state = getStageState(i, execution.status, execution.reviewStatus)
+              const state = getStageState(i, execution.status, execution.reviewStatus, execution.pullRequestStatus)
 
               return (
                 <li key={st.key} className="relative flex gap-3 pb-5 last:pb-0">
@@ -438,6 +445,18 @@ export function ExecutionWorkspace() {
                 <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
                   <span>Remote Push</span>
                   <span className="text-success font-semibold">{execution.remoteCommitSha?.slice(0, 7) ?? "Pushed"}</span>
+                </div>
+              )}
+              {execution.pullRequestStatus === "Open" && (
+                <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
+                  <span>Pull Request</span>
+                  {execution.pullRequestUrl ? (
+                    <a href={execution.pullRequestUrl} target="_blank" rel="noreferrer" className="text-success font-semibold hover:underline">
+                      #{execution.pullRequestNumber} &rarr;
+                    </a>
+                  ) : (
+                    <span className="text-success font-semibold">#{execution.pullRequestNumber}</span>
+                  )}
                 </div>
               )}
             </Panel>

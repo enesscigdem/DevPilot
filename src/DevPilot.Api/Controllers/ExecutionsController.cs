@@ -1,5 +1,6 @@
 using DevPilot.Application.Executions.Commands.ApproveExecutionReview;
 using DevPilot.Application.Executions.Commands.CommitExecution;
+using DevPilot.Application.Executions.Commands.CreatePullRequest;
 using DevPilot.Application.Executions.Commands.PushExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
 using DevPilot.Application.Executions.Queries.GetExecutionActivity;
@@ -26,6 +27,7 @@ public class ExecutionsController : ControllerBase
     private readonly IRejectExecutionReviewCommandHandler _rejectReviewHandler;
     private readonly ICommitExecutionCommandHandler _commitExecutionHandler;
     private readonly IPushExecutionCommandHandler _pushExecutionHandler;
+    private readonly ICreatePullRequestCommandHandler _createPullRequestHandler;
 
     public ExecutionsController(
         IGetExecutionsQueryHandler getExecutionsHandler,
@@ -35,7 +37,8 @@ public class ExecutionsController : ControllerBase
         IApproveExecutionReviewCommandHandler approveReviewHandler,
         IRejectExecutionReviewCommandHandler rejectReviewHandler,
         ICommitExecutionCommandHandler commitExecutionHandler,
-        IPushExecutionCommandHandler pushExecutionHandler)
+        IPushExecutionCommandHandler pushExecutionHandler,
+        ICreatePullRequestCommandHandler createPullRequestHandler)
     {
         _getExecutionsHandler = getExecutionsHandler;
         _getExecutionByIdHandler = getExecutionByIdHandler;
@@ -45,6 +48,7 @@ public class ExecutionsController : ControllerBase
         _rejectReviewHandler = rejectReviewHandler;
         _commitExecutionHandler = commitExecutionHandler;
         _pushExecutionHandler = pushExecutionHandler;
+        _createPullRequestHandler = createPullRequestHandler;
     }
 
     [HttpGet]
@@ -180,6 +184,26 @@ public class ExecutionsController : ControllerBase
             PushExecutionResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
             PushExecutionResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be pushed." }),
             PushExecutionResultStatus.Success => Ok(result.Response),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
+    [HttpPost("{id:guid}/pull-request", Name = nameof(CreatePullRequest))]
+    public async Task<IActionResult> CreatePullRequest(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _createPullRequestHandler
+            .HandleAsync(new CreatePullRequestCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            CreatePullRequestResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            CreatePullRequestResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot create pull request." }),
+            CreatePullRequestResultStatus.ExternalFailure => StatusCode(502, new { error = result.ErrorMessage ?? "GitHub API error." }),
+            CreatePullRequestResultStatus.Created => StatusCode(201, result.Response),
+            CreatePullRequestResultStatus.Success => Ok(result.Response),
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }

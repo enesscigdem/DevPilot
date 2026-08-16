@@ -12,6 +12,7 @@ using DevPilot.Application.Tasks.Commands.ApproveTask;
 using DevPilot.Application.Executions.Commands.ApproveExecutionReview;
 using DevPilot.Application.Executions.Commands.CommitExecution;
 using DevPilot.Application.Executions.Commands.PushExecution;
+using DevPilot.Application.Executions.Commands.CreatePullRequest;
 using DevPilot.Application.Executions.Commands.ProcessExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
 using DevPilot.Application.Executions.Commands.RunDeveloperAgent;
@@ -115,6 +116,8 @@ public static class DependencyInjection
         services.AddScoped<ICommitExecutionCommandHandler, CommitExecutionCommandHandler>();
         services.AddScoped<IExecutionGitPushService, GitExecutionPushService>();
         services.AddScoped<IPushExecutionCommandHandler, PushExecutionCommandHandler>();
+        services.AddScoped<IExecutionGitHubPullRequestService, GitHubExecutionPullRequestService>();
+        services.AddScoped<ICreatePullRequestCommandHandler, CreatePullRequestCommandHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();
         services.AddScoped<IRejectExecutionReviewCommandHandler, RejectExecutionReviewCommandHandler>();
 
@@ -178,7 +181,12 @@ public static class DependencyInjection
                 {
                     client.Timeout = TimeSpan.FromSeconds(30);
                 });
+                services.AddHttpClient(GitHubPullRequestClient.HttpClientName, client =>
+                {
+                    client.Timeout = TimeSpan.FromSeconds(30);
+                });
                 services.AddScoped<IGitProvider, GitHubGitProvider>();
+                services.AddScoped<IGitHubPullRequestClient, GitHubPullRequestClient>();
                 break;
             default:
                 throw new InvalidOperationException(

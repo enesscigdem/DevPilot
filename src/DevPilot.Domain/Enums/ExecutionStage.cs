@@ -9,5 +9,6 @@ public enum ExecutionStage
     Test = 4,
     Review = 5,
     Commit = 6,
-    Push = 7
+    Push = 7,
+    PullRequest = 8
 }

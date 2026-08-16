@@ -43,6 +43,16 @@ public sealed class ExecutionDto
     public DateTime? PushedAt { get; set; }
 
     public bool CanRequestPush { get; set; }
+
+    public string PullRequestStatus { get; set; } = ExecutionPullRequestStatus.None.ToString();
+
+    public int? PullRequestNumber { get; set; }
+
+    public string? PullRequestUrl { get; set; }
+
+    public DateTime? PullRequestCreatedAt { get; set; }
+
+    public bool CanRequestPullRequest { get; set; }
 }
 
 public sealed class ExecutionListItemDto
