@@ -18,6 +18,8 @@ using DevPilot.Application.Executions.Commands.ProcessExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
 using DevPilot.Application.Executions.Commands.RunDeveloperAgent;
 using DevPilot.Application.Executions.Commands.StartExecution;
+using DevPilot.Application.Executions.Commands.MergeExecution;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
 using DevPilot.Application.Executions.Queries.GetExecutionReview;
@@ -76,12 +78,12 @@ public static class DependencyInjection
         services.AddRepositoryClone(configuration);
         services.AddProjectBrain();
         services.AddScoped<IRepositoryAnalyzer, RoslynRepositoryAnalyzer>();
-        services.AddTask();
+        services.AddTask(configuration);
 
         return services;
     }
 
-    private static IServiceCollection AddTask(this IServiceCollection services)
+    private static IServiceCollection AddTask(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddScoped<ITaskRepository, EfTaskRepository>();
         services.AddScoped<IRepositoryWorkspaceQuery, RepositoryWorkspaceQuery>();
@@ -126,6 +128,8 @@ public static class DependencyInjection
         services.AddScoped<ISyncPullRequestCommandHandler, SyncPullRequestCommandHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();
         services.AddScoped<IRejectExecutionReviewCommandHandler, RejectExecutionReviewCommandHandler>();
+        services.AddScoped<IMergeExecutionCommandHandler, MergeExecutionCommandHandler>();
+        services.Configure<MergePolicyOptions>(configuration.GetSection("MergePolicy"));
 
         return services;
     }

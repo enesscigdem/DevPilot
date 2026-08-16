@@ -1,8 +1,11 @@
 using DevPilot.Application.Executions.Dtos;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Services;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace DevPilot.Application.Executions.Queries.GetExecutionReview;
 
@@ -12,6 +15,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
     private readonly IExecutionWorkspaceManager _workspaceManager;
     private readonly IExecutionGitDiffReader _gitDiffReader;
     private readonly IExecutionChangeFingerprintCalculator _fingerprintCalculator;
+    private readonly IExecutionActivityRepository _activityRepository;
+    private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
     private readonly ILogger<GetExecutionReviewQueryHandler> _logger;
 
     public GetExecutionReviewQueryHandler(
@@ -19,12 +24,16 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         IExecutionWorkspaceManager workspaceManager,
         IExecutionGitDiffReader gitDiffReader,
         IExecutionChangeFingerprintCalculator fingerprintCalculator,
+        IExecutionActivityRepository activityRepository,
+        IOptions<MergePolicyOptions> mergePolicyOptions,
         ILogger<GetExecutionReviewQueryHandler> logger)
     {
         _executionRepository = executionRepository;
         _workspaceManager = workspaceManager;
         _gitDiffReader = gitDiffReader;
         _fingerprintCalculator = fingerprintCalculator;
+        _activityRepository = activityRepository;
+        _mergePolicyOptions = mergePolicyOptions;
         _logger = logger;
     }
 
@@ -67,6 +76,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 $"Execution workspace verification failed: {verificationResult.ErrorMessage}");
         }
 
+        var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
+        var buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
+        var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
+        var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
+        var canRequestMerge = ExecutionMergeEligibility.CalculateCanRequestMerge(execution, allowNoChecks, buildPassed, testPassed);
+
         if (execution.CommitStatus == ExecutionCommitStatus.Committed)
         {
             var validation = await ValidateCommittedGitIntegrityAsync(
@@ -93,8 +108,6 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                     $"Failed to read committed Git diff: {committedDiffResult.ErrorMessage}");
             }
 
-            var (committedBuildStatus, committedTestStatus) = DetermineStageStatuses(execution);
-
             var committedReview = new ExecutionReviewDto(
                 ExecutionId: execution.Id,
                 TaskId: execution.DevelopmentTaskId,
@@ -105,8 +118,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 ChangedFiles: committedDiffResult.ChangedFiles ?? Array.Empty<ExecutionReviewFileDto>(),
                 Diff: committedDiffResult.DiffText,
                 DiffTruncated: committedDiffResult.DiffTruncated,
-                Build: new ExecutionReviewStageStatusDto(committedBuildStatus),
-                Test: new ExecutionReviewStageStatusDto(committedTestStatus),
+                Build: new ExecutionReviewStageStatusDto(DetermineStageStatuses(execution).BuildStatus),
+                Test: new ExecutionReviewStageStatusDto(DetermineStageStatuses(execution).TestStatus),
                 ReviewStatus: execution.ReviewStatus.ToString(),
                 DecidedAt: execution.ReviewDecidedAt,
                 RejectionReason: execution.ReviewRejectionReason,
@@ -141,7 +154,11 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                         Conclusion: c.Conclusion,
                         StartedAt: c.StartedAt,
                         CompletedAt: c.CompletedAt))
-                    .ToList());
+                    .ToList(),
+                MergeStatus: execution.MergeStatus.ToString(),
+                MergeCommitSha: execution.MergeCommitSha,
+                MergedAt: execution.MergedAt,
+                CanRequestMerge: canRequestMerge);
 
             return GetExecutionReviewResult.Ok(committedReview);
         }
@@ -247,7 +264,11 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                     Conclusion: c.Conclusion,
                     StartedAt: c.StartedAt,
                     CompletedAt: c.CompletedAt))
-                .ToList());
+                .ToList(),
+            MergeStatus: execution.MergeStatus.ToString(),
+            MergeCommitSha: execution.MergeCommitSha,
+            MergedAt: execution.MergedAt,
+            CanRequestMerge: canRequestMerge);
 
         return GetExecutionReviewResult.Ok(review);
     }

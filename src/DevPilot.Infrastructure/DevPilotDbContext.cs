@@ -215,6 +215,15 @@ public class DevPilotDbContext : DbContext
                 .HasMaxLength(50)
                 .HasDefaultValue(ExecutionCiStatus.Unknown);
             entity.Property(e => e.CiLastSyncedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.MergeStatus)
+                .HasConversion<string>()
+                .HasMaxLength(50)
+                .HasDefaultValue(ExecutionMergeStatus.None);
+            entity.Property(e => e.MergeAttemptId).HasColumnType("uuid");
+            entity.Property(e => e.MergeClaimedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.MergeCommitSha).HasMaxLength(100);
+            entity.Property(e => e.MergedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.MergeMethod).HasMaxLength(50);
 
             entity.HasOne(e => e.DevelopmentTask)
                 .WithMany()

@@ -91,4 +91,16 @@ public class TaskExecution
     public DateTime? CiLastSyncedAt { get; set; }
 
     public ICollection<ExecutionCiCheck> CiChecks { get; set; } = new List<ExecutionCiCheck>();
+
+    public ExecutionMergeStatus MergeStatus { get; set; } = ExecutionMergeStatus.None;
+
+    public Guid? MergeAttemptId { get; set; }
+
+    public DateTime? MergeClaimedAt { get; set; }
+
+    public string? MergeCommitSha { get; set; }
+
+    public DateTime? MergedAt { get; set; }
+
+    public string? MergeMethod { get; set; }
 }

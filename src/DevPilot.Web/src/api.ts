@@ -10,6 +10,7 @@ import type {
   PushExecutionResult,
   PullRequestResult,
   SyncPullRequestResult,
+  MergeExecutionResult,
   Task,
   TaskListItem,
   UpdateTaskStatusRequest,
@@ -163,6 +164,12 @@ export async function createPullRequest(id: string): Promise<PullRequestResult> 
 
 export async function syncPullRequest(id: string): Promise<SyncPullRequestResult> {
   return http<SyncPullRequestResult>(`/executions/${id}/pull-request/sync`, {
+    method: 'POST',
+  });
+}
+
+export async function mergeExecution(id: string): Promise<MergeExecutionResult> {
+  return http<MergeExecutionResult>(`/executions/${id}/merge`, {
     method: 'POST',
   });
 }

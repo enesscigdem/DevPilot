@@ -18,7 +18,7 @@ import {
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution } from "@/api"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
@@ -307,6 +307,31 @@ export function CodeReview() {
   const [isSubmittingPr, setIsSubmittingPr] = useState(false)
   const [isSyncingPr, setIsSyncingPr] = useState(false)
   const [syncError, setSyncError] = useState<string | null>(null)
+  const [isSubmittingMerge, setIsSubmittingMerge] = useState(false)
+  const [showMergeConfirmModal, setShowMergeConfirmModal] = useState(false)
+
+  const handleConfirmMerge = async () => {
+    if (!id || !review || isSubmittingMerge) return
+    setIsSubmittingMerge(true)
+    setDecisionError(null)
+
+    try {
+      const res = await mergeExecution(id)
+      setReview({
+        ...review,
+        mergeStatus: res.mergeStatus,
+        mergeCommitSha: res.mergeCommitSha,
+        mergedAt: res.mergedAt,
+        canRequestMerge: false,
+        pullRequestRemoteState: "Merged",
+      })
+      setShowMergeConfirmModal(false)
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : "Failed to merge pull request.")
+    } finally {
+      setIsSubmittingMerge(false)
+    }
+  }
 
   const handleSyncPr = async () => {
     if (!id || !review || isSyncingPr) return
@@ -323,7 +348,7 @@ export function CodeReview() {
         pullRequestIntegrityStatus: res.pullRequestIntegrityStatus,
         pullRequestLastSyncedAt: res.lastSyncedAt,
         ciStatus: res.ciStatus,
-        ciChecks: res.checks,
+        ciChecks: res.ciChecks,
       })
       if (res.syncError) {
         setSyncError(res.syncError)
@@ -845,6 +870,43 @@ export function CodeReview() {
                                 View on GitHub &rarr;
                               </a>
                             )}
+
+                            {review.mergeStatus === "Merged" ? (
+                              <div className="mt-3 rounded-[var(--radius-md)] border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-1.5 font-mono text-[11px]">
+                                <div className="flex items-center justify-between text-emerald-400 font-semibold text-[12.5px]">
+                                  <div className="flex items-center gap-1.5">
+                                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                                    <span>Pull Request Merged</span>
+                                  </div>
+                                  <Badge tone="green">Merged</Badge>
+                                </div>
+                                {review.mergeCommitSha && (
+                                  <div className="text-subtle-foreground truncate">
+                                    Commit: <span className="text-foreground font-semibold">{review.mergeCommitSha.slice(0, 7)}</span>
+                                  </div>
+                                )}
+                                {review.mergedAt && (
+                                  <div className="text-subtle-foreground">
+                                    Merged: <span className="text-foreground">{new Date(review.mergedAt).toLocaleString()}</span>
+                                  </div>
+                                )}
+                              </div>
+                            ) : review.canRequestMerge ? (
+                              <Button
+                                variant="primary"
+                                size="md"
+                                disabled={isSubmittingMerge}
+                                onClick={() => setShowMergeConfirmModal(true)}
+                                className="w-full mt-3 bg-emerald-600 hover:bg-emerald-500 text-white"
+                              >
+                                {isSubmittingMerge ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <GitPullRequest className="h-4 w-4" />
+                                )}
+                                Merge pull request
+                              </Button>
+                            ) : null}
                           </Panel>
                         ) : (
                           <Button
@@ -970,6 +1032,58 @@ export function CodeReview() {
                 className="bg-danger text-white hover:bg-danger/90 border-transparent"
               >
                 {isSubmittingDecision ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Confirm Rejection"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Merge Confirmation Modal */}
+      {showMergeConfirmModal && review && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-[520px] rounded-[var(--radius-lg)] border border-border bg-canvas p-6 shadow-xl space-y-4">
+            <div className="flex items-center gap-2 text-foreground font-semibold text-[16px]">
+              <GitPullRequest className="h-5 w-5 text-emerald-500" />
+              <span>Merge Pull Request #{review.pullRequestNumber}?</span>
+            </div>
+            <div className="rounded-[var(--radius-md)] border border-border/60 bg-surface p-3.5 space-y-2 font-mono text-[12px]">
+              <div className="flex justify-between text-subtle-foreground">
+                <span>Base branch:</span>
+                <span className="text-foreground font-semibold">master</span>
+              </div>
+              <div className="flex justify-between text-subtle-foreground">
+                <span>Head branch:</span>
+                <span className="text-foreground font-semibold">{review.remoteBranchName}</span>
+              </div>
+              <div className="flex justify-between text-subtle-foreground">
+                <span>Approved commit:</span>
+                <span className="text-foreground font-semibold">{review.remoteCommitSha?.slice(0, 7)}</span>
+              </div>
+              <div className="flex justify-between text-subtle-foreground border-t border-border/40 pt-1.5">
+                <span>CI Status:</span>
+                <span className="text-emerald-400 font-semibold">{review.ciStatus}</span>
+              </div>
+            </div>
+            <p className="text-[12.5px] text-muted-foreground">
+              This will merge the execution's approved pull request into the base branch on GitHub using standard merge method.
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                variant="default"
+                size="sm"
+                disabled={isSubmittingMerge}
+                onClick={() => setShowMergeConfirmModal(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={isSubmittingMerge}
+                onClick={handleConfirmMerge}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white"
+              >
+                {isSubmittingMerge ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Confirm merge"}
               </Button>
             </div>
           </div>

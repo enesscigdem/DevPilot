@@ -195,4 +195,32 @@ public interface IExecutionRepository
         IReadOnlyList<ExecutionCiCheck> checks,
         DateTime syncedAt,
         CancellationToken cancellationToken = default);
+
+    Task<bool> TryClaimMergeLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan syncLeaseTimeout,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> TryReclaimStaleMergeLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan mergeLeaseTimeout,
+        TimeSpan syncLeaseTimeout,
+        CancellationToken cancellationToken = default);
+
+    Task SetExecutionMergedAsync(
+        Guid executionId,
+        Guid attemptId,
+        string mergeCommitSha,
+        DateTime mergedAt,
+        string mergeMethod = "merge",
+        CancellationToken cancellationToken = default);
+
+    Task SetMergeFailedAsync(
+        Guid executionId,
+        Guid attemptId,
+        CancellationToken cancellationToken = default);
 }

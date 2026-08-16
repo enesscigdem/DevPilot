@@ -1,6 +1,8 @@
 using DevPilot.Application.Executions.Dtos;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Domain.Entities;
+using Microsoft.Extensions.Options;
 
 namespace DevPilot.Application.Executions.Queries.GetExecutionById;
 
@@ -25,10 +27,17 @@ public interface IGetExecutionByIdQueryHandler
 public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
 {
     private readonly IExecutionRepository _executionRepository;
+    private readonly IExecutionActivityRepository _activityRepository;
+    private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
 
-    public GetExecutionByIdQueryHandler(IExecutionRepository executionRepository)
+    public GetExecutionByIdQueryHandler(
+        IExecutionRepository executionRepository,
+        IExecutionActivityRepository activityRepository,
+        IOptions<MergePolicyOptions> mergePolicyOptions)
     {
         _executionRepository = executionRepository;
+        _activityRepository = activityRepository;
+        _mergePolicyOptions = mergePolicyOptions;
     }
 
     public async Task<GetExecutionByIdResult> HandleAsync(
@@ -48,14 +57,19 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             };
         }
 
+        var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
+        var buildPassed = activities.Any(a => a.Stage == DevPilot.Domain.Enums.ExecutionStage.Build && a.Status == DevPilot.Domain.Enums.ExecutionActivityStatus.Completed);
+        var testPassed = activities.Any(a => a.Stage == DevPilot.Domain.Enums.ExecutionStage.Test && a.Status == DevPilot.Domain.Enums.ExecutionActivityStatus.Completed);
+        var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
+
         return new GetExecutionByIdResult
         {
             Found = true,
-            Execution = MapToDto(execution),
+            Execution = MapToDto(execution, allowNoChecks, buildPassed, testPassed),
         };
     }
 
-    private static ExecutionDto MapToDto(TaskExecution execution) =>
+    private static ExecutionDto MapToDto(TaskExecution execution, bool allowNoChecks, bool buildPassed, bool testPassed) =>
         new()
         {
             Id = execution.Id,
@@ -101,5 +115,9 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
                     StartedAt: c.StartedAt,
                     CompletedAt: c.CompletedAt))
                 .ToList(),
+            MergeStatus = execution.MergeStatus.ToString(),
+            MergeCommitSha = execution.MergeCommitSha,
+            MergedAt = execution.MergedAt,
+            CanRequestMerge = DevPilot.Application.Executions.Services.ExecutionMergeEligibility.CalculateCanRequestMerge(execution, allowNoChecks, buildPassed, testPassed)
         };
 }

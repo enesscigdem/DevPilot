@@ -137,7 +137,7 @@ public sealed class SyncPullRequestCommandHandler : ISyncPullRequestCommandHandl
 
         // Execute read-only GitHub sync
         var syncResult = await _githubSyncService
-            .SyncPullRequestAndCiAsync(execution, cancellationToken)
+            .SyncPullRequestAndCiAsync(execution, bypassFreshnessCache: false, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
 
         if (!syncResult.Success)

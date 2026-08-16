@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using DevPilot.Application.Executions.Dtos;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.Executions.Queries.GetExecutionReview;
 using DevPilot.Domain.Entities;
@@ -8,6 +9,7 @@ using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure.Executions;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace DevPilot.Tests.Executions;
@@ -78,7 +80,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -125,7 +127,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -162,7 +164,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -195,7 +197,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -234,7 +236,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -268,7 +270,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -308,7 +310,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -345,7 +347,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -384,7 +386,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -419,7 +421,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -448,7 +450,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -475,7 +477,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: false, errorMessage: "Workspace directory does not exist.");
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -493,7 +495,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator();
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(Guid.NewGuid()));
@@ -553,7 +555,7 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -610,7 +612,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -652,7 +654,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -698,7 +700,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -743,7 +745,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -832,7 +834,7 @@ public class ExecutionReviewTests : IDisposable
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
         var fingerprintCalculator = new StubFingerprintCalculator { SampleFingerprint = "sha256:test" };
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -921,6 +923,10 @@ public class ExecutionReviewTests : IDisposable
         public Task<bool> TryReclaimStalePullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task ReleasePullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime releasedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<bool> ReplacePullRequestTrackingSnapshotAsync(Guid executionId, Guid attemptId, DevPilot.Domain.Enums.ExecutionPullRequestRemoteState remoteState, DevPilot.Domain.Enums.ExecutionPullRequestIntegrityStatus integrityStatus, DateTime? closedAt, DateTime? mergedAt, DevPilot.Domain.Enums.ExecutionCiStatus ciStatus, IReadOnlyList<DevPilot.Domain.Entities.ExecutionCiCheck> checks, DateTime syncedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> TryClaimMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> TryReclaimStaleMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan mergeLeaseTimeout, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task SetExecutionMergedAsync(Guid executionId, Guid attemptId, string mergeCommitSha, DateTime mergedAt, string mergeMethod, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task SetMergeFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class FakeWorkspaceManager : IExecutionWorkspaceManager
@@ -974,5 +980,11 @@ public class ExecutionReviewTests : IDisposable
                 HasSensitiveFiles: false,
                 ChangedFileCount: 1));
         }
+    }
+
+    private class FakeExecutionActivityRepository : IExecutionActivityRepository
+    {
+        public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(Guid executionId, CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<ExecutionActivity>>(Array.Empty<ExecutionActivity>());
     }
 }

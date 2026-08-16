@@ -231,4 +231,25 @@ public class ExecutionsController : ControllerBase
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }
+
+    [HttpPost("{id:guid}/merge", Name = nameof(MergeExecution))]
+    public async Task<IActionResult> MergeExecution(
+        [FromRoute] Guid id,
+        [FromServices] DevPilot.Application.Executions.Commands.MergeExecution.IMergeExecutionCommandHandler mergeHandler,
+        CancellationToken cancellationToken)
+    {
+        var result = await mergeHandler
+            .HandleAsync(new DevPilot.Application.Executions.Commands.MergeExecution.MergeExecutionCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            DevPilot.Application.Executions.Commands.MergeExecution.MergeExecutionResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            DevPilot.Application.Executions.Commands.MergeExecution.MergeExecutionResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be merged." }),
+            DevPilot.Application.Executions.Commands.MergeExecution.MergeExecutionResultStatus.ExternalFailure => StatusCode(502, new { error = result.ErrorMessage ?? "External GitHub merge error." }),
+            DevPilot.Application.Executions.Commands.MergeExecution.MergeExecutionResultStatus.Created => StatusCode(201, result.Response),
+            DevPilot.Application.Executions.Commands.MergeExecution.MergeExecutionResultStatus.Success => Ok(result.Response),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
 }

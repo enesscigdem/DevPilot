@@ -64,6 +64,14 @@ public sealed class ExecutionDto
 
     public IReadOnlyList<DevPilot.Application.Executions.Commands.SyncPullRequest.ExecutionCiCheckDto> CiChecks { get; set; } =
         Array.Empty<DevPilot.Application.Executions.Commands.SyncPullRequest.ExecutionCiCheckDto>();
+
+    public string MergeStatus { get; set; } = ExecutionMergeStatus.None.ToString();
+
+    public string? MergeCommitSha { get; set; }
+
+    public DateTime? MergedAt { get; set; }
+
+    public bool CanRequestMerge { get; set; }
 }
 
 public sealed class ExecutionListItemDto

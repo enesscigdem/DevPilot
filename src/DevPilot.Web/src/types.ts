@@ -233,6 +233,10 @@ export interface ExecutionDetail {
   pullRequestLastSyncedAt?: string | null;
   ciStatus?: string;
   ciChecks?: ExecutionCiCheck[];
+  mergeStatus?: string;
+  mergeCommitSha?: string | null;
+  mergedAt?: string | null;
+  canRequestMerge?: boolean;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -321,6 +325,11 @@ export interface ExecutionReview {
   pullRequestLastSyncedAt?: string | null;
   ciStatus?: string;
   ciChecks?: ExecutionCiCheck[];
+  mergeStatus?: string;
+  mergeCommitSha?: string | null;
+  mergedAt?: string | null;
+  mergeMethod?: string | null;
+  canRequestMerge?: boolean;
 }
 
 export interface ExecutionReviewDecision {
@@ -363,10 +372,22 @@ export interface SyncPullRequestResult {
   pullRequestUrl?: string | null;
   pullRequestRemoteState: string;
   pullRequestIntegrityStatus: string;
-  headCommitSha: string;
+  pullRequestLastSyncedAt?: string | null;
   ciStatus: string;
-  checkCount: number;
-  checks: ExecutionCiCheck[];
+  ciChecks: ExecutionCiCheck[];
   lastSyncedAt?: string | null;
   syncError?: string | null;
+}
+
+export interface MergeExecutionResult {
+  executionId: string;
+  mergeStatus: string;
+  pullRequestNumber?: number | null;
+  pullRequestUrl?: string | null;
+  baseBranch: string;
+  headBranch: string;
+  approvedHeadSha: string;
+  mergeCommitSha?: string | null;
+  mergedAt?: string | null;
+  mergeMethod?: string | null;
 }

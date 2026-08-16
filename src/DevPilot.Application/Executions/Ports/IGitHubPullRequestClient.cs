@@ -1,4 +1,4 @@
-namespace DevPilot.Infrastructure.GitProviders;
+namespace DevPilot.Application.Executions.Ports;
 
 public interface IGitHubPullRequestClient
 {
@@ -41,7 +41,20 @@ public interface IGitHubPullRequestClient
         string repository,
         string refSha,
         CancellationToken cancellationToken = default);
+
+    Task<GitHubPullRequestClientResult<GitHubMergeResultDto>> MergePullRequestAsync(
+        string owner,
+        string repository,
+        int pullNumber,
+        string expectedHeadSha,
+        string? commitTitle = null,
+        string? commitMessage = null,
+        CancellationToken cancellationToken = default);
 }
+
+public sealed record GitHubMergeResultDto(
+    string? MergeCommitSha,
+    bool Merged);
 
 public sealed class GitHubPullRequestClientResult<T>
 {

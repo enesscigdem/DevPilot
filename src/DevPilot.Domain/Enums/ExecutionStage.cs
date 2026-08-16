@@ -10,5 +10,6 @@ public enum ExecutionStage
     Review = 5,
     Commit = 6,
     Push = 7,
-    PullRequest = 8
+    PullRequest = 8,
+    Merge = 9
 }

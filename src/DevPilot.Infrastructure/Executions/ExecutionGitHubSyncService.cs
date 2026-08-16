@@ -21,6 +21,7 @@ public sealed class ExecutionGitHubSyncService : IExecutionGitHubSyncService
 
     public async Task<GitHubSyncResultDto> SyncPullRequestAndCiAsync(
         TaskExecution execution,
+        bool bypassFreshnessCache = false,
         CancellationToken cancellationToken = default)
     {
         var repoOwner = execution.DevelopmentTask?.RepositoryWorkspace?.Owner ?? string.Empty;

@@ -10,6 +10,7 @@ using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace DevPilot.Tests.Executions;
@@ -291,7 +292,7 @@ public class ExecutionReviewDecisionTests : IDisposable
         var execution = SeedCompletedExecution();
         execution.ReviewStatus = ExecutionReviewStatus.Approved;
 
-        var handler = new GetExecutionByIdQueryHandler(_executionRepository);
+        var handler = new GetExecutionByIdQueryHandler(_executionRepository, new FakeActivityRepository(), Options.Create(new DevPilot.Application.Executions.Options.MergePolicyOptions()));
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionByIdQuery(execution.Id));
@@ -395,6 +396,10 @@ public class ExecutionReviewDecisionTests : IDisposable
         public Task<bool> TryReclaimStalePullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task ReleasePullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime releasedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<bool> ReplacePullRequestTrackingSnapshotAsync(Guid executionId, Guid attemptId, ExecutionPullRequestRemoteState remoteState, ExecutionPullRequestIntegrityStatus integrityStatus, DateTime? closedAt, DateTime? mergedAt, ExecutionCiStatus ciStatus, IReadOnlyList<ExecutionCiCheck> checks, DateTime syncedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> TryClaimMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> TryReclaimStaleMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan mergeLeaseTimeout, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task SetExecutionMergedAsync(Guid executionId, Guid attemptId, string mergeCommitSha, DateTime mergedAt, string mergeMethod, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task SetMergeFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class StubWorkspaceManager : IExecutionWorkspaceManager
@@ -466,5 +471,11 @@ public class ExecutionReviewDecisionTests : IDisposable
                 HasSensitiveFiles: false,
                 ChangedFileCount: 1));
         }
+    }
+
+    private sealed class FakeActivityRepository : IExecutionActivityRepository
+    {
+        public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(Guid executionId, CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<ExecutionActivity>>(Array.Empty<ExecutionActivity>());
     }
 }

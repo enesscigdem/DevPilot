@@ -470,6 +470,14 @@ export function ExecutionWorkspace() {
                       </span>
                     </div>
                   )}
+                  {execution.mergeStatus === "Merged" && (
+                    <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
+                      <span>Merge Status</span>
+                      <span className="text-emerald-400 font-semibold truncate">
+                        Merged ({execution.mergeCommitSha?.slice(0, 7) ?? "Confirmed"})
+                      </span>
+                    </div>
+                  )}
                 </>
               )}
             </Panel>

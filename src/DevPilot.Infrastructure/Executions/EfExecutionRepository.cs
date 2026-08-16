@@ -662,6 +662,17 @@ public sealed class EfExecutionRepository : IExecutionRepository
             return false;
         }
 
+        // Guard against stale sync overwriting a confirmed Merged state (Constraint #1)
+        if ((execution.PullRequestRemoteState == ExecutionPullRequestRemoteState.Merged || execution.MergeStatus == ExecutionMergeStatus.Merged) &&
+            remoteState != ExecutionPullRequestRemoteState.Merged)
+        {
+            execution.PullRequestLastSyncAttemptAt = syncedAt;
+            execution.PullRequestSyncAttemptId = null;
+            execution.PullRequestSyncClaimedAt = null;
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
         execution.PullRequestRemoteState = remoteState;
         execution.PullRequestIntegrityStatus = integrityStatus;
         execution.PullRequestClosedAt = closedAt;
@@ -685,5 +696,164 @@ public sealed class EfExecutionRepository : IExecutionRepository
 
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         return true;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryClaimMergeLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan syncLeaseTimeout,
+        CancellationToken cancellationToken = default)
+    {
+        var syncThreshold = claimedAt - syncLeaseTimeout;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == ExecutionReviewStatus.Approved &&
+                        e.CommitStatus == ExecutionCommitStatus.Committed &&
+                        e.PushStatus == ExecutionPushStatus.Pushed &&
+                        e.PullRequestStatus == ExecutionPullRequestStatus.Open &&
+                        (e.MergeStatus == ExecutionMergeStatus.None || e.MergeStatus == ExecutionMergeStatus.Failed) &&
+                        (e.PullRequestSyncAttemptId == null || e.PullRequestSyncClaimedAt == null || e.PullRequestSyncClaimedAt < syncThreshold))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.MergeStatus, ExecutionMergeStatus.InProgress)
+                    .SetProperty(e => e.MergeAttemptId, attemptId)
+                    .SetProperty(e => e.MergeClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+                .FirstOrDefault(e => e.Entity.Id == executionId);
+            if (tracked != null)
+            {
+                tracked.Entity.MergeStatus = ExecutionMergeStatus.InProgress;
+                tracked.Entity.MergeAttemptId = attemptId;
+                tracked.Entity.MergeClaimedAt = claimedAt;
+            }
+        }
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryReclaimStaleMergeLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan mergeLeaseTimeout,
+        TimeSpan syncLeaseTimeout,
+        CancellationToken cancellationToken = default)
+    {
+        var mergeThreshold = claimedAt - mergeLeaseTimeout;
+        var syncThreshold = claimedAt - syncLeaseTimeout;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.MergeStatus == ExecutionMergeStatus.InProgress &&
+                        (e.MergeClaimedAt == null || e.MergeClaimedAt < mergeThreshold) &&
+                        (e.PullRequestSyncAttemptId == null || e.PullRequestSyncClaimedAt == null || e.PullRequestSyncClaimedAt < syncThreshold))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.MergeAttemptId, attemptId)
+                    .SetProperty(e => e.MergeClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+                .FirstOrDefault(e => e.Entity.Id == executionId);
+            if (tracked != null)
+            {
+                tracked.Entity.MergeAttemptId = attemptId;
+                tracked.Entity.MergeClaimedAt = claimedAt;
+            }
+        }
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task SetExecutionMergedAsync(
+        Guid executionId,
+        Guid attemptId,
+        string mergeCommitSha,
+        DateTime mergedAt,
+        string mergeMethod = "merge",
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.MergeAttemptId == attemptId &&
+                        e.MergeStatus == ExecutionMergeStatus.InProgress)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.MergeStatus, ExecutionMergeStatus.Merged)
+                    .SetProperty(e => e.MergeCommitSha, mergeCommitSha)
+                    .SetProperty(e => e.MergedAt, mergedAt)
+                    .SetProperty(e => e.MergeMethod, mergeMethod)
+                    .SetProperty(e => e.PullRequestRemoteState, ExecutionPullRequestRemoteState.Merged)
+                    .SetProperty(e => e.PullRequestMergedAt, mergedAt)
+                    .SetProperty(e => e.MergeAttemptId, (Guid?)null)
+                    .SetProperty(e => e.MergeClaimedAt, (DateTime?)null)
+                    .SetProperty(e => e.PullRequestSyncAttemptId, (Guid?)null)
+                    .SetProperty(e => e.PullRequestSyncClaimedAt, (DateTime?)null),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+                .FirstOrDefault(e => e.Entity.Id == executionId);
+            if (tracked != null)
+            {
+                tracked.Entity.MergeStatus = ExecutionMergeStatus.Merged;
+                tracked.Entity.MergeCommitSha = mergeCommitSha;
+                tracked.Entity.MergedAt = mergedAt;
+                tracked.Entity.MergeMethod = mergeMethod;
+                tracked.Entity.PullRequestRemoteState = ExecutionPullRequestRemoteState.Merged;
+                tracked.Entity.PullRequestMergedAt = mergedAt;
+                tracked.Entity.MergeAttemptId = null;
+                tracked.Entity.MergeClaimedAt = null;
+                tracked.Entity.PullRequestSyncAttemptId = null;
+                tracked.Entity.PullRequestSyncClaimedAt = null;
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task SetMergeFailedAsync(
+        Guid executionId,
+        Guid attemptId,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.MergeAttemptId == attemptId &&
+                        e.MergeStatus == ExecutionMergeStatus.InProgress)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.MergeStatus, ExecutionMergeStatus.Failed)
+                    .SetProperty(e => e.MergeAttemptId, (Guid?)null)
+                    .SetProperty(e => e.MergeClaimedAt, (DateTime?)null),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+                .FirstOrDefault(e => e.Entity.Id == executionId);
+            if (tracked != null)
+            {
+                tracked.Entity.MergeStatus = ExecutionMergeStatus.Failed;
+                tracked.Entity.MergeAttemptId = null;
+                tracked.Entity.MergeClaimedAt = null;
+            }
+        }
     }
 }

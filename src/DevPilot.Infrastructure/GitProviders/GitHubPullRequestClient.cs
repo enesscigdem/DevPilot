@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using DevPilot.Application.Executions.Ports;
 using DevPilot.Infrastructure.Executions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -319,23 +320,56 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
                 }
             }
 
-            if (pageItems.Count < perPage)
-            {
-                break;
-            }
-
-            if (page == maxPages)
-            {
-                _logger.LogWarning("Commit statuses for SHA {RefSha} exceeded maximum pagination safety limit of {MaxPages} pages.", refSha, maxPages);
-                return GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>.Failure(
-                    "GitHub commit statuses exceeded maximum pagination safety limit.",
-                    isExceededLimit: true);
-            }
-
             page++;
         }
 
         return GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>.Success(statuses);
+    }
+
+    public async Task<GitHubPullRequestClientResult<GitHubMergeResultDto>> MergePullRequestAsync(
+        string owner,
+        string repository,
+        int pullNumber,
+        string expectedHeadSha,
+        string? commitTitle = null,
+        string? commitMessage = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_isConfigured)
+        {
+            return GitHubPullRequestClientResult<GitHubMergeResultDto>.Failure(
+                "GitHub API credentials or base URL are not configured.",
+                isConfigurationError: true);
+        }
+
+        var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/pulls/{pullNumber}/merge";
+        var payload = new MergePrRequestPayload
+        {
+            Sha = expectedHeadSha,
+            MergeMethod = "merge",
+            CommitTitle = commitTitle,
+            CommitMessage = commitMessage
+        };
+
+        var jsonPayload = JsonSerializer.Serialize(payload, JsonSerializerOptions.Web);
+        using var content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
+
+        using var response = await SendAsync(HttpMethod.Put, relativeUri, content, cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return await HandleErrorResponseAsync<GitHubMergeResultDto>(response, cancellationToken).ConfigureAwait(false);
+        }
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        var apiDto = JsonSerializer.Deserialize<GitHubApiMergeResultDto>(json, JsonSerializerOptions.Web);
+
+        if (apiDto is null)
+        {
+            return GitHubPullRequestClientResult<GitHubMergeResultDto>.Failure("GitHub API returned empty merge response.");
+        }
+
+        return GitHubPullRequestClientResult<GitHubMergeResultDto>.Success(new GitHubMergeResultDto(apiDto.Sha, apiDto.Merged));
     }
 
     private async Task<HttpResponseMessage> SendAsync(
@@ -554,5 +588,34 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
     private sealed class GitHubApiCommitDto
     {
         public string Sha { get; set; } = string.Empty;
+    }
+
+    private sealed class MergePrRequestPayload
+    {
+        [JsonPropertyName("sha")]
+        public string Sha { get; set; } = string.Empty;
+
+        [JsonPropertyName("merge_method")]
+        public string MergeMethod { get; set; } = "merge";
+
+        [JsonPropertyName("commit_title")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? CommitTitle { get; set; }
+
+        [JsonPropertyName("commit_message")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? CommitMessage { get; set; }
+    }
+
+    private sealed class GitHubApiMergeResultDto
+    {
+        [JsonPropertyName("sha")]
+        public string? Sha { get; set; }
+
+        [JsonPropertyName("merged")]
+        public bool Merged { get; set; }
+
+        [JsonPropertyName("message")]
+        public string? Message { get; set; }
     }
 }

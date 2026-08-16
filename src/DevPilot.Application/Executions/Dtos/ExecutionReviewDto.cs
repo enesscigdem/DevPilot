@@ -46,4 +46,8 @@ public sealed record ExecutionReviewDto(
     string PullRequestIntegrityStatus = "Unknown",
     DateTime? PullRequestLastSyncedAt = null,
     string CiStatus = "Unknown",
-    IReadOnlyList<DevPilot.Application.Executions.Commands.SyncPullRequest.ExecutionCiCheckDto>? CiChecks = null);
+    IReadOnlyList<DevPilot.Application.Executions.Commands.SyncPullRequest.ExecutionCiCheckDto>? CiChecks = null,
+    string MergeStatus = "None",
+    string? MergeCommitSha = null,
+    DateTime? MergedAt = null,
+    bool CanRequestMerge = false);
