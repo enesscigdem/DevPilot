@@ -228,6 +228,11 @@ export interface ExecutionDetail {
   pullRequestUrl?: string | null;
   pullRequestCreatedAt?: string | null;
   canRequestPullRequest?: boolean;
+  pullRequestRemoteState?: string;
+  pullRequestIntegrityStatus?: string;
+  pullRequestLastSyncedAt?: string | null;
+  ciStatus?: string;
+  ciChecks?: ExecutionCiCheck[];
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -268,6 +273,18 @@ export interface ExecutionReviewFile {
   deletions: number | null;
 }
 
+export interface ExecutionCiCheck {
+  id: string;
+  externalId: number;
+  name: string;
+  source: string;
+  checkType: string;
+  status: string;
+  conclusion?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+}
+
 export interface ExecutionReview {
   executionId: string;
   taskId: string;
@@ -299,6 +316,11 @@ export interface ExecutionReview {
   pullRequestUrl: string | null;
   pullRequestCreatedAt: string | null;
   canRequestPullRequest: boolean;
+  pullRequestRemoteState?: string;
+  pullRequestIntegrityStatus?: string;
+  pullRequestLastSyncedAt?: string | null;
+  ciStatus?: string;
+  ciChecks?: ExecutionCiCheck[];
 }
 
 export interface ExecutionReviewDecision {
@@ -333,4 +355,18 @@ export interface PullRequestResult {
   headBranch: string;
   headCommitSha: string;
   createdAt: string | null;
+}
+
+export interface SyncPullRequestResult {
+  executionId: string;
+  pullRequestNumber?: number | null;
+  pullRequestUrl?: string | null;
+  pullRequestRemoteState: string;
+  pullRequestIntegrityStatus: string;
+  headCommitSha: string;
+  ciStatus: string;
+  checkCount: number;
+  checks: ExecutionCiCheck[];
+  lastSyncedAt?: string | null;
+  syncError?: string | null;
 }

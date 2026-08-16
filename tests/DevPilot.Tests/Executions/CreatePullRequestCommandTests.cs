@@ -345,6 +345,9 @@ public sealed class CreatePullRequestCommandTests
             Number: 15,
             HtmlUrl: "https://github.com/enesscigdem/DevPilot/pull/15",
             State: "open",
+            Merged: false,
+            ClosedAt: null,
+            MergedAt: null,
             HeadRef: "devpilot/task-123",
             HeadSha: "sha123",
             HeadRepoOwner: "enesscigdem",
@@ -491,6 +494,11 @@ public sealed class CreatePullRequestCommandTests
             }
             return Task.CompletedTask;
         }
+
+        public Task<bool> TryClaimPullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> TryReclaimStalePullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task ReleasePullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime releasedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<bool> ReplacePullRequestTrackingSnapshotAsync(Guid executionId, Guid attemptId, ExecutionPullRequestRemoteState remoteState, ExecutionPullRequestIntegrityStatus integrityStatus, DateTime? closedAt, DateTime? mergedAt, ExecutionCiStatus ciStatus, IReadOnlyList<ExecutionCiCheck> checks, DateTime syncedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
     }
 
     private sealed class FakeGitHubPullRequestService : IExecutionGitHubPullRequestService

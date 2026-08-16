@@ -69,4 +69,26 @@ public class TaskExecution
     public DateTime? PullRequestCreatedAt { get; set; }
 
     public string? PullRequestBaseBranch { get; set; }
+
+    public ExecutionPullRequestRemoteState PullRequestRemoteState { get; set; } = ExecutionPullRequestRemoteState.Unknown;
+
+    public ExecutionPullRequestIntegrityStatus PullRequestIntegrityStatus { get; set; } = ExecutionPullRequestIntegrityStatus.Unknown;
+
+    public DateTime? PullRequestLastSyncedAt { get; set; }
+
+    public DateTime? PullRequestLastSyncAttemptAt { get; set; }
+
+    public DateTime? PullRequestMergedAt { get; set; }
+
+    public DateTime? PullRequestClosedAt { get; set; }
+
+    public Guid? PullRequestSyncAttemptId { get; set; }
+
+    public DateTime? PullRequestSyncClaimedAt { get; set; }
+
+    public ExecutionCiStatus CiStatus { get; set; } = ExecutionCiStatus.Unknown;
+
+    public DateTime? CiLastSyncedAt { get; set; }
+
+    public ICollection<ExecutionCiCheck> CiChecks { get; set; } = new List<ExecutionCiCheck>();
 }

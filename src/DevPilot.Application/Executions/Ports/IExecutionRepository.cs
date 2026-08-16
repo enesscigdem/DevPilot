@@ -164,4 +164,35 @@ public interface IExecutionRepository
         Guid executionId,
         Guid attemptId,
         CancellationToken cancellationToken = default);
+
+    Task<bool> TryClaimPullRequestSyncLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> TryReclaimStalePullRequestSyncLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan leaseTimeout,
+        CancellationToken cancellationToken = default);
+
+    Task ReleasePullRequestSyncLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime attemptAt,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> ReplacePullRequestTrackingSnapshotAsync(
+        Guid executionId,
+        Guid attemptId,
+        DevPilot.Domain.Enums.ExecutionPullRequestRemoteState remoteState,
+        DevPilot.Domain.Enums.ExecutionPullRequestIntegrityStatus integrityStatus,
+        DateTime? closedAt,
+        DateTime? mergedAt,
+        DevPilot.Domain.Enums.ExecutionCiStatus ciStatus,
+        IReadOnlyList<ExecutionCiCheck> checks,
+        DateTime syncedAt,
+        CancellationToken cancellationToken = default);
 }

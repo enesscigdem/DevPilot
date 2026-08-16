@@ -14,10 +14,11 @@ import {
   CheckCircle2,
   XCircle,
   UploadCloud,
+  RotateCw,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest } from "@/api"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
@@ -304,6 +305,35 @@ export function CodeReview() {
   }
 
   const [isSubmittingPr, setIsSubmittingPr] = useState(false)
+  const [isSyncingPr, setIsSyncingPr] = useState(false)
+  const [syncError, setSyncError] = useState<string | null>(null)
+
+  const handleSyncPr = async () => {
+    if (!id || !review || isSyncingPr) return
+    setIsSyncingPr(true)
+    setSyncError(null)
+
+    try {
+      const res = await syncPullRequest(id)
+      setReview({
+        ...review,
+        pullRequestNumber: res.pullRequestNumber ?? review.pullRequestNumber,
+        pullRequestUrl: res.pullRequestUrl ?? review.pullRequestUrl,
+        pullRequestRemoteState: res.pullRequestRemoteState,
+        pullRequestIntegrityStatus: res.pullRequestIntegrityStatus,
+        pullRequestLastSyncedAt: res.lastSyncedAt,
+        ciStatus: res.ciStatus,
+        ciChecks: res.checks,
+      })
+      if (res.syncError) {
+        setSyncError(res.syncError)
+      }
+    } catch (err) {
+      setSyncError(err instanceof Error ? err.message : "GitHub sync failed.")
+    } finally {
+      setIsSyncingPr(false)
+    }
+  }
 
   const handleCreatePullRequest = async () => {
     if (!id || !review || isSubmittingPr) return
@@ -710,18 +740,107 @@ export function CodeReview() {
                         </Panel>
 
                         {review.pullRequestStatus === "Open" ? (
-                          <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
-                            <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
-                              <GitPullRequest className="h-4 w-4 shrink-0" />
-                              <span>Pull Request Open</span>
-                              <span className="font-mono text-[11.5px]">#{review.pullRequestNumber}</span>
+                          <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-3">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
+                                <GitPullRequest className="h-4 w-4 shrink-0" />
+                                <span>PR #{review.pullRequestNumber}</span>
+                                <Badge tone={review.pullRequestRemoteState === "Merged" ? "green" : review.pullRequestRemoteState === "Closed" ? "red" : "blue"}>
+                                  {review.pullRequestRemoteState ?? "Open"}
+                                </Badge>
+                              </div>
+                              <Button
+                                variant="default"
+                                size="sm"
+                                disabled={isSyncingPr}
+                                onClick={handleSyncPr}
+                                className="h-7 px-2 font-mono text-[11px]"
+                              >
+                                {isSyncingPr ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <RotateCw className="h-3 w-3" />
+                                )}
+                                Refresh
+                              </Button>
                             </div>
+
+                            {/* Integrity Badge */}
+                            {review.pullRequestIntegrityStatus && review.pullRequestIntegrityStatus !== "Unknown" && (
+                              <div className="flex items-center gap-1.5 text-[11.5px] font-mono">
+                                <span className="text-subtle-foreground">Integrity:</span>
+                                {review.pullRequestIntegrityStatus === "Valid" ? (
+                                  <span className="text-success font-medium">✓ Approved commit</span>
+                                ) : review.pullRequestIntegrityStatus === "HeadChanged" ? (
+                                  <span className="text-danger font-medium">⚠ PR head changed after approval</span>
+                                ) : (
+                                  <span className="text-danger font-medium">⚠ Identity mismatch</span>
+                                )}
+                              </div>
+                            )}
+
+                            {/* CI Aggregate Status */}
+                            {review.ciStatus && (
+                              <div className="flex items-center justify-between border-t border-border/40 pt-2 text-[12px]">
+                                <span className="text-subtle-foreground">CI Status:</span>
+                                <Badge
+                                  tone={
+                                    review.ciStatus === "Success"
+                                      ? "green"
+                                      : review.ciStatus === "Failure"
+                                        ? "red"
+                                        : review.ciStatus === "Pending"
+                                          ? "amber"
+                                          : "neutral"
+                                  }
+                                >
+                                  {review.ciStatus}
+                                </Badge>
+                              </div>
+                            )}
+
+                            {/* CI Checks List */}
+                            {review.ciChecks && review.ciChecks.length > 0 && (
+                              <div className="space-y-1.5 border-t border-border/40 pt-2 font-mono text-[11px]">
+                                <div className="text-subtle-foreground font-semibold text-[10px] uppercase">Checks ({review.ciChecks.length})</div>
+                                {review.ciChecks.map((check) => (
+                                  <div key={check.id} className="flex items-center justify-between text-foreground">
+                                    <span className="truncate max-w-[180px]" title={check.name}>{check.name}</span>
+                                    <span
+                                      className={cn(
+                                        "font-semibold text-[10px]",
+                                        check.conclusion === "success" || check.status === "success"
+                                          ? "text-success"
+                                          : check.conclusion === "failure" || check.status === "failure" || check.conclusion === "error"
+                                            ? "text-danger"
+                                            : "text-amber-500"
+                                      )}
+                                    >
+                                      {check.conclusion || check.status}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {syncError && (
+                              <div className="text-[11px] text-danger bg-danger-soft/60 p-2 rounded-[var(--radius-md)]">
+                                Refresh failed: {syncError}
+                              </div>
+                            )}
+
+                            {review.pullRequestLastSyncedAt && (
+                              <div className="font-mono text-[10.5px] text-subtle-foreground">
+                                Last synced {new Date(review.pullRequestLastSyncedAt).toLocaleTimeString()}
+                              </div>
+                            )}
+
                             {review.pullRequestUrl && (
                               <a
                                 href={review.pullRequestUrl}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="inline-flex items-center gap-1 font-mono text-[12px] text-primary hover:underline"
+                                className="inline-flex items-center gap-1 font-mono text-[12px] text-primary hover:underline pt-1"
                               >
                                 View on GitHub &rarr;
                               </a>

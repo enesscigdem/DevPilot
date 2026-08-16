@@ -448,16 +448,29 @@ export function ExecutionWorkspace() {
                 </div>
               )}
               {execution.pullRequestStatus === "Open" && (
-                <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
-                  <span>Pull Request</span>
-                  {execution.pullRequestUrl ? (
-                    <a href={execution.pullRequestUrl} target="_blank" rel="noreferrer" className="text-success font-semibold hover:underline">
-                      #{execution.pullRequestNumber} &rarr;
-                    </a>
-                  ) : (
-                    <span className="text-success font-semibold">#{execution.pullRequestNumber}</span>
+                <>
+                  <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
+                    <span>Pull Request</span>
+                    {execution.pullRequestUrl ? (
+                      <a href={execution.pullRequestUrl} target="_blank" rel="noreferrer" className="text-success font-semibold hover:underline">
+                        #{execution.pullRequestNumber} ({execution.pullRequestRemoteState ?? "Open"}) &rarr;
+                      </a>
+                    ) : (
+                      <span className="text-success font-semibold">#{execution.pullRequestNumber} ({execution.pullRequestRemoteState ?? "Open"})</span>
+                    )}
+                  </div>
+                  {execution.ciStatus && (
+                    <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
+                      <span>CI Status</span>
+                      <span className={cn(
+                        "font-semibold",
+                        execution.ciStatus === "Success" ? "text-success" : execution.ciStatus === "Failure" ? "text-danger" : "text-amber-500"
+                      )}>
+                        {execution.ciStatus}
+                      </span>
+                    </div>
                   )}
-                </div>
+                </>
               )}
             </Panel>
 

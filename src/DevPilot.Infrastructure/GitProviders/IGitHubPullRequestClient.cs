@@ -23,6 +23,24 @@ public interface IGitHubPullRequestClient
         string repository,
         string branch,
         CancellationToken cancellationToken = default);
+
+    Task<GitHubPullRequestClientResult<GitHubPullRequestDto>> GetPullRequestAsync(
+        string owner,
+        string repository,
+        int pullNumber,
+        CancellationToken cancellationToken = default);
+
+    Task<GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>> ListCheckRunsForRefAsync(
+        string owner,
+        string repository,
+        string refSha,
+        CancellationToken cancellationToken = default);
+
+    Task<GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>> ListCommitStatusesForRefAsync(
+        string owner,
+        string repository,
+        string refSha,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed class GitHubPullRequestClientResult<T>
@@ -35,6 +53,8 @@ public sealed class GitHubPullRequestClientResult<T>
 
     public bool IsRateLimit { get; set; }
 
+    public bool IsExceededLimit { get; set; }
+
     public string? ErrorMessage { get; set; }
 
     public T? Data { get; set; }
@@ -46,14 +66,16 @@ public sealed class GitHubPullRequestClientResult<T>
         string errorMessage,
         bool isConfigurationError = false,
         bool isConflict = false,
-        bool isRateLimit = false) =>
+        bool isRateLimit = false,
+        bool isExceededLimit = false) =>
         new()
         {
             IsSuccess = false,
             ErrorMessage = errorMessage,
             IsConfigurationError = isConfigurationError,
             IsConflict = isConflict,
-            IsRateLimit = isRateLimit
+            IsRateLimit = isRateLimit,
+            IsExceededLimit = isExceededLimit
         };
 }
 
@@ -61,6 +83,9 @@ public sealed record GitHubPullRequestDto(
     int Number,
     string HtmlUrl,
     string State,
+    bool Merged,
+    DateTime? ClosedAt,
+    DateTime? MergedAt,
     string HeadRef,
     string HeadSha,
     string HeadRepoOwner,
@@ -69,6 +94,23 @@ public sealed record GitHubPullRequestDto(
     string BaseRepoOwner,
     string BaseRepoName,
     string Body);
+
+public sealed record GitHubCheckRunDto(
+    long Id,
+    string Name,
+    string Status,
+    string? Conclusion,
+    DateTime? StartedAt,
+    DateTime? CompletedAt,
+    string AppName);
+
+public sealed record GitHubCommitStatusDto(
+    long Id,
+    string Context,
+    string State,
+    string? Description,
+    DateTime CreatedAt,
+    DateTime? UpdatedAt);
 
 public sealed record GitHubBranchRefResult(
     bool IsSuccess,

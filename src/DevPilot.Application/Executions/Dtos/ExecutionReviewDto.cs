@@ -41,4 +41,9 @@ public sealed record ExecutionReviewDto(
     int? PullRequestNumber = null,
     string? PullRequestUrl = null,
     DateTime? PullRequestCreatedAt = null,
-    bool CanRequestPullRequest = false);
+    bool CanRequestPullRequest = false,
+    string PullRequestRemoteState = "Unknown",
+    string PullRequestIntegrityStatus = "Unknown",
+    DateTime? PullRequestLastSyncedAt = null,
+    string CiStatus = "Unknown",
+    IReadOnlyList<DevPilot.Application.Executions.Commands.SyncPullRequest.ExecutionCiCheckDto>? CiChecks = null);

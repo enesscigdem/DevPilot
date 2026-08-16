@@ -3,6 +3,7 @@ using DevPilot.Application.Executions.Commands.CommitExecution;
 using DevPilot.Application.Executions.Commands.CreatePullRequest;
 using DevPilot.Application.Executions.Commands.PushExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
+using DevPilot.Application.Executions.Commands.SyncPullRequest;
 using DevPilot.Application.Executions.Queries.GetExecutionActivity;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
 using DevPilot.Application.Executions.Queries.GetExecutionReview;
@@ -29,6 +30,8 @@ public class ExecutionsController : ControllerBase
     private readonly IPushExecutionCommandHandler _pushExecutionHandler;
     private readonly ICreatePullRequestCommandHandler _createPullRequestHandler;
 
+    private readonly ISyncPullRequestCommandHandler _syncPullRequestHandler;
+
     public ExecutionsController(
         IGetExecutionsQueryHandler getExecutionsHandler,
         IGetExecutionByIdQueryHandler getExecutionByIdHandler,
@@ -38,7 +41,8 @@ public class ExecutionsController : ControllerBase
         IRejectExecutionReviewCommandHandler rejectReviewHandler,
         ICommitExecutionCommandHandler commitExecutionHandler,
         IPushExecutionCommandHandler pushExecutionHandler,
-        ICreatePullRequestCommandHandler createPullRequestHandler)
+        ICreatePullRequestCommandHandler createPullRequestHandler,
+        ISyncPullRequestCommandHandler syncPullRequestHandler)
     {
         _getExecutionsHandler = getExecutionsHandler;
         _getExecutionByIdHandler = getExecutionByIdHandler;
@@ -49,6 +53,7 @@ public class ExecutionsController : ControllerBase
         _commitExecutionHandler = commitExecutionHandler;
         _pushExecutionHandler = pushExecutionHandler;
         _createPullRequestHandler = createPullRequestHandler;
+        _syncPullRequestHandler = syncPullRequestHandler;
     }
 
     [HttpGet]
@@ -204,6 +209,25 @@ public class ExecutionsController : ControllerBase
             CreatePullRequestResultStatus.ExternalFailure => StatusCode(502, new { error = result.ErrorMessage ?? "GitHub API error." }),
             CreatePullRequestResultStatus.Created => StatusCode(201, result.Response),
             CreatePullRequestResultStatus.Success => Ok(result.Response),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
+    [HttpPost("{id:guid}/pull-request/sync", Name = nameof(SyncPullRequest))]
+    public async Task<IActionResult> SyncPullRequest(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _syncPullRequestHandler
+            .HandleAsync(new DevPilot.Application.Executions.Commands.SyncPullRequest.SyncPullRequestCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            DevPilot.Application.Executions.Commands.SyncPullRequest.SyncPullRequestResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            DevPilot.Application.Executions.Commands.SyncPullRequest.SyncPullRequestResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution pull request sync conflict." }),
+            DevPilot.Application.Executions.Commands.SyncPullRequest.SyncPullRequestResultStatus.ExternalFailure => StatusCode(502, new { error = result.ErrorMessage ?? "GitHub API synchronization failed.", snapshot = result.Response }),
+            DevPilot.Application.Executions.Commands.SyncPullRequest.SyncPullRequestResultStatus.Success => Ok(result.Response),
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }

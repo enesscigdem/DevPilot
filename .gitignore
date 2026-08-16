@@ -43,3 +43,5 @@ Thumbs.db
 # Test results
 **/TestResults/
 **/coverage/
+# Local agent/.NET scratch
+/scratch/

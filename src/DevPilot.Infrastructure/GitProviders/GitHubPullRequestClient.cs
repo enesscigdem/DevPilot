@@ -170,6 +170,174 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         return new GitHubBranchRefResult(true, false, dto.Commit.Sha, null);
     }
 
+    public async Task<GitHubPullRequestClientResult<GitHubPullRequestDto>> GetPullRequestAsync(
+        string owner,
+        string repository,
+        int pullNumber,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_isConfigured)
+        {
+            return GitHubPullRequestClientResult<GitHubPullRequestDto>.Failure(
+                "GitHub API credentials or base URL are not configured.",
+                isConfigurationError: true);
+        }
+
+        var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/pulls/{pullNumber}";
+
+        using var response = await SendAsync(HttpMethod.Get, relativeUri, null, cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return await HandleErrorResponseAsync<GitHubPullRequestDto>(response, cancellationToken).ConfigureAwait(false);
+        }
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        var apiDto = JsonSerializer.Deserialize<GitHubApiPullRequestDto>(json, JsonSerializerOptions.Web);
+
+        if (apiDto is null)
+        {
+            return GitHubPullRequestClientResult<GitHubPullRequestDto>.Failure("GitHub API returned empty PR response.");
+        }
+
+        return GitHubPullRequestClientResult<GitHubPullRequestDto>.Success(apiDto.ToDto());
+    }
+
+    public async Task<GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>> ListCheckRunsForRefAsync(
+        string owner,
+        string repository,
+        string refSha,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_isConfigured)
+        {
+            return GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>.Failure(
+                "GitHub API credentials or base URL are not configured.",
+                isConfigurationError: true);
+        }
+
+        var seenIds = new HashSet<long>();
+        var checkRuns = new List<GitHubCheckRunDto>();
+        var page = 1;
+        const int perPage = 100;
+        const int maxPages = 5;
+
+        while (page <= maxPages)
+        {
+            var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/commits/{Escape(refSha)}/check-runs?filter=latest&per_page={perPage}&page={page}";
+
+            using var response = await SendAsync(HttpMethod.Get, relativeUri, null, cancellationToken).ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return await HandleErrorResponseAsync<IReadOnlyList<GitHubCheckRunDto>>(response, cancellationToken).ConfigureAwait(false);
+            }
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var pageWrapper = JsonSerializer.Deserialize<GitHubApiCheckRunsListDto>(json, JsonSerializerOptions.Web);
+
+            var pageItems = pageWrapper?.CheckRuns;
+            if (pageItems is null || pageItems.Count == 0)
+            {
+                break;
+            }
+
+            foreach (var item in pageItems)
+            {
+                if (seenIds.Add(item.Id))
+                {
+                    checkRuns.Add(item.ToDto());
+                }
+            }
+
+            if (pageItems.Count < perPage)
+            {
+                break;
+            }
+
+            if (page == maxPages)
+            {
+                // Has more items beyond page safety bound
+                _logger.LogWarning("Check runs for SHA {RefSha} exceeded maximum pagination safety limit of {MaxPages} pages.", refSha, maxPages);
+                return GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>.Failure(
+                    "GitHub check runs exceeded maximum pagination safety limit.",
+                    isExceededLimit: true);
+            }
+
+            page++;
+        }
+
+        return GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>.Success(checkRuns);
+    }
+
+    public async Task<GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>> ListCommitStatusesForRefAsync(
+        string owner,
+        string repository,
+        string refSha,
+        CancellationToken cancellationToken = default)
+    {
+        if (!_isConfigured)
+        {
+            return GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>.Failure(
+                "GitHub API credentials or base URL are not configured.",
+                isConfigurationError: true);
+        }
+
+        var seenContexts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var statuses = new List<GitHubCommitStatusDto>();
+        var page = 1;
+        const int perPage = 100;
+        const int maxPages = 5;
+
+        while (page <= maxPages)
+        {
+            var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/commits/{Escape(refSha)}/statuses?per_page={perPage}&page={page}";
+
+            using var response = await SendAsync(HttpMethod.Get, relativeUri, null, cancellationToken).ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return await HandleErrorResponseAsync<IReadOnlyList<GitHubCommitStatusDto>>(response, cancellationToken).ConfigureAwait(false);
+            }
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var pageItems = JsonSerializer.Deserialize<List<GitHubApiCommitStatusDto>>(json, JsonSerializerOptions.Web);
+
+            if (pageItems is null || pageItems.Count == 0)
+            {
+                break;
+            }
+
+            // GitHub returns statuses in reverse chronological order (newest first).
+            // Keep first occurrence per context.
+            foreach (var item in pageItems)
+            {
+                var contextName = string.IsNullOrWhiteSpace(item.Context) ? "default" : item.Context.Trim();
+                if (seenContexts.Add(contextName))
+                {
+                    statuses.Add(item.ToDto());
+                }
+            }
+
+            if (pageItems.Count < perPage)
+            {
+                break;
+            }
+
+            if (page == maxPages)
+            {
+                _logger.LogWarning("Commit statuses for SHA {RefSha} exceeded maximum pagination safety limit of {MaxPages} pages.", refSha, maxPages);
+                return GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>.Failure(
+                    "GitHub commit statuses exceeded maximum pagination safety limit.",
+                    isExceededLimit: true);
+            }
+
+            page++;
+        }
+
+        return GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>.Success(statuses);
+    }
+
     private async Task<HttpResponseMessage> SendAsync(
         HttpMethod method,
         string relativeUri,
@@ -259,6 +427,14 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
 
         public string State { get; set; } = string.Empty;
 
+        public bool Merged { get; set; }
+
+        [JsonPropertyName("closed_at")]
+        public DateTime? ClosedAt { get; set; }
+
+        [JsonPropertyName("merged_at")]
+        public DateTime? MergedAt { get; set; }
+
         public GitHubApiRefDto Head { get; set; } = new();
 
         public GitHubApiRefDto Base { get; set; } = new();
@@ -270,6 +446,9 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
                 Number: Number,
                 HtmlUrl: HtmlUrl,
                 State: State,
+                Merged: Merged || MergedAt.HasValue,
+                ClosedAt: ClosedAt,
+                MergedAt: MergedAt,
                 HeadRef: Head.Ref,
                 HeadSha: Head.Sha,
                 HeadRepoOwner: Head.Repo?.Owner?.Login ?? string.Empty,
@@ -278,6 +457,72 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
                 BaseRepoOwner: Base.Repo?.Owner?.Login ?? string.Empty,
                 BaseRepoName: Base.Repo?.Name ?? string.Empty,
                 Body: Body ?? string.Empty);
+    }
+
+    private sealed class GitHubApiCheckRunsListDto
+    {
+        [JsonPropertyName("check_runs")]
+        public List<GitHubApiCheckRunDto>? CheckRuns { get; set; }
+    }
+
+    private sealed class GitHubApiCheckRunDto
+    {
+        public long Id { get; set; }
+
+        public string Name { get; set; } = string.Empty;
+
+        public string Status { get; set; } = string.Empty;
+
+        public string? Conclusion { get; set; }
+
+        [JsonPropertyName("started_at")]
+        public DateTime? StartedAt { get; set; }
+
+        [JsonPropertyName("completed_at")]
+        public DateTime? CompletedAt { get; set; }
+
+        public GitHubApiAppDto? App { get; set; }
+
+        public GitHubCheckRunDto ToDto() =>
+            new(
+                Id: Id,
+                Name: Name ?? string.Empty,
+                Status: Status ?? string.Empty,
+                Conclusion: Conclusion,
+                StartedAt: StartedAt,
+                CompletedAt: CompletedAt,
+                AppName: App?.Name ?? "GitHub Actions");
+    }
+
+    private sealed class GitHubApiAppDto
+    {
+        public string Name { get; set; } = string.Empty;
+    }
+
+    private sealed class GitHubApiCommitStatusDto
+    {
+        public long Id { get; set; }
+
+        public string Context { get; set; } = string.Empty;
+
+        public string State { get; set; } = string.Empty;
+
+        public string? Description { get; set; }
+
+        [JsonPropertyName("created_at")]
+        public DateTime CreatedAt { get; set; }
+
+        [JsonPropertyName("updated_at")]
+        public DateTime? UpdatedAt { get; set; }
+
+        public GitHubCommitStatusDto ToDto() =>
+            new(
+                Id: Id,
+                Context: string.IsNullOrWhiteSpace(Context) ? "default" : Context,
+                State: State ?? string.Empty,
+                Description: Description,
+                CreatedAt: CreatedAt,
+                UpdatedAt: UpdatedAt);
     }
 
     private sealed class GitHubApiRefDto

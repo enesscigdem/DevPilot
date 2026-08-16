@@ -13,6 +13,7 @@ using DevPilot.Application.Executions.Commands.ApproveExecutionReview;
 using DevPilot.Application.Executions.Commands.CommitExecution;
 using DevPilot.Application.Executions.Commands.PushExecution;
 using DevPilot.Application.Executions.Commands.CreatePullRequest;
+using DevPilot.Application.Executions.Commands.SyncPullRequest;
 using DevPilot.Application.Executions.Commands.ProcessExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
 using DevPilot.Application.Executions.Commands.RunDeveloperAgent;
@@ -48,6 +49,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Pgvector.EntityFrameworkCore;
+using System.Runtime.CompilerServices;
+
+[assembly: InternalsVisibleTo("DevPilot.Tests")]
 
 namespace DevPilot.Infrastructure;
 
@@ -117,7 +121,9 @@ public static class DependencyInjection
         services.AddScoped<IExecutionGitPushService, GitExecutionPushService>();
         services.AddScoped<IPushExecutionCommandHandler, PushExecutionCommandHandler>();
         services.AddScoped<IExecutionGitHubPullRequestService, GitHubExecutionPullRequestService>();
+        services.AddScoped<IExecutionGitHubSyncService, ExecutionGitHubSyncService>();
         services.AddScoped<ICreatePullRequestCommandHandler, CreatePullRequestCommandHandler>();
+        services.AddScoped<ISyncPullRequestCommandHandler, SyncPullRequestCommandHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();
         services.AddScoped<IRejectExecutionReviewCommandHandler, RejectExecutionReviewCommandHandler>();
 

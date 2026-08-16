@@ -53,6 +53,17 @@ public sealed class ExecutionDto
     public DateTime? PullRequestCreatedAt { get; set; }
 
     public bool CanRequestPullRequest { get; set; }
+
+    public string PullRequestRemoteState { get; set; } = ExecutionPullRequestRemoteState.Unknown.ToString();
+
+    public string PullRequestIntegrityStatus { get; set; } = ExecutionPullRequestIntegrityStatus.Unknown.ToString();
+
+    public DateTime? PullRequestLastSyncedAt { get; set; }
+
+    public string CiStatus { get; set; } = ExecutionCiStatus.Unknown.ToString();
+
+    public IReadOnlyList<DevPilot.Application.Executions.Commands.SyncPullRequest.ExecutionCiCheckDto> CiChecks { get; set; } =
+        Array.Empty<DevPilot.Application.Executions.Commands.SyncPullRequest.ExecutionCiCheckDto>();
 }
 
 public sealed class ExecutionListItemDto

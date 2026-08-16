@@ -9,6 +9,7 @@ import type {
   ImpactAnalysis,
   PushExecutionResult,
   PullRequestResult,
+  SyncPullRequestResult,
   Task,
   TaskListItem,
   UpdateTaskStatusRequest,
@@ -156,6 +157,12 @@ export async function pushExecution(id: string): Promise<PushExecutionResult> {
 
 export async function createPullRequest(id: string): Promise<PullRequestResult> {
   return http<PullRequestResult>(`/executions/${id}/pull-request`, {
+    method: 'POST',
+  });
+}
+
+export async function syncPullRequest(id: string): Promise<SyncPullRequestResult> {
+  return http<SyncPullRequestResult>(`/executions/${id}/pull-request/sync`, {
     method: 'POST',
   });
 }

@@ -36,6 +36,8 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<ExecutionActivity> ExecutionActivities => Set<ExecutionActivity>();
 
+    public DbSet<ExecutionCiCheck> ExecutionCiChecks => Set<ExecutionCiCheck>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -70,8 +72,16 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.TypeName).HasMaxLength(200);
             entity.Property(e => e.MethodName).HasMaxLength(200);
             entity.Property(e => e.ContentHash).HasMaxLength(64);
-            entity.Property(e => e.Embedding)
-                .HasColumnType($"vector({ProjectBrainConstants.DefaultEmbeddingDimensions})");
+            if (Database.IsNpgsql())
+            {
+                entity.Property(e => e.Embedding)
+                    .HasColumnType($"vector({ProjectBrainConstants.DefaultEmbeddingDimensions})");
+            }
+            else
+            {
+                entity.Property(e => e.Embedding)
+                    .HasConversion(v => v == null ? null : v.ToString(), s => string.IsNullOrEmpty(s) ? null : new Pgvector.Vector(s));
+            }
         });
 
         modelBuilder.Entity<IndexJob>(entity =>
@@ -186,6 +196,25 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.PullRequestUrl).HasMaxLength(500);
             entity.Property(e => e.PullRequestCreatedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.PullRequestBaseBranch).HasMaxLength(200);
+            entity.Property(e => e.PullRequestRemoteState)
+                .HasConversion<string>()
+                .HasMaxLength(50)
+                .HasDefaultValue(ExecutionPullRequestRemoteState.Unknown);
+            entity.Property(e => e.PullRequestIntegrityStatus)
+                .HasConversion<string>()
+                .HasMaxLength(50)
+                .HasDefaultValue(ExecutionPullRequestIntegrityStatus.Unknown);
+            entity.Property(e => e.PullRequestLastSyncedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.PullRequestLastSyncAttemptAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.PullRequestMergedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.PullRequestClosedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.PullRequestSyncAttemptId).HasColumnType("uuid");
+            entity.Property(e => e.PullRequestSyncClaimedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CiStatus)
+                .HasConversion<string>()
+                .HasMaxLength(50)
+                .HasDefaultValue(ExecutionCiStatus.Unknown);
+            entity.Property(e => e.CiLastSyncedAt).HasColumnType("timestamp with time zone");
 
             entity.HasOne(e => e.DevelopmentTask)
                 .WithMany()
@@ -200,15 +229,45 @@ public class DevPilotDbContext : DbContext
             entity.HasIndex(e => new { e.ExecutionId, e.CreatedAt, e.Id })
                 .HasDatabaseName("IX_ExecutionActivities_ExecutionId_CreatedAt_Id");
 
-            entity.Property(e => e.Stage).HasConversion<string>().HasMaxLength(50);
-            entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
-            entity.Property(e => e.Message).HasMaxLength(500);
-            entity.Property(e => e.MetadataJson).HasColumnType("jsonb");
-            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.Stage)
+                .HasConversion<string>()
+                .HasMaxLength(50);
+
+            entity.Property(e => e.Status)
+                .HasConversion<string>()
+                .HasMaxLength(50);
+
+            entity.Property(e => e.Message)
+                .HasMaxLength(500);
+
+            entity.Property(e => e.MetadataJson)
+                .HasColumnType("jsonb");
+
+            entity.Property(e => e.CreatedAt)
+                .HasColumnType("timestamp with time zone");
 
             entity.HasOne(e => e.Execution)
                 .WithMany()
                 .HasForeignKey(e => e.ExecutionId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ExecutionCiCheck>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.TaskExecutionId, e.ExternalId, e.CheckType }).IsUnique();
+            entity.Property(e => e.Name).HasMaxLength(200);
+            entity.Property(e => e.Source).HasMaxLength(100);
+            entity.Property(e => e.CheckType).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.Status).HasMaxLength(50);
+            entity.Property(e => e.Conclusion).HasMaxLength(50);
+            entity.Property(e => e.StartedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CompletedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+
+            entity.HasOne(e => e.TaskExecution)
+                .WithMany(e => e.CiChecks)
+                .HasForeignKey(e => e.TaskExecutionId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

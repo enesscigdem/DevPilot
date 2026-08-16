@@ -65,6 +65,7 @@ public sealed class EfExecutionRepository : IExecutionRepository
         return await _dbContext.TaskExecutions
             .Include(e => e.DevelopmentTask)
                 .ThenInclude(t => t.RepositoryWorkspace)
+            .Include(e => e.CiChecks)
             .FirstOrDefaultAsync(e => e.Id == id, cancellationToken)
             .ConfigureAwait(false);
     }
@@ -522,5 +523,167 @@ public sealed class EfExecutionRepository : IExecutionRepository
                     .SetProperty(e => e.PullRequestStatus, ExecutionPullRequestStatus.Failed),
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryClaimPullRequestSyncLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.PullRequestStatus == ExecutionPullRequestStatus.Open &&
+                        e.PullRequestSyncAttemptId == null)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PullRequestSyncAttemptId, attemptId)
+                    .SetProperty(e => e.PullRequestSyncClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+                .FirstOrDefault(e => e.Entity.Id == executionId);
+            if (tracked != null)
+            {
+                tracked.Entity.PullRequestSyncAttemptId = attemptId;
+                tracked.Entity.PullRequestSyncClaimedAt = claimedAt;
+            }
+        }
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryReclaimStalePullRequestSyncLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan leaseTimeout,
+        CancellationToken cancellationToken = default)
+    {
+        var threshold = claimedAt - leaseTimeout;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.PullRequestStatus == ExecutionPullRequestStatus.Open &&
+                        e.PullRequestSyncAttemptId != null &&
+                        (e.PullRequestSyncClaimedAt == null || e.PullRequestSyncClaimedAt < threshold))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PullRequestSyncAttemptId, attemptId)
+                    .SetProperty(e => e.PullRequestSyncClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+                .FirstOrDefault(e => e.Entity.Id == executionId);
+            if (tracked != null)
+            {
+                tracked.Entity.PullRequestSyncAttemptId = attemptId;
+                tracked.Entity.PullRequestSyncClaimedAt = claimedAt;
+            }
+        }
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task ReleasePullRequestSyncLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime attemptAt,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.PullRequestSyncAttemptId == attemptId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.PullRequestLastSyncAttemptAt, attemptAt)
+                    .SetProperty(e => e.PullRequestSyncAttemptId, (Guid?)null)
+                    .SetProperty(e => e.PullRequestSyncClaimedAt, (DateTime?)null),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+                .FirstOrDefault(e => e.Entity.Id == executionId);
+            if (tracked != null)
+            {
+                tracked.Entity.PullRequestLastSyncAttemptAt = attemptAt;
+                tracked.Entity.PullRequestSyncAttemptId = null;
+                tracked.Entity.PullRequestSyncClaimedAt = null;
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> ReplacePullRequestTrackingSnapshotAsync(
+        Guid executionId,
+        Guid attemptId,
+        ExecutionPullRequestRemoteState remoteState,
+        ExecutionPullRequestIntegrityStatus integrityStatus,
+        DateTime? closedAt,
+        DateTime? mergedAt,
+        ExecutionCiStatus ciStatus,
+        IReadOnlyList<ExecutionCiCheck> checks,
+        DateTime syncedAt,
+        CancellationToken cancellationToken = default)
+    {
+        var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+            .FirstOrDefault(e => e.Entity.Id == executionId);
+
+        TaskExecution? execution;
+        if (tracked != null)
+        {
+            await tracked.ReloadAsync(cancellationToken).ConfigureAwait(false);
+            execution = tracked.Entity;
+            await _dbContext.Entry(execution)
+                .Collection(e => e.CiChecks)
+                .LoadAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            execution = await _dbContext.TaskExecutions
+                .Include(e => e.CiChecks)
+                .FirstOrDefaultAsync(e => e.Id == executionId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (execution is null || execution.PullRequestSyncAttemptId != attemptId)
+        {
+            return false;
+        }
+
+        execution.PullRequestRemoteState = remoteState;
+        execution.PullRequestIntegrityStatus = integrityStatus;
+        execution.PullRequestClosedAt = closedAt;
+        execution.PullRequestMergedAt = mergedAt;
+        execution.PullRequestLastSyncedAt = syncedAt;
+        execution.PullRequestLastSyncAttemptAt = syncedAt;
+        execution.CiStatus = ciStatus;
+        execution.CiLastSyncedAt = syncedAt;
+        execution.PullRequestSyncAttemptId = null;
+        execution.PullRequestSyncClaimedAt = null;
+
+        _dbContext.ExecutionCiChecks.RemoveRange(execution.CiChecks);
+
+        foreach (var c in checks)
+        {
+            c.Id = Guid.NewGuid();
+            c.TaskExecutionId = executionId;
+            c.CreatedAt = syncedAt;
+            _dbContext.ExecutionCiChecks.Add(c);
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 }

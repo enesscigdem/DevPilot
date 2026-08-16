@@ -1,5 +1,6 @@
 using DevPilot.Application.Executions.Dtos;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Logging;
 
@@ -124,7 +125,23 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 PullRequestNumber: execution.PullRequestNumber,
                 PullRequestUrl: execution.PullRequestUrl,
                 PullRequestCreatedAt: execution.PullRequestCreatedAt,
-                CanRequestPullRequest: DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution));
+                CanRequestPullRequest: DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution),
+                PullRequestRemoteState: execution.PullRequestRemoteState.ToString(),
+                PullRequestIntegrityStatus: execution.PullRequestIntegrityStatus.ToString(),
+                PullRequestLastSyncedAt: execution.PullRequestLastSyncedAt,
+                CiStatus: execution.CiStatus.ToString(),
+                CiChecks: (execution.CiChecks ?? Array.Empty<ExecutionCiCheck>())
+                    .Select(c => new Commands.SyncPullRequest.ExecutionCiCheckDto(
+                        Id: c.Id,
+                        ExternalId: c.ExternalId,
+                        Name: c.Name,
+                        Source: c.Source,
+                        CheckType: c.CheckType.ToString(),
+                        Status: c.Status,
+                        Conclusion: c.Conclusion,
+                        StartedAt: c.StartedAt,
+                        CompletedAt: c.CompletedAt))
+                    .ToList());
 
             return GetExecutionReviewResult.Ok(committedReview);
         }
@@ -214,7 +231,23 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             PullRequestNumber: execution.PullRequestNumber,
             PullRequestUrl: execution.PullRequestUrl,
             PullRequestCreatedAt: execution.PullRequestCreatedAt,
-            CanRequestPullRequest: DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution));
+            CanRequestPullRequest: DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution),
+            PullRequestRemoteState: execution.PullRequestRemoteState.ToString(),
+            PullRequestIntegrityStatus: execution.PullRequestIntegrityStatus.ToString(),
+            PullRequestLastSyncedAt: execution.PullRequestLastSyncedAt,
+            CiStatus: execution.CiStatus.ToString(),
+            CiChecks: (execution.CiChecks ?? Array.Empty<ExecutionCiCheck>())
+                .Select(c => new Commands.SyncPullRequest.ExecutionCiCheckDto(
+                    Id: c.Id,
+                    ExternalId: c.ExternalId,
+                    Name: c.Name,
+                    Source: c.Source,
+                    CheckType: c.CheckType.ToString(),
+                    Status: c.Status,
+                    Conclusion: c.Conclusion,
+                    StartedAt: c.StartedAt,
+                    CompletedAt: c.CompletedAt))
+                .ToList());
 
         return GetExecutionReviewResult.Ok(review);
     }
