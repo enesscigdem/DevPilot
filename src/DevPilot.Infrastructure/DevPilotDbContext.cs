@@ -1,5 +1,8 @@
 using DevPilot.Domain.Entities;
+using DevPilot.Domain.ProjectBrain;
+using DevPilot.Domain.ProjectBrain.Entities;
 using Microsoft.EntityFrameworkCore;
+using Pgvector;
 
 namespace DevPilot.Infrastructure;
 
@@ -12,9 +15,15 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<RepositoryWorkspace> RepositoryWorkspaces => Set<RepositoryWorkspace>();
 
+    public DbSet<CodeChunk> CodeChunks => Set<CodeChunk>();
+
+    public DbSet<IndexJob> IndexJobs => Set<IndexJob>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        modelBuilder.HasPostgresExtension("vector");
 
         modelBuilder.Entity<RepositoryWorkspace>(entity =>
         {
@@ -28,5 +37,37 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.LocalPath).HasMaxLength(500);
             entity.Property(e => e.ErrorMessage).HasMaxLength(1000);
         });
+
+        modelBuilder.Entity<CodeChunk>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.WorkspacePath, e.RelativePath, e.ChunkOrder }).IsUnique();
+            entity.HasIndex(e => e.ContentHash);
+            entity.Property(e => e.WorkspacePath).HasMaxLength(500);
+            entity.Property(e => e.WorkspaceName).HasMaxLength(200);
+            entity.Property(e => e.ProjectName).HasMaxLength(200);
+            entity.Property(e => e.FilePath).HasMaxLength(500);
+            entity.Property(e => e.RelativePath).HasMaxLength(500);
+            entity.Property(e => e.Language).HasMaxLength(50);
+            entity.Property(e => e.SymbolName).HasMaxLength(200);
+            entity.Property(e => e.TypeName).HasMaxLength(200);
+            entity.Property(e => e.MethodName).HasMaxLength(200);
+            entity.Property(e => e.ContentHash).HasMaxLength(64);
+            entity.Property(e => e.Embedding)
+                .HasColumnType($"vector({ProjectBrainConstants.DefaultEmbeddingDimensions})");
+        });
+
+        modelBuilder.Entity<IndexJob>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.WorkspacePath);
+            entity.HasIndex(e => new { e.WorkspacePath, e.StartedAt });
+            entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.WorkspacePath).HasMaxLength(500);
+            entity.Property(e => e.WorkspaceName).HasMaxLength(200);
+            entity.Property(e => e.ErrorMessage).HasMaxLength(1000);
+            entity.Property(e => e.EmbeddingProviderStatus).HasMaxLength(500);
+        });
     }
 }
+

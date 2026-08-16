@@ -1,14 +1,25 @@
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.GitProviders;
+using DevPilot.Application.ProjectBrain.Commands.IndexWorkspace;
+using DevPilot.Application.ProjectBrain.Ports;
+using DevPilot.Application.ProjectBrain.Queries.SemanticSearch;
 using DevPilot.Application.RepositoryClone;
+using DevPilot.Domain.ProjectBrain;
 using DevPilot.Infrastructure.AiProviders;
 using DevPilot.Infrastructure.CodeAnalysis;
 using DevPilot.Infrastructure.GitProviders;
+using DevPilot.Infrastructure.ProjectBrain;
+using DevPilot.Infrastructure.ProjectBrain.EmbeddingProviders;
+using DevPilot.Infrastructure.ProjectBrain.Repositories;
+using DevPilot.Infrastructure.ProjectBrain.SemanticSearch;
 using DevPilot.Infrastructure.RepositoryClone;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
+using Pgvector;
+using Pgvector.EntityFrameworkCore;
 
 namespace DevPilot.Infrastructure;
 
@@ -21,13 +32,20 @@ public static class DependencyInjection
         var connectionString = configuration.GetConnectionString("DevPilotDb")
             ?? throw new InvalidOperationException("Connection string 'DevPilotDb' is not configured.");
 
+        var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
+        dataSourceBuilder.UseVector();
+
         services.AddDbContext<DevPilotDbContext>(options =>
-            options.UseNpgsql(connectionString, npgsql =>
-                npgsql.MigrationsAssembly(typeof(DependencyInjection).Assembly.FullName)));
+            options.UseNpgsql(dataSourceBuilder.Build(), npgsql =>
+            {
+                npgsql.UseVector();
+                npgsql.MigrationsAssembly(typeof(DependencyInjection).Assembly.FullName);
+            }));
 
         services.AddAiProviders(configuration);
         services.AddGitProviders(configuration);
         services.AddRepositoryClone(configuration);
+        services.AddProjectBrain();
         services.AddScoped<IRepositoryAnalyzer, RoslynRepositoryAnalyzer>();
 
         return services;
@@ -96,6 +114,19 @@ public static class DependencyInjection
                 throw new InvalidOperationException(
                     $"Unsupported Git provider '{providerName}'. Supported providers: {GitProviderNames.GitHub}.");
         }
+
+        return services;
+    }
+
+    private static IServiceCollection AddProjectBrain(this IServiceCollection services)
+    {
+        services.AddScoped<IRepositoryChunker, RepositoryChunker>();
+        services.AddScoped<IEmbeddingProvider, NullEmbeddingProvider>();
+        services.AddScoped<ICodeChunkRepository, EfCodeChunkRepository>();
+        services.AddScoped<IIndexJobRepository, EfIndexJobRepository>();
+        services.AddScoped<IIndexWorkspaceCommandHandler, IndexWorkspaceCommandHandler>();
+        services.AddScoped<ISemanticSearchQueryHandler, SemanticSearchQueryHandler>();
+        services.AddScoped<ISemanticSearchService, NullSemanticSearchService>();
 
         return services;
     }
