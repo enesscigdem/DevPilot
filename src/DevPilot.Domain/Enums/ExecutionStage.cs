@@ -7,5 +7,6 @@ public enum ExecutionStage
     DeveloperAgent = 2,
     Build = 3,
     Test = 4,
-    Review = 5
+    Review = 5,
+    Commit = 6
 }

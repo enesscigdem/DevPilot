@@ -27,6 +27,12 @@ public sealed class ExecutionDto
     public string? ErrorMessage { get; set; }
 
     public string ReviewStatus { get; set; } = ExecutionReviewStatus.Pending.ToString();
+
+    public string CommitStatus { get; set; } = ExecutionCommitStatus.None.ToString();
+
+    public string? CommitSha { get; set; }
+
+    public DateTime? CommittedAt { get; set; }
 }
 
 public sealed class ExecutionListItemDto

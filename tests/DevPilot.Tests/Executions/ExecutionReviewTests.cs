@@ -77,7 +77,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -123,7 +124,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -159,7 +161,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -191,7 +194,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -229,7 +233,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -262,7 +267,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -301,7 +307,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -337,7 +344,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -375,7 +383,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -409,7 +418,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -437,7 +447,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -463,7 +474,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(execution);
         var workspaceManager = new FakeWorkspaceManager(isValid: false, errorMessage: "Workspace directory does not exist.");
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
@@ -480,7 +492,8 @@ public class ExecutionReviewTests : IDisposable
         var repo = new FakeExecutionRepository(null);
         var workspaceManager = new FakeWorkspaceManager(isValid: true);
         var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
-        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, NullLogger<GetExecutionReviewQueryHandler>.Instance);
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionReviewQuery(Guid.NewGuid()));
@@ -488,6 +501,289 @@ public class ExecutionReviewTests : IDisposable
         // Assert
         result.Status.Should().Be(ExecutionReviewResultStatus.NotFound);
         result.ErrorMessage.Should().Contain("Execution not found");
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_CommittedExecution_ReadsDiffFromBaseCommitToCommitSha_WhenWorktreeIsClean()
+    {
+        // Arrange
+        var fileRelPath = "src/Services/PaymentService.cs";
+        var fullPath = Path.Combine(_workspaceDir, fileRelPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, "public class PaymentService {}");
+
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial base commit");
+        var baseCommitSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        // Worktree modification
+        File.WriteAllText(fullPath, "public class PaymentService { public void Process() {} }");
+        var executionId = Guid.NewGuid();
+
+        // Calculate expected fingerprint
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+        var fpResult = await fingerprintCalc.ComputeFingerprintAsync(_workspaceDir);
+        fpResult.Success.Should().BeTrue();
+
+        // Create committed commit with DevPilot-Execution trailer
+        RunGit(_workspaceDir, "add", ".");
+        var treeSha = RunGitOutput(_workspaceDir, "write-tree").Trim();
+        var commitMsg = $"Execute task changes\n\nDevPilot-Execution: {executionId}\n";
+        var commitSha = RunGitOutput(_workspaceDir, "commit-tree", treeSha, "-p", baseCommitSha, "-m", commitMsg).Trim();
+        RunGit(_workspaceDir, "update-ref", "refs/heads/main", commitSha);
+
+        // Worktree is now clean post-commit
+        RunGit(_workspaceDir, "reset", "--hard", commitSha);
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Committed Task" },
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            CommitStatus = ExecutionCommitStatus.Committed,
+            BaseCommitSha = baseCommitSha,
+            CommitSha = commitSha,
+            ApprovedChangeFingerprint = fpResult.Fingerprint,
+            ReviewStatus = ExecutionReviewStatus.Approved
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.ChangedFileCount.Should().Be(1);
+        result.Review.ChangedFiles[0].Path.Should().Be("src/Services/PaymentService.cs");
+        result.Review.Diff.Should().Contain("Process()");
+        result.Review.ApprovedSnapshotMatchesCurrent.Should().BeTrue();
+        result.Review.CommitEligible.Should().BeFalse();
+        result.Review.CommitStatus.Should().Be("Committed");
+        result.Review.CommitSha.Should().Be(commitSha);
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_CommittedExecution_ParentMismatch_ReturnsConflict()
+    {
+        // Arrange
+        var fileRelPath = "File1.txt";
+        File.WriteAllText(Path.Combine(_workspaceDir, fileRelPath), "Base");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Base 1");
+        var base1 = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(Path.Combine(_workspaceDir, fileRelPath), "Base 2");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Base 2");
+        var base2 = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        var executionId = Guid.NewGuid();
+        File.WriteAllText(Path.Combine(_workspaceDir, fileRelPath), "Mod");
+        RunGit(_workspaceDir, "add", ".");
+        var treeSha = RunGitOutput(_workspaceDir, "write-tree").Trim();
+        var commitMsg = $"Execute\n\nDevPilot-Execution: {executionId}\n";
+        // Commit parent is base2, but persisted BaseCommitSha is base1
+        var commitSha = RunGitOutput(_workspaceDir, "commit-tree", treeSha, "-p", base2, "-m", commitMsg).Trim();
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            CommitStatus = ExecutionCommitStatus.Committed,
+            BaseCommitSha = base1, // Mismatch with actual parent base2!
+            CommitSha = commitSha,
+            ApprovedChangeFingerprint = "sha256:dummy",
+            ReviewStatus = ExecutionReviewStatus.Approved
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("git integrity check failed");
+        result.ErrorMessage.Should().Contain("parent commit does not match");
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_CommittedExecution_ObjectTypeNotCommit_ReturnsConflict()
+    {
+        // Arrange
+        File.WriteAllText(Path.Combine(_workspaceDir, "a.txt"), "hello");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial");
+        var baseSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(Path.Combine(_workspaceDir, "a.txt"), "world");
+        RunGit(_workspaceDir, "add", ".");
+        var treeSha = RunGitOutput(_workspaceDir, "write-tree").Trim(); // tree object, NOT commit!
+
+        var executionId = Guid.NewGuid();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            CommitStatus = ExecutionCommitStatus.Committed,
+            BaseCommitSha = baseSha,
+            CommitSha = treeSha, // Passed a tree object instead of commit!
+            ApprovedChangeFingerprint = "sha256:dummy",
+            ReviewStatus = ExecutionReviewStatus.Approved
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("git integrity check failed");
+        result.ErrorMessage.Should().Contain("not a valid Git commit object");
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_CommittedExecution_MissingOrWrongTrailer_ReturnsConflict()
+    {
+        // Arrange
+        File.WriteAllText(Path.Combine(_workspaceDir, "b.txt"), "hello");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial");
+        var baseSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(Path.Combine(_workspaceDir, "b.txt"), "world");
+        RunGit(_workspaceDir, "add", ".");
+        var treeSha = RunGitOutput(_workspaceDir, "write-tree").Trim();
+
+        var executionId = Guid.NewGuid();
+        var wrongId = Guid.NewGuid();
+        var commitMsg = $"Execute\n\nDevPilot-Execution: {wrongId}\n"; // Wrong execution ID in trailer!
+        var commitSha = RunGitOutput(_workspaceDir, "commit-tree", treeSha, "-p", baseSha, "-m", commitMsg).Trim();
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            CommitStatus = ExecutionCommitStatus.Committed,
+            BaseCommitSha = baseSha,
+            CommitSha = commitSha,
+            ApprovedChangeFingerprint = "sha256:dummy",
+            ReviewStatus = ExecutionReviewStatus.Approved
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("git integrity check failed");
+        result.ErrorMessage.Should().Contain("trailer");
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_CommittedExecution_FingerprintMismatch_ReturnsConflict()
+    {
+        // Arrange
+        File.WriteAllText(Path.Combine(_workspaceDir, "c.txt"), "hello");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial");
+        var baseSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(Path.Combine(_workspaceDir, "c.txt"), "world");
+        RunGit(_workspaceDir, "add", ".");
+        var treeSha = RunGitOutput(_workspaceDir, "write-tree").Trim();
+
+        var executionId = Guid.NewGuid();
+        var commitMsg = $"Execute\n\nDevPilot-Execution: {executionId}\n";
+        var commitSha = RunGitOutput(_workspaceDir, "commit-tree", treeSha, "-p", baseSha, "-m", commitMsg).Trim();
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            CommitStatus = ExecutionCommitStatus.Committed,
+            BaseCommitSha = baseSha,
+            CommitSha = commitSha,
+            ApprovedChangeFingerprint = "sha256:wrong_fingerprint_hash_value_1234567890",
+            ReviewStatus = ExecutionReviewStatus.Approved
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("git integrity check failed");
+        result.ErrorMessage.Should().Contain("fingerprint");
+    }
+
+    [Fact]
+    public async Task ReadCommittedDiff_SensitiveRenamedFile_RedactsContent()
+    {
+        // Arrange
+        File.WriteAllText(Path.Combine(_workspaceDir, ".env"), "SECRET_KEY=12345");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Add env");
+        var baseSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        // Rename .env to harmless.txt
+        var envPath = Path.Combine(_workspaceDir, ".env");
+        var harmlessPath = Path.Combine(_workspaceDir, "harmless.txt");
+        File.Move(envPath, harmlessPath);
+
+        RunGit(_workspaceDir, "add", "-A");
+        var treeSha = RunGitOutput(_workspaceDir, "write-tree").Trim();
+        var commitMsg = "Rename secret\n";
+        var commitSha = RunGitOutput(_workspaceDir, "commit-tree", treeSha, "-p", baseSha, "-m", commitMsg).Trim();
+        RunGit(_workspaceDir, "update-ref", "refs/heads/main", commitSha);
+        RunGit(_workspaceDir, "reset", "--hard", commitSha);
+
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+
+        // Act
+        var result = await diffReader.ReadCommittedDiffAsync(_workspaceDir, baseSha, commitSha);
+
+        // Assert
+        result.Success.Should().BeTrue();
+        result.DiffText.Should().NotContain("SECRET_KEY=12345");
+        result.DiffText.Should().Contain("[Redacted sensitive file content:");
     }
 
     private static void InitGitRepo(string path)
@@ -513,6 +809,24 @@ public class ExecutionReviewTests : IDisposable
         p.WaitForExit();
     }
 
+    private static string RunGitOutput(string workingDirectory, params string[] args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = workingDirectory
+        };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        using var p = Process.Start(psi)!;
+        var output = p.StandardOutput.ReadToEnd();
+        p.WaitForExit();
+        return output;
+    }
+
     private sealed class FakeExecutionRepository : IExecutionRepository
     {
         private readonly TaskExecution? _execution;
@@ -533,6 +847,11 @@ public class ExecutionReviewTests : IDisposable
         public Task FailAsync(Guid executionId, string errorMessage, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task UpdateWorkspaceDetailsAsync(Guid executionId, string workspacePath, string branchName, CancellationToken cancellationToken = default) => throw new NotImplementedException();
         public Task<bool> TrySetReviewDecisionAsync(Guid executionId, DevPilot.Domain.Enums.ExecutionReviewStatus expectedStatus, DevPilot.Domain.Enums.ExecutionReviewStatus newStatus, DateTime decidedAt, string? rejectionReason, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> TrySetReviewDecisionWithFingerprintAsync(Guid executionId, DevPilot.Domain.Enums.ExecutionReviewStatus expectedStatus, DevPilot.Domain.Enums.ExecutionReviewStatus newStatus, DateTime decidedAt, string fingerprint, string? rejectionReason, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> TryClaimNewCommitLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, string baseCommitSha, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> TryReclaimStaleCommitLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task SetCommitCompletedAsync(Guid executionId, Guid attemptId, string commitSha, DateTime committedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task SetCommitFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class FakeWorkspaceManager : IExecutionWorkspaceManager
@@ -561,5 +880,30 @@ public class ExecutionReviewTests : IDisposable
         }
 
         public Task<ExecutionWorkspaceResult> PrepareWorkspaceAsync(Guid executionId, Guid taskId, string sourceRepositoryLocalPath, string? sourceBranch = null, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+    }
+
+    private sealed class StubFingerprintCalculator : IExecutionChangeFingerprintCalculator
+    {
+        public string SampleFingerprint { get; set; } = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+        public Task<ExecutionFingerprintResult> ComputeFingerprintAsync(string workspacePath, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ExecutionFingerprintResult(
+                Success: true,
+                Fingerprint: SampleFingerprint,
+                BaseHeadSha: "base123",
+                HasSensitiveFiles: false,
+                ChangedFileCount: 1));
+        }
+
+        public Task<ExecutionFingerprintResult> ComputeStagedTreeFingerprintAsync(string workspacePath, string treeSha, string baseHeadSha, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ExecutionFingerprintResult(
+                Success: true,
+                Fingerprint: SampleFingerprint,
+                BaseHeadSha: baseHeadSha,
+                HasSensitiveFiles: false,
+                ChangedFileCount: 1));
+        }
     }
 }

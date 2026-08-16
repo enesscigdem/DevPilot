@@ -29,4 +29,18 @@ public class TaskExecution
     public DateTime? ReviewDecidedAt { get; set; }
 
     public string? ReviewRejectionReason { get; set; }
+
+    public string? ApprovedChangeFingerprint { get; set; }
+
+    public string? BaseCommitSha { get; set; }
+
+    public ExecutionCommitStatus CommitStatus { get; set; } = ExecutionCommitStatus.None;
+
+    public Guid? CommitAttemptId { get; set; }
+
+    public DateTime? CommitClaimedAt { get; set; }
+
+    public string? CommitSha { get; set; }
+
+    public DateTime? CommittedAt { get; set; }
 }

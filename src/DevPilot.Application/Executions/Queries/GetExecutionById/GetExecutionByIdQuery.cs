@@ -70,5 +70,8 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             CompletedAt = execution.CompletedAt,
             ErrorMessage = execution.ErrorMessage,
             ReviewStatus = execution.ReviewStatus.ToString(),
+            CommitStatus = execution.CommitStatus.ToString(),
+            CommitSha = execution.CommitSha,
+            CommittedAt = execution.CommittedAt,
         };
 }

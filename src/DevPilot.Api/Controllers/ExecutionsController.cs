@@ -1,4 +1,5 @@
 using DevPilot.Application.Executions.Commands.ApproveExecutionReview;
+using DevPilot.Application.Executions.Commands.CommitExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
 using DevPilot.Application.Executions.Queries.GetExecutionActivity;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
@@ -8,6 +9,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace DevPilot.Api.Controllers;
 
+public sealed record ApproveExecutionReviewRequest(string ExpectedChangeFingerprint);
 public sealed record RejectExecutionReviewRequest(string? Reason);
 
 [ApiController]
@@ -21,6 +23,7 @@ public class ExecutionsController : ControllerBase
     private readonly IGetExecutionActivityQueryHandler _getExecutionActivityHandler;
     private readonly IApproveExecutionReviewCommandHandler _approveReviewHandler;
     private readonly IRejectExecutionReviewCommandHandler _rejectReviewHandler;
+    private readonly ICommitExecutionCommandHandler _commitExecutionHandler;
 
     public ExecutionsController(
         IGetExecutionsQueryHandler getExecutionsHandler,
@@ -28,7 +31,8 @@ public class ExecutionsController : ControllerBase
         IGetExecutionReviewQueryHandler getExecutionReviewHandler,
         IGetExecutionActivityQueryHandler getExecutionActivityHandler,
         IApproveExecutionReviewCommandHandler approveReviewHandler,
-        IRejectExecutionReviewCommandHandler rejectReviewHandler)
+        IRejectExecutionReviewCommandHandler rejectReviewHandler,
+        ICommitExecutionCommandHandler commitExecutionHandler)
     {
         _getExecutionsHandler = getExecutionsHandler;
         _getExecutionByIdHandler = getExecutionByIdHandler;
@@ -36,6 +40,7 @@ public class ExecutionsController : ControllerBase
         _getExecutionActivityHandler = getExecutionActivityHandler;
         _approveReviewHandler = approveReviewHandler;
         _rejectReviewHandler = rejectReviewHandler;
+        _commitExecutionHandler = commitExecutionHandler;
     }
 
     [HttpGet]
@@ -103,10 +108,11 @@ public class ExecutionsController : ControllerBase
     [HttpPost("{id:guid}/review/approve", Name = nameof(ApproveExecutionReview))]
     public async Task<IActionResult> ApproveExecutionReview(
         [FromRoute] Guid id,
+        [FromBody] ApproveExecutionReviewRequest request,
         CancellationToken cancellationToken)
     {
         var result = await _approveReviewHandler
-            .HandleAsync(new ApproveExecutionReviewCommand(id), cancellationToken)
+            .HandleAsync(new ApproveExecutionReviewCommand(id, request?.ExpectedChangeFingerprint ?? string.Empty), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -134,6 +140,24 @@ public class ExecutionsController : ControllerBase
             RejectExecutionReviewResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
             RejectExecutionReviewResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be rejected." }),
             RejectExecutionReviewResultStatus.Success => Ok(result.Decision),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
+    [HttpPost("{id:guid}/commit", Name = nameof(CommitExecution))]
+    public async Task<IActionResult> CommitExecution(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _commitExecutionHandler
+            .HandleAsync(new CommitExecutionCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            CommitExecutionResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            CommitExecutionResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be committed." }),
+            CommitExecutionResultStatus.Success => Ok(result.Response),
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }

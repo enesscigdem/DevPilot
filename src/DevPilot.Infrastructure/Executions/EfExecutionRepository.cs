@@ -231,4 +231,116 @@ public sealed class EfExecutionRepository : IExecutionRepository
 
         return affected > 0;
     }
+
+    /// <inheritdoc />
+    public async Task<bool> TrySetReviewDecisionWithFingerprintAsync(
+        Guid executionId,
+        ExecutionReviewStatus expectedStatus,
+        ExecutionReviewStatus newStatus,
+        DateTime decidedAt,
+        string fingerprint,
+        string? rejectionReason,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == expectedStatus)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.ReviewStatus, newStatus)
+                    .SetProperty(e => e.ReviewDecidedAt, decidedAt)
+                    .SetProperty(e => e.ApprovedChangeFingerprint, fingerprint)
+                    .SetProperty(e => e.ReviewRejectionReason, rejectionReason),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryClaimNewCommitLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        string baseCommitSha,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == ExecutionReviewStatus.Approved &&
+                        (e.CommitStatus == ExecutionCommitStatus.None || e.CommitStatus == ExecutionCommitStatus.Failed))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.CommitStatus, ExecutionCommitStatus.InProgress)
+                    .SetProperty(e => e.CommitAttemptId, attemptId)
+                    .SetProperty(e => e.CommitClaimedAt, claimedAt)
+                    .SetProperty(e => e.BaseCommitSha, baseCommitSha),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> TryReclaimStaleCommitLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan leaseTimeout,
+        CancellationToken cancellationToken = default)
+    {
+        var threshold = claimedAt - leaseTimeout;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.Status == TaskExecutionStatus.Completed &&
+                        e.ReviewStatus == ExecutionReviewStatus.Approved &&
+                        e.CommitStatus == ExecutionCommitStatus.InProgress &&
+                        (e.CommitClaimedAt == null || e.CommitClaimedAt < threshold))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.CommitAttemptId, attemptId)
+                    .SetProperty(e => e.CommitClaimedAt, claimedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    /// <inheritdoc />
+    public async Task SetCommitCompletedAsync(
+        Guid executionId,
+        Guid attemptId,
+        string commitSha,
+        DateTime committedAt,
+        CancellationToken cancellationToken = default)
+    {
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        (e.CommitAttemptId == attemptId || e.CommitStatus == ExecutionCommitStatus.InProgress))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.CommitStatus, ExecutionCommitStatus.Committed)
+                    .SetProperty(e => e.CommitSha, commitSha)
+                    .SetProperty(e => e.CommittedAt, committedAt),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SetCommitFailedAsync(
+        Guid executionId,
+        Guid attemptId,
+        CancellationToken cancellationToken = default)
+    {
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.CommitAttemptId == attemptId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.CommitStatus, ExecutionCommitStatus.Failed),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

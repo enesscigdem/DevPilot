@@ -76,4 +76,39 @@ public interface IExecutionRepository
         DateTime decidedAt,
         string? rejectionReason,
         CancellationToken cancellationToken = default);
+
+    Task<bool> TrySetReviewDecisionWithFingerprintAsync(
+        Guid executionId,
+        DevPilot.Domain.Enums.ExecutionReviewStatus expectedStatus,
+        DevPilot.Domain.Enums.ExecutionReviewStatus newStatus,
+        DateTime decidedAt,
+        string fingerprint,
+        string? rejectionReason,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> TryClaimNewCommitLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        string baseCommitSha,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> TryReclaimStaleCommitLeaseAsync(
+        Guid executionId,
+        Guid attemptId,
+        DateTime claimedAt,
+        TimeSpan leaseTimeout,
+        CancellationToken cancellationToken = default);
+
+    Task SetCommitCompletedAsync(
+        Guid executionId,
+        Guid attemptId,
+        string commitSha,
+        DateTime committedAt,
+        CancellationToken cancellationToken = default);
+
+    Task SetCommitFailedAsync(
+        Guid executionId,
+        Guid attemptId,
+        CancellationToken cancellationToken = default);
 }

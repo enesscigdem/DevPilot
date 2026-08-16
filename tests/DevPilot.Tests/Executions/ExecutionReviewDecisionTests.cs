@@ -99,14 +99,16 @@ public class ExecutionReviewDecisionTests : IDisposable
     {
         // Arrange
         var execution = SeedCompletedExecution();
+        var fingerprintCalculator = new StubFingerprintCalculator();
         var handler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
             _workspaceManager,
+            fingerprintCalculator,
             _activityRecorder,
             NullLogger<ApproveExecutionReviewCommandHandler>.Instance);
 
         // Act
-        var result = await handler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id));
+        var result = await handler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id, fingerprintCalculator.SampleFingerprint));
 
         // Assert
         result.Status.Should().Be(ApproveExecutionReviewResultStatus.Success);
@@ -185,9 +187,11 @@ public class ExecutionReviewDecisionTests : IDisposable
     {
         // Arrange
         var execution = SeedCompletedExecution();
+        var fingerprintCalculator = new StubFingerprintCalculator();
         var approveHandler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
             _workspaceManager,
+            fingerprintCalculator,
             _activityRecorder,
             NullLogger<ApproveExecutionReviewCommandHandler>.Instance);
 
@@ -198,7 +202,7 @@ public class ExecutionReviewDecisionTests : IDisposable
             NullLogger<RejectExecutionReviewCommandHandler>.Instance);
 
         // Act — trigger approve and reject concurrently
-        var approveTask = Task.Run(() => approveHandler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id)));
+        var approveTask = Task.Run(() => approveHandler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id, fingerprintCalculator.SampleFingerprint)));
         var rejectTask = Task.Run(() => rejectHandler.HandleAsync(new RejectExecutionReviewCommand(execution.Id, "Reject reason")));
 
         await Task.WhenAll(approveTask, rejectTask);
@@ -232,10 +236,12 @@ public class ExecutionReviewDecisionTests : IDisposable
         // Arrange
         var execution = SeedCompletedExecution();
         execution.Status = status;
+        var fingerprintCalculator = new StubFingerprintCalculator();
 
         var approveHandler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
             _workspaceManager,
+            fingerprintCalculator,
             _activityRecorder,
             NullLogger<ApproveExecutionReviewCommandHandler>.Instance);
 
@@ -246,7 +252,7 @@ public class ExecutionReviewDecisionTests : IDisposable
             NullLogger<RejectExecutionReviewCommandHandler>.Instance);
 
         // Act
-        var approveResult = await approveHandler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id));
+        var approveResult = await approveHandler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id, fingerprintCalculator.SampleFingerprint));
         var rejectResult = await rejectHandler.HandleAsync(new RejectExecutionReviewCommand(execution.Id, "reason"));
 
         // Assert
@@ -260,15 +266,17 @@ public class ExecutionReviewDecisionTests : IDisposable
         // Arrange
         var execution = SeedCompletedExecution();
         var failingActivityRecorder = new FailingActivityRecorder();
+        var fingerprintCalculator = new StubFingerprintCalculator();
 
         var handler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
             _workspaceManager,
+            fingerprintCalculator,
             failingActivityRecorder,
             NullLogger<ApproveExecutionReviewCommandHandler>.Instance);
 
         // Act
-        var result = await handler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id));
+        var result = await handler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id, fingerprintCalculator.SampleFingerprint));
 
         // Assert — decision is successfully saved despite telemetry crash
         result.Status.Should().Be(ApproveExecutionReviewResultStatus.Success);
@@ -335,6 +343,39 @@ public class ExecutionReviewDecisionTests : IDisposable
             }
         }
 
+        public Task<bool> TrySetReviewDecisionWithFingerprintAsync(
+            Guid executionId,
+            ExecutionReviewStatus expectedStatus,
+            ExecutionReviewStatus newStatus,
+            DateTime decidedAt,
+            string fingerprint,
+            string? rejectionReason,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_executions.TryGetValue(executionId, out var execution))
+            {
+                return Task.FromResult(false);
+            }
+
+            lock (execution)
+            {
+                if (execution.Status == TaskExecutionStatus.Completed && execution.ReviewStatus == expectedStatus)
+                {
+                    execution.ReviewStatus = newStatus;
+                    execution.ReviewDecidedAt = decidedAt;
+                    execution.ApprovedChangeFingerprint = fingerprint;
+                    execution.ReviewRejectionReason = rejectionReason;
+                    return Task.FromResult(true);
+                }
+                return Task.FromResult(false);
+            }
+        }
+
+        public Task<bool> TryClaimNewCommitLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, string baseCommitSha, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> TryReclaimStaleCommitLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task SetCommitCompletedAsync(Guid executionId, Guid attemptId, string commitSha, DateTime committedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task SetCommitFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
         public Task<bool> StartExecutionAtomicAsync(TaskExecution execution, DevelopmentTask task, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task<IReadOnlyList<TaskExecution>> GetAllAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<TaskExecution>>(_executions.Values.ToList());
         public Task<bool> HasActiveExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
@@ -387,6 +428,31 @@ public class ExecutionReviewDecisionTests : IDisposable
         public Task RecordActivityAsync(Guid executionId, ExecutionStage stage, ExecutionActivityStatus status, string message, ExecutionActivityMetadata? metadata = null, CancellationToken cancellationToken = default)
         {
             throw new InvalidOperationException("Simulated telemetry database exception");
+        }
+    }
+
+    private sealed class StubFingerprintCalculator : IExecutionChangeFingerprintCalculator
+    {
+        public string SampleFingerprint { get; set; } = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+
+        public Task<ExecutionFingerprintResult> ComputeFingerprintAsync(string workspacePath, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ExecutionFingerprintResult(
+                Success: true,
+                Fingerprint: SampleFingerprint,
+                BaseHeadSha: "base123",
+                HasSensitiveFiles: false,
+                ChangedFileCount: 1));
+        }
+
+        public Task<ExecutionFingerprintResult> ComputeStagedTreeFingerprintAsync(string workspacePath, string treeSha, string baseHeadSha, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ExecutionFingerprintResult(
+                Success: true,
+                Fingerprint: SampleFingerprint,
+                BaseHeadSha: baseHeadSha,
+                HasSensitiveFiles: false,
+                ChangedFileCount: 1));
         }
     }
 }

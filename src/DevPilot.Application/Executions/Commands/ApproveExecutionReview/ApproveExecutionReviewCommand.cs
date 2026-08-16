@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Application.Executions.Commands.ApproveExecutionReview;
 
-public sealed record ApproveExecutionReviewCommand(Guid ExecutionId);
+public sealed record ApproveExecutionReviewCommand(Guid ExecutionId, string ExpectedChangeFingerprint);
 
 public enum ApproveExecutionReviewResultStatus
 {
@@ -43,17 +43,20 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
 {
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionWorkspaceManager _workspaceManager;
+    private readonly IExecutionChangeFingerprintCalculator _fingerprintCalculator;
     private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly ILogger<ApproveExecutionReviewCommandHandler> _logger;
 
     public ApproveExecutionReviewCommandHandler(
         IExecutionRepository executionRepository,
         IExecutionWorkspaceManager workspaceManager,
+        IExecutionChangeFingerprintCalculator fingerprintCalculator,
         IExecutionActivityRecorder activityRecorder,
         ILogger<ApproveExecutionReviewCommandHandler> logger)
     {
         _executionRepository = executionRepository;
         _workspaceManager = workspaceManager;
+        _fingerprintCalculator = fingerprintCalculator;
         _activityRecorder = activityRecorder;
         _logger = logger;
     }
@@ -103,13 +106,43 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
                 $"Execution workspace verification failed: {verificationResult.ErrorMessage}");
         }
 
+        // Recompute current worktree fingerprint to compare against expectedChangeFingerprint
+        var fingerprintResult = await _fingerprintCalculator
+            .ComputeFingerprintAsync(execution.WorkspacePath, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!fingerprintResult.Success || string.IsNullOrEmpty(fingerprintResult.Fingerprint))
+        {
+            return ApproveExecutionReviewResult.Conflict(
+                $"Failed to compute worktree fingerprint: {fingerprintResult.ErrorMessage}");
+        }
+
+        if (fingerprintResult.HasSensitiveFiles)
+        {
+            return ApproveExecutionReviewResult.Conflict(
+                "Execution worktree contains sensitive files that cannot be approved or committed.");
+        }
+
+        if (fingerprintResult.ChangedFileCount == 0)
+        {
+            return ApproveExecutionReviewResult.Conflict(
+                "Execution worktree has no changed files to approve.");
+        }
+
+        if (!string.Equals(fingerprintResult.Fingerprint, command.ExpectedChangeFingerprint, StringComparison.Ordinal))
+        {
+            return ApproveExecutionReviewResult.Conflict(
+                "Review changes have changed. Please refresh and review again.");
+        }
+
         var decidedAt = DateTime.UtcNow;
         var updated = await _executionRepository
-            .TrySetReviewDecisionAsync(
+            .TrySetReviewDecisionWithFingerprintAsync(
                 execution.Id,
                 ExecutionReviewStatus.Pending,
                 ExecutionReviewStatus.Approved,
                 decidedAt,
+                fingerprintResult.Fingerprint,
                 rejectionReason: null,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);

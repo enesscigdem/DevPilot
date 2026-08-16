@@ -157,6 +157,16 @@ public class DevPilotDbContext : DbContext
                 .HasDefaultValue(ExecutionReviewStatus.Pending);
             entity.Property(e => e.ReviewDecidedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.ReviewRejectionReason).HasMaxLength(1000);
+            entity.Property(e => e.ApprovedChangeFingerprint).HasMaxLength(100);
+            entity.Property(e => e.BaseCommitSha).HasMaxLength(100);
+            entity.Property(e => e.CommitStatus)
+                .HasConversion<string>()
+                .HasMaxLength(50)
+                .HasDefaultValue(ExecutionCommitStatus.None);
+            entity.Property(e => e.CommitAttemptId).HasColumnType("uuid");
+            entity.Property(e => e.CommitClaimedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CommitSha).HasMaxLength(100);
+            entity.Property(e => e.CommittedAt).HasColumnType("timestamp with time zone");
 
             entity.HasOne(e => e.DevelopmentTask)
                 .WithMany()

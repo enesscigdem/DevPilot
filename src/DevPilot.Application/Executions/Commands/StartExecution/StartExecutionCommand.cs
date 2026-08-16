@@ -202,5 +202,9 @@ public sealed class StartExecutionCommandHandler : IStartExecutionCommandHandler
             StartedAt = execution.StartedAt,
             CompletedAt = execution.CompletedAt,
             ErrorMessage = execution.ErrorMessage,
+            ReviewStatus = execution.ReviewStatus.ToString(),
+            CommitStatus = execution.CommitStatus.ToString(),
+            CommitSha = execution.CommitSha,
+            CommittedAt = execution.CommittedAt,
         };
 }

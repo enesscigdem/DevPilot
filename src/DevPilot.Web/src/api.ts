@@ -1,4 +1,5 @@
 import type {
+  CommitExecutionResult,
   CreateTaskRequest,
   ExecutionActivityItem,
   ExecutionDetail,
@@ -125,9 +126,10 @@ export async function getExecutionReview(id: string, init?: RequestInit): Promis
   return http<ExecutionReview>(`/executions/${id}/review`, init);
 }
 
-export async function approveExecutionReview(id: string): Promise<ExecutionReviewDecision> {
+export async function approveExecutionReview(id: string, expectedChangeFingerprint: string): Promise<ExecutionReviewDecision> {
   return http<ExecutionReviewDecision>(`/executions/${id}/review/approve`, {
     method: 'POST',
+    body: JSON.stringify({ expectedChangeFingerprint }),
   });
 }
 
@@ -135,5 +137,11 @@ export async function rejectExecutionReview(id: string, reason?: string): Promis
   return http<ExecutionReviewDecision>(`/executions/${id}/review/reject`, {
     method: 'POST',
     body: JSON.stringify({ reason }),
+  });
+}
+
+export async function commitExecution(id: string): Promise<CommitExecutionResult> {
+  return http<CommitExecutionResult>(`/executions/${id}/commit`, {
+    method: 'POST',
   });
 }

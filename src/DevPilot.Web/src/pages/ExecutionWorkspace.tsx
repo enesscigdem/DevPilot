@@ -428,6 +428,12 @@ export function ExecutionWorkspace() {
                 <span>Completed</span>
                 <span className="text-foreground">{execution.completedAt ? formatDateTime(execution.completedAt) : "—"}</span>
               </div>
+              {execution.commitStatus === "Committed" && (
+                <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
+                  <span>Local Commit</span>
+                  <span className="text-success font-semibold">{execution.commitSha?.slice(0, 7) ?? "Committed"}</span>
+                </div>
+              )}
             </Panel>
 
             <Panel className="p-3.5">

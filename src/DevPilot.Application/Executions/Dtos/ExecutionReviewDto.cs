@@ -25,4 +25,10 @@ public sealed record ExecutionReviewDto(
     ExecutionReviewStageStatusDto Test,
     string ReviewStatus = "Pending",
     DateTime? DecidedAt = null,
-    string? RejectionReason = null);
+    string? RejectionReason = null,
+    string ChangeFingerprint = "",
+    bool ApprovedSnapshotMatchesCurrent = true,
+    bool CommitEligible = false,
+    string CommitStatus = "None",
+    string? CommitSha = null,
+    DateTime? CommittedAt = null);

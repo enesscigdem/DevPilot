@@ -84,8 +84,8 @@ public sealed class GitExecutionDiffReader : IExecutionGitDiffReader
         {
             var relativePath = entry.Path;
 
-            // Step A: Sensitive-path classification FIRST (MUST NOT read/diff sensitive files)
-            var isSensitive = IsSensitivePath(relativePath);
+            // Step A: Sensitive-path classification FIRST on BOTH relativePath and OldPath
+            var isSensitive = IsSensitivePath(relativePath) || (!string.IsNullOrEmpty(entry.OldPath) && IsSensitivePath(entry.OldPath));
 
             // Step B: Metadata & Binary classification
             int? additions = null;
@@ -211,44 +211,172 @@ public sealed class GitExecutionDiffReader : IExecutionGitDiffReader
             DiffTruncated: diffTruncated);
     }
 
+    public async Task<ExecutionGitDiffResult> ReadCommittedDiffAsync(
+        string workspacePath,
+        string baseCommitSha,
+        string commitSha,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
+        {
+            return new ExecutionGitDiffResult(false, $"Execution workspace directory does not exist: '{workspacePath}'.");
+        }
+
+        var fullWorkspacePath = Path.GetFullPath(workspacePath);
+
+        // 1. Fetch numstat map via git diff-tree --numstat -z -M50% baseCommitSha commitSha
+        var numstatCmd = await RunGitCommandAsync(
+            fullWorkspacePath,
+            cancellationToken,
+            "-c", "diff.renames=true",
+            "-c", "status.renames=true",
+            "diff-tree",
+            "--numstat",
+            "-z",
+            "-M50%",
+            baseCommitSha,
+            commitSha).ConfigureAwait(false);
+
+        var numstatMap = numstatCmd.IsSuccess ? ParseNumstatZ(numstatCmd.RawBytes) : new Dictionary<string, NumstatEntry>(StringComparer.Ordinal);
+
+        // 2. Fetch diff entries via git diff-tree --no-commit-id -r -z -M50% baseCommitSha commitSha
+        var diffTreeCmd = await RunGitCommandAsync(
+            fullWorkspacePath,
+            cancellationToken,
+            "-c", "diff.renames=true",
+            "-c", "status.renames=true",
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "-z",
+            "-M50%",
+            baseCommitSha,
+            commitSha).ConfigureAwait(false);
+
+        if (!diffTreeCmd.IsSuccess)
+        {
+            return new ExecutionGitDiffResult(false, $"Failed to get committed diff tree: {diffTreeCmd.StdErr}");
+        }
+
+        var diffTreeEntries = ParseDiffTreeZ(diffTreeCmd.RawBytes);
+        if (diffTreeEntries.Count == 0)
+        {
+            return new ExecutionGitDiffResult(true, ChangedFiles: Array.Empty<ExecutionReviewFileDto>(), DiffText: "", DiffTruncated: false);
+        }
+
+        var changedFileDtos = new List<ExecutionReviewFileDto>();
+        var diffBuilder = new StringBuilder();
+        var currentUtf8Bytes = 0;
+        var diffTruncated = false;
+
+        foreach (var entry in diffTreeEntries)
+        {
+            var relativePath = entry.Path;
+            var oldPath = entry.OldPath;
+
+            // Sensitive-path classification on BOTH relativePath and oldPath
+            var isSensitive = IsSensitivePath(relativePath) || (!string.IsNullOrEmpty(oldPath) && IsSensitivePath(oldPath));
+
+            // Metadata & Binary classification
+            int? additions = null;
+            int? deletions = null;
+            var isBinary = false;
+
+            if (numstatMap.TryGetValue(relativePath, out var numstat))
+            {
+                if (numstat.IsBinary)
+                {
+                    isBinary = true;
+                }
+                else
+                {
+                    additions = numstat.Additions;
+                    deletions = numstat.Deletions;
+                }
+            }
+
+            var changeTypeStr = DetermineChangeTypeFromDiffTree(entry.ChangeType);
+
+            changedFileDtos.Add(new ExecutionReviewFileDto(
+                Path: relativePath,
+                ChangeType: changeTypeStr,
+                Additions: additions,
+                Deletions: deletions));
+
+            string fileDiffText;
+
+            if (isSensitive)
+            {
+                fileDiffText = $"[Redacted sensitive file content: {relativePath}]\n";
+            }
+            else if (isBinary)
+            {
+                fileDiffText = $"[Binary file diff not shown: {relativePath}]\n";
+            }
+            else
+            {
+                // Tracked safe text file -> git diff baseCommitSha commitSha -- <path>
+                var diffCmd = await RunGitCommandAsync(
+                    fullWorkspacePath,
+                    cancellationToken,
+                    "-c", "diff.renames=true",
+                    "-c", "status.renames=true",
+                    "diff",
+                    "-M50%",
+                    baseCommitSha,
+                    commitSha,
+                    "--",
+                    relativePath).ConfigureAwait(false);
+
+                if (diffCmd.IsSuccess && !string.IsNullOrEmpty(diffCmd.StdOut))
+                {
+                    fileDiffText = diffCmd.StdOut;
+                    if (!fileDiffText.EndsWith('\n'))
+                    {
+                        fileDiffText += "\n";
+                    }
+                }
+                else
+                {
+                    fileDiffText = "";
+                }
+            }
+
+            if (!string.IsNullOrEmpty(fileDiffText))
+            {
+                if (!diffTruncated)
+                {
+                    var textBytes = Encoding.UTF8.GetByteCount(fileDiffText);
+                    if (currentUtf8Bytes + textBytes <= MaxDiffSizeBytes)
+                    {
+                        diffBuilder.Append(fileDiffText);
+                        currentUtf8Bytes += textBytes;
+                    }
+                    else
+                    {
+                        var remainingBytes = MaxDiffSizeBytes - currentUtf8Bytes;
+                        if (remainingBytes > 0)
+                        {
+                            var truncatedStr = TruncateUtf8String(fileDiffText, remainingBytes);
+                            diffBuilder.Append(truncatedStr);
+                            currentUtf8Bytes += Encoding.UTF8.GetByteCount(truncatedStr);
+                        }
+                        diffTruncated = true;
+                    }
+                }
+            }
+        }
+
+        return new ExecutionGitDiffResult(
+            Success: true,
+            ChangedFiles: changedFileDtos,
+            DiffText: diffBuilder.ToString(),
+            DiffTruncated: diffTruncated);
+    }
+
     public static bool IsSensitivePath(string relativePath)
     {
-        if (string.IsNullOrWhiteSpace(relativePath))
-        {
-            return false;
-        }
-
-        var normalized = relativePath.Replace('\\', '/').TrimStart('/');
-
-        // Check for .git directory or files
-        if (normalized.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
-            normalized.StartsWith(".git/", StringComparison.OrdinalIgnoreCase) ||
-            normalized.Contains("/.git/", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        var fileName = Path.GetFileName(normalized);
-
-        // Exact file name match
-        if (SensitiveExactFileNames.Any(s => fileName.Equals(s, StringComparison.OrdinalIgnoreCase)))
-        {
-            return true;
-        }
-
-        // Starts with .env.
-        if (fileName.StartsWith(".env.", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        // Sensitive extensions
-        if (SensitiveExtensions.Any(ext => fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
-        {
-            return true;
-        }
-
-        return false;
+        return DevPilot.Application.Executions.Services.ExecutionSensitivePathClassifier.IsSensitivePath(relativePath);
     }
 
     private static List<StatusEntry> ParseStatusPorcelainZ(byte[] rawBytes)
@@ -464,6 +592,85 @@ public sealed class GitExecutionDiffReader : IExecutionGitDiffReader
         }
     }
 
+    private static string DetermineChangeTypeFromDiffTree(string changeType)
+    {
+        return changeType switch
+        {
+            "M" => "Modified",
+            "A" => "Added",
+            "D" => "Deleted",
+            "R" => "Renamed",
+            "C" => "Copied",
+            _ => "Modified"
+        };
+    }
+
+    private static List<DiffTreeEntry> ParseDiffTreeZ(byte[] rawBytes)
+    {
+        var entries = new List<DiffTreeEntry>();
+        if (rawBytes == null || rawBytes.Length == 0)
+        {
+            return entries;
+        }
+
+        var tokens = SplitByNul(rawBytes);
+        var i = 0;
+
+        while (i < tokens.Count)
+        {
+            var header = tokens[i];
+            i++;
+
+            if (string.IsNullOrWhiteSpace(header))
+            {
+                continue;
+            }
+
+            var parts = header.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 5)
+            {
+                continue;
+            }
+
+            var fileMode = parts[1].TrimStart(':');
+            var newSha = parts[3];
+            var statusRaw = parts[4];
+            var changeType = statusRaw.Length > 0 ? statusRaw[..1] : "M";
+
+            string? oldPath = null;
+            string path = "";
+
+            if (changeType == "R" || changeType == "C")
+            {
+                if (i < tokens.Count)
+                {
+                    oldPath = tokens[i];
+                    i++;
+                }
+                if (i < tokens.Count)
+                {
+                    path = tokens[i];
+                    i++;
+                }
+            }
+            else
+            {
+                if (i < tokens.Count)
+                {
+                    path = tokens[i];
+                    i++;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(path))
+            {
+                entries.Add(new DiffTreeEntry(fileMode, changeType, oldPath, path, newSha));
+            }
+        }
+
+        return entries;
+    }
+
     private static string TruncateUtf8String(string text, int maxBytes)
     {
         if (string.IsNullOrEmpty(text) || maxBytes <= 0)
@@ -562,6 +769,8 @@ public sealed class GitExecutionDiffReader : IExecutionGitDiffReader
     }
 
     private sealed record StatusEntry(string Path, string? OldPath, string ChangeType);
+
+    private sealed record DiffTreeEntry(string FileMode, string ChangeType, string? OldPath, string Path, string BlobSha);
 
     private sealed record NumstatEntry(bool IsBinary, int? Additions, int? Deletions);
 

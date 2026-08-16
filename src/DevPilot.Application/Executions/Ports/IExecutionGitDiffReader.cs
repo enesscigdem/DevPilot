@@ -15,4 +15,10 @@ public interface IExecutionGitDiffReader
         string workspacePath,
         string branchName,
         CancellationToken cancellationToken = default);
+
+    Task<ExecutionGitDiffResult> ReadCommittedDiffAsync(
+        string workspacePath,
+        string baseCommitSha,
+        string commitSha,
+        CancellationToken cancellationToken = default);
 }

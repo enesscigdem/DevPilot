@@ -215,6 +215,9 @@ export interface ExecutionDetail {
   repositoryName: string;
   status: number;
   reviewStatus: string;
+  commitStatus?: string;
+  commitSha?: string | null;
+  committedAt?: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -270,6 +273,12 @@ export interface ExecutionReview {
   reviewStatus: string;
   decidedAt: string | null;
   rejectionReason: string | null;
+  changeFingerprint: string;
+  approvedSnapshotMatchesCurrent: boolean;
+  commitEligible: boolean;
+  commitStatus: string;
+  commitSha: string | null;
+  committedAt: string | null;
 }
 
 export interface ExecutionReviewDecision {
@@ -277,4 +286,12 @@ export interface ExecutionReviewDecision {
   reviewStatus: string;
   decidedAt: string;
   rejectionReason: string | null;
+}
+
+export interface CommitExecutionResult {
+  executionId: string;
+  branchName: string;
+  commitStatus: string;
+  commitSha: string;
+  committedAt: string;
 }

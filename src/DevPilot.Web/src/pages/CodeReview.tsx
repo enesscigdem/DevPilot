@@ -16,7 +16,7 @@ import {
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, getExecutionReview, rejectExecutionReview } from "@/api"
+import { approveExecutionReview, commitExecution, getExecutionReview, rejectExecutionReview } from "@/api"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
@@ -235,13 +235,15 @@ export function CodeReview() {
     }
   }, [id])
 
+  const [isSubmittingCommit, setIsSubmittingCommit] = useState(false)
+
   const handleApprove = async () => {
     if (!id || !review || isSubmittingDecision) return
     setIsSubmittingDecision(true)
     setDecisionError(null)
 
     try {
-      const decision = await approveExecutionReview(id)
+      const decision = await approveExecutionReview(id, review.changeFingerprint)
       setReview({
         ...review,
         reviewStatus: decision.reviewStatus,
@@ -252,6 +254,27 @@ export function CodeReview() {
       setDecisionError(err instanceof Error ? err.message : "Failed to approve review.")
     } finally {
       setIsSubmittingDecision(false)
+    }
+  }
+
+  const handleCommit = async () => {
+    if (!id || !review || isSubmittingCommit) return
+    setIsSubmittingCommit(true)
+    setDecisionError(null)
+
+    try {
+      const res = await commitExecution(id)
+      setReview({
+        ...review,
+        commitStatus: res.commitStatus,
+        commitSha: res.commitSha,
+        committedAt: res.committedAt,
+        commitEligible: false,
+      })
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : "Failed to commit changes.")
+    } finally {
+      setIsSubmittingCommit(false)
     }
   }
 
@@ -573,20 +596,68 @@ export function CodeReview() {
             )}
 
             {isApproved && (
-              <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
-                <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
-                  <CheckCircle2 className="h-4 w-4 shrink-0" />
-                  <span>Review Approved</span>
-                </div>
-                {review.decidedAt && (
-                  <div className="font-mono text-[11px] text-subtle-foreground">
-                    Decided at {new Date(review.decidedAt).toLocaleString()}
+              <div className="space-y-3">
+                <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
+                  <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                    <span>Review Approved</span>
                   </div>
+                  {review.decidedAt && (
+                    <div className="font-mono text-[11px] text-subtle-foreground">
+                      Decided at {new Date(review.decidedAt).toLocaleString()}
+                    </div>
+                  )}
+                  <p className="text-[12px] text-muted-foreground">
+                    Execution changes approved.
+                  </p>
+                </Panel>
+
+                {review.commitStatus === "Committed" ? (
+                  <Panel className="border-primary/30 bg-primary-soft/30 p-4 space-y-2">
+                    <div className="flex items-center gap-2 text-primary font-semibold text-[13.5px]">
+                      <GitBranch className="h-4 w-4 shrink-0" />
+                      <span>Committed</span>
+                      <span className="font-mono text-[11px] text-muted-foreground">({review.commitSha?.slice(0, 7)})</span>
+                    </div>
+                    {review.committedAt && (
+                      <div className="font-mono text-[11px] text-subtle-foreground">
+                        Committed at {new Date(review.committedAt).toLocaleString()}
+                      </div>
+                    )}
+                    <p className="text-[12px] text-muted-foreground">
+                      Changes committed to local execution branch. Remote push is a future next step.
+                    </p>
+                  </Panel>
+                ) : !review.approvedSnapshotMatchesCurrent ? (
+                  <Panel className="border-amber/30 bg-amber-soft/40 p-4 space-y-2">
+                    <div className="flex items-center gap-2 text-accent font-semibold text-[13px]">
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                      <span>Approved snapshot changed</span>
+                    </div>
+                    <p className="text-[12px] text-muted-foreground">
+                      Worktree content differs from the approved review snapshot.
+                    </p>
+                    <Button variant="default" size="md" disabled className="w-full opacity-50 cursor-not-allowed">
+                      Commit changes
+                    </Button>
+                  </Panel>
+                ) : (
+                  <Button
+                    variant="primary"
+                    size="md"
+                    disabled={!review.commitEligible || isSubmittingCommit}
+                    onClick={handleCommit}
+                    className="w-full"
+                  >
+                    {isSubmittingCommit ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <GitBranch className="h-4 w-4" />
+                    )}
+                    Commit changes
+                  </Button>
                 )}
-                <p className="text-[12px] text-muted-foreground">
-                  Execution changes approved. Next future step: Commit & Open Pull Request.
-                </p>
-              </Panel>
+              </div>
             )}
 
             {isRejected && (

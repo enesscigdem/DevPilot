@@ -10,6 +10,7 @@ using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
 using DevPilot.Application.Tasks.Commands.ApproveTask;
 using DevPilot.Application.Executions.Commands.ApproveExecutionReview;
+using DevPilot.Application.Executions.Commands.CommitExecution;
 using DevPilot.Application.Executions.Commands.ProcessExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
 using DevPilot.Application.Executions.Commands.RunDeveloperAgent;
@@ -108,6 +109,9 @@ public static class DependencyInjection
         services.AddScoped<IExecutionActivityRecorder, EfExecutionActivityRecorder>();
         services.AddScoped<IExecutionActivityRepository, EfExecutionActivityRepository>();
         services.AddScoped<IGetExecutionActivityQueryHandler, GetExecutionActivityQueryHandler>();
+        services.AddScoped<IExecutionChangeFingerprintCalculator, GitExecutionChangeFingerprintCalculator>();
+        services.AddScoped<IExecutionGitCommitService, GitExecutionCommitService>();
+        services.AddScoped<ICommitExecutionCommandHandler, CommitExecutionCommandHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();
         services.AddScoped<IRejectExecutionReviewCommandHandler, RejectExecutionReviewCommandHandler>();
 
