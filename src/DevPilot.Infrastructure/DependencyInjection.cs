@@ -5,6 +5,13 @@ using DevPilot.Application.ProjectBrain.Commands.IndexWorkspace;
 using DevPilot.Application.ProjectBrain.Ports;
 using DevPilot.Application.ProjectBrain.Queries.SemanticSearch;
 using DevPilot.Application.RepositoryClone;
+using DevPilot.Application.Tasks.Commands.CreateTask;
+using DevPilot.Application.Tasks.Commands.DeleteTask;
+using DevPilot.Application.Tasks.Commands.UpdateTask;
+using DevPilot.Application.Tasks.Commands.UpdateTaskStatus;
+using DevPilot.Application.Tasks.Ports;
+using DevPilot.Application.Tasks.Queries.GetTaskById;
+using DevPilot.Application.Tasks.Queries.GetTasks;
 using DevPilot.Domain.ProjectBrain;
 using DevPilot.Infrastructure.AiProviders;
 using DevPilot.Infrastructure.CodeAnalysis;
@@ -14,11 +21,10 @@ using DevPilot.Infrastructure.ProjectBrain.EmbeddingProviders;
 using DevPilot.Infrastructure.ProjectBrain.Repositories;
 using DevPilot.Infrastructure.ProjectBrain.SemanticSearch;
 using DevPilot.Infrastructure.RepositoryClone;
+using DevPilot.Infrastructure.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Npgsql;
-using Pgvector;
 using Pgvector.EntityFrameworkCore;
 
 namespace DevPilot.Infrastructure;
@@ -32,21 +38,33 @@ public static class DependencyInjection
         var connectionString = configuration.GetConnectionString("DevPilotDb")
             ?? throw new InvalidOperationException("Connection string 'DevPilotDb' is not configured.");
 
-        var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
-        dataSourceBuilder.UseVector();
-
         services.AddDbContext<DevPilotDbContext>(options =>
-            options.UseNpgsql(dataSourceBuilder.Build(), npgsql =>
-            {
-                npgsql.UseVector();
-                npgsql.MigrationsAssembly(typeof(DependencyInjection).Assembly.FullName);
-            }));
+        options.UseNpgsql(connectionString, npgsql =>
+        {
+            npgsql.UseVector();
+            npgsql.MigrationsAssembly(typeof(DependencyInjection).Assembly.FullName);
+        }));
 
         services.AddAiProviders(configuration);
         services.AddGitProviders(configuration);
         services.AddRepositoryClone(configuration);
         services.AddProjectBrain();
         services.AddScoped<IRepositoryAnalyzer, RoslynRepositoryAnalyzer>();
+        services.AddTask();
+
+        return services;
+    }
+
+    private static IServiceCollection AddTask(this IServiceCollection services)
+    {
+        services.AddScoped<ITaskRepository, EfTaskRepository>();
+        services.AddScoped<IRepositoryWorkspaceQuery, RepositoryWorkspaceQuery>();
+        services.AddScoped<ICreateTaskCommandHandler, CreateTaskCommandHandler>();
+        services.AddScoped<IUpdateTaskCommandHandler, UpdateTaskCommandHandler>();
+        services.AddScoped<IUpdateTaskStatusCommandHandler, UpdateTaskStatusCommandHandler>();
+        services.AddScoped<IDeleteTaskCommandHandler, DeleteTaskCommandHandler>();
+        services.AddScoped<IGetTaskByIdQueryHandler, GetTaskByIdQueryHandler>();
+        services.AddScoped<IGetTasksQueryHandler, GetTasksQueryHandler>();
 
         return services;
     }

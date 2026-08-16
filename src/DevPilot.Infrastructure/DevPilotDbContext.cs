@@ -19,6 +19,8 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<IndexJob> IndexJobs => Set<IndexJob>();
 
+    public DbSet<DevelopmentTask> DevelopmentTasks => Set<DevelopmentTask>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -67,6 +69,23 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.WorkspaceName).HasMaxLength(200);
             entity.Property(e => e.ErrorMessage).HasMaxLength(1000);
             entity.Property(e => e.EmbeddingProviderStatus).HasMaxLength(500);
+        });
+
+        modelBuilder.Entity<DevelopmentTask>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.RepositoryWorkspaceId);
+            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.Status });
+            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.Priority });
+            entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.Priority).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.Title).HasMaxLength(200);
+            entity.Property(e => e.Description).HasMaxLength(4000);
+            entity.Property(e => e.AcceptanceCriteria).HasMaxLength(4000);
+            entity.HasOne(e => e.RepositoryWorkspace)
+                .WithMany()
+                .HasForeignKey(e => e.RepositoryWorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }
