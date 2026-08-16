@@ -5,6 +5,9 @@ using DevPilot.Application.ProjectBrain.Commands.IndexWorkspace;
 using DevPilot.Application.ProjectBrain.Ports;
 using DevPilot.Application.ProjectBrain.Queries.SemanticSearch;
 using DevPilot.Application.RepositoryClone;
+using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
+using DevPilot.Application.TaskImpactAnalysis.Ports;
+using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
 using DevPilot.Application.Tasks.Commands.CreateTask;
 using DevPilot.Application.Tasks.Commands.DeleteTask;
 using DevPilot.Application.Tasks.Commands.UpdateTask;
@@ -21,6 +24,7 @@ using DevPilot.Infrastructure.ProjectBrain.EmbeddingProviders;
 using DevPilot.Infrastructure.ProjectBrain.Repositories;
 using DevPilot.Infrastructure.ProjectBrain.SemanticSearch;
 using DevPilot.Infrastructure.RepositoryClone;
+using DevPilot.Infrastructure.ImpactAnalysis;
 using DevPilot.Infrastructure.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -59,12 +63,15 @@ public static class DependencyInjection
     {
         services.AddScoped<ITaskRepository, EfTaskRepository>();
         services.AddScoped<IRepositoryWorkspaceQuery, RepositoryWorkspaceQuery>();
+        services.AddScoped<IImpactAnalysisRepository, EfImpactAnalysisRepository>();
         services.AddScoped<ICreateTaskCommandHandler, CreateTaskCommandHandler>();
         services.AddScoped<IUpdateTaskCommandHandler, UpdateTaskCommandHandler>();
         services.AddScoped<IUpdateTaskStatusCommandHandler, UpdateTaskStatusCommandHandler>();
         services.AddScoped<IDeleteTaskCommandHandler, DeleteTaskCommandHandler>();
         services.AddScoped<IGetTaskByIdQueryHandler, GetTaskByIdQueryHandler>();
         services.AddScoped<IGetTasksQueryHandler, GetTasksQueryHandler>();
+        services.AddScoped<IAnalyzeTaskImpactCommandHandler, AnalyzeTaskImpactCommandHandler>();
+        services.AddScoped<IGetTaskImpactAnalysisQueryHandler, GetTaskImpactAnalysisQueryHandler>();
 
         return services;
     }
@@ -89,7 +96,7 @@ public static class DependencyInjection
         {
             services.AddHttpClient("Kimi", client =>
             {
-                client.Timeout = TimeSpan.FromSeconds(60);
+                client.Timeout = TimeSpan.FromSeconds(300);
             });
         }
 

@@ -1,13 +1,21 @@
+using System.Text.Json;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.ProjectBrain;
 using DevPilot.Domain.ProjectBrain.Entities;
+using DevPilot.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Pgvector;
 
 namespace DevPilot.Infrastructure;
 
 public class DevPilotDbContext : DbContext
 {
+    private static readonly JsonSerializerOptions StructuredResultJsonOptions = new()
+    {
+        PropertyNamingPolicy = null,
+    };
+
     public DevPilotDbContext(DbContextOptions<DevPilotDbContext> options)
         : base(options)
     {
@@ -20,6 +28,8 @@ public class DevPilotDbContext : DbContext
     public DbSet<IndexJob> IndexJobs => Set<IndexJob>();
 
     public DbSet<DevelopmentTask> DevelopmentTasks => Set<DevelopmentTask>();
+
+    public DbSet<TaskImpactAnalysis> TaskImpactAnalyses => Set<TaskImpactAnalysis>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -85,6 +95,31 @@ public class DevPilotDbContext : DbContext
             entity.HasOne(e => e.RepositoryWorkspace)
                 .WithMany()
                 .HasForeignKey(e => e.RepositoryWorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<TaskImpactAnalysis>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.DevelopmentTaskId);
+            entity.HasIndex(e => new { e.DevelopmentTaskId, e.CreatedAt });
+            entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.Summary).HasMaxLength(4000);
+            entity.Property(e => e.Model).HasMaxLength(200);
+            entity.Property(e => e.ProviderName).HasMaxLength(100);
+            entity.Property(e => e.RawResponse).HasColumnType("text");
+            entity.Property(e => e.ErrorMessage).HasMaxLength(4000);
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CompletedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.StructuredResult)
+                .HasConversion(new ValueConverter<ImpactAnalysisResultData?, string?>(
+                    v => v == null ? null : JsonSerializer.Serialize(v, StructuredResultJsonOptions),
+                    v => string.IsNullOrEmpty(v) ? null : JsonSerializer.Deserialize<ImpactAnalysisResultData>(v, StructuredResultJsonOptions)))
+                .HasColumnType("jsonb");
+
+            entity.HasOne(e => e.DevelopmentTask)
+                .WithMany()
+                .HasForeignKey(e => e.DevelopmentTaskId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

@@ -1,3 +1,5 @@
+using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
+using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
 using DevPilot.Application.Tasks.Commands.CreateTask;
 using DevPilot.Application.Tasks.Commands.DeleteTask;
 using DevPilot.Application.Tasks.Commands.UpdateTask;
@@ -21,6 +23,8 @@ public class TasksController : ControllerBase
     private readonly IDeleteTaskCommandHandler _deleteHandler;
     private readonly IGetTaskByIdQueryHandler _getByIdHandler;
     private readonly IGetTasksQueryHandler _getTasksHandler;
+    private readonly IAnalyzeTaskImpactCommandHandler _analyzeImpactHandler;
+    private readonly IGetTaskImpactAnalysisQueryHandler _getImpactAnalysisHandler;
 
     public TasksController(
         ICreateTaskCommandHandler createHandler,
@@ -28,7 +32,9 @@ public class TasksController : ControllerBase
         IUpdateTaskStatusCommandHandler updateStatusHandler,
         IDeleteTaskCommandHandler deleteHandler,
         IGetTaskByIdQueryHandler getByIdHandler,
-        IGetTasksQueryHandler getTasksHandler)
+        IGetTasksQueryHandler getTasksHandler,
+        IAnalyzeTaskImpactCommandHandler analyzeImpactHandler,
+        IGetTaskImpactAnalysisQueryHandler getImpactAnalysisHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -36,6 +42,8 @@ public class TasksController : ControllerBase
         _deleteHandler = deleteHandler;
         _getByIdHandler = getByIdHandler;
         _getTasksHandler = getTasksHandler;
+        _analyzeImpactHandler = analyzeImpactHandler;
+        _getImpactAnalysisHandler = getImpactAnalysisHandler;
     }
 
     [HttpGet]
@@ -162,5 +170,54 @@ public class TasksController : ControllerBase
         }
 
         return NoContent();
+    }
+
+    [HttpPost("{id:guid}/impact-analysis")]
+    public async Task<IActionResult> AnalyzeTaskImpact(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _analyzeImpactHandler
+            .HandleAsync(new AnalyzeTaskImpactCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.Success)
+        {
+            return CreatedAtAction(
+                nameof(GetTaskImpactAnalysis),
+                new { id },
+                result.Analysis);
+        }
+
+        if (result.AnalysisId is null)
+        {
+            if (result.ErrorMessage == "Task not found.")
+            {
+                return NotFound(new { error = result.ErrorMessage });
+            }
+
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return StatusCode(
+            StatusCodes.Status502BadGateway,
+            new { error = result.ErrorMessage, analysisId = result.AnalysisId });
+    }
+
+    [HttpGet("{id:guid}/impact-analysis")]
+    public async Task<IActionResult> GetTaskImpactAnalysis(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _getImpactAnalysisHandler
+            .HandleAsync(new GetTaskImpactAnalysisQuery(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Found || result.Analysis is null)
+        {
+            return NotFound(new { error = result.ErrorMessage ?? "No impact analysis found for this task." });
+        }
+
+        return Ok(result.Analysis);
     }
 }
