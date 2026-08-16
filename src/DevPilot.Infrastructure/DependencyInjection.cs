@@ -34,6 +34,8 @@ using DevPilot.Infrastructure.RepositoryClone;
 using DevPilot.Infrastructure.ImpactAnalysis;
 using DevPilot.Infrastructure.Tasks;
 using DevPilot.Infrastructure.Executions;
+using DevPilot.Application.DeveloperAgent.Ports;
+using DevPilot.Infrastructure.DeveloperAgent;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -86,6 +88,8 @@ public static class DependencyInjection
         services.AddScoped<IExecutionWorkspaceManager, GitExecutionWorkspaceManager>();
         services.AddScoped<IExecutionProcessor, GitWorkspaceExecutionProcessor>();
         services.AddScoped<IExecutionDispatcher, HangfireExecutionDispatcher>();
+        services.AddScoped<IWorktreeEditApplier, WorktreeEditApplier>();
+        services.AddScoped<IDeveloperAgent, DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent>();
         services.AddScoped<IStartExecutionCommandHandler, StartExecutionCommandHandler>();
         services.AddScoped<IProcessExecutionCommandHandler, ProcessExecutionCommandHandler>();
         services.AddScoped<ExecutionWorkerJob>();
