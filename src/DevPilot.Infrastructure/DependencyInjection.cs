@@ -10,6 +10,7 @@ using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
 using DevPilot.Application.Tasks.Commands.ApproveTask;
 using DevPilot.Application.Executions.Commands.ProcessExecution;
+using DevPilot.Application.Executions.Commands.RunDeveloperAgent;
 using DevPilot.Application.Executions.Commands.StartExecution;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
@@ -95,6 +96,7 @@ public static class DependencyInjection
         services.AddScoped<ExecutionWorkerJob>();
         services.AddScoped<IGetExecutionByIdQueryHandler, GetExecutionByIdQueryHandler>();
         services.AddScoped<IGetExecutionsQueryHandler, GetExecutionsQueryHandler>();
+        services.AddScoped<IRunDeveloperAgentCommandHandler, RunDeveloperAgentCommandHandler>();
 
         return services;
     }

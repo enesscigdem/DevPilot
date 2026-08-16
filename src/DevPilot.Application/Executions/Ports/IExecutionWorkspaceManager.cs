@@ -6,6 +6,13 @@ public sealed record ExecutionWorkspaceResult(
     bool Success,
     string? ErrorMessage = null);
 
+public sealed record WorkspaceVerificationResult(
+    bool IsValid,
+    bool WorkspaceExists,
+    bool BranchMatches,
+    bool IsClean,
+    string? ErrorMessage = null);
+
 public interface IExecutionWorkspaceManager
 {
     /// <summary>
@@ -17,5 +24,14 @@ public interface IExecutionWorkspaceManager
         Guid taskId,
         string sourceRepositoryLocalPath,
         string? sourceBranch = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Verifies that an execution workspace exists on disk, is checked out on the expected branch,
+    /// and has a clean worktree (no uncommitted or untracked changes).
+    /// </summary>
+    Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(
+        string workspacePath,
+        string expectedBranchName,
         CancellationToken cancellationToken = default);
 }

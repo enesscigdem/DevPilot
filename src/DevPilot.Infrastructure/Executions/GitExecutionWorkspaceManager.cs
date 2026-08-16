@@ -137,6 +137,68 @@ public sealed class GitExecutionWorkspaceManager : IExecutionWorkspaceManager
             Success: true);
     }
 
+    public async Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(
+        string workspacePath,
+        string expectedBranchName,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath))
+        {
+            return new WorkspaceVerificationResult(
+                IsValid: false, WorkspaceExists: false, BranchMatches: false, IsClean: false,
+                ErrorMessage: "Execution workspace path is empty.");
+        }
+
+        if (string.IsNullOrWhiteSpace(expectedBranchName))
+        {
+            return new WorkspaceVerificationResult(
+                IsValid: false, WorkspaceExists: Directory.Exists(workspacePath), BranchMatches: false, IsClean: false,
+                ErrorMessage: "Expected branch name is empty.");
+        }
+
+        var fullPath = Path.GetFullPath(workspacePath);
+        if (!Directory.Exists(fullPath))
+        {
+            return new WorkspaceVerificationResult(
+                IsValid: false, WorkspaceExists: false, BranchMatches: false, IsClean: false,
+                ErrorMessage: $"Execution workspace directory does not exist on disk: '{fullPath}'.");
+        }
+
+        var (branchOk, currentBranch, branchError) = await RunGitCommandAsync(fullPath, cancellationToken, "rev-parse", "--abbrev-ref", "HEAD").ConfigureAwait(false);
+        if (!branchOk || string.IsNullOrWhiteSpace(currentBranch))
+        {
+            return new WorkspaceVerificationResult(
+                IsValid: false, WorkspaceExists: true, BranchMatches: false, IsClean: false,
+                ErrorMessage: $"Failed to determine Git branch at '{fullPath}': {branchError}");
+        }
+
+        var actualBranch = currentBranch.Trim();
+        if (!string.Equals(actualBranch, expectedBranchName.Trim(), StringComparison.Ordinal))
+        {
+            return new WorkspaceVerificationResult(
+                IsValid: false, WorkspaceExists: true, BranchMatches: false, IsClean: false,
+                ErrorMessage: $"Execution workspace at '{fullPath}' is on branch '{actualBranch}', expected '{expectedBranchName}'.");
+        }
+
+        var (statusOk, statusOutput, statusError) = await RunGitCommandAsync(fullPath, cancellationToken, "status", "--porcelain").ConfigureAwait(false);
+        if (!statusOk)
+        {
+            return new WorkspaceVerificationResult(
+                IsValid: false, WorkspaceExists: true, BranchMatches: true, IsClean: false,
+                ErrorMessage: $"Failed to check Git worktree status at '{fullPath}': {statusError}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(statusOutput))
+        {
+            return new WorkspaceVerificationResult(
+                IsValid: false, WorkspaceExists: true, BranchMatches: true, IsClean: false,
+                ErrorMessage: $"Execution worktree at '{fullPath}' contains uncommitted or untracked changes.");
+        }
+
+        return new WorkspaceVerificationResult(
+            IsValid: true, WorkspaceExists: true, BranchMatches: true, IsClean: true);
+    }
+
     private static ExecutionWorkspaceResult Failure(string errorMessage)
     {
         return new ExecutionWorkspaceResult(
