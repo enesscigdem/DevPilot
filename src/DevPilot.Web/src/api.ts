@@ -1,4 +1,4 @@
-import type { CreateTaskRequest, Task, TaskListItem, UpdateTaskStatusRequest, Workspace } from './types';
+import type { CreateTaskRequest, ImpactAnalysis, Task, TaskListItem, UpdateTaskStatusRequest, Workspace } from './types';
 
 const BASE_URL = '/api';
 
@@ -66,4 +66,21 @@ export async function deleteTask(id: string): Promise<void> {
 
 export async function getWorkspaces(): Promise<Workspace[]> {
   return http<Workspace[]>('/repositoryworkspaces');
+}
+
+export async function getTaskImpactAnalysis(id: string): Promise<ImpactAnalysis | null> {
+  try {
+    return await http<ImpactAnalysis>(`/tasks/${id}/impact-analysis`);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('404')) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+export async function analyzeTaskImpact(id: string): Promise<ImpactAnalysis> {
+  return http<ImpactAnalysis>(`/tasks/${id}/impact-analysis`, {
+    method: 'POST',
+  });
 }

@@ -90,3 +90,74 @@ export const priorityOptions = Object.entries(priorityLabels).map(([value, label
   value: Number(value),
   label,
 }));
+
+// ---------------------------------------------------------------------------
+// Impact Analysis — enums
+// ImpactAnalysisStatus arrives as integer (no JsonStringEnumConverter)
+// ---------------------------------------------------------------------------
+export const ImpactAnalysisStatus = {
+  Pending: 0,
+  InProgress: 1,
+  Completed: 2,
+  Failed: 3,
+} as const;
+export type ImpactAnalysisStatusValue = (typeof ImpactAnalysisStatus)[keyof typeof ImpactAnalysisStatus];
+
+// ImpactFileChangeType, RiskLevel, SystemImpactLevel arrive as strings
+export type ImpactFileChangeType = 'Unknown' | 'Add' | 'Modify' | 'Delete' | 'Refactor';
+export type RiskLevelValue = 'Low' | 'Medium' | 'High' | 'Critical';
+export type SystemImpactLevelValue = 'Low' | 'Medium' | 'High' | 'Critical';
+
+// ---------------------------------------------------------------------------
+// Impact Analysis — DTOs
+// ---------------------------------------------------------------------------
+export interface ImpactedFile {
+  filePath: string;
+  changeType: ImpactFileChangeType;
+  reason: string;
+  confidence: number;
+}
+
+export interface ProposedPlanStep {
+  order: number;
+  title: string;
+  description: string;
+  relatedFiles: string[];
+}
+
+export interface SystemImpact {
+  area: string;
+  impactLevel: SystemImpactLevelValue;
+  description: string;
+}
+
+export interface Risk {
+  level: RiskLevelValue;
+  description: string;
+  mitigation: string;
+}
+
+export interface StructuredResult {
+  summary: string;
+  confidence: number;
+  impactedFiles: ImpactedFile[];
+  proposedPlan: ProposedPlanStep[];
+  systemImpacts: SystemImpact[];
+  risks: Risk[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface ImpactAnalysis {
+  id: string;
+  developmentTaskId: string;
+  status: ImpactAnalysisStatusValue;
+  summary: string;
+  confidence: number;
+  model: string | null;
+  providerName: string | null;
+  rawResponse: string | null;
+  errorMessage: string | null;
+  structuredResult: StructuredResult | null;
+  createdAt: string;
+  completedAt: string | null;
+}
