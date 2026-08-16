@@ -1,4 +1,13 @@
-import type { CreateTaskRequest, ImpactAnalysis, Task, TaskListItem, UpdateTaskStatusRequest, Workspace } from './types';
+import type {
+  CreateTaskRequest,
+  ExecutionDetail,
+  ExecutionListItem,
+  ImpactAnalysis,
+  Task,
+  TaskListItem,
+  UpdateTaskStatusRequest,
+  Workspace,
+} from './types';
 
 const BASE_URL = '/api';
 
@@ -95,4 +104,12 @@ export async function rejectTask(id: string): Promise<Task> {
   return http<Task>(`/tasks/${id}/reject`, {
     method: 'POST',
   });
+}
+
+export async function getExecutions(): Promise<ExecutionListItem[]> {
+  return http<ExecutionListItem[]>('/executions');
+}
+
+export async function getExecution(id: string): Promise<ExecutionDetail> {
+  return http<ExecutionDetail>(`/executions/${id}`);
 }

@@ -161,3 +161,61 @@ export interface ImpactAnalysis {
   createdAt: string;
   completedAt: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Executions — enums & DTOs
+// ---------------------------------------------------------------------------
+export const TaskExecutionStatus = {
+  Pending: 0,
+  Running: 1,
+  Completed: 2,
+  Failed: 3,
+  Cancelled: 4,
+} as const;
+export type TaskExecutionStatusValue = (typeof TaskExecutionStatus)[keyof typeof TaskExecutionStatus];
+
+export type Tone = "neutral" | "blue" | "amber" | "green" | "red" | "gray";
+
+export const executionStatusMeta: Record<number, { label: string; tone: Tone }> = {
+  [TaskExecutionStatus.Pending]: { label: "Pending", tone: "amber" },
+  [TaskExecutionStatus.Running]: { label: "Running", tone: "blue" },
+  [TaskExecutionStatus.Completed]: { label: "Completed", tone: "green" },
+  [TaskExecutionStatus.Failed]: { label: "Failed", tone: "red" },
+  [TaskExecutionStatus.Cancelled]: { label: "Cancelled", tone: "gray" },
+};
+
+export function getExecutionStatusMeta(status: number | string): { label: string; tone: Tone } {
+  if (typeof status === "number") {
+    return executionStatusMeta[status] ?? { label: `Status ${status}`, tone: "neutral" };
+  }
+  const s = String(status).toLowerCase();
+  if (s === "pending") return executionStatusMeta[TaskExecutionStatus.Pending];
+  if (s === "running") return executionStatusMeta[TaskExecutionStatus.Running];
+  if (s === "completed") return executionStatusMeta[TaskExecutionStatus.Completed];
+  if (s === "failed") return executionStatusMeta[TaskExecutionStatus.Failed];
+  if (s === "cancelled") return executionStatusMeta[TaskExecutionStatus.Cancelled];
+  return { label: String(status), tone: "neutral" };
+}
+
+export interface ExecutionListItem {
+  id: string;
+  developmentTaskId: string;
+  taskTitle: string;
+  repositoryName: string;
+  status: number;
+  createdAt: string;
+}
+
+export interface ExecutionDetail {
+  id: string;
+  developmentTaskId: string;
+  taskTitle: string;
+  repositoryWorkspaceId: string;
+  repositoryOwner: string;
+  repositoryName: string;
+  status: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  errorMessage: string | null;
+}
