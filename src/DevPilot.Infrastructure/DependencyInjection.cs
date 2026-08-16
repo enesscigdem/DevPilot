@@ -14,6 +14,7 @@ using DevPilot.Application.Executions.Commands.RunDeveloperAgent;
 using DevPilot.Application.Executions.Commands.StartExecution;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
+using DevPilot.Application.Executions.Queries.GetExecutionReview;
 using DevPilot.Application.Executions.Queries.GetExecutions;
 using DevPilot.Application.Tasks.Commands.CreateTask;
 using DevPilot.Application.Tasks.Commands.DeleteTask;
@@ -99,6 +100,8 @@ public static class DependencyInjection
         services.AddScoped<IGetExecutionByIdQueryHandler, GetExecutionByIdQueryHandler>();
         services.AddScoped<IGetExecutionsQueryHandler, GetExecutionsQueryHandler>();
         services.AddScoped<IRunDeveloperAgentCommandHandler, RunDeveloperAgentCommandHandler>();
+        services.AddScoped<IExecutionGitDiffReader, GitExecutionDiffReader>();
+        services.AddScoped<IGetExecutionReviewQueryHandler, GetExecutionReviewQueryHandler>();
 
         return services;
     }
