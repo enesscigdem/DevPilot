@@ -91,6 +91,8 @@ public static class DependencyInjection
         services.AddScoped<IExecutionDispatcher, HangfireExecutionDispatcher>();
         services.AddScoped<IWorktreeEditApplier, WorktreeEditApplier>();
         services.AddScoped<IDeveloperAgent, DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent>();
+        services.AddScoped<IProcessRunner, DotnetProcessRunner>();
+        services.AddScoped<IExecutionValidationRunner, DotnetExecutionValidationRunner>();
         services.AddScoped<IStartExecutionCommandHandler, StartExecutionCommandHandler>();
         services.AddScoped<IProcessExecutionCommandHandler, ProcessExecutionCommandHandler>();
         services.AddScoped<ExecutionWorkerJob>();
