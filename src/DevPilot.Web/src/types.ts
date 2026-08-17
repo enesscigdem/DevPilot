@@ -411,3 +411,80 @@ export interface MergeExecutionResult {
   mergedAt?: string | null;
   mergeMethod?: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Workspace Analysis — DTOs
+// ---------------------------------------------------------------------------
+export interface WorkspaceRepositoryInfo {
+  owner: string;
+  repository: string;
+  fullName: string;
+  branch: string;
+  commitSha: string;
+}
+
+export interface WorkspaceAnalysisStep {
+  label: string;
+  done: boolean;
+}
+
+export interface WorkspaceAnalysisSummary {
+  status: string;
+  engine: string;
+  symbolsCount: number;
+  typesCount: number;
+  referencesCount: number;
+  analyzedAt: string;
+  steps: WorkspaceAnalysisStep[];
+}
+
+export interface WorkspaceFileNode {
+  name: string;
+  path: string;
+  type: "folder" | "file";
+  lang?: string;
+  children?: WorkspaceFileNode[];
+}
+
+export interface WorkspaceProjectReference {
+  name: string;
+  path: string;
+}
+
+export interface WorkspaceProject {
+  name: string;
+  path: string;
+  projectType: string;
+  layer: string;
+  fileCount: number;
+  targetFramework: string | null;
+  projectReferences: WorkspaceProjectReference[];
+  compilationSucceeded: boolean;
+  compilationErrors: string[];
+  warnings: string[];
+}
+
+export interface WorkspaceTechnology {
+  name: string;
+  version: string | null;
+  kind: string;
+}
+
+export interface WorkspaceEndpoint {
+  method: string;
+  route: string;
+  controller: string;
+  action: string;
+  auth: boolean;
+  sourcePath: string;
+}
+
+export interface WorkspaceAnalysis {
+  repository: WorkspaceRepositoryInfo;
+  summary: WorkspaceAnalysisSummary;
+  fileTree: WorkspaceFileNode[];
+  projects: WorkspaceProject[];
+  technologies: WorkspaceTechnology[];
+  endpoints: WorkspaceEndpoint[];
+  warnings: string[];
+}

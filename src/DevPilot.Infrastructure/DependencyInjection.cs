@@ -6,6 +6,9 @@ using DevPilot.Application.ProjectBrain.Ports;
 using DevPilot.Application.ProjectBrain.Queries.SemanticSearch;
 using DevPilot.Application.RepositoryClone;
 using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspace;
+using DevPilot.Application.RepositoryWorkspaces.Ports;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
+using DevPilot.Infrastructure.RepositoryInspection;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
@@ -144,6 +147,8 @@ public static class DependencyInjection
 
         services.AddScoped<IRepositoryCloneService, RepositoryCloneService>();
         services.AddScoped<ICreateRepositoryWorkspaceCommandHandler, CreateRepositoryWorkspaceCommandHandler>();
+        services.AddScoped<IRepositoryStructureScanner, RepositoryStructureScanner>();
+        services.AddScoped<IGetRepositoryWorkspaceAnalysisQueryHandler, GetRepositoryWorkspaceAnalysisQueryHandler>();
 
         return services;
     }

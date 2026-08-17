@@ -920,17 +920,116 @@ internal sealed partial class RoslynRepositoryAnalyzer : IRepositoryAnalyzer
             var (httpMethod, actionRoute) = GetActionVerbAndRoute(method, semanticModel);
             var combinedRoute = CombineRoutes(controllerRoute, actionRoute);
             combinedRoute = ExpandRouteTokens(combinedRoute, controllerName, actionName);
+            var isAuthorized = IsActionAuthorized(controller, method, semanticModel);
 
             actions.Add(new ControllerActionAnalysisResult
             {
                 Name = actionName,
                 HttpMethod = httpMethod,
                 RouteTemplate = string.IsNullOrWhiteSpace(combinedRoute) ? null : combinedRoute,
+                IsAuthorized = isAuthorized,
                 SourcePath = sourcePath,
             });
         }
 
         return actions;
+    }
+
+    private static bool IsActionAuthorized(
+        TypeDeclarationSyntax controller,
+        MethodDeclarationSyntax method,
+        SemanticModel? semanticModel)
+    {
+        var hasControllerAuth = HasAuthorizeAttribute(controller.AttributeLists, semanticModel, controller);
+        var hasMethodAuth = HasAuthorizeAttribute(method.AttributeLists, semanticModel, method);
+        var hasMethodAllowAnonymous = HasAllowAnonymousAttribute(method.AttributeLists, semanticModel, method);
+
+        if (hasMethodAllowAnonymous)
+        {
+            return false;
+        }
+
+        return hasControllerAuth || hasMethodAuth;
+    }
+
+    private static bool HasAuthorizeAttribute(
+        SyntaxList<AttributeListSyntax> attributeLists,
+        SemanticModel? semanticModel,
+        SyntaxNode node)
+    {
+        foreach (var attribute in attributeLists.SelectMany(a => a.Attributes))
+        {
+            var name = attribute.Name.ToString().Split('.').LastOrDefault() ?? attribute.Name.ToString();
+            if (name is "Authorize" or "AuthorizeAttribute")
+            {
+                return true;
+            }
+        }
+
+        if (semanticModel is not null)
+        {
+            try
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(node);
+                if (symbol is not null)
+                {
+                    foreach (var attr in symbol.GetAttributes())
+                    {
+                        var attrName = attr.AttributeClass?.Name ?? string.Empty;
+                        if (attrName is "Authorize" or "AuthorizeAttribute")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Fall back to syntax
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasAllowAnonymousAttribute(
+        SyntaxList<AttributeListSyntax> attributeLists,
+        SemanticModel? semanticModel,
+        SyntaxNode node)
+    {
+        foreach (var attribute in attributeLists.SelectMany(a => a.Attributes))
+        {
+            var name = attribute.Name.ToString().Split('.').LastOrDefault() ?? attribute.Name.ToString();
+            if (name is "AllowAnonymous" or "AllowAnonymousAttribute")
+            {
+                return true;
+            }
+        }
+
+        if (semanticModel is not null)
+        {
+            try
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(node);
+                if (symbol is not null)
+                {
+                    foreach (var attr in symbol.GetAttributes())
+                    {
+                        var attrName = attr.AttributeClass?.Name ?? string.Empty;
+                        if (attrName is "AllowAnonymous" or "AllowAnonymousAttribute")
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Fall back to syntax
+            }
+        }
+
+        return false;
     }
 
     private static string? GetControllerRouteTemplate(

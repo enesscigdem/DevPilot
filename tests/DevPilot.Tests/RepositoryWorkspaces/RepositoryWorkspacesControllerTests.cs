@@ -1,6 +1,7 @@
 using DevPilot.Api.Controllers;
 using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspace;
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure;
@@ -16,6 +17,7 @@ public class RepositoryWorkspacesControllerTests : IDisposable
 {
     private readonly DevPilotDbContext _dbContext;
     private readonly FakeCreateWorkspaceCommandHandler _commandHandler = new();
+    private readonly FakeGetWorkspaceAnalysisQueryHandler _analysisHandler = new();
     private readonly RepositoryWorkspacesController _controller;
 
     public RepositoryWorkspacesControllerTests()
@@ -25,7 +27,7 @@ public class RepositoryWorkspacesControllerTests : IDisposable
             .Options;
 
         _dbContext = new DevPilotDbContext(options);
-        _controller = new RepositoryWorkspacesController(_dbContext, _commandHandler);
+        _controller = new RepositoryWorkspacesController(_dbContext, _commandHandler, _analysisHandler);
     }
 
     public void Dispose()
@@ -228,12 +230,110 @@ public class RepositoryWorkspacesControllerTests : IDisposable
         list[1].Id.Should().Be(id1);
     }
 
+    [Fact]
+    public async Task GetAnalysis_ExistingCompletedWorkspace_ReturnsOkWithAnalysis()
+    {
+        var id = Guid.NewGuid();
+        _analysisHandler.ResultToReturn = new GetRepositoryWorkspaceAnalysisResult
+        {
+            Success = true,
+            Analysis = new WorkspaceAnalysisDto
+            {
+                Repository = new WorkspaceRepositoryInfoDto
+                {
+                    Owner = "enesscigdem",
+                    Repository = "DevPilot",
+                    FullName = "enesscigdem/DevPilot",
+                    Branch = "master",
+                    CommitSha = "abc1234",
+                },
+                Summary = new WorkspaceAnalysisSummaryDto
+                {
+                    Status = "Ready",
+                    SymbolsCount = 42,
+                    TypesCount = 10,
+                    ReferencesCount = 5,
+                },
+            },
+        };
+
+        var response = await _controller.GetAnalysis(id, CancellationToken.None);
+
+        var okResult = response.Should().BeOfType<OkObjectResult>().Subject;
+        okResult.StatusCode.Should().Be(StatusCodes.Status200OK);
+        var dto = okResult.Value.Should().BeOfType<WorkspaceAnalysisDto>().Subject;
+        dto.Repository.FullName.Should().Be("enesscigdem/DevPilot");
+        dto.Summary.SymbolsCount.Should().Be(42);
+    }
+
+    [Fact]
+    public async Task GetAnalysis_WorkspaceNotFound_ReturnsNotFound()
+    {
+        var id = Guid.NewGuid();
+        _analysisHandler.ResultToReturn = new GetRepositoryWorkspaceAnalysisResult
+        {
+            Success = false,
+            NotFound = true,
+            ErrorMessage = "Repository workspace not found.",
+        };
+
+        var response = await _controller.GetAnalysis(id, CancellationToken.None);
+
+        var notFoundResult = response.Should().BeOfType<NotFoundObjectResult>().Subject;
+        notFoundResult.StatusCode.Should().Be(StatusCodes.Status404NotFound);
+    }
+
+    [Fact]
+    public async Task GetAnalysis_WorkspaceNotReady_ReturnsConflict()
+    {
+        var id = Guid.NewGuid();
+        _analysisHandler.ResultToReturn = new GetRepositoryWorkspaceAnalysisResult
+        {
+            Success = false,
+            IsConflict = true,
+            ErrorMessage = "Repository workspace is not ready for analysis (status: Cloning).",
+        };
+
+        var response = await _controller.GetAnalysis(id, CancellationToken.None);
+
+        var conflictResult = response.Should().BeOfType<ConflictObjectResult>().Subject;
+        conflictResult.StatusCode.Should().Be(StatusCodes.Status409Conflict);
+    }
+
+    [Fact]
+    public async Task GetAnalysis_UnhandledError_Returns500()
+    {
+        var id = Guid.NewGuid();
+        _analysisHandler.ResultToReturn = new GetRepositoryWorkspaceAnalysisResult
+        {
+            Success = false,
+            ErrorMessage = "Code analysis failed: out of memory",
+        };
+
+        var response = await _controller.GetAnalysis(id, CancellationToken.None);
+
+        var errorResult = response.Should().BeOfType<ObjectResult>().Subject;
+        errorResult.StatusCode.Should().Be(StatusCodes.Status500InternalServerError);
+    }
+
     private sealed class FakeCreateWorkspaceCommandHandler : ICreateRepositoryWorkspaceCommandHandler
     {
         public CreateRepositoryWorkspaceResult ResultToReturn { get; set; } = new();
 
         public Task<CreateRepositoryWorkspaceResult> HandleAsync(
             CreateRepositoryWorkspaceCommand command,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(ResultToReturn);
+        }
+    }
+
+    private sealed class FakeGetWorkspaceAnalysisQueryHandler : IGetRepositoryWorkspaceAnalysisQueryHandler
+    {
+        public GetRepositoryWorkspaceAnalysisResult ResultToReturn { get; set; } = new();
+
+        public Task<GetRepositoryWorkspaceAnalysisResult> HandleAsync(
+            GetRepositoryWorkspaceAnalysisQuery query,
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult(ResultToReturn);

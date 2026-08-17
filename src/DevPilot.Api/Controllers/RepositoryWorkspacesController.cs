@@ -1,5 +1,6 @@
 using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspace;
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure;
@@ -16,13 +17,16 @@ public class RepositoryWorkspacesController : ControllerBase
 {
     private readonly DevPilotDbContext _dbContext;
     private readonly ICreateRepositoryWorkspaceCommandHandler _createWorkspaceHandler;
+    private readonly IGetRepositoryWorkspaceAnalysisQueryHandler _analysisQueryHandler;
 
     public RepositoryWorkspacesController(
         DevPilotDbContext dbContext,
-        ICreateRepositoryWorkspaceCommandHandler createWorkspaceHandler)
+        ICreateRepositoryWorkspaceCommandHandler createWorkspaceHandler,
+        IGetRepositoryWorkspaceAnalysisQueryHandler analysisQueryHandler)
     {
         _dbContext = dbContext;
         _createWorkspaceHandler = createWorkspaceHandler;
+        _analysisQueryHandler = analysisQueryHandler;
     }
 
     [HttpGet]
@@ -102,6 +106,35 @@ public class RepositoryWorkspacesController : ControllerBase
             nameof(GetById),
             new { id = result.Workspace!.Id },
             result.Workspace);
+    }
+
+    [HttpGet("{id:guid}/analysis")]
+    public async Task<IActionResult> GetAnalysis(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _analysisQueryHandler
+            .HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.NotFound)
+        {
+            return NotFound(new { error = result.ErrorMessage ?? "Repository workspace not found." });
+        }
+
+        if (result.IsConflict)
+        {
+            return Conflict(new { error = result.ErrorMessage });
+        }
+
+        if (!result.Success)
+        {
+            return StatusCode(
+                StatusCodes.Status500InternalServerError,
+                new { error = result.ErrorMessage ?? "Failed to analyze repository workspace." });
+        }
+
+        return Ok(result.Analysis);
     }
 
     public sealed class RepositoryWorkspaceListDto
