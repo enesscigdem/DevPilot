@@ -28,7 +28,7 @@ jobs:
         run: dotnet build DevPilot.sln --no-restore
 
       - name: Run tests
-        run: dotnet test tests/DevPilot.Tests/DevPilot.Tests.csproj --no-build
+        run: dotnet test tests/DevPilot.Tests/DevPilot.Tests.csproj --no-restore
 
   frontend:
     name: Frontend CI
@@ -51,3 +51,4 @@ jobs:
       - name: Build frontend
         working-directory: src/DevPilot.Web
         run: npm run build
+
