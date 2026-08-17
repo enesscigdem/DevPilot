@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using Microsoft.Extensions.Logging;
@@ -697,6 +698,94 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         return false;
     }
 
+    public static List<DiscoveredProjectNode> DiscoverProjectGraph(string workspacePath)
+    {
+        var canonicalWorkspace = GetCanonicalRealPath(workspacePath);
+        var csprojFiles = SafeFindFiles(canonicalWorkspace, "*.csproj");
+        var nodes = new List<DiscoveredProjectNode>();
+
+        foreach (var fullPath in csprojFiles)
+        {
+            var relativeProjPath = Path.GetRelativePath(canonicalWorkspace, fullPath).Replace('\\', '/');
+            var projDir = Path.GetDirectoryName(fullPath) ?? canonicalWorkspace;
+            var relativeProjDir = Path.GetRelativePath(canonicalWorkspace, projDir).Replace('\\', '/');
+            if (string.IsNullOrEmpty(relativeProjDir) || relativeProjDir == ".")
+            {
+                relativeProjDir = ".";
+            }
+
+            var projectName = Path.GetFileNameWithoutExtension(fullPath);
+            bool isTest = false;
+            var references = new List<string>();
+
+            if (projectName.Contains("Test", StringComparison.OrdinalIgnoreCase))
+            {
+                isTest = true;
+            }
+
+            try
+            {
+                var content = File.ReadAllText(fullPath);
+                var doc = XDocument.Parse(content);
+
+                var isTestElem = doc.Descendants()
+                    .FirstOrDefault(e => e.Name.LocalName.Equals("IsTestProject", StringComparison.OrdinalIgnoreCase));
+                if (isTestElem != null && bool.TryParse(isTestElem.Value.Trim(), out var parsedIsTest))
+                {
+                    isTest = parsedIsTest;
+                }
+
+                var pkgRefs = doc.Descendants()
+                    .Where(e => e.Name.LocalName.Equals("PackageReference", StringComparison.OrdinalIgnoreCase));
+                foreach (var pkg in pkgRefs)
+                {
+                    var pkgInclude = (string?)pkg.Attribute("Include") ?? (string?)pkg.Attribute("include");
+                    if (!string.IsNullOrEmpty(pkgInclude))
+                    {
+                        if (pkgInclude.Contains("xunit", StringComparison.OrdinalIgnoreCase) ||
+                            pkgInclude.Contains("nunit", StringComparison.OrdinalIgnoreCase) ||
+                            pkgInclude.Contains("mstest", StringComparison.OrdinalIgnoreCase) ||
+                            pkgInclude.Contains("Microsoft.NET.Test.Sdk", StringComparison.OrdinalIgnoreCase))
+                        {
+                            isTest = true;
+                        }
+                    }
+                }
+
+                var projRefs = doc.Descendants()
+                    .Where(e => e.Name.LocalName.Equals("ProjectReference", StringComparison.OrdinalIgnoreCase));
+                foreach (var pref in projRefs)
+                {
+                    var include = (string?)pref.Attribute("Include") ?? (string?)pref.Attribute("include");
+                    if (!string.IsNullOrWhiteSpace(include))
+                    {
+                        var resolvedFull = Path.GetFullPath(Path.Combine(projDir, include));
+                        var relRef = Path.GetRelativePath(canonicalWorkspace, resolvedFull).Replace('\\', '/');
+                        if (!references.Contains(relRef, StringComparer.OrdinalIgnoreCase))
+                        {
+                            references.Add(relRef);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Graceful fallback if XML parsing fails
+            }
+
+            nodes.Add(new DiscoveredProjectNode
+            {
+                ProjectPath = relativeProjPath,
+                ProjectName = projectName,
+                ProjectDirectory = relativeProjDir,
+                IsTestProject = isTest,
+                ProjectReferences = references
+            });
+        }
+
+        return nodes.OrderBy(n => n.ProjectPath, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     private static void CleanupDirectory(string path)
     {
         try
@@ -711,4 +800,13 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             // Best effort cleanup
         }
     }
+}
+
+public sealed class DiscoveredProjectNode
+{
+    public string ProjectPath { get; set; } = string.Empty;
+    public string ProjectName { get; set; } = string.Empty;
+    public string ProjectDirectory { get; set; } = string.Empty;
+    public bool IsTestProject { get; set; }
+    public List<string> ProjectReferences { get; set; } = new();
 }

@@ -1,12 +1,5 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using DevPilot.Application.DeveloperAgent.Models;
-using DevPilot.Application.Executions.Commands.ApproveExecutionReview;
-using DevPilot.Application.Executions.Dtos;
-using DevPilot.Application.Executions.Models;
-using DevPilot.Application.Executions.Ports;
-using DevPilot.Domain.Entities;
-using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure.DeveloperAgent;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -199,6 +192,144 @@ public class TargetCsProjPathValidationTests : IDisposable
 
         var act2 = () => WorktreeEditApplier.ValidateAndResolvePath(_worktreeDir, @"src\DevPilot.Api\..\..\..\outside.cs");
         act2.Should().Throw<InvalidOperationException>().WithMessage("*Path safety violation*");
+    }
+
+    [Fact]
+    public void DiscoverProjectGraph_MultiProjectGraph_ParsesReferencesAndTestStatusCorrectly()
+    {
+        // Arrange
+        var srcCoreDir = Path.Combine(_worktreeDir, "src", "Custom.Core");
+        var srcApiDir = Path.Combine(_worktreeDir, "src", "Custom.Api");
+        var testDir = Path.Combine(_worktreeDir, "tests", "Custom.UnitTests");
+
+        Directory.CreateDirectory(srcCoreDir);
+        Directory.CreateDirectory(srcApiDir);
+        Directory.CreateDirectory(testDir);
+
+        File.WriteAllText(Path.Combine(srcCoreDir, "Custom.Core.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        File.WriteAllText(Path.Combine(srcApiDir, "Custom.Api.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk.Web">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <ProjectReference Include="..\Custom.Core\Custom.Core.csproj" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        File.WriteAllText(Path.Combine(testDir, "Custom.UnitTests.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <IsTestProject>true</IsTestProject>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="xunit" Version="2.9.2" />
+                <ProjectReference Include="..\..\src\Custom.Core\Custom.Core.csproj" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        // Act
+        var graph = WorktreeEditApplier.DiscoverProjectGraph(_worktreeDir);
+
+        // Assert
+        graph.Should().HaveCount(3);
+
+        var coreNode = graph.FirstOrDefault(g => g.ProjectName == "Custom.Core");
+        coreNode.Should().NotBeNull();
+        coreNode!.ProjectPath.Should().Be("src/Custom.Core/Custom.Core.csproj");
+        coreNode.ProjectDirectory.Should().Be("src/Custom.Core");
+        coreNode.IsTestProject.Should().BeFalse();
+        coreNode.ProjectReferences.Should().BeEmpty();
+
+        var apiNode = graph.FirstOrDefault(g => g.ProjectName == "Custom.Api");
+        apiNode.Should().NotBeNull();
+        apiNode!.ProjectPath.Should().Be("src/Custom.Api/Custom.Api.csproj");
+        apiNode.IsTestProject.Should().BeFalse();
+        apiNode.ProjectReferences.Should().ContainSingle().Which.Should().Be("src/Custom.Core/Custom.Core.csproj");
+
+        var testNode = graph.FirstOrDefault(g => g.ProjectName == "Custom.UnitTests");
+        testNode.Should().NotBeNull();
+        testNode!.ProjectPath.Should().Be("tests/Custom.UnitTests/Custom.UnitTests.csproj");
+        testNode.IsTestProject.Should().BeTrue();
+        testNode.ProjectReferences.Should().ContainSingle().Which.Should().Be("src/Custom.Core/Custom.Core.csproj");
+        testNode.ProjectReferences.Should().NotContain("src/Custom.Api/Custom.Api.csproj");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RendersProjectGraphWithReferencesAndTestStatus()
+    {
+        // Arrange
+        var graph = new List<DiscoveredProjectNode>
+        {
+            new()
+            {
+                ProjectPath = "src/Shop.Core/Shop.Core.csproj",
+                ProjectName = "Shop.Core",
+                ProjectDirectory = "src/Shop.Core",
+                IsTestProject = false,
+                ProjectReferences = new List<string>()
+            },
+            new()
+            {
+                ProjectPath = "src/Shop.Api/Shop.Api.csproj",
+                ProjectName = "Shop.Api",
+                ProjectDirectory = "src/Shop.Api",
+                IsTestProject = false,
+                ProjectReferences = new List<string> { "src/Shop.Core/Shop.Core.csproj" }
+            },
+            new()
+            {
+                ProjectPath = "tests/Shop.Tests/Shop.Tests.csproj",
+                ProjectName = "Shop.Tests",
+                ProjectDirectory = "tests/Shop.Tests",
+                IsTestProject = true,
+                ProjectReferences = new List<string> { "src/Shop.Core/Shop.Core.csproj" }
+            }
+        };
+
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Add System Info Endpoint",
+            TaskDescription: "Create GET /api/system/info with applicationName exactly 'DevPilot'",
+            AcceptanceCriteria: "Returns JSON with applicationName 'DevPilot'",
+            ImpactAnalysisSummary: "Impacts Shop.Api",
+            ProposedPlan: "Add controller to Shop.Api",
+            ImpactedFilePaths: Array.Empty<string>(),
+            WorkspacePath: _worktreeDir,
+            BranchName: "master");
+
+        // Act
+        var userPrompt = DeveloperAgent.BuildUserPrompt(request, new Dictionary<string, string>(), graph);
+
+        // Assert
+        userPrompt.Should().Contain("=== Discovered .NET Project Graph ===");
+        userPrompt.Should().Contain("- Project: src/Shop.Api/Shop.Api.csproj (Name: Shop.Api, Directory: src/Shop.Api, TestProject: False)");
+        userPrompt.Should().Contain("    - src/Shop.Core/Shop.Core.csproj");
+        userPrompt.Should().Contain("- Project: tests/Shop.Tests/Shop.Tests.csproj (Name: Shop.Tests, Directory: tests/Shop.Tests, TestProject: True)");
+    }
+
+    [Fact]
+    public void BuildSystemPrompt_ContainsExactValuesAndTestReferenceRules()
+    {
+        // Act
+        var systemPrompt = DeveloperAgent.BuildSystemPrompt();
+
+        // Assert
+        systemPrompt.Should().Contain("EXACT VALUES & LITERALS");
+        systemPrompt.Should().Contain("TEST PROJECT REFERENCE COMPLIANCE");
+        systemPrompt.Should().Contain("Do NOT create uncompilable unit test files in that test project");
+        systemPrompt.Should().Contain("Do NOT substitute required literal values with dynamic environment lookups");
     }
 
     private static void InitGitRepo(string path)
