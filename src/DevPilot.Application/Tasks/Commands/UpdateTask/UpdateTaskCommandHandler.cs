@@ -97,6 +97,11 @@ public sealed class UpdateTaskCommandHandler : IUpdateTaskCommandHandler
             return "Title must be at most 200 characters.";
         }
 
+        if (dto.Description.Length > 10000)
+        {
+            return "Description must be at most 10,000 characters.";
+        }
+
         if (!Enum.IsDefined(typeof(DevPilot.Domain.Enums.DevelopmentTaskPriority), dto.Priority))
         {
             return "Invalid priority value.";

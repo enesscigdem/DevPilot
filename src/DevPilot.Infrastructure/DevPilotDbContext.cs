@@ -105,7 +105,7 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.Priority).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.Title).HasMaxLength(200);
-            entity.Property(e => e.Description).HasMaxLength(4000);
+            entity.Property(e => e.Description).HasMaxLength(10000);
             entity.Property(e => e.AcceptanceCriteria).HasMaxLength(4000);
             entity.HasOne(e => e.RepositoryWorkspace)
                 .WithMany()

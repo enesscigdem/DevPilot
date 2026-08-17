@@ -51,7 +51,8 @@ export function Tasks() {
 
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all")
   const [searchQuery, setSearchQuery] = useState("")
-  const [draft, setDraft] = useState("")
+  const [title, setTitle] = useState("")
+  const [description, setDescription] = useState("")
 
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -92,7 +93,7 @@ export function Tasks() {
   const selectedWorkspace = workspaces.find((w) => w.id === selectedWorkspaceId) || workspaces[0]
 
   const handleCreateTask = async () => {
-    if (!draft.trim() || isSubmitting) return
+    if (!title.trim() || isSubmitting) return
     setIsSubmitting(true)
     setCreateError(null)
     try {
@@ -103,12 +104,13 @@ export function Tasks() {
 
       const created = await createTask({
         repositoryWorkspaceId: workspaceId,
-        title: draft.trim(),
-        description: draft.trim(),
+        title: title.trim(),
+        description: description.trim(),
         priority: TaskPriority.Medium,
       })
 
-      setDraft("")
+      setTitle("")
+      setDescription("")
       navigate(`/tasks/${created.id}`)
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Failed to create task.")
@@ -117,7 +119,7 @@ export function Tasks() {
     }
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
       handleCreateTask()
@@ -146,14 +148,25 @@ export function Tasks() {
           <div className="mt-1.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary-soft text-primary">
             <Sparkles className="h-4 w-4" />
           </div>
-          <div className="flex-1">
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
               onKeyDown={handleKeyDown}
+              maxLength={200}
+              placeholder="Task title (e.g. Add rate limiting to the public products endpoint)"
+              className="w-full bg-transparent text-[14px] font-medium text-foreground outline-none placeholder:text-subtle-foreground"
+              required
+            />
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              onKeyDown={handleKeyDown}
+              maxLength={10000}
               rows={2}
-              placeholder="e.g. Add rate limiting to the public products endpoint, 100 requests per minute per API key…"
-              className="w-full resize-none bg-transparent text-[14px] leading-relaxed text-foreground outline-none placeholder:text-subtle-foreground"
+              placeholder="Description / details (optional)…"
+              className="w-full resize-none bg-transparent text-[13px] leading-relaxed text-foreground outline-none placeholder:text-subtle-foreground"
             />
             {createError && (
               <div className="mb-2 flex items-center gap-1.5 text-[12px] font-medium text-danger">
@@ -188,7 +201,7 @@ export function Tasks() {
               <Button
                 variant="primary"
                 size="sm"
-                disabled={!draft.trim() || isSubmitting}
+                disabled={!title.trim() || isSubmitting}
                 onClick={handleCreateTask}
               >
                 {isSubmitting ? (

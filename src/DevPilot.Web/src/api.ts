@@ -114,6 +114,12 @@ export async function rejectTask(id: string): Promise<Task> {
   });
 }
 
+export async function startExecution(taskId: string): Promise<ExecutionDetail> {
+  return http<ExecutionDetail>(`/tasks/${taskId}/executions`, {
+    method: 'POST',
+  });
+}
+
 export async function getExecutions(): Promise<ExecutionListItem[]> {
   return http<ExecutionListItem[]>('/executions');
 }

@@ -56,8 +56,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         // 2. Build prompt for AI provider
+        var projectFiles = WorktreeEditApplier.SafeFindFiles(request.WorkspacePath, "*.csproj")
+            .Select(p => Path.GetRelativePath(request.WorkspacePath, p).Replace('\\', '/'))
+            .OrderBy(p => p)
+            .ToList();
+
         var systemPrompt = BuildSystemPrompt();
-        var userPrompt = BuildUserPrompt(request, contextFiles);
+        var userPrompt = BuildUserPrompt(request, contextFiles, projectFiles);
 
         var aiRequest = new AiRequest
         {
@@ -80,6 +85,20 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             return DeveloperAgentResult.Fail(
                 "AI provider request failed.");
+        }
+
+        if (!aiResponse.IsSuccess)
+        {
+            var msg = !string.IsNullOrWhiteSpace(aiResponse.ErrorMessage)
+                ? aiResponse.ErrorMessage
+                : "AI provider request failed.";
+
+            _logger.LogWarning(
+                "DeveloperAgent: AI provider returned failure for task {TaskId}: {ErrorMessage}",
+                request.TaskId,
+                msg);
+
+            return DeveloperAgentResult.Fail(msg);
         }
 
         if (string.IsNullOrWhiteSpace(aiResponse.Content))
@@ -122,6 +141,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             3. Do NOT execute arbitrary shell commands.
             4. For 'Modify' actions, each search string must match EXACTLY ONCE in the target file.
             5. For 'Create' actions, specify 'newContent' explicitly.
+            6. For 'Create' actions of C# source files (*.cs), target 'filePath' MUST be repository-relative (using '/') AND MUST be located inside an existing discovered .NET project directory (e.g. 'src/ProjectName/Folder/File.cs'). Never create C# files at the repository root unless a .csproj file exists at the repository root itself.
 
             JSON Schema:
             {
@@ -146,7 +166,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
             """;
     }
 
-    private static string BuildUserPrompt(DeveloperAgentRequest request, IReadOnlyDictionary<string, string> contextFiles)
+    private static string BuildUserPrompt(
+        DeveloperAgentRequest request,
+        IReadOnlyDictionary<string, string> contextFiles,
+        IReadOnlyList<string> projectFiles)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
@@ -154,6 +177,20 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
         {
             sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
+        }
+        sb.AppendLine();
+        sb.AppendLine("=== Discovered .NET Project Roots ===");
+        if (projectFiles != null && projectFiles.Count > 0)
+        {
+            foreach (var proj in projectFiles)
+            {
+                var projDir = Path.GetDirectoryName(proj)?.Replace('\\', '/') ?? "";
+                sb.AppendLine($"- {proj} (Project Directory: {(string.IsNullOrEmpty(projDir) ? "." : projDir)})");
+            }
+        }
+        else
+        {
+            sb.AppendLine("No .csproj files discovered in workspace.");
         }
         sb.AppendLine();
         sb.AppendLine("=== Impact Analysis Summary ===");

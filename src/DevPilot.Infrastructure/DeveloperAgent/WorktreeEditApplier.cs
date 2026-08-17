@@ -82,43 +82,59 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         var result = new Dictionary<string, string>();
         long totalContentBytes = 0;
 
-        foreach (var relativePath in filePaths)
+        foreach (var rawRelativePath in filePaths)
         {
-            var resolvedPath = ValidateAndResolvePath(workspacePath, relativePath);
+            if (string.IsNullOrWhiteSpace(rawRelativePath))
+            {
+                continue;
+            }
+
+            var resolvedPath = ValidateAndResolvePath(workspacePath, rawRelativePath);
 
             if (!File.Exists(resolvedPath))
             {
-                _logger.LogWarning("Context file does not exist and will be skipped: '{RelativePath}'.", relativePath);
+                _logger.LogWarning("Context file does not exist and will be skipped: '{RawPath}'.", rawRelativePath);
                 continue;
             }
 
             var fileInfo = new FileInfo(resolvedPath);
             if (fileInfo.Length > limits.MaxFileSizeBytes)
             {
-                throw new InvalidOperationException(
-                    $"File '{relativePath}' size ({fileInfo.Length} bytes) exceeds maximum context file size limit of {limits.MaxFileSizeBytes} bytes.");
+                _logger.LogWarning("Context file '{RawPath}' size ({Size} bytes) exceeds limit ({Limit} bytes) and will be skipped.", rawRelativePath, fileInfo.Length, limits.MaxFileSizeBytes);
+                continue;
             }
 
-            var bytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+            byte[] bytes;
+            try
+            {
+                bytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read context file '{RawPath}'. Skipping.", rawRelativePath);
+                continue;
+            }
+
             if (IsBinaryContent(bytes))
             {
-                throw new InvalidOperationException($"File '{relativePath}' contains binary content and cannot be loaded into context.");
+                _logger.LogWarning("Context file '{RawPath}' contains binary content and will be skipped.", rawRelativePath);
+                continue;
+            }
+
+            if (totalContentBytes + bytes.Length > limits.MaxTotalContentSizeBytes)
+            {
+                _logger.LogWarning("Context file '{RawPath}' exceeds total context size limit ({Limit} bytes). Stopping context loading.", rawRelativePath, limits.MaxTotalContentSizeBytes);
+                break;
             }
 
             totalContentBytes += bytes.Length;
-            if (totalContentBytes > limits.MaxTotalContentSizeBytes)
-            {
-                throw new InvalidOperationException(
-                    $"Total context file size ({totalContentBytes} bytes) exceeds maximum limit of {limits.MaxTotalContentSizeBytes} bytes.");
-            }
-
             var content = DecodeUtf8Text(bytes, out _);
-            result[relativePath] = content;
+            result[rawRelativePath] = content;
         }
 
-        if (result.Count == 0)
+        if (result.Count == 0 && filePaths.Count > 0)
         {
-            throw new InvalidOperationException("No valid context files could be loaded from the requested paths.");
+            _logger.LogWarning("No valid context files could be loaded from the {Count} requested paths. Continuing with empty context.", filePaths.Count);
         }
 
         return result;
@@ -183,6 +199,20 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                     {
                         return DeveloperAgentResult.Fail(
                             $"Strict Create action failed: newContent was null for '{spec.FilePath}'.");
+                    }
+
+                    if (spec.FilePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var projectRoots = DiscoverProjectRoots(workspacePath);
+                        if (!IsCsFileInProjectRoot(spec.FilePath, projectRoots))
+                        {
+                            var rootsFormatted = projectRoots.Count > 0
+                                ? string.Join(", ", projectRoots.Select(r => string.IsNullOrEmpty(r) ? "." : r))
+                                : "none";
+
+                            return DeveloperAgentResult.Fail(
+                                $"Target path safety violation: Created C# file '{spec.FilePath}' is outside all discovered .NET project roots ({rootsFormatted}). C# files must be created within an existing .NET project directory.");
+                        }
                     }
 
                     preparedCreates.Add((resolvedPath, spec.FilePath, spec.NewContent));
@@ -358,10 +388,29 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             throw new ArgumentException("Target relative path cannot be empty.", nameof(relativePath));
         }
 
-        // Reject absolute paths
-        if (Path.IsPathRooted(relativePath) || relativePath.StartsWith('/') || relativePath.StartsWith('\\'))
+        relativePath = relativePath.Trim();
+
+        // Trim leading root slashes for repository-root relative paths (e.g. "/src/File.cs" or "\src\File.cs")
+        if (relativePath.StartsWith('/') || relativePath.StartsWith('\\'))
         {
-            throw new InvalidOperationException($"Absolute paths are rejected: '{relativePath}'.");
+            relativePath = relativePath.TrimStart('/', '\\');
+        }
+
+        var canonicalWorkspace = GetCanonicalRealPath(workspacePath);
+
+        // If a drive-rooted absolute path is provided that resides within the execution workspace, convert it to a relative path
+        if (Path.IsPathRooted(relativePath))
+        {
+            var fullPathCandidate = Path.GetFullPath(relativePath);
+            var canonicalCandidate = GetCanonicalRealPath(fullPathCandidate);
+            if (IsSubPath(canonicalWorkspace, canonicalCandidate))
+            {
+                relativePath = Path.GetRelativePath(canonicalWorkspace, canonicalCandidate);
+            }
+            else
+            {
+                throw new InvalidOperationException($"Absolute paths are rejected (outside workspace): '{relativePath}'.");
+            }
         }
 
         // Reject .git segment anywhere in relative path
@@ -383,7 +432,6 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             throw new InvalidOperationException($"Access to sensitive configuration/credential file is rejected: '{relativePath}'.");
         }
 
-        var canonicalWorkspace = GetCanonicalRealPath(workspacePath);
         var combinedPath = Path.Combine(canonicalWorkspace, relativePath);
         var canonicalTarget = GetCanonicalRealPath(combinedPath);
 
@@ -403,11 +451,18 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
 
         if (File.Exists(fullPath) || Directory.Exists(fullPath))
         {
-            FileSystemInfo info = File.Exists(fullPath) ? new FileInfo(fullPath) : new DirectoryInfo(fullPath);
-            var target = info.ResolveLinkTarget(returnFinalTarget: true);
-            if (target != null)
+            try
             {
-                fullPath = target.FullName;
+                FileSystemInfo info = File.Exists(fullPath) ? new FileInfo(fullPath) : new DirectoryInfo(fullPath);
+                var target = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (target != null)
+                {
+                    fullPath = target.FullName;
+                }
+            }
+            catch (Exception)
+            {
+                // Fall back to fullPath if link target resolution fails
             }
         }
 
@@ -415,16 +470,30 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         var current = File.Exists(fullPath) ? Path.GetDirectoryName(fullPath) : fullPath;
         while (!string.IsNullOrEmpty(current) && Directory.Exists(current))
         {
-            var dirInfo = new DirectoryInfo(current);
-            var target = dirInfo.ResolveLinkTarget(returnFinalTarget: true);
-            if (target != null)
-            {
-                var relative = Path.GetRelativePath(current, fullPath);
-                fullPath = Path.GetFullPath(Path.Combine(target.FullName, relative));
-                current = target.FullName;
-            }
             var parent = Path.GetDirectoryName(current);
-            if (parent == current) break;
+            if (string.IsNullOrEmpty(parent) || parent == current || Path.GetPathRoot(current) == current)
+            {
+                break;
+            }
+
+            try
+            {
+                var dirInfo = new DirectoryInfo(current);
+                var target = dirInfo.ResolveLinkTarget(returnFinalTarget: true);
+                if (target != null)
+                {
+                    var relative = Path.GetRelativePath(current, fullPath);
+                    fullPath = Path.GetFullPath(Path.Combine(target.FullName, relative));
+                    current = target.FullName;
+                    parent = Path.GetDirectoryName(current);
+                }
+            }
+            catch (Exception)
+            {
+                // Ignore symlink resolution failures on individual parent directories
+            }
+
+            if (string.IsNullOrEmpty(parent) || parent == current) break;
             current = parent;
         }
 
@@ -534,6 +603,98 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
 
         return (process.ExitCode == 0, await outTask.ConfigureAwait(false), await errTask.ConfigureAwait(false));
+    }
+
+    private static readonly string[] ExcludedDirectoryNames =
+    {
+        ".git", "bin", "obj", "node_modules", ".vs", ".dotnet_home", ".pnpm-store"
+    };
+
+    public static List<string> SafeFindFiles(string rootPath, string searchPattern)
+    {
+        var results = new List<string>();
+        var canonicalRoot = GetCanonicalRealPath(rootPath);
+
+        void Recurse(string currentDir)
+        {
+            var dirName = Path.GetFileName(currentDir);
+            if (ExcludedDirectoryNames.Any(e => e.Equals(dirName, StringComparison.OrdinalIgnoreCase)))
+            {
+                return;
+            }
+
+            var canonicalCurrentDir = GetCanonicalRealPath(currentDir);
+            if (!IsSubPath(canonicalRoot, canonicalCurrentDir))
+            {
+                return;
+            }
+
+            foreach (var file in Directory.GetFiles(currentDir, searchPattern))
+            {
+                var canonicalFile = GetCanonicalRealPath(file);
+                if (IsSubPath(canonicalRoot, canonicalFile))
+                {
+                    results.Add(canonicalFile);
+                }
+            }
+
+            foreach (var subDir in Directory.GetDirectories(currentDir))
+            {
+                Recurse(subDir);
+            }
+        }
+
+        Recurse(canonicalRoot);
+        return results;
+    }
+
+    public static List<string> DiscoverProjectRoots(string workspacePath)
+    {
+        var canonicalWorkspace = GetCanonicalRealPath(workspacePath);
+        var csprojFiles = SafeFindFiles(canonicalWorkspace, "*.csproj");
+        var projectRoots = new List<string>();
+
+        foreach (var file in csprojFiles)
+        {
+            var dir = Path.GetDirectoryName(file);
+            if (string.IsNullOrEmpty(dir)) continue;
+
+            var relativeDir = Path.GetRelativePath(canonicalWorkspace, dir).Replace('\\', '/');
+            if (relativeDir == ".") relativeDir = string.Empty;
+
+            if (!projectRoots.Contains(relativeDir, StringComparer.OrdinalIgnoreCase))
+            {
+                projectRoots.Add(relativeDir);
+            }
+        }
+
+        return projectRoots;
+    }
+
+    public static bool IsCsFileInProjectRoot(string relativeFilePath, IReadOnlyList<string> projectRoots)
+    {
+        if (projectRoots == null || projectRoots.Count == 0)
+        {
+            return true;
+        }
+
+        var normalizedPath = relativeFilePath.Replace('\\', '/').TrimStart('/');
+
+        foreach (var projRoot in projectRoots)
+        {
+            if (string.IsNullOrEmpty(projRoot))
+            {
+                return true;
+            }
+
+            var projPrefix = projRoot.TrimEnd('/') + "/";
+            if (normalizedPath.StartsWith(projPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void CleanupDirectory(string path)

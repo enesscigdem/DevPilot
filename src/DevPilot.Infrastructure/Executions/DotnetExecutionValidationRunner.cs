@@ -356,27 +356,48 @@ public sealed class DotnetExecutionValidationRunner : IExecutionValidationRunner
 
         if (File.Exists(fullPath) || Directory.Exists(fullPath))
         {
-            FileSystemInfo info = File.Exists(fullPath) ? new FileInfo(fullPath) : new DirectoryInfo(fullPath);
-            var target = info.ResolveLinkTarget(returnFinalTarget: true);
-            if (target != null)
+            try
             {
-                fullPath = target.FullName;
+                FileSystemInfo info = File.Exists(fullPath) ? new FileInfo(fullPath) : new DirectoryInfo(fullPath);
+                var target = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (target != null)
+                {
+                    fullPath = target.FullName;
+                }
+            }
+            catch (Exception)
+            {
+                // Fall back to fullPath if link target resolution fails
             }
         }
 
         var current = File.Exists(fullPath) ? Path.GetDirectoryName(fullPath) : fullPath;
         while (!string.IsNullOrEmpty(current) && Directory.Exists(current))
         {
-            var dirInfo = new DirectoryInfo(current);
-            var target = dirInfo.ResolveLinkTarget(returnFinalTarget: true);
-            if (target != null)
-            {
-                var relative = Path.GetRelativePath(current, fullPath);
-                fullPath = Path.GetFullPath(Path.Combine(target.FullName, relative));
-                current = target.FullName;
-            }
             var parent = Path.GetDirectoryName(current);
-            if (parent == current) break;
+            if (string.IsNullOrEmpty(parent) || parent == current || Path.GetPathRoot(current) == current)
+            {
+                break;
+            }
+
+            try
+            {
+                var dirInfo = new DirectoryInfo(current);
+                var target = dirInfo.ResolveLinkTarget(returnFinalTarget: true);
+                if (target != null)
+                {
+                    var relative = Path.GetRelativePath(current, fullPath);
+                    fullPath = Path.GetFullPath(Path.Combine(target.FullName, relative));
+                    current = target.FullName;
+                    parent = Path.GetDirectoryName(current);
+                }
+            }
+            catch (Exception)
+            {
+                // Ignore symlink resolution failures on individual parent directories
+            }
+
+            if (string.IsNullOrEmpty(parent) || parent == current) break;
             current = parent;
         }
 

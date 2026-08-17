@@ -88,6 +88,7 @@ export function TaskForm({ onCreated, onCancel }: TaskFormProps) {
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
+            maxLength={200}
             placeholder="e.g. Refactor authentication middleware"
             required
           />
@@ -98,6 +99,7 @@ export function TaskForm({ onCreated, onCancel }: TaskFormProps) {
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
+            maxLength={10000}
             placeholder="Describe what needs to be done and why."
             rows={5}
             required

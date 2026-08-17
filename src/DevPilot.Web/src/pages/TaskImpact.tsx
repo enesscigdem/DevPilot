@@ -20,7 +20,7 @@ import {
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Panel, Badge, Meter, StatusDot, IconChip } from "@/components/ui/primitives"
-import { getTask, getTaskImpactAnalysis, analyzeTaskImpact, approveTask, rejectTask } from "@/api"
+import { getTask, getTaskImpactAnalysis, analyzeTaskImpact, approveTask, rejectTask, startExecution } from "@/api"
 import {
   TaskStatus,
   TaskPriority,
@@ -103,6 +103,24 @@ export function TaskImpact() {
   const [isRejecting, setIsRejecting] = useState(false)
   const [approvalError, setApprovalError] = useState<string | null>(null)
   const [mockStatus, setMockStatus] = useState<string>("awaiting-approval")
+
+  const [isStartingExecution, setIsStartingExecution] = useState(false)
+  const [startExecutionError, setStartExecutionError] = useState<string | null>(null)
+
+  const handleStartExecution = async () => {
+    if (!id || isStartingExecution) return
+    setIsStartingExecution(true)
+    setStartExecutionError(null)
+
+    try {
+      const execution = await startExecution(id)
+      navigate(`/executions/${execution.id}`)
+    } catch (err) {
+      setStartExecutionError(err instanceof Error ? err.message : "Failed to start execution.")
+    } finally {
+      setIsStartingExecution(false)
+    }
+  }
 
   const loadData = useCallback(async () => {
     if (!id) return
@@ -752,14 +770,43 @@ export function TaskImpact() {
                   </div>
                 </>
               ) : isApproved ? (
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <IconChip tone="blue" className="shrink-0">
-                    <Check className="h-4 w-4" />
-                  </IconChip>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold text-foreground">Plan approved</div>
-                    <div className="text-[12px] text-muted-foreground">This task has been approved and is ready for execution.</div>
+                <div className="space-y-3 min-w-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <IconChip tone="blue" className="shrink-0">
+                      <Check className="h-4 w-4" />
+                    </IconChip>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-semibold text-foreground">Plan approved</div>
+                      <div className="text-[12px] text-muted-foreground">This task has been approved and is ready for execution.</div>
+                    </div>
                   </div>
+
+                  {startExecutionError && (
+                    <div className="flex items-center gap-1.5 text-[12px] font-medium text-danger">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span className="break-words">{startExecutionError}</span>
+                    </div>
+                  )}
+
+                  <Button
+                    variant="primary"
+                    size="lg"
+                    className="w-full"
+                    disabled={isStartingExecution}
+                    onClick={handleStartExecution}
+                  >
+                    {isStartingExecution ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Starting execution…
+                      </>
+                    ) : (
+                      <>
+                        <Play className="h-4 w-4" />
+                        Start execution
+                      </>
+                    )}
+                  </Button>
                 </div>
               ) : isRejected ? (
                 <div className="flex items-center gap-2.5 min-w-0">
