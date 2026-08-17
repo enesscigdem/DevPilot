@@ -5,6 +5,7 @@ using DevPilot.Application.ProjectBrain.Commands.IndexWorkspace;
 using DevPilot.Application.ProjectBrain.Ports;
 using DevPilot.Application.ProjectBrain.Queries.SemanticSearch;
 using DevPilot.Application.RepositoryClone;
+using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspace;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
@@ -142,6 +143,7 @@ public static class DependencyInjection
             configuration.GetSection(RepositoryCloneOptions.SectionName));
 
         services.AddScoped<IRepositoryCloneService, RepositoryCloneService>();
+        services.AddScoped<ICreateRepositoryWorkspaceCommandHandler, CreateRepositoryWorkspaceCommandHandler>();
 
         return services;
     }
