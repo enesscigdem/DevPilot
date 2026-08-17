@@ -26,6 +26,7 @@ import {
   type BrainMessage,
   type BrainCitation,
 } from "@/data/mock"
+import { useWorkspace } from "@/lib/workspace"
 
 function citationKey(c: BrainCitation) {
   return `${c.path}#${c.lines}`
@@ -150,7 +151,12 @@ function SourcePreview({ citation }: { citation: BrainCitation }) {
 /* --------------------------------- Page ------------------------------------ */
 
 export function ProjectBrain() {
+  const { activeWorkspace } = useWorkspace()
   const [draft, setDraft] = useState("")
+
+  const repoFullName = activeWorkspace
+    ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
+    : repository.fullName
 
   const allCitations = useMemo(
     () => brainConversation.flatMap((m) => m.citations ?? []),
@@ -172,7 +178,7 @@ export function ProjectBrain() {
               <Boxes className="h-4 w-4" />
             </div>
             <div className="min-w-0">
-              <div className="truncate font-mono text-[12.5px] font-medium text-foreground">{repository.fullName}</div>
+              <div className="truncate font-mono text-[12.5px] font-medium text-foreground">{repoFullName}</div>
               <div className="font-mono text-[10.5px] text-subtle-foreground">{repository.language}</div>
             </div>
           </div>

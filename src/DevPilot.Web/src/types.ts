@@ -34,13 +34,33 @@ export interface UpdateTaskStatusRequest {
   status: number;
 }
 
-export interface Workspace {
+export const RepositoryWorkspaceStatus = {
+  Cloning: 0,
+  Completed: 1,
+  Failed: 2,
+  AlreadyExists: 3,
+} as const;
+export type RepositoryWorkspaceStatusValue =
+  (typeof RepositoryWorkspaceStatus)[keyof typeof RepositoryWorkspaceStatus];
+
+export interface RepositoryWorkspace {
   id: string;
   owner: string;
   repository: string;
   branch: string;
   status: number;
-  displayName: string;
+  displayName?: string;
+  commitSha?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type Workspace = RepositoryWorkspace;
+
+export interface CreateRepositoryWorkspaceRequest {
+  owner: string;
+  repository: string;
+  branch: string;
 }
 
 export const TaskStatus = {

@@ -14,7 +14,8 @@ import type {
   Task,
   TaskListItem,
   UpdateTaskStatusRequest,
-  Workspace,
+  RepositoryWorkspace,
+  CreateRepositoryWorkspaceRequest,
 } from './types';
 
 const BASE_URL = '/api';
@@ -81,8 +82,21 @@ export async function deleteTask(id: string): Promise<void> {
   });
 }
 
-export async function getWorkspaces(): Promise<Workspace[]> {
-  return http<Workspace[]>('/repositoryworkspaces');
+export async function getRepositoryWorkspaces(): Promise<RepositoryWorkspace[]> {
+  return http<RepositoryWorkspace[]>('/repositoryworkspaces');
+}
+
+export const getWorkspaces = getRepositoryWorkspaces;
+
+export async function getRepositoryWorkspace(id: string): Promise<RepositoryWorkspace> {
+  return http<RepositoryWorkspace>(`/repositoryworkspaces/${id}`);
+}
+
+export async function createRepositoryWorkspace(request: CreateRepositoryWorkspaceRequest): Promise<RepositoryWorkspace> {
+  return http<RepositoryWorkspace>('/repositoryworkspaces', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
 }
 
 export async function getTaskImpactAnalysis(id: string): Promise<ImpactAnalysis | null> {

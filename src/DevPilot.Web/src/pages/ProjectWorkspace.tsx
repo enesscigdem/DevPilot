@@ -26,6 +26,7 @@ import {
   tasks,
   type FileNode,
 } from "@/data/mock"
+import { useWorkspace } from "@/lib/workspace"
 import { cn } from "@/lib/utils"
 
 const methodTone: Record<string, string> = {
@@ -37,17 +38,24 @@ const methodTone: Record<string, string> = {
 }
 
 export function ProjectWorkspace() {
+  const { activeWorkspace } = useWorkspace()
+  const repoFullName = activeWorkspace
+    ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
+    : repository.fullName
+  const branchName = activeWorkspace ? activeWorkspace.branch : repository.branch
+  const repoName = activeWorkspace ? activeWorkspace.repository : repository.name
+
   return (
     <PageContainer>
       <PageHeading
         eyebrow="Project workspace"
-        title={repository.fullName}
+        title={repoFullName}
         description="Structure, detected technologies and analyzer state derived from Roslyn workspace analysis of the master branch."
         actions={
           <>
             <div className="flex items-center gap-1.5 rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground">
               <GitBranch className="h-3.5 w-3.5" />
-              {repository.branch}
+              {branchName}
             </div>
             <Button variant="default" size="md" className="gap-1.5">
               <RotateCcw className="h-3.5 w-3.5" />
@@ -90,7 +98,7 @@ export function ProjectWorkspace() {
           <Panel className="overflow-hidden">
             <div className="flex items-center gap-2 border-b border-border bg-surface-2 px-3 py-2 font-mono text-[11px] text-subtle-foreground">
               <Folder className="h-3.5 w-3.5" />
-              {repository.name}
+              {repoName}
               <span className="ml-auto">{repository.commit}</span>
             </div>
             <div className="max-h-[520px] overflow-y-auto p-1.5">

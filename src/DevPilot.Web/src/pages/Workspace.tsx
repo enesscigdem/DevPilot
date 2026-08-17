@@ -20,24 +20,31 @@ import {
   execution,
   stages,
 } from "@/data/mock"
+import { useWorkspace } from "@/lib/workspace"
 import { cn } from "@/lib/utils"
 
 export function Workspace() {
+  const { activeWorkspace } = useWorkspace()
   const awaiting = tasks.filter((t) => t.status === "awaiting-approval" || t.status === "planning")
   const trouble = tasks.filter((t) => t.status === "blocked" || t.status === "failed")
+
+  const repoFullName = activeWorkspace
+    ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
+    : repository.fullName
+  const branchName = activeWorkspace ? activeWorkspace.branch : repository.branch
 
   return (
     <PageContainer>
       {/* Greeting */}
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="tech-label mb-1.5">Tuesday · 09:42 · master</div>
+          <div className="tech-label mb-1.5">Tuesday · 09:42 · {branchName}</div>
           <h1 className="text-[24px] font-semibold tracking-tight text-foreground">
             What should you work on right now?
           </h1>
           <p className="mt-1.5 flex items-center gap-2 font-mono text-[12px] text-muted-foreground">
             <GitBranch className="h-3.5 w-3.5" />
-            {repository.fullName}
+            {repoFullName}
             <span className="text-border-strong">·</span>
             {repository.files} files
             <span className="text-border-strong">·</span>
@@ -233,7 +240,7 @@ export function Workspace() {
                 </div>
                 <div className="min-w-0">
                   <div className="truncate font-mono text-[12.5px] font-medium text-foreground">
-                    {repository.fullName}
+                    {repoFullName}
                   </div>
                   <div className="font-mono text-[11px] text-subtle-foreground">
                     {repository.language} · {repository.loc.toLocaleString()} LOC
