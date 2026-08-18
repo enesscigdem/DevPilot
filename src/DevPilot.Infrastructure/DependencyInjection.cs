@@ -108,6 +108,7 @@ public static class DependencyInjection
         services.AddScoped<IApproveTaskCommandHandler, ApproveTaskCommandHandler>();
         services.AddScoped<IRejectTaskCommandHandler, RejectTaskCommandHandler>();
         services.AddScoped<IExecutionRepository, EfExecutionRepository>();
+        services.AddScoped<IExecutionListReader, EfExecutionListReader>();
         services.AddScoped<IExecutionWorkspaceManager, GitExecutionWorkspaceManager>();
         services.AddScoped<IExecutionProcessor, GitWorkspaceExecutionProcessor>();
         services.AddScoped<IExecutionDispatcher, HangfireExecutionDispatcher>();

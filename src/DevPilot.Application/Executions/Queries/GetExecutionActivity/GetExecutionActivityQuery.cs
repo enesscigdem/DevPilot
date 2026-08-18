@@ -5,7 +5,7 @@ using DevPilot.Application.Executions.Ports;
 
 namespace DevPilot.Application.Executions.Queries.GetExecutionActivity;
 
-public sealed record GetExecutionActivityQuery(Guid ExecutionId);
+public sealed record GetExecutionActivityQuery(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
 
 public sealed class GetExecutionActivityResult
 {
@@ -27,6 +27,9 @@ public sealed class GetExecutionActivityQueryHandler : IGetExecutionActivityQuer
     {
         PropertyNameCaseInsensitive = true
     };
+
+    private static readonly System.Text.RegularExpressions.Regex AbsolutePathRegex =
+        new(@"([a-zA-Z]:\\[^\s""]+|/(?:home|Users|tmp|var)/[^\s""]+)", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionActivityRepository _activityRepository;
@@ -56,6 +59,16 @@ public sealed class GetExecutionActivityQueryHandler : IGetExecutionActivityQuer
             };
         }
 
+        if (query.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask.RepositoryWorkspaceId != query.RepositoryWorkspaceId.Value)
+        {
+            return new GetExecutionActivityResult
+            {
+                Found = false,
+                ErrorMessage = $"Execution with ID '{query.ExecutionId}' was not found."
+            };
+        }
+
         var activities = await _activityRepository
             .GetByExecutionIdAsync(query.ExecutionId, cancellationToken)
             .ConfigureAwait(false);
@@ -75,13 +88,15 @@ public sealed class GetExecutionActivityQueryHandler : IGetExecutionActivityQuer
                 }
             }
 
+            var sanitizedMessage = SanitizeMessage(a.Message);
+
             return new ExecutionActivityDto(
                 Id: a.Id,
                 ExecutionId: a.ExecutionId,
                 Stage: a.Stage.ToString(),
                 Status: a.Status.ToString(),
                 CreatedAt: a.CreatedAt,
-                Message: a.Message,
+                Message: sanitizedMessage,
                 Metadata: metadata);
         }).ToList();
 
@@ -90,5 +105,15 @@ public sealed class GetExecutionActivityQueryHandler : IGetExecutionActivityQuer
             Found = true,
             Activities = dtos
         };
+    }
+
+    public static string SanitizeMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return string.Empty;
+        }
+
+        return AbsolutePathRegex.Replace(message, "[path]");
     }
 }

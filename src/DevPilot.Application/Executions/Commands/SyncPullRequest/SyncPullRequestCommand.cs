@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Application.Executions.Commands.SyncPullRequest;
 
-public sealed record SyncPullRequestCommand(Guid ExecutionId);
+public sealed record SyncPullRequestCommand(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
 
 public enum SyncPullRequestResultStatus
 {
@@ -95,6 +95,12 @@ public sealed class SyncPullRequestCommandHandler : ISyncPullRequestCommandHandl
             .ConfigureAwait(false);
 
         if (execution is null)
+        {
+            return SyncPullRequestResult.NotFound("Execution not found.");
+        }
+
+        if (command.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask?.RepositoryWorkspaceId != command.RepositoryWorkspaceId.Value)
         {
             return SyncPullRequestResult.NotFound("Execution not found.");
         }

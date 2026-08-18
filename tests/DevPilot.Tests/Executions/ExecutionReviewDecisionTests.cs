@@ -292,7 +292,7 @@ public class ExecutionReviewDecisionTests : IDisposable
         var execution = SeedCompletedExecution();
         execution.ReviewStatus = ExecutionReviewStatus.Approved;
 
-        var handler = new GetExecutionByIdQueryHandler(_executionRepository, new FakeActivityRepository(), Options.Create(new DevPilot.Application.Executions.Options.MergePolicyOptions()));
+        var handler = new GetExecutionByIdQueryHandler(_executionRepository, new FakeActivityRepository(), new FakeImpactAnalysisRepository(), Options.Create(new DevPilot.Application.Executions.Options.MergePolicyOptions()));
 
         // Act
         var result = await handler.HandleAsync(new GetExecutionByIdQuery(execution.Id));
@@ -477,5 +477,13 @@ public class ExecutionReviewDecisionTests : IDisposable
     {
         public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(Guid executionId, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<ExecutionActivity>>(Array.Empty<ExecutionActivity>());
+    }
+
+    private sealed class FakeImpactAnalysisRepository : DevPilot.Application.TaskImpactAnalysis.Ports.IImpactAnalysisRepository
+    {
+        public Task AddAsync(TaskImpactAnalysis analysis, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<TaskImpactAnalysis?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) => Task.FromResult<TaskImpactAnalysis?>(null);
+        public Task<TaskImpactAnalysis?> GetLatestByTaskIdAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult<TaskImpactAnalysis?>(null);
+        public Task<IReadOnlyList<TaskImpactAnalysis>> GetByTaskIdAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<TaskImpactAnalysis>>(Array.Empty<TaskImpactAnalysis>());
     }
 }

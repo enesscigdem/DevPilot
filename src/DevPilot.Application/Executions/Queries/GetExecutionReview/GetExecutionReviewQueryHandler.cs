@@ -50,6 +50,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             return GetExecutionReviewResult.NotFound("Execution not found.");
         }
 
+        if (query.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask?.RepositoryWorkspaceId != query.RepositoryWorkspaceId.Value)
+        {
+            return GetExecutionReviewResult.NotFound("Execution not found.");
+        }
+
         if (execution.Status == TaskExecutionStatus.Pending || execution.Status == TaskExecutionStatus.Running)
         {
             return GetExecutionReviewResult.Conflict(
@@ -81,6 +87,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
         var canRequestMerge = ExecutionMergeEligibility.CalculateCanRequestMerge(execution, allowNoChecks, buildPassed, testPassed);
+        var (buildStatus, testStatus) = DetermineStageStatuses(execution, activities);
 
         if (execution.CommitStatus == ExecutionCommitStatus.Committed)
         {
@@ -118,8 +125,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 ChangedFiles: committedDiffResult.ChangedFiles ?? Array.Empty<ExecutionReviewFileDto>(),
                 Diff: committedDiffResult.DiffText,
                 DiffTruncated: committedDiffResult.DiffTruncated,
-                Build: new ExecutionReviewStageStatusDto(DetermineStageStatuses(execution).BuildStatus),
-                Test: new ExecutionReviewStageStatusDto(DetermineStageStatuses(execution).TestStatus),
+                Build: new ExecutionReviewStageStatusDto(buildStatus),
+                Test: new ExecutionReviewStageStatusDto(testStatus),
                 ReviewStatus: execution.ReviewStatus.ToString(),
                 DecidedAt: execution.ReviewDecidedAt,
                 RejectionReason: execution.ReviewRejectionReason,
@@ -200,8 +207,6 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 $"Failed to read Git execution review diff: {diffResult.ErrorMessage}");
         }
 
-        var (buildStatus, testStatus) = DetermineStageStatuses(execution);
-
         var currentFingerprint = fingerprintResult.Fingerprint ?? string.Empty;
         var approvedMatchesCurrent = true;
 
@@ -273,28 +278,55 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         return GetExecutionReviewResult.Ok(review);
     }
 
-    private static (string BuildStatus, string TestStatus) DetermineStageStatuses(Domain.Entities.TaskExecution execution)
+    private static (string BuildStatus, string TestStatus) DetermineStageStatuses(
+        Domain.Entities.TaskExecution execution,
+        IReadOnlyList<ExecutionActivity> activities)
     {
-        if (execution.Status == TaskExecutionStatus.Completed)
+        var buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
+        var buildFailed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Failed);
+        var buildStarted = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Started);
+
+        var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
+        var testFailed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Failed);
+        var testStarted = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started);
+
+        string buildStatus;
+        if (buildPassed || (execution.Status == TaskExecutionStatus.Completed && !buildFailed))
         {
-            return ("Passed", "Passed");
+            buildStatus = "Passed";
+        }
+        else if (buildFailed)
+        {
+            buildStatus = "Failed";
+        }
+        else if (buildStarted)
+        {
+            buildStatus = "Running";
+        }
+        else
+        {
+            buildStatus = "Unknown";
         }
 
-        if (execution.Status == TaskExecutionStatus.Failed)
+        string testStatus;
+        if (testPassed || (execution.Status == TaskExecutionStatus.Completed && !testFailed))
         {
-            var err = execution.ErrorMessage ?? string.Empty;
-            if (err.Contains("Build validation failed", StringComparison.OrdinalIgnoreCase))
-            {
-                return ("Failed", "Unknown");
-            }
-            if (err.Contains("Test validation failed", StringComparison.OrdinalIgnoreCase))
-            {
-                return ("Passed", "Failed");
-            }
-            return ("Unknown", "Unknown");
+            testStatus = "Passed";
+        }
+        else if (testFailed)
+        {
+            testStatus = "Failed";
+        }
+        else if (testStarted)
+        {
+            testStatus = "Running";
+        }
+        else
+        {
+            testStatus = "Unknown";
         }
 
-        return ("Unknown", "Unknown");
+        return (buildStatus, testStatus);
     }
 
     private static bool CalculateCanRequestPush(Domain.Entities.TaskExecution execution)

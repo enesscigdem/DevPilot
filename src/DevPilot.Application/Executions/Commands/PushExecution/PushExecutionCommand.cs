@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Application.Executions.Commands.PushExecution;
 
-public sealed record PushExecutionCommand(Guid ExecutionId);
+public sealed record PushExecutionCommand(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
 
 public enum PushExecutionResultStatus
 {
@@ -75,6 +75,12 @@ public sealed class PushExecutionCommandHandler : IPushExecutionCommandHandler
             .ConfigureAwait(false);
 
         if (execution is null)
+        {
+            return PushExecutionResult.NotFound("Execution not found.");
+        }
+
+        if (command.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask?.RepositoryWorkspaceId != command.RepositoryWorkspaceId.Value)
         {
             return PushExecutionResult.NotFound("Execution not found.");
         }

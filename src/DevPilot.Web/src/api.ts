@@ -140,62 +140,85 @@ export async function startExecution(taskId: string): Promise<ExecutionDetail> {
   });
 }
 
-export async function getExecutions(): Promise<ExecutionListItem[]> {
-  return http<ExecutionListItem[]>('/executions');
+function appendWorkspaceQuery(url: string, workspaceId?: string | null): string {
+  if (!workspaceId) return url;
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}repositoryWorkspaceId=${encodeURIComponent(workspaceId)}`;
 }
 
-export async function getExecution(id: string): Promise<ExecutionDetail> {
-  return http<ExecutionDetail>(`/executions/${id}`);
+export async function getExecutions(workspaceId?: string | null, init?: RequestInit): Promise<ExecutionListItem[]> {
+  return http<ExecutionListItem[]>(appendWorkspaceQuery('/executions', workspaceId), init);
 }
 
-export async function getExecutionActivity(id: string): Promise<ExecutionActivityItem[]> {
-  return http<ExecutionActivityItem[]>(`/executions/${id}/activity`);
+export async function getExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<ExecutionDetail> {
+  return http<ExecutionDetail>(appendWorkspaceQuery(`/executions/${id}`, workspaceId), init);
 }
 
-export async function getExecutionReview(id: string, init?: RequestInit): Promise<ExecutionReview> {
-  return http<ExecutionReview>(`/executions/${id}/review`, init);
+export async function getExecutionActivity(id: string, workspaceId?: string | null, init?: RequestInit): Promise<ExecutionActivityItem[]> {
+  return http<ExecutionActivityItem[]>(appendWorkspaceQuery(`/executions/${id}/activity`, workspaceId), init);
 }
 
-export async function approveExecutionReview(id: string, expectedChangeFingerprint: string): Promise<ExecutionReviewDecision> {
-  return http<ExecutionReviewDecision>(`/executions/${id}/review/approve`, {
+export async function getExecutionReview(id: string, workspaceId?: string | null, init?: RequestInit): Promise<ExecutionReview> {
+  return http<ExecutionReview>(appendWorkspaceQuery(`/executions/${id}/review`, workspaceId), init);
+}
+
+export async function approveExecutionReview(
+  id: string,
+  expectedChangeFingerprint: string,
+  workspaceId?: string | null,
+  init?: RequestInit
+): Promise<ExecutionReviewDecision> {
+  return http<ExecutionReviewDecision>(appendWorkspaceQuery(`/executions/${id}/review/approve`, workspaceId), {
+    ...init,
     method: 'POST',
     body: JSON.stringify({ expectedChangeFingerprint }),
   });
 }
 
-export async function rejectExecutionReview(id: string, reason?: string): Promise<ExecutionReviewDecision> {
-  return http<ExecutionReviewDecision>(`/executions/${id}/review/reject`, {
+export async function rejectExecutionReview(
+  id: string,
+  reason?: string,
+  workspaceId?: string | null,
+  init?: RequestInit
+): Promise<ExecutionReviewDecision> {
+  return http<ExecutionReviewDecision>(appendWorkspaceQuery(`/executions/${id}/review/reject`, workspaceId), {
+    ...init,
     method: 'POST',
     body: JSON.stringify({ reason }),
   });
 }
 
-export async function commitExecution(id: string): Promise<CommitExecutionResult> {
-  return http<CommitExecutionResult>(`/executions/${id}/commit`, {
+export async function commitExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<CommitExecutionResult> {
+  return http<CommitExecutionResult>(appendWorkspaceQuery(`/executions/${id}/commit`, workspaceId), {
+    ...init,
     method: 'POST',
   });
 }
 
-export async function pushExecution(id: string): Promise<PushExecutionResult> {
-  return http<PushExecutionResult>(`/executions/${id}/push`, {
+export async function pushExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<PushExecutionResult> {
+  return http<PushExecutionResult>(appendWorkspaceQuery(`/executions/${id}/push`, workspaceId), {
+    ...init,
     method: 'POST',
   });
 }
 
-export async function createPullRequest(id: string): Promise<PullRequestResult> {
-  return http<PullRequestResult>(`/executions/${id}/pull-request`, {
+export async function createPullRequest(id: string, workspaceId?: string | null, init?: RequestInit): Promise<PullRequestResult> {
+  return http<PullRequestResult>(appendWorkspaceQuery(`/executions/${id}/pull-request`, workspaceId), {
+    ...init,
     method: 'POST',
   });
 }
 
-export async function syncPullRequest(id: string): Promise<SyncPullRequestResult> {
-  return http<SyncPullRequestResult>(`/executions/${id}/pull-request/sync`, {
+export async function syncPullRequest(id: string, workspaceId?: string | null, init?: RequestInit): Promise<SyncPullRequestResult> {
+  return http<SyncPullRequestResult>(appendWorkspaceQuery(`/executions/${id}/pull-request/sync`, workspaceId), {
+    ...init,
     method: 'POST',
   });
 }
 
-export async function mergeExecution(id: string): Promise<MergeExecutionResult> {
-  return http<MergeExecutionResult>(`/executions/${id}/merge`, {
+export async function mergeExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<MergeExecutionResult> {
+  return http<MergeExecutionResult>(appendWorkspaceQuery(`/executions/${id}/merge`, workspaceId), {
+    ...init,
     method: 'POST',
   });
 }

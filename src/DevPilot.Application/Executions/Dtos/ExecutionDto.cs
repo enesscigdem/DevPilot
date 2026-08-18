@@ -72,6 +72,10 @@ public sealed class ExecutionDto
     public DateTime? MergedAt { get; set; }
 
     public bool CanRequestMerge { get; set; }
+
+    public int ProgressPercentage { get; set; }
+
+    public IReadOnlyList<ExecutionStageStepDto> Stages { get; set; } = Array.Empty<ExecutionStageStepDto>();
 }
 
 public sealed class ExecutionListItemDto
@@ -87,4 +91,28 @@ public sealed class ExecutionListItemDto
     public TaskExecutionStatus Status { get; set; }
 
     public DateTime CreatedAt { get; set; }
+
+    public DateTime? StartedAt { get; set; }
+
+    public DateTime? CompletedAt { get; set; }
+
+    public string ReviewStatus { get; set; } = ExecutionReviewStatus.Pending.ToString();
+
+    public string CommitStatus { get; set; } = ExecutionCommitStatus.None.ToString();
+
+    public string PushStatus { get; set; } = ExecutionPushStatus.None.ToString();
+
+    public string PullRequestStatus { get; set; } = ExecutionPullRequestStatus.None.ToString();
+
+    public string PullRequestRemoteState { get; set; } = ExecutionPullRequestRemoteState.Unknown.ToString();
+
+    public string CiStatus { get; set; } = ExecutionCiStatus.Unknown.ToString();
+
+    public string MergeStatus { get; set; } = ExecutionMergeStatus.None.ToString();
+
+    public string? ErrorMessage { get; set; }
+
+    public int ProgressPercentage { get; set; }
+
+    public IReadOnlyList<ExecutionStageStepDto> Stages { get; set; } = Array.Empty<ExecutionStageStepDto>();
 }

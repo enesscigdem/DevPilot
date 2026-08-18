@@ -57,10 +57,12 @@ public class ExecutionsController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetExecutions(CancellationToken cancellationToken)
+    public async Task<IActionResult> GetExecutions(
+        [FromQuery] Guid? repositoryWorkspaceId,
+        CancellationToken cancellationToken)
     {
         var result = await _getExecutionsHandler
-            .HandleAsync(new GetExecutionsQuery(), cancellationToken)
+            .HandleAsync(new GetExecutionsQuery(repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return Ok(result.Executions);
@@ -69,10 +71,11 @@ public class ExecutionsController : ControllerBase
     [HttpGet("{id:guid}", Name = nameof(GetExecutionById))]
     public async Task<IActionResult> GetExecutionById(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         CancellationToken cancellationToken)
     {
         var result = await _getExecutionByIdHandler
-            .HandleAsync(new GetExecutionByIdQuery(id), cancellationToken)
+            .HandleAsync(new GetExecutionByIdQuery(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         if (!result.Found || result.Execution is null)
@@ -86,10 +89,11 @@ public class ExecutionsController : ControllerBase
     [HttpGet("{id:guid}/activity", Name = nameof(GetExecutionActivity))]
     public async Task<IActionResult> GetExecutionActivity(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         CancellationToken cancellationToken)
     {
         var result = await _getExecutionActivityHandler
-            .HandleAsync(new GetExecutionActivityQuery(id), cancellationToken)
+            .HandleAsync(new GetExecutionActivityQuery(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         if (!result.Found)
@@ -103,10 +107,11 @@ public class ExecutionsController : ControllerBase
     [HttpGet("{id:guid}/review", Name = nameof(GetExecutionReview))]
     public async Task<IActionResult> GetExecutionReview(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         CancellationToken cancellationToken)
     {
         var result = await _getExecutionReviewHandler
-            .HandleAsync(new GetExecutionReviewQuery(id), cancellationToken)
+            .HandleAsync(new GetExecutionReviewQuery(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -121,11 +126,12 @@ public class ExecutionsController : ControllerBase
     [HttpPost("{id:guid}/review/approve", Name = nameof(ApproveExecutionReview))]
     public async Task<IActionResult> ApproveExecutionReview(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         [FromBody] ApproveExecutionReviewRequest request,
         CancellationToken cancellationToken)
     {
         var result = await _approveReviewHandler
-            .HandleAsync(new ApproveExecutionReviewCommand(id, request?.ExpectedChangeFingerprint ?? string.Empty), cancellationToken)
+            .HandleAsync(new ApproveExecutionReviewCommand(id, request?.ExpectedChangeFingerprint ?? string.Empty, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -140,11 +146,12 @@ public class ExecutionsController : ControllerBase
     [HttpPost("{id:guid}/review/reject", Name = nameof(RejectExecutionReview))]
     public async Task<IActionResult> RejectExecutionReview(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         [FromBody] RejectExecutionReviewRequest? request,
         CancellationToken cancellationToken)
     {
         var result = await _rejectReviewHandler
-            .HandleAsync(new RejectExecutionReviewCommand(id, request?.Reason), cancellationToken)
+            .HandleAsync(new RejectExecutionReviewCommand(id, request?.Reason, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -160,10 +167,11 @@ public class ExecutionsController : ControllerBase
     [HttpPost("{id:guid}/commit", Name = nameof(CommitExecution))]
     public async Task<IActionResult> CommitExecution(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         CancellationToken cancellationToken)
     {
         var result = await _commitExecutionHandler
-            .HandleAsync(new CommitExecutionCommand(id), cancellationToken)
+            .HandleAsync(new CommitExecutionCommand(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -178,10 +186,11 @@ public class ExecutionsController : ControllerBase
     [HttpPost("{id:guid}/push", Name = nameof(PushExecution))]
     public async Task<IActionResult> PushExecution(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         CancellationToken cancellationToken)
     {
         var result = await _pushExecutionHandler
-            .HandleAsync(new PushExecutionCommand(id), cancellationToken)
+            .HandleAsync(new PushExecutionCommand(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -196,10 +205,11 @@ public class ExecutionsController : ControllerBase
     [HttpPost("{id:guid}/pull-request", Name = nameof(CreatePullRequest))]
     public async Task<IActionResult> CreatePullRequest(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         CancellationToken cancellationToken)
     {
         var result = await _createPullRequestHandler
-            .HandleAsync(new CreatePullRequestCommand(id), cancellationToken)
+            .HandleAsync(new CreatePullRequestCommand(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -216,10 +226,11 @@ public class ExecutionsController : ControllerBase
     [HttpPost("{id:guid}/pull-request/sync", Name = nameof(SyncPullRequest))]
     public async Task<IActionResult> SyncPullRequest(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         CancellationToken cancellationToken)
     {
         var result = await _syncPullRequestHandler
-            .HandleAsync(new DevPilot.Application.Executions.Commands.SyncPullRequest.SyncPullRequestCommand(id), cancellationToken)
+            .HandleAsync(new DevPilot.Application.Executions.Commands.SyncPullRequest.SyncPullRequestCommand(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -235,11 +246,12 @@ public class ExecutionsController : ControllerBase
     [HttpPost("{id:guid}/merge", Name = nameof(MergeExecution))]
     public async Task<IActionResult> MergeExecution(
         [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
         [FromServices] DevPilot.Application.Executions.Commands.MergeExecution.IMergeExecutionCommandHandler mergeHandler,
         CancellationToken cancellationToken)
     {
         var result = await mergeHandler
-            .HandleAsync(new DevPilot.Application.Executions.Commands.MergeExecution.MergeExecutionCommand(id), cancellationToken)
+            .HandleAsync(new DevPilot.Application.Executions.Commands.MergeExecution.MergeExecutionCommand(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch

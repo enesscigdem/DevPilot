@@ -4,7 +4,7 @@ using DevPilot.Domain.Entities;
 
 namespace DevPilot.Application.Executions.Queries.GetExecutions;
 
-public sealed record GetExecutionsQuery();
+public sealed record GetExecutionsQuery(Guid? RepositoryWorkspaceId = null);
 
 public sealed class GetExecutionsResult
 {
@@ -20,35 +20,24 @@ public interface IGetExecutionsQueryHandler
 
 public sealed class GetExecutionsQueryHandler : IGetExecutionsQueryHandler
 {
-    private readonly IExecutionRepository _executionRepository;
+    private readonly IExecutionListReader _listReader;
 
-    public GetExecutionsQueryHandler(IExecutionRepository executionRepository)
+    public GetExecutionsQueryHandler(IExecutionListReader listReader)
     {
-        _executionRepository = executionRepository;
+        _listReader = listReader;
     }
 
     public async Task<GetExecutionsResult> HandleAsync(
         GetExecutionsQuery query,
         CancellationToken cancellationToken = default)
     {
-        var executions = await _executionRepository
-            .GetAllAsync(cancellationToken)
+        var executions = await _listReader
+            .ReadExecutionsListAsync(query.RepositoryWorkspaceId, cancellationToken)
             .ConfigureAwait(false);
 
         return new GetExecutionsResult
         {
-            Executions = executions.Select(MapToDto).ToList(),
+            Executions = executions,
         };
     }
-
-    private static ExecutionListItemDto MapToDto(TaskExecution execution) =>
-        new()
-        {
-            Id = execution.Id,
-            DevelopmentTaskId = execution.DevelopmentTaskId,
-            TaskTitle = execution.DevelopmentTask.Title,
-            RepositoryName = execution.DevelopmentTask.RepositoryWorkspace.Repository,
-            Status = execution.Status,
-            CreatedAt = execution.CreatedAt,
-        };
 }

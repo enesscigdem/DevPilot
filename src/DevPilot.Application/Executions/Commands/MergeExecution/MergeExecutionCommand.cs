@@ -8,7 +8,7 @@ using Microsoft.Extensions.Options;
 
 namespace DevPilot.Application.Executions.Commands.MergeExecution;
 
-public sealed record MergeExecutionCommand(Guid ExecutionId);
+public sealed record MergeExecutionCommand(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
 
 public enum MergeExecutionResultStatus
 {
@@ -102,6 +102,12 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
             .ConfigureAwait(false);
 
         if (execution is null)
+        {
+            return MergeExecutionResult.NotFound("Execution not found.");
+        }
+
+        if (command.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask?.RepositoryWorkspaceId != command.RepositoryWorkspaceId.Value)
         {
             return MergeExecutionResult.NotFound("Execution not found.");
         }

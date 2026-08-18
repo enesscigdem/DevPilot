@@ -11,16 +11,15 @@ import {
   GitBranch,
   Hammer,
   FlaskConical,
-  CircleCheck,
   Terminal,
   X,
-  OctagonAlert,
   Loader2,
   AlertCircle,
 } from "lucide-react"
 import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
 import { cn } from "@/lib/utils"
 import { getExecution, getExecutionActivity } from "@/api"
+import { useWorkspace } from "@/lib/workspace"
 import {
   TaskExecutionStatus,
   getExecutionStatusMeta,
@@ -32,7 +31,7 @@ import { stages } from "@/data/mock"
 function getStageState(stageIndex: number, status: number, reviewStatus?: string, pullRequestStatus?: string): "done" | "active" | "todo" | "failed" | "blocked" {
   if (stageIndex === 6) {
     const pr = String(pullRequestStatus || "").toLowerCase()
-    if (pr === "open") return "done"
+    if (pr === "open" || pr === "merged") return "done"
     if (pr === "inprogress") return "active"
     if (pr === "failed") return "failed"
     return "todo"
@@ -104,17 +103,24 @@ function getMetadataDisplay(act: ExecutionActivityItem): string | null {
 export function ExecutionWorkspace() {
   const navigate = useNavigate()
   const { id } = useParams<{ id: string }>()
+  const { activeWorkspaceId, isLoading: isWorkspaceLoading } = useWorkspace()
+  const activeReqWorkspaceIdRef = useRef<string | null>(activeWorkspaceId)
+
+  useEffect(() => {
+    activeReqWorkspaceIdRef.current = activeWorkspaceId
+  }, [activeWorkspaceId])
 
   const [execution, setExecution] = useState<ExecutionDetail | null>(null)
   const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const isFetchingRef = useRef(false)
+  const activeRequestIdRef = useRef(0)
 
-  const fetchData = useCallback(async (showLoadingSpinner = false) => {
-    if (!id || isFetchingRef.current) return
-    isFetchingRef.current = true
+  const fetchData = useCallback(async (showLoadingSpinner = false, signal?: AbortSignal) => {
+    if (!id || isWorkspaceLoading) return
+    const currentRequestId = ++activeRequestIdRef.current
+
     if (showLoadingSpinner) {
       setIsLoading(true)
       setError(null)
@@ -122,30 +128,51 @@ export function ExecutionWorkspace() {
 
     try {
       const [execData, actData] = await Promise.all([
-        getExecution(id),
-        getExecutionActivity(id).catch(() => []),
+        getExecution(id, activeWorkspaceId, { signal }),
+        getExecutionActivity(id, activeWorkspaceId, { signal }).catch(() => []),
       ])
-      setExecution(execData)
-      setActivities(actData)
+
+      if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        if (activeWorkspaceId && execData.repositoryWorkspaceId && execData.repositoryWorkspaceId !== activeWorkspaceId) {
+          setError(`Execution run "${id}" does not belong to the selected workspace.`)
+          setExecution(null)
+        } else {
+          setExecution(execData)
+          setActivities(actData)
+          setError(null)
+        }
+      }
     } catch (err) {
-      if (showLoadingSpinner) {
-        setError(err instanceof Error ? err.message : "Failed to load execution detail.")
+      if (signal?.aborted) return
+      if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        if (showLoadingSpinner) {
+          setError(err instanceof Error ? err.message : "Failed to load execution detail.")
+          setExecution(null)
+        }
       }
     } finally {
-      if (showLoadingSpinner) {
-        setIsLoading(false)
+      if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        if (showLoadingSpinner) {
+          setIsLoading(false)
+        }
       }
-      isFetchingRef.current = false
     }
-  }, [id])
+  }, [id, isWorkspaceLoading, activeWorkspaceId])
 
   useEffect(() => {
-    fetchData(true)
-  }, [fetchData])
+    if (isWorkspaceLoading || !id) {
+      setIsLoading(true)
+      return
+    }
+
+    const controller = new AbortController()
+    fetchData(true, controller.signal)
+    return () => controller.abort()
+  }, [id, isWorkspaceLoading, activeWorkspaceId, fetchData])
 
   // Polling loop while execution is Pending (0) or Running (1)
   useEffect(() => {
-    if (!execution) return
+    if (isWorkspaceLoading || !execution) return
     const isRunningOrPending =
       execution.status === TaskExecutionStatus.Pending ||
       execution.status === TaskExecutionStatus.Running
@@ -157,9 +184,9 @@ export function ExecutionWorkspace() {
     }, 2000)
 
     return () => clearInterval(interval)
-  }, [execution, fetchData])
+  }, [isWorkspaceLoading, execution, fetchData])
 
-  if (isLoading) {
+  if (isWorkspaceLoading || isLoading) {
     return (
       <div className="flex h-[calc(100vh-100px)] w-full items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-center">
@@ -199,10 +226,7 @@ export function ExecutionWorkspace() {
 
   const statusMeta = getExecutionStatusMeta(execution.status)
   const isRunning = execution.status === TaskExecutionStatus.Running
-  const isFailed = execution.status === TaskExecutionStatus.Failed
-  const isCompleted = execution.status === TaskExecutionStatus.Completed
   const isPending = execution.status === TaskExecutionStatus.Pending
-  const isCancelled = execution.status === TaskExecutionStatus.Cancelled
 
   const buildPassed = activities.some((a) => a.stage === "Build" && a.status === "Completed")
   const buildFailed = activities.some((a) => a.stage === "Build" && a.status === "Failed")
@@ -260,7 +284,9 @@ export function ExecutionWorkspace() {
           <div className="tech-label mb-3">Pipeline</div>
           <ol className="relative">
             {stages.map((st, i) => {
-              const state = getStageState(i, execution.status, execution.reviewStatus, execution.pullRequestStatus)
+              const backendState = execution.stages?.[i]?.state?.toLowerCase()
+              const state = (backendState as "done" | "active" | "failed" | "blocked" | "todo") ||
+                getStageState(i, execution.status, execution.reviewStatus, execution.pullRequestStatus)
 
               return (
                 <li key={st.key} className="relative flex gap-3 pb-5 last:pb-0">

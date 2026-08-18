@@ -268,10 +268,17 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
             ? WorkspaceStageState.Done
             : (hasFailedAnalysis ? WorkspaceStageState.Failed : WorkspaceStageState.Todo);
 
-        // Stage 3: Approved (explicit semantic states, no enum ordinal comparison)
+        // Stage 3: Approved (explicit semantic states and execution invariants)
+        var hasExecutionStarted = execution.Status is TaskExecutionStatus.Running
+                                                   or TaskExecutionStatus.Completed
+                                                   or TaskExecutionStatus.Failed
+                                                   or TaskExecutionStatus.Cancelled
+                                  || activities.Count > 0;
+
         var isExplicitlyApproved = task.Status is DevelopmentTaskStatus.Approved
                                                or DevelopmentTaskStatus.Executing
-                                               or DevelopmentTaskStatus.Completed;
+                                               or DevelopmentTaskStatus.Completed
+                                  || hasExecutionStarted;
 
         var approvedState = isExplicitlyApproved
             ? WorkspaceStageState.Done

@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { Activity, Clock, Coins, Cpu, ArrowUpRight, Search, Loader2, AlertCircle, Plus } from "lucide-react"
 import { PageContainer, PageHeading } from "@/components/shared"
 import { Panel, Badge, StatusDot, Meter, Button } from "@/components/ui/primitives"
 import { getExecutions } from "@/api"
+import { useWorkspace } from "@/lib/workspace"
 import {
   TaskExecutionStatus,
   getExecutionStatusMeta,
   type ExecutionListItem,
   type Tone,
 } from "@/types"
-import { stages } from "@/data/mock"
+import { stages as defaultStages } from "@/data/mock"
 
 type FilterKey = "all" | "pending" | "running" | "completed" | "failed" | "cancelled"
 
@@ -51,9 +52,9 @@ function getProgressPercentage(status: number): number {
     case TaskExecutionStatus.Completed:
       return 100
     case TaskExecutionStatus.Failed:
-      return 100
+      return 71
     case TaskExecutionStatus.Cancelled:
-      return 0
+      return 43
     default:
       return 0
   }
@@ -69,28 +70,56 @@ function formatDate(dateStr: string): string {
 }
 
 export function Executions() {
+  const { activeWorkspaceId, isLoading: isWorkspaceLoading } = useWorkspace()
+  const activeReqWorkspaceIdRef = useRef<string | null>(activeWorkspaceId)
+
+  useEffect(() => {
+    activeReqWorkspaceIdRef.current = activeWorkspaceId
+  }, [activeWorkspaceId])
+
   const [executions, setExecutions] = useState<ExecutionListItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all")
   const [searchQuery, setSearchQuery] = useState("")
 
-  const fetchExecutions = useCallback(async () => {
+  const activeRequestIdRef = useRef(0)
+
+  const fetchExecutions = useCallback(async (signal?: AbortSignal) => {
+    if (isWorkspaceLoading) return
+    const currentRequestId = ++activeRequestIdRef.current
+
     setIsLoading(true)
     setError(null)
     try {
-      const data = await getExecutions()
-      setExecutions(data)
+      const data = await getExecutions(activeWorkspaceId, { signal })
+      if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        setExecutions(data)
+        setError(null)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load executions.")
+      if (signal?.aborted) return
+      if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        setError(err instanceof Error ? err.message : "Failed to load executions.")
+      }
     } finally {
-      setIsLoading(false)
+      if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsLoading(false)
+      }
     }
-  }, [])
+  }, [isWorkspaceLoading, activeWorkspaceId])
 
   useEffect(() => {
-    fetchExecutions()
-  }, [fetchExecutions])
+    if (isWorkspaceLoading) {
+      setIsLoading(true)
+      return
+    }
+
+    setExecutions([])
+    const controller = new AbortController()
+    fetchExecutions(controller.signal)
+    return () => controller.abort()
+  }, [isWorkspaceLoading, activeWorkspaceId, fetchExecutions])
 
   const runningCount = executions.filter((e) => e.status === TaskExecutionStatus.Running).length
 
@@ -170,7 +199,7 @@ export function Executions() {
         </div>
       </div>
 
-      {isLoading ? (
+      {isWorkspaceLoading || isLoading ? (
         <Panel className="flex flex-col items-center justify-center gap-2 px-4 py-16 text-center">
           <Loader2 className="h-5 w-5 animate-spin text-subtle-foreground" />
           <p className="text-[13px] text-muted-foreground">Loading executions from API…</p>
@@ -182,7 +211,7 @@ export function Executions() {
             <p className="text-[13.5px] font-medium text-foreground">Failed to load executions</p>
             <p className="mt-0.5 text-[12.5px] text-muted-foreground">{error}</p>
           </div>
-          <Button variant="default" size="sm" onClick={fetchExecutions}>
+          <Button variant="default" size="sm" onClick={() => fetchExecutions()}>
             Retry
           </Button>
         </Panel>
@@ -199,8 +228,24 @@ export function Executions() {
         <div className="space-y-3">
           {filteredExecutions.map((run) => {
             const meta = getExecutionStatusMeta(run.status)
-            const progress = getProgressPercentage(run.status)
+            const progress = typeof run.progressPercentage === "number"
+              ? run.progressPercentage
+              : getProgressPercentage(run.status)
             const isLive = run.status === TaskExecutionStatus.Running
+
+            const itemStages = run.stages && run.stages.length === 7
+              ? run.stages
+              : defaultStages.map((st, i) => ({
+                  stageKey: st.key,
+                  label: st.label,
+                  state: (run.status === TaskExecutionStatus.Completed
+                    ? "Done"
+                    : run.status === TaskExecutionStatus.Failed
+                      ? (i === 4 ? "Failed" : (i < 4 ? "Done" : "Todo"))
+                      : run.status === TaskExecutionStatus.Running
+                        ? (i === 3 ? "Active" : (i < 3 ? "Done" : "Todo"))
+                        : "Todo") as any,
+                }))
 
             return (
               <Link key={run.id} to={`/executions/${run.id}`}>
@@ -229,30 +274,21 @@ export function Executions() {
                   </div>
                   {/* stage rail */}
                   <div className="mt-3 flex items-center gap-1">
-                    {stages.map((st, i) => {
-                      const reached = run.status === TaskExecutionStatus.Completed
-                        ? true
-                        : run.status === TaskExecutionStatus.Failed
-                          ? i <= 4
-                          : run.status === TaskExecutionStatus.Running
-                            ? i < 3
-                            : false
+                    {itemStages.map((st) => {
+                      const state = String(st.state).toLowerCase()
+                      const bgClass =
+                        state === "done"
+                          ? "bg-success"
+                          : state === "failed"
+                            ? "bg-danger"
+                            : state === "active"
+                              ? "bg-primary"
+                              : state === "blocked"
+                                ? "bg-accent"
+                                : "bg-surface-3"
                       return (
-                        <div key={st.key} className="flex flex-1 items-center gap-1">
-                          <div
-                            className={
-                              "h-1 flex-1 rounded-full " +
-                              (reached
-                                ? meta.tone === "red"
-                                  ? "bg-danger"
-                                  : meta.tone === "amber"
-                                    ? "bg-accent"
-                                    : meta.tone === "green"
-                                      ? "bg-success"
-                                      : "bg-primary"
-                                : "bg-surface-3")
-                            }
-                          />
+                        <div key={st.stageKey || st.label} className="flex flex-1 items-center gap-1">
+                          <div className={"h-1 flex-1 rounded-full " + bgClass} />
                         </div>
                       )
                     })}

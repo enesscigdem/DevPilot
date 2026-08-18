@@ -7,7 +7,8 @@ namespace DevPilot.Application.Executions.Commands.RejectExecutionReview;
 
 public sealed record RejectExecutionReviewCommand(
     Guid ExecutionId,
-    string? Reason);
+    string? Reason,
+    Guid? RepositoryWorkspaceId = null);
 
 public enum RejectExecutionReviewResultStatus
 {
@@ -81,6 +82,12 @@ public sealed class RejectExecutionReviewCommandHandler : IRejectExecutionReview
             .ConfigureAwait(false);
 
         if (execution is null)
+        {
+            return RejectExecutionReviewResult.NotFound("Execution not found.");
+        }
+
+        if (command.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask?.RepositoryWorkspaceId != command.RepositoryWorkspaceId.Value)
         {
             return RejectExecutionReviewResult.NotFound("Execution not found.");
         }
