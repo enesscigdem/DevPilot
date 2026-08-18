@@ -31,12 +31,15 @@ public sealed class RepositoryChunker : IRepositoryChunker
         ".lock", ".cache", ".DS_Store", ".gitignore",
     }.ToFrozenSet();
 
-    private static readonly FrozenSet<string> SensitiveFileNameTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenSet<string> SensitiveExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "secret", "secrets", "credential", "credentials", "token", "tokens", "apikey", "api-key", "api_key",
-        "password", "passwd", "private", ".env", "appsettings.Development", "appsettings.Local",
-        "appsettings.Staging", "appsettings.Production", "connectionstring", "connection-string", "connection_string",
-        "key", "keys", "cert", "certificate", ".pem", ".pfx", ".p12", ".cer", ".crt",
+        ".pem", ".pfx", ".p12", ".cer", ".crt", ".key", ".kdbx", ".jks", ".keystore",
+    }.ToFrozenSet();
+
+    private static readonly FrozenSet<string> SensitiveExactFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ".env", "secrets.json", "credentials.json", "client_secrets.json", "service-account.json",
+        "htpasswd", ".htpasswd", "id_rsa", "id_ed25519", "id_dsa", "known_hosts",
     }.ToFrozenSet();
 
     private static readonly FrozenSet<string> SupportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -117,15 +120,16 @@ public sealed class RepositoryChunker : IRepositoryChunker
                     var chunk = new CodeChunk
                     {
                         Id = Guid.NewGuid(),
-                        WorkspacePath = workspacePath,
-                        WorkspaceName = metadata.WorkspaceName,
-                        ProjectName = projectName,
-                        FilePath = filePath,
-                        RelativePath = normalizedRelative,
-                        Language = language,
-                        SymbolName = symbolInfo?.SymbolName,
-                        TypeName = symbolInfo?.TypeName,
-                        MethodName = symbolInfo?.MethodName,
+                        RepositoryWorkspaceId = metadata.RepositoryWorkspaceId,
+                        WorkspacePath = Truncate(workspacePath, 500),
+                        WorkspaceName = Truncate(metadata.WorkspaceName, 200),
+                        ProjectName = Truncate(projectName, 200),
+                        FilePath = Truncate(filePath, 500),
+                        RelativePath = Truncate(normalizedRelative, 500),
+                        Language = Truncate(language, 50),
+                        SymbolName = TruncateNullable(symbolInfo?.SymbolName, 200),
+                        TypeName = TruncateNullable(symbolInfo?.TypeName, 200),
+                        MethodName = TruncateNullable(symbolInfo?.MethodName, 200),
                         DeclaredSymbols = symbolInfo?.DeclaredSymbols ?? string.Empty,
                         ChunkOrder = i,
                         StartLine = startLine,
@@ -223,12 +227,37 @@ public sealed class RepositoryChunker : IRepositoryChunker
             return false;
         }
 
-        if (SensitiveFileNameTokens.Any(token => fileName.Contains(token, StringComparison.OrdinalIgnoreCase)))
+        var extension = Path.GetExtension(filePath);
+
+        if (SensitiveExtensions.Contains(extension))
         {
             return false;
         }
 
-        var extension = Path.GetExtension(filePath);
+        if (SensitiveExactFileNames.Contains(fileName))
+        {
+            return false;
+        }
+
+        if (fileName.StartsWith(".env", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (fileName.StartsWith("appsettings.", StringComparison.OrdinalIgnoreCase) &&
+            (fileName.Contains("Development", StringComparison.OrdinalIgnoreCase) ||
+             fileName.Contains("Local", StringComparison.OrdinalIgnoreCase) ||
+             fileName.Contains("Production", StringComparison.OrdinalIgnoreCase) ||
+             fileName.Contains("Staging", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (fileName.EndsWith(".private-key.pem", StringComparison.OrdinalIgnoreCase) ||
+            fileName.EndsWith(".key.pem", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
 
         if (fileName.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase) ||
             fileName.EndsWith(".g.i.cs", StringComparison.OrdinalIgnoreCase) ||
@@ -391,11 +420,23 @@ public sealed class RepositoryChunker : IRepositoryChunker
                 .ToList();
             if (methodNames.Count > 0)
             {
-                info.MethodName = string.Join(", ", methodNames);
+                info.MethodName = Truncate(string.Join(", ", methodNames), 200);
             }
         }
 
         return map;
+    }
+
+    private static string Truncate(string? value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        return value.Length <= maxLength ? value : value[..maxLength];
+    }
+
+    private static string? TruncateNullable(string? value, int maxLength)
+    {
+        if (value is null) return null;
+        return value.Length <= maxLength ? value : value[..maxLength];
     }
 
     private static List<(int StartLine, int EndLine, string Content)> ChunkContent(string content)
@@ -449,4 +490,3 @@ public sealed class RepositoryChunker : IRepositoryChunker
         public string DeclaredSymbols { get; set; } = string.Empty;
     }
 }
-

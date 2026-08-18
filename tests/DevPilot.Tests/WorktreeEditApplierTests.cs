@@ -79,6 +79,40 @@ public class WorktreeEditApplierTests : IDisposable
         act.Should().Throw<InvalidOperationException>().WithMessage("*Absolute paths are rejected*");
     }
 
+    [Theory]
+    [InlineData("src/foo/bar.cs")]
+    [InlineData(@"src\foo\bar.cs")]
+    [InlineData(@"\src\foo\bar.cs")]
+    public void ValidateAndResolvePath_ValidRelativeVariants_AcceptedOnAllHosts(string validPath)
+    {
+        var resolved = WorktreeEditApplier.ValidateAndResolvePath(_worktreeDir, validPath);
+        resolved.Should().StartWith(WorktreeEditApplier.GetCanonicalRealPath(_worktreeDir));
+        resolved.Should().EndWith("bar.cs");
+    }
+
+    [Theory]
+    [InlineData("../secret.txt")]
+    [InlineData(@"..\secret.txt")]
+    [InlineData("src/../../secret.txt")]
+    [InlineData(@"src\..\..\secret.txt")]
+    [InlineData(@"C:\secret.txt")]
+    [InlineData("C:/secret.txt")]
+    [InlineData(@"\\server\share\secret.txt")]
+    [InlineData("//server/share/secret.txt")]
+    public void ValidateAndResolvePath_UnsafeOrAbsolutePaths_RejectedOnAllHosts(string unsafePath)
+    {
+        var act = () => WorktreeEditApplier.ValidateAndResolvePath(_worktreeDir, unsafePath);
+        act.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact]
+    public void ValidateAndResolvePath_SiblingPrefixEscape_ThrowsInvalidOperationException()
+    {
+        var siblingPath = Path.Combine(_tempDir, "worktree_sibling", "secret.txt");
+        var act = () => WorktreeEditApplier.ValidateAndResolvePath(_worktreeDir, siblingPath);
+        act.Should().Throw<InvalidOperationException>().WithMessage("*Absolute paths are rejected*");
+    }
+
     [Fact]
     public void ValidateAndResolvePath_ParentTraversal_ThrowsInvalidOperationException()
     {
@@ -308,14 +342,14 @@ public class WorktreeEditApplierTests : IDisposable
     }
 
     [Fact]
-    public async Task ReadContextFiles_AllContextFilesMissing_ThrowsInvalidOperationException()
+    public async Task ReadContextFiles_AllContextFilesMissing_ReturnsEmptyDictionaryWithoutThrowing()
     {
-        var act = () => _applier.ReadContextFilesAsync(
+        var result = await _applier.ReadContextFilesAsync(
             _worktreeDir,
             _branchName,
             new[] { "missing1.txt", "missing2.txt" });
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*No valid context files could be loaded*");
+        result.Should().BeEmpty();
     }
 
     [Fact]
@@ -508,6 +542,73 @@ public class WorktreeEditApplierTests : IDisposable
         var act = () => _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
 
         await act.Should().ThrowAsync<DecoderFallbackException>();
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_ValidRepositoryRelativePath_LoadsSuccessfully()
+    {
+        var relativePath = "src/SubFolder/Valid.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        await File.WriteAllTextAsync(fullPath, "public class Valid {}");
+
+        var result = await _applier.ReadContextFilesAsync(_worktreeDir, _branchName, new[] { relativePath });
+
+        result.Should().ContainKey(relativePath);
+        result[relativePath].Should().Be("public class Valid {}");
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_MissingOneOfMultipleFiles_SkipsMissingAndLoadsValid()
+    {
+        var validPath = "src/ValidFile.cs";
+        var missingPath = "src/MissingFile.cs";
+
+        var fullValidPath = Path.Combine(_worktreeDir, validPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullValidPath)!);
+        await File.WriteAllTextAsync(fullValidPath, "public class ValidFile {}");
+
+        var result = await _applier.ReadContextFilesAsync(_worktreeDir, _branchName, new[] { missingPath, validPath });
+
+        result.Should().HaveCount(1);
+        result.Should().ContainKey(validPath);
+        result.Should().NotContainKey(missingPath);
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_AllFilesMissing_ReturnsEmptyDictionaryWithoutThrowing()
+    {
+        var missing1 = "Missing1.cs";
+        var missing2 = "Missing2.cs";
+
+        var result = await _applier.ReadContextFilesAsync(_worktreeDir, _branchName, new[] { missing1, missing2 });
+
+        result.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ReadContextFiles_WindowsPathSeparatorsAndLeadingSlashes_ResolvesAndLoadsSuccessfully()
+    {
+        var relativePath = @"\src\SubFolder\WinFile.cs";
+        var fullPath = Path.Combine(_worktreeDir, "src", "SubFolder", "WinFile.cs");
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        await File.WriteAllTextAsync(fullPath, "public class WinFile {}");
+
+        var result = await _applier.ReadContextFilesAsync(_worktreeDir, _branchName, new[] { relativePath });
+
+        result.Should().HaveCount(1);
+        result.Values.First().Should().Be("public class WinFile {}");
+    }
+
+    [Fact]
+    public void ValidateAndResolvePath_AbsoluteInWorkspacePath_ThrowsInvalidOperationException()
+    {
+        var relative = "src/Inside.cs";
+        var absoluteInWorkspace = Path.Combine(_worktreeDir, relative);
+
+        var act = () => WorktreeEditApplier.ValidateAndResolvePath(_worktreeDir, absoluteInWorkspace);
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("*Absolute paths are rejected*");
     }
 
     private static void InitGitRepo(string path)

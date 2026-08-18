@@ -3,8 +3,9 @@ import { useNavigate } from "react-router-dom"
 import { Plus, Search, Sparkles, CornerDownLeft, Loader2, AlertCircle } from "lucide-react"
 import { PageContainer, PageHeading, TaskRow } from "@/components/shared"
 import { Button, Panel, Badge, Kbd } from "@/components/ui/primitives"
-import { getTasks, createTask, getWorkspaces } from "@/api"
-import { TaskStatus, TaskPriority, type TaskListItem, type Workspace } from "@/types"
+import { getTasks, createTask } from "@/api"
+import { useWorkspace } from "@/lib/workspace"
+import { TaskStatus, TaskPriority, type TaskListItem } from "@/types"
 
 type FilterKey = "all" | "awaiting-approval" | "executing" | "blocked" | "done" | "failed" | "draft"
 
@@ -45,13 +46,13 @@ function matchesFilter(task: TaskListItem, filter: FilterKey): boolean {
 
 export function Tasks() {
   const navigate = useNavigate()
+  const { activeWorkspace, activeWorkspaceId } = useWorkspace()
   const [tasks, setTasks] = useState<TaskListItem[]>([])
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("")
 
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all")
   const [searchQuery, setSearchQuery] = useState("")
-  const [draft, setDraft] = useState("")
+  const [title, setTitle] = useState("")
+  const [description, setDescription] = useState("")
 
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -59,56 +60,48 @@ export function Tasks() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
 
-  const fetchWorkspaces = useCallback(async () => {
-    try {
-      const wsList = await getWorkspaces()
-      setWorkspaces(wsList)
-      if (wsList.length > 0) {
-        setSelectedWorkspaceId((prev) => prev || wsList[0].id)
-      }
-    } catch (err) {
-      console.error("Failed to load workspaces", err)
-    }
-  }, [])
-
   const fetchTasks = useCallback(async () => {
+    if (!activeWorkspaceId) {
+      setTasks([])
+      setIsLoading(false)
+      return
+    }
+
     setIsLoading(true)
     setError(null)
     try {
-      const data = await getTasks()
+      const data = await getTasks({ repositoryWorkspaceId: activeWorkspaceId })
       setTasks(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load tasks from server.")
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [activeWorkspaceId])
 
   useEffect(() => {
-    fetchWorkspaces()
     fetchTasks()
-  }, [fetchWorkspaces, fetchTasks])
-
-  const selectedWorkspace = workspaces.find((w) => w.id === selectedWorkspaceId) || workspaces[0]
+  }, [fetchTasks])
 
   const handleCreateTask = async () => {
-    if (!draft.trim() || isSubmitting) return
+    if (!title.trim() || isSubmitting) return
+    if (!activeWorkspaceId) {
+      setCreateError("No active repository workspace. Please connect or select a workspace.")
+      return
+    }
+
     setIsSubmitting(true)
     setCreateError(null)
     try {
-      const workspaceId = selectedWorkspaceId || (workspaces[0] ? workspaces[0].id : "")
-      if (!workspaceId) {
-        throw new Error("No repository workspace available. Please ensure a workspace exists.")
-      }
-
       const created = await createTask({
-        repositoryWorkspaceId: workspaceId,
-        title: draft.trim(),
-        description: draft.trim(),
+        repositoryWorkspaceId: activeWorkspaceId,
+        title: title.trim(),
+        description: description.trim(),
         priority: TaskPriority.Medium,
       })
 
-      setDraft("")
+      setTitle("")
+      setDescription("")
       navigate(`/tasks/${created.id}`)
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Failed to create task.")
@@ -117,7 +110,7 @@ export function Tasks() {
     }
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
       handleCreateTask()
@@ -146,14 +139,25 @@ export function Tasks() {
           <div className="mt-1.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary-soft text-primary">
             <Sparkles className="h-4 w-4" />
           </div>
-          <div className="flex-1">
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
               onKeyDown={handleKeyDown}
+              maxLength={200}
+              placeholder="Task title (e.g. Add rate limiting to the public products endpoint)"
+              className="w-full bg-transparent text-[14px] font-medium text-foreground outline-none placeholder:text-subtle-foreground"
+              required
+            />
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              onKeyDown={handleKeyDown}
+              maxLength={10000}
               rows={2}
-              placeholder="e.g. Add rate limiting to the public products endpoint, 100 requests per minute per API key…"
-              className="w-full resize-none bg-transparent text-[14px] leading-relaxed text-foreground outline-none placeholder:text-subtle-foreground"
+              placeholder="Description / details (optional)…"
+              className="w-full resize-none bg-transparent text-[13px] leading-relaxed text-foreground outline-none placeholder:text-subtle-foreground"
             />
             {createError && (
               <div className="mb-2 flex items-center gap-1.5 text-[12px] font-medium text-danger">
@@ -164,31 +168,17 @@ export function Tasks() {
             <div className="mt-2 flex items-center justify-between">
               <div className="flex items-center gap-2 font-mono text-[11px] text-subtle-foreground">
                 <span>Context</span>
-                {workspaces.length > 1 ? (
-                  <select
-                    value={selectedWorkspaceId}
-                    onChange={(e) => setSelectedWorkspaceId(e.target.value)}
-                    className="rounded-[var(--radius-sm)] border border-border bg-surface px-2 py-0.5 font-mono text-[11px] text-foreground outline-none transition-colors hover:border-primary-ring"
-                  >
-                    {workspaces.map((ws) => (
-                      <option key={ws.id} value={ws.id}>
-                        {ws.displayName}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <Badge tone="neutral" mono>
-                    {selectedWorkspace
-                      ? `${selectedWorkspace.owner}/${selectedWorkspace.repository}`
-                      : "enesscigdem/DevPilot"}
-                  </Badge>
-                )}
+                <Badge tone="neutral" mono>
+                  {activeWorkspace
+                    ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
+                    : "No active workspace"}
+                </Badge>
                 <span className="hidden sm:inline">· active workspace</span>
               </div>
               <Button
                 variant="primary"
                 size="sm"
-                disabled={!draft.trim() || isSubmitting}
+                disabled={!title.trim() || isSubmitting || !activeWorkspaceId}
                 onClick={handleCreateTask}
               >
                 {isSubmitting ? (
@@ -265,9 +255,11 @@ export function Tasks() {
           <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
             <Plus className="h-5 w-5 text-subtle-foreground" />
             <p className="text-[13px] text-muted-foreground">
-              {searchQuery.trim() || activeFilter !== "all"
-                ? "No tasks match the selected filter."
-                : "No tasks found."}
+              {!activeWorkspaceId
+                ? "No active repository workspace. Connect or select a workspace to view tasks."
+                : searchQuery.trim() || activeFilter !== "all"
+                  ? "No tasks match the selected filter."
+                  : "No tasks found."}
             </p>
           </div>
         ) : (

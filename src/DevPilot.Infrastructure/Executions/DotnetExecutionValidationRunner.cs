@@ -295,7 +295,9 @@ public sealed class DotnetExecutionValidationRunner : IExecutionValidationRunner
             throw new InvalidOperationException($"Target file extension '{ext}' is not an approved target type ({string.Join(", ", allowedExtensions)}).");
         }
 
-        var combinedPath = Path.Combine(canonicalWorkspace, callerTargetPath);
+        var normalizedTarget = callerTargetPath.Replace('\\', '/').TrimStart('/');
+        var hostTarget = normalizedTarget.Replace('/', Path.DirectorySeparatorChar);
+        var combinedPath = Path.Combine(canonicalWorkspace, hostTarget);
         var canonicalTarget = GetCanonicalRealPath(combinedPath);
 
         if (!IsSubPath(canonicalWorkspace, canonicalTarget))
@@ -356,39 +358,73 @@ public sealed class DotnetExecutionValidationRunner : IExecutionValidationRunner
 
         if (File.Exists(fullPath) || Directory.Exists(fullPath))
         {
-            FileSystemInfo info = File.Exists(fullPath) ? new FileInfo(fullPath) : new DirectoryInfo(fullPath);
-            var target = info.ResolveLinkTarget(returnFinalTarget: true);
-            if (target != null)
+            try
             {
-                fullPath = target.FullName;
+                FileSystemInfo info = File.Exists(fullPath) ? new FileInfo(fullPath) : new DirectoryInfo(fullPath);
+                var target = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (target != null)
+                {
+                    fullPath = target.FullName;
+                }
+            }
+            catch (Exception)
+            {
+                // Fall back to fullPath if link target resolution fails
             }
         }
 
         var current = File.Exists(fullPath) ? Path.GetDirectoryName(fullPath) : fullPath;
         while (!string.IsNullOrEmpty(current) && Directory.Exists(current))
         {
-            var dirInfo = new DirectoryInfo(current);
-            var target = dirInfo.ResolveLinkTarget(returnFinalTarget: true);
-            if (target != null)
-            {
-                var relative = Path.GetRelativePath(current, fullPath);
-                fullPath = Path.GetFullPath(Path.Combine(target.FullName, relative));
-                current = target.FullName;
-            }
             var parent = Path.GetDirectoryName(current);
-            if (parent == current) break;
+            if (string.IsNullOrEmpty(parent) || parent == current || Path.GetPathRoot(current) == current)
+            {
+                break;
+            }
+
+            try
+            {
+                var dirInfo = new DirectoryInfo(current);
+                var target = dirInfo.ResolveLinkTarget(returnFinalTarget: true);
+                if (target != null)
+                {
+                    var relative = Path.GetRelativePath(current, fullPath);
+                    fullPath = Path.GetFullPath(Path.Combine(target.FullName, relative));
+                    current = target.FullName;
+                    parent = Path.GetDirectoryName(current);
+                }
+            }
+            catch (Exception)
+            {
+                // Ignore symlink resolution failures on individual parent directories
+            }
+
+            if (string.IsNullOrEmpty(parent) || parent == current) break;
             current = parent;
         }
 
         return Path.GetFullPath(fullPath);
     }
 
-    private static bool IsSubPath(string basePath, string candidatePath)
+    public static bool IsSubPath(string basePath, string candidatePath)
     {
-        var normBase = Path.GetFullPath(basePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var normCand = Path.GetFullPath(candidatePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normBase = Path.GetFullPath(basePath);
+        var normCand = Path.GetFullPath(candidatePath);
 
-        return normCand.Equals(normBase, StringComparison.OrdinalIgnoreCase) ||
-               normCand.StartsWith(normBase + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        normBase = normBase.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        normCand = normCand.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+        if (normCand.Equals(normBase, comparison))
+        {
+            return true;
+        }
+
+        var baseWithSep = normBase.EndsWith(Path.DirectorySeparatorChar)
+            ? normBase
+            : normBase + Path.DirectorySeparatorChar;
+
+        return normCand.StartsWith(baseWithSep, comparison);
     }
 }

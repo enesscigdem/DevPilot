@@ -4,6 +4,8 @@ namespace DevPilot.Application.ProjectBrain.Models;
 
 public sealed class ChunkSourceInfo
 {
+    public Guid? RepositoryWorkspaceId { get; set; }
+
     public string WorkspacePath { get; set; } = string.Empty;
 
     public string WorkspaceName { get; set; } = string.Empty;
@@ -37,6 +39,8 @@ public sealed class ChunkSourceInfo
 
 public sealed class ChunkMetadata
 {
+    public Guid? RepositoryWorkspaceId { get; set; }
+
     public string WorkspacePath { get; set; } = string.Empty;
 
     public string WorkspaceName { get; set; } = string.Empty;

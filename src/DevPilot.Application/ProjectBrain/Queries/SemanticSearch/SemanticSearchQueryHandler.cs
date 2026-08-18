@@ -31,12 +31,12 @@ public sealed class SemanticSearchQueryHandler : ISemanticSearchQueryHandler
         SemanticSearchQuery query,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(query.WorkspacePath))
+        if (!query.RepositoryWorkspaceId.HasValue && string.IsNullOrWhiteSpace(query.WorkspacePath))
         {
             return new SemanticSearchResult
             {
                 Success = false,
-                ErrorMessage = "WorkspacePath is required.",
+                ErrorMessage = "RepositoryWorkspaceId or WorkspacePath is required.",
             };
         }
 
@@ -49,38 +49,26 @@ public sealed class SemanticSearchQueryHandler : ISemanticSearchQueryHandler
             };
         }
 
-        var queryEmbeddingResult = await _embeddingProvider.GenerateAsync(
-            new[] { query.QueryText },
-            cancellationToken).ConfigureAwait(false);
-
-        if (!queryEmbeddingResult.Success)
+        float[]? queryEmbedding = null;
+        try
         {
-            _logger.LogWarning(
-                "Semantic search failed for workspace {WorkspacePath}: {Error}",
-                query.WorkspacePath,
-                queryEmbeddingResult.ErrorMessage);
+            var queryEmbeddingResult = await _embeddingProvider.GenerateAsync(
+                new[] { query.QueryText },
+                cancellationToken).ConfigureAwait(false);
 
-            return new SemanticSearchResult
+            if (queryEmbeddingResult.Success && queryEmbeddingResult.Embeddings.Count > 0)
             {
-                Success = false,
-                ErrorMessage = queryEmbeddingResult.ErrorMessage ?? "Embedding provider not configured",
-                ProviderName = _embeddingProvider.ProviderName,
-            };
+                queryEmbedding = queryEmbeddingResult.Embeddings[0];
+            }
         }
-
-        if (queryEmbeddingResult.Embeddings.Count == 0 || queryEmbeddingResult.Embeddings[0] is null)
+        catch (Exception ex)
         {
-            return new SemanticSearchResult
-            {
-                Success = false,
-                ErrorMessage = "Embedding provider returned an empty query embedding.",
-                ProviderName = _embeddingProvider.ProviderName,
-            };
+            _logger.LogWarning(ex, "Embedding generation failed; proceeding with lexical search");
         }
 
         return await _searchService.SearchAsync(
             query,
-            queryEmbeddingResult.Embeddings[0]!,
+            queryEmbedding,
             cancellationToken).ConfigureAwait(false);
     }
 }

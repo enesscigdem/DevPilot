@@ -14,7 +14,13 @@ import type {
   Task,
   TaskListItem,
   UpdateTaskStatusRequest,
-  Workspace,
+  RepositoryWorkspace,
+  CreateRepositoryWorkspaceRequest,
+  WorkspaceAnalysis,
+  WorkspaceArchitecture,
+  BrainStatus,
+  BrainChatResponse,
+  BrainIndexResponse,
 } from './types';
 
 const BASE_URL = '/api';
@@ -81,8 +87,21 @@ export async function deleteTask(id: string): Promise<void> {
   });
 }
 
-export async function getWorkspaces(): Promise<Workspace[]> {
-  return http<Workspace[]>('/repositoryworkspaces');
+export async function getRepositoryWorkspaces(): Promise<RepositoryWorkspace[]> {
+  return http<RepositoryWorkspace[]>('/repositoryworkspaces');
+}
+
+export const getWorkspaces = getRepositoryWorkspaces;
+
+export async function getRepositoryWorkspace(id: string): Promise<RepositoryWorkspace> {
+  return http<RepositoryWorkspace>(`/repositoryworkspaces/${id}`);
+}
+
+export async function createRepositoryWorkspace(request: CreateRepositoryWorkspaceRequest): Promise<RepositoryWorkspace> {
+  return http<RepositoryWorkspace>('/repositoryworkspaces', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
 }
 
 export async function getTaskImpactAnalysis(id: string): Promise<ImpactAnalysis | null> {
@@ -110,6 +129,12 @@ export async function approveTask(id: string): Promise<Task> {
 
 export async function rejectTask(id: string): Promise<Task> {
   return http<Task>(`/tasks/${id}/reject`, {
+    method: 'POST',
+  });
+}
+
+export async function startExecution(taskId: string): Promise<ExecutionDetail> {
+  return http<ExecutionDetail>(`/tasks/${taskId}/executions`, {
     method: 'POST',
   });
 }
@@ -171,5 +196,37 @@ export async function syncPullRequest(id: string): Promise<SyncPullRequestResult
 export async function mergeExecution(id: string): Promise<MergeExecutionResult> {
   return http<MergeExecutionResult>(`/executions/${id}/merge`, {
     method: 'POST',
+  });
+}
+
+export async function getRepositoryWorkspaceAnalysis(workspaceId: string): Promise<WorkspaceAnalysis> {
+  return http<WorkspaceAnalysis>(`/repositoryworkspaces/${workspaceId}/analysis`);
+}
+
+export async function getRepositoryWorkspaceArchitecture(workspaceId: string): Promise<WorkspaceArchitecture> {
+  return http<WorkspaceArchitecture>(`/repositoryworkspaces/${workspaceId}/architecture`);
+}
+
+export async function getBrainStatus(workspaceId: string): Promise<BrainStatus> {
+  return http<BrainStatus>(`/repositoryworkspaces/${workspaceId}/brain/status`);
+}
+
+export async function indexBrain(
+  workspaceId: string,
+  generateEmbeddings = true,
+): Promise<BrainIndexResponse> {
+  return http<BrainIndexResponse>(`/repositoryworkspaces/${workspaceId}/brain/index`, {
+    method: 'POST',
+    body: JSON.stringify({ generateEmbeddings }),
+  });
+}
+
+export async function askBrain(
+  workspaceId: string,
+  question: string,
+): Promise<BrainChatResponse> {
+  return http<BrainChatResponse>(`/repositoryworkspaces/${workspaceId}/brain/chat`, {
+    method: 'POST',
+    body: JSON.stringify({ question }),
   });
 }

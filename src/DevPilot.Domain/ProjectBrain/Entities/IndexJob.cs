@@ -1,8 +1,16 @@
+using DevPilot.Domain.Entities;
+
 namespace DevPilot.Domain.ProjectBrain.Entities;
 
 public class IndexJob
 {
     public Guid Id { get; set; }
+
+    public Guid? RepositoryWorkspaceId { get; set; }
+
+    public RepositoryWorkspace? RepositoryWorkspace { get; set; }
+
+    public string? CommitSha { get; set; }
 
     public string WorkspacePath { get; set; } = string.Empty;
 

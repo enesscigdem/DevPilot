@@ -1,10 +1,17 @@
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.GitProviders;
+using DevPilot.Application.ProjectBrain.Commands.AskBrain;
 using DevPilot.Application.ProjectBrain.Commands.IndexWorkspace;
 using DevPilot.Application.ProjectBrain.Ports;
+using DevPilot.Application.ProjectBrain.Queries.GetBrainStatus;
 using DevPilot.Application.ProjectBrain.Queries.SemanticSearch;
 using DevPilot.Application.RepositoryClone;
+using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspace;
+using DevPilot.Application.RepositoryWorkspaces.Ports;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceArchitecture;
+using DevPilot.Infrastructure.RepositoryInspection;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
@@ -142,6 +149,10 @@ public static class DependencyInjection
             configuration.GetSection(RepositoryCloneOptions.SectionName));
 
         services.AddScoped<IRepositoryCloneService, RepositoryCloneService>();
+        services.AddScoped<ICreateRepositoryWorkspaceCommandHandler, CreateRepositoryWorkspaceCommandHandler>();
+        services.AddScoped<IRepositoryStructureScanner, RepositoryStructureScanner>();
+        services.AddScoped<IGetRepositoryWorkspaceAnalysisQueryHandler, GetRepositoryWorkspaceAnalysisQueryHandler>();
+        services.AddScoped<IGetRepositoryWorkspaceArchitectureQueryHandler, GetRepositoryWorkspaceArchitectureQueryHandler>();
 
         return services;
     }
@@ -214,7 +225,9 @@ public static class DependencyInjection
         services.AddScoped<IIndexJobRepository, EfIndexJobRepository>();
         services.AddScoped<IIndexWorkspaceCommandHandler, IndexWorkspaceCommandHandler>();
         services.AddScoped<ISemanticSearchQueryHandler, SemanticSearchQueryHandler>();
-        services.AddScoped<ISemanticSearchService, NullSemanticSearchService>();
+        services.AddScoped<ISemanticSearchService, EfSemanticSearchService>();
+        services.AddScoped<IGetBrainStatusQueryHandler, GetBrainStatusQueryHandler>();
+        services.AddScoped<IAskBrainCommandHandler, AskBrainCommandHandler>();
 
         return services;
     }

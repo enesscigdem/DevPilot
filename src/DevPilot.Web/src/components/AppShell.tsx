@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { NavLink, useLocation } from "react-router-dom"
 import {
   Boxes,
@@ -11,13 +11,18 @@ import {
   Sun,
   Moon,
   GitBranch,
+  Check,
+  Plus,
+  Loader2,
+  AlertCircle,
   Command as CommandIcon,
 } from "lucide-react"
 import { useTheme } from "@/lib/theme"
+import { useWorkspace } from "@/lib/workspace"
+import { RepositoryWorkspaceStatus } from "@/types"
 import { cn } from "@/lib/utils"
 import { CommandMenu } from "./CommandMenu"
 import { StatusDot } from "./ui/primitives"
-import { repository } from "@/data/mock"
 
 const nav = [
   { to: "/", label: "Workspace", icon: Boxes, end: true },
@@ -49,7 +54,24 @@ function Logo() {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { theme, toggle } = useTheme()
+  const {
+    workspaces,
+    activeWorkspace,
+    activeWorkspaceId,
+    selectWorkspace,
+    connectWorkspace,
+  } = useWorkspace()
+
   const [cmdOpen, setCmdOpen] = useState(false)
+  const [repoMenuOpen, setRepoMenuOpen] = useState(false)
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [owner, setOwner] = useState("")
+  const [repositoryName, setRepositoryName] = useState("")
+  const [branch, setBranch] = useState("main")
+  const [submitting, setSubmitting] = useState(false)
+  const [connectError, setConnectError] = useState<string | null>(null)
+
+  const repoMenuRef = useRef<HTMLDivElement>(null)
   const location = useLocation()
 
   useEffect(() => {
@@ -63,6 +85,43 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", handler)
   }, [])
 
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (repoMenuRef.current && !repoMenuRef.current.contains(e.target as Node)) {
+        setRepoMenuOpen(false)
+        setIsConnecting(false)
+        setConnectError(null)
+      }
+    }
+    if (repoMenuOpen) {
+      document.addEventListener("mousedown", handleClickOutside)
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [repoMenuOpen])
+
+  const handleConnectSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!owner.trim() || !repositoryName.trim() || submitting) return
+    setSubmitting(true)
+    setConnectError(null)
+    try {
+      await connectWorkspace({
+        owner: owner.trim(),
+        repository: repositoryName.trim(),
+        branch: branch.trim() || "main",
+      })
+      setOwner("")
+      setRepositoryName("")
+      setBranch("main")
+      setIsConnecting(false)
+      setRepoMenuOpen(false)
+    } catch (err) {
+      setConnectError(err instanceof Error ? err.message : "Failed to connect repository.")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-canvas">
       {/* Left navigation rail */}
@@ -72,18 +131,189 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         {/* Repo switcher */}
-        <div className="px-3">
-          <button className="group flex w-full items-center gap-2.5 rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-2 text-left shadow-[var(--shadow-sm)] transition-colors hover:border-border-strong">
+        <div className="relative px-3" ref={repoMenuRef}>
+          <button
+            type="button"
+            onClick={() => {
+              setRepoMenuOpen((prev) => {
+                if (!prev) {
+                  setIsConnecting(false)
+                  setConnectError(null)
+                }
+                return !prev
+              })
+            }}
+            aria-expanded={repoMenuOpen}
+            className="group flex w-full items-center gap-2.5 rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-2 text-left shadow-[var(--shadow-sm)] transition-colors hover:border-border-strong"
+          >
             <FolderGit2 className="h-4 w-4 shrink-0 text-muted-foreground" strokeWidth={2} />
             <div className="min-w-0 flex-1">
-              <div className="truncate font-mono text-[12px] font-medium text-foreground">{repository.fullName}</div>
+              <div className="truncate font-mono text-[12px] font-medium text-foreground">
+                {activeWorkspace
+                  ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
+                  : "No repository"}
+              </div>
               <div className="flex items-center gap-1 text-[11px] text-subtle-foreground">
                 <GitBranch className="h-3 w-3" />
-                <span className="font-mono">{repository.branch}</span>
+                <span className="font-mono">{activeWorkspace ? activeWorkspace.branch : "none"}</span>
               </div>
             </div>
-            <StatusDot tone="green" />
+            <StatusDot
+              tone={
+                activeWorkspace
+                  ? activeWorkspace.status === RepositoryWorkspaceStatus.Completed
+                    ? "green"
+                    : activeWorkspace.status === RepositoryWorkspaceStatus.Cloning
+                      ? "blue"
+                      : activeWorkspace.status === RepositoryWorkspaceStatus.Failed
+                        ? "red"
+                        : "neutral"
+                  : "gray"
+              }
+              pulse={activeWorkspace?.status === RepositoryWorkspaceStatus.Cloning}
+            />
           </button>
+
+          {/* Repo selector dropdown / popover */}
+          {repoMenuOpen && (
+            <div className="absolute left-3 top-full z-50 mt-1.5 w-[320px] max-w-[calc(100vw-24px)] rounded-[var(--radius-lg)] border border-border bg-surface p-1.5 shadow-[var(--shadow-lg)]">
+              <div className="tech-label px-2 py-1 text-[10px]">Repositories</div>
+              <div className="max-h-48 overflow-y-auto space-y-0.5 py-1">
+                {workspaces.length === 0 ? (
+                  <div className="px-2 py-2 text-[11.5px] text-muted-foreground">
+                    No repositories connected.
+                  </div>
+                ) : (
+                  workspaces.map((ws) => {
+                    const isSelected = activeWorkspaceId === ws.id
+                    const isCompleted = ws.status === RepositoryWorkspaceStatus.Completed
+                    const tone =
+                      ws.status === RepositoryWorkspaceStatus.Completed
+                        ? "green"
+                        : ws.status === RepositoryWorkspaceStatus.Cloning
+                          ? "blue"
+                          : ws.status === RepositoryWorkspaceStatus.Failed
+                            ? "red"
+                            : "neutral"
+
+                    return (
+                      <button
+                        key={ws.id}
+                        type="button"
+                        disabled={!isCompleted}
+                        onClick={() => {
+                          if (isCompleted) {
+                            selectWorkspace(ws.id)
+                            setRepoMenuOpen(false)
+                          }
+                        }}
+                        className={cn(
+                          "flex w-full items-center gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-left transition-colors",
+                          isSelected
+                            ? "bg-primary-soft text-primary font-medium"
+                            : isCompleted
+                              ? "text-foreground hover:bg-surface-3"
+                              : "cursor-not-allowed opacity-60 text-muted-foreground",
+                        )}
+                      >
+                        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-mono text-[11.5px]">
+                            {ws.owner}/{ws.repository}
+                          </div>
+                          <div className="flex items-center gap-1 font-mono text-[10px] text-subtle-foreground">
+                            <GitBranch className="h-2.5 w-2.5" />
+                            <span>{ws.branch}</span>
+                            {!isCompleted && (
+                              <span className="ml-1 text-[9.5px]">
+                                ({ws.status === RepositoryWorkspaceStatus.Cloning
+                                  ? "Cloning"
+                                  : ws.status === RepositoryWorkspaceStatus.Failed
+                                    ? "Failed"
+                                    : "Exists"})
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <StatusDot tone={tone} pulse={ws.status === RepositoryWorkspaceStatus.Cloning} />
+                        {isSelected && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+
+              <div className="my-1 border-t border-border" />
+
+              {!isConnecting ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsConnecting(true)
+                    setConnectError(null)
+                  }}
+                  className="flex w-full items-center gap-1.5 rounded-[var(--radius-sm)] px-2 py-1.5 text-[12px] font-medium text-primary hover:bg-surface-3 transition-colors"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>Connect repository</span>
+                </button>
+              ) : (
+                <form onSubmit={handleConnectSubmit} className="space-y-1.5 p-1">
+                  <div className="text-[11px] font-semibold text-foreground">Connect repository</div>
+                  <input
+                    type="text"
+                    value={owner}
+                    onChange={(e) => setOwner(e.target.value)}
+                    placeholder="Owner (e.g. enesscigdem)"
+                    required
+                    className="w-full rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-subtle-foreground outline-none focus:border-primary-ring"
+                  />
+                  <input
+                    type="text"
+                    value={repositoryName}
+                    onChange={(e) => setRepositoryName(e.target.value)}
+                    placeholder="Repository (e.g. DevPilot)"
+                    required
+                    className="w-full rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-subtle-foreground outline-none focus:border-primary-ring"
+                  />
+                  <input
+                    type="text"
+                    value={branch}
+                    onChange={(e) => setBranch(e.target.value)}
+                    placeholder="Branch (e.g. main)"
+                    required
+                    className="w-full rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-subtle-foreground outline-none focus:border-primary-ring"
+                  />
+                  {connectError && (
+                    <div className="flex items-center gap-1 text-[10.5px] text-danger">
+                      <AlertCircle className="h-3 w-3 shrink-0" />
+                      <span className="truncate">{connectError}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-end gap-1.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsConnecting(false)
+                        setConnectError(null)
+                      }}
+                      className="rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-muted-foreground hover:bg-surface-3"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submitting || !owner.trim() || !repositoryName.trim()}
+                      className="flex items-center gap-1 rounded-[var(--radius-sm)] bg-primary px-2.5 py-1 text-[11px] font-medium text-canvas hover:bg-primary/90 disabled:opacity-50"
+                    >
+                      {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
+                      Connect
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
         </div>
 
         <nav className="mt-4 flex flex-col gap-0.5 px-3">

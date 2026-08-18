@@ -6,7 +6,7 @@ public sealed class NullSemanticSearchService : ISemanticSearchService
 {
     public Task<SemanticSearchResult> SearchAsync(
         SemanticSearchQuery query,
-        float[] queryEmbedding,
+        float[]? queryEmbedding,
         CancellationToken cancellationToken = default)
     {
         return Task.FromResult(new SemanticSearchResult

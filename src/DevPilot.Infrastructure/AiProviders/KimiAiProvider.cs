@@ -82,151 +82,223 @@ internal sealed class KimiAiProvider : IAiProvider
             Messages = messages,
         };
 
-        try
+        var payloadJson = JsonSerializer.Serialize(payload, JsonSerializerOptions.Web);
+        var payloadLength = payloadJson.Length;
+
+        const int maxAttempts = 4;
+        const int baseDelayMs = 200;
+
+        int attempt = 0;
+        HttpResponseMessage? lastResponse = null;
+        string? lastResponseContent = null;
+        Exception? lastException = null;
+
+        while (attempt < maxAttempts)
         {
-            using var client = _httpClientFactory.CreateClient("Kimi");
+            attempt++;
+            cancellationToken.ThrowIfCancellationRequested();
 
-            using var requestMessage = new HttpRequestMessage(HttpMethod.Post, BuildCompletionUri());
-            requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
-            requestMessage.Content = new StringContent(
-                JsonSerializer.Serialize(payload, JsonSerializerOptions.Web),
-                Encoding.UTF8,
-                "application/json");
-
-            using var response = await client
-                .SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-                .ConfigureAwait(false);
-
-            var responseContent = await response.Content
-                .ReadAsStringAsync(cancellationToken)
-                .ConfigureAwait(false);
-
-            if (!response.IsSuccessStatusCode)
+            try
             {
+                using var client = _httpClientFactory.CreateClient("Kimi");
+                using var requestMessage = new HttpRequestMessage(HttpMethod.Post, BuildCompletionUri());
+                requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+                requestMessage.Content = new StringContent(payloadJson, Encoding.UTF8, MediaTypeHeaderValue.Parse("application/json"));
+
+                lastResponse = await client
+                    .SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                    .ConfigureAwait(false);
+
+                lastResponseContent = await lastResponse.Content
+                    .ReadAsStringAsync(cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (lastResponse.IsSuccessStatusCode)
+                {
+                    var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(
+                        lastResponseContent,
+                        JsonSerializerOptions.Web);
+
+                    var content = completion?.Choices?.FirstOrDefault()?.Message?.Content;
+
+                    if (string.IsNullOrWhiteSpace(content))
+                    {
+                        _logger.LogWarning("Kimi API returned a response with no content on attempt {Attempt}/{MaxAttempts}.", attempt, maxAttempts);
+
+                        stopwatch.Stop();
+                        return new AiResponse
+                        {
+                            Provider = ProviderName,
+                            Model = model,
+                            Duration = stopwatch.Elapsed,
+                            IsSuccess = false,
+                            ErrorMessage = "Kimi API returned a response with no content.",
+                        };
+                    }
+
+                    stopwatch.Stop();
+                    return new AiResponse
+                    {
+                        Provider = ProviderName,
+                        Model = completion?.Model ?? model,
+                        Content = content,
+                        InputTokens = completion?.Usage?.PromptTokens,
+                        OutputTokens = completion?.Usage?.CompletionTokens,
+                        Duration = stopwatch.Elapsed,
+                        IsSuccess = true,
+                    };
+                }
+
+                var statusCode = (int)lastResponse.StatusCode;
+                var isTransient = statusCode is 429 or 502 or 503 or 504;
+
+                if (isTransient && attempt < maxAttempts)
+                {
+                    var delayMs = GetDelayMilliseconds(lastResponse, attempt, baseDelayMs);
+                    _logger.LogWarning(
+                        "Kimi API returned transient status code {StatusCode} on attempt {Attempt}/{MaxAttempts}. Retrying in {DelayMs}ms. PayloadLength: {PayloadLength}.",
+                        statusCode, attempt, maxAttempts, delayMs, payloadLength);
+
+                    await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                var snippet = GetBoundedBodySnippet(lastResponseContent, 500);
                 _logger.LogWarning(
-                    "Kimi API returned non-success status code {StatusCode}.",
-                    response.StatusCode);
+                    "Kimi API request failed with non-success status code {StatusCode} on attempt {Attempt}/{MaxAttempts}. PayloadLength: {PayloadLength}. ResponseSnippet: {ResponseSnippet}",
+                    statusCode, attempt, maxAttempts, payloadLength, snippet);
 
                 stopwatch.Stop();
-
                 return new AiResponse
                 {
                     Provider = ProviderName,
                     Model = model,
                     Duration = stopwatch.Elapsed,
                     IsSuccess = false,
-                    ErrorMessage = $"Kimi API returned status code {(int)response.StatusCode}.",
+                    ErrorMessage = $"Kimi API returned status code {statusCode}.",
                 };
             }
-
-            var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(
-                responseContent,
-                JsonSerializerOptions.Web);
-
-            var content = completion?.Choices?.FirstOrDefault()?.Message?.Content;
-
-            if (string.IsNullOrWhiteSpace(content))
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                _logger.LogWarning("Kimi API returned a response with no content.");
-
                 stopwatch.Stop();
-
                 return new AiResponse
                 {
                     Provider = ProviderName,
                     Model = model,
                     Duration = stopwatch.Elapsed,
                     IsSuccess = false,
-                    ErrorMessage = "Kimi API returned a response with no content.",
+                    ErrorMessage = "The request was cancelled.",
                 };
             }
-
-            stopwatch.Stop();
-
-            return new AiResponse
+            catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
             {
-                Provider = ProviderName,
-                Model = completion?.Model ?? model,
-                Content = content,
-                InputTokens = completion?.Usage?.PromptTokens,
-                OutputTokens = completion?.Usage?.CompletionTokens,
-                Duration = stopwatch.Elapsed,
-                IsSuccess = true,
-            };
+                lastException = exception;
+                if (attempt < maxAttempts)
+                {
+                    var delayMs = baseDelayMs * (int)Math.Pow(2, attempt - 1);
+                    _logger.LogWarning(exception, "Kimi API request timed out on attempt {Attempt}/{MaxAttempts}. Retrying in {DelayMs}ms. PayloadLength: {PayloadLength}.", attempt, maxAttempts, delayMs, payloadLength);
+                    await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                _logger.LogWarning(exception, "Kimi API request timed out on final attempt {Attempt}/{MaxAttempts}. PayloadLength: {PayloadLength}.", attempt, maxAttempts, payloadLength);
+                stopwatch.Stop();
+                return new AiResponse
+                {
+                    Provider = ProviderName,
+                    Model = model,
+                    Duration = stopwatch.Elapsed,
+                    IsSuccess = false,
+                    ErrorMessage = "The request to the Kimi API timed out.",
+                };
+            }
+            catch (HttpRequestException exception)
+            {
+                lastException = exception;
+                if (attempt < maxAttempts)
+                {
+                    var delayMs = baseDelayMs * (int)Math.Pow(2, attempt - 1);
+                    _logger.LogWarning(exception, "Kimi API HTTP request exception on attempt {Attempt}/{MaxAttempts}. Retrying in {DelayMs}ms. PayloadLength: {PayloadLength}.", attempt, maxAttempts, delayMs, payloadLength);
+                    await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                _logger.LogWarning(exception, "An HTTP error occurred while calling the Kimi API on final attempt {Attempt}/{MaxAttempts}. PayloadLength: {PayloadLength}.", attempt, maxAttempts, payloadLength);
+                stopwatch.Stop();
+                return new AiResponse
+                {
+                    Provider = ProviderName,
+                    Model = model,
+                    Duration = stopwatch.Elapsed,
+                    IsSuccess = false,
+                    ErrorMessage = "An HTTP error occurred while calling the Kimi API.",
+                };
+            }
+            catch (JsonException exception)
+            {
+                _logger.LogWarning(exception, "Failed to parse the Kimi API response on attempt {Attempt}/{MaxAttempts}. PayloadLength: {PayloadLength}.", attempt, maxAttempts, payloadLength);
+                stopwatch.Stop();
+                return new AiResponse
+                {
+                    Provider = ProviderName,
+                    Model = model,
+                    Duration = stopwatch.Elapsed,
+                    IsSuccess = false,
+                    ErrorMessage = "Failed to parse the Kimi API response.",
+                };
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "An unexpected error occurred while calling the Kimi API on attempt {Attempt}/{MaxAttempts}. PayloadLength: {PayloadLength}.", attempt, maxAttempts, payloadLength);
+                stopwatch.Stop();
+                return new AiResponse
+                {
+                    Provider = ProviderName,
+                    Model = model,
+                    Duration = stopwatch.Elapsed,
+                    IsSuccess = false,
+                    ErrorMessage = "An unexpected error occurred while calling the Kimi API.",
+                };
+            }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+
+        stopwatch.Stop();
+        return new AiResponse
         {
-            stopwatch.Stop();
+            Provider = ProviderName,
+            Model = model,
+            Duration = stopwatch.Elapsed,
+            IsSuccess = false,
+            ErrorMessage = lastException?.Message ?? "Kimi API request failed after retries.",
+        };
+    }
 
-            return new AiResponse
-            {
-                Provider = ProviderName,
-                Model = model,
-                Duration = stopwatch.Elapsed,
-                IsSuccess = false,
-                ErrorMessage = "The request was cancelled.",
-            };
-        }
-        catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+    private static int GetDelayMilliseconds(HttpResponseMessage response, int attempt, int baseDelayMs)
+    {
+        if (response.Headers.RetryAfter != null)
         {
-            _logger.LogWarning(exception, "The request to the Kimi API timed out.");
-
-            stopwatch.Stop();
-
-            return new AiResponse
+            if (response.Headers.RetryAfter.Delta.HasValue && response.Headers.RetryAfter.Delta.Value.TotalMilliseconds <= 10000)
             {
-                Provider = ProviderName,
-                Model = model,
-                Duration = stopwatch.Elapsed,
-                IsSuccess = false,
-                ErrorMessage = "The request to the Kimi API timed out.",
-            };
-        }
-        catch (HttpRequestException exception)
-        {
-            _logger.LogWarning(exception, "An HTTP error occurred while calling the Kimi API.");
-
-            stopwatch.Stop();
-
-            return new AiResponse
+                return (int)response.Headers.RetryAfter.Delta.Value.TotalMilliseconds;
+            }
+            if (response.Headers.RetryAfter.Date.HasValue)
             {
-                Provider = ProviderName,
-                Model = model,
-                Duration = stopwatch.Elapsed,
-                IsSuccess = false,
-                ErrorMessage = "An HTTP error occurred while calling the Kimi API.",
-            };
+                var diff = response.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
+                if (diff.TotalMilliseconds > 0 && diff.TotalMilliseconds <= 10000)
+                {
+                    return (int)diff.TotalMilliseconds;
+                }
+            }
         }
-        catch (JsonException exception)
-        {
-            _logger.LogWarning(exception, "Failed to parse the Kimi API response.");
 
-            stopwatch.Stop();
+        return baseDelayMs * (int)Math.Pow(2, attempt - 1);
+    }
 
-            return new AiResponse
-            {
-                Provider = ProviderName,
-                Model = model,
-                Duration = stopwatch.Elapsed,
-                IsSuccess = false,
-                ErrorMessage = "Failed to parse the Kimi API response.",
-            };
-        }
-        catch (Exception exception)
-        {
-            _logger.LogWarning(exception, "An unexpected error occurred while calling the Kimi API.");
-
-            stopwatch.Stop();
-
-            return new AiResponse
-            {
-                Provider = ProviderName,
-                Model = model,
-                Duration = stopwatch.Elapsed,
-                IsSuccess = false,
-                ErrorMessage = "An unexpected error occurred while calling the Kimi API.",
-            };
-        }
+    private static string GetBoundedBodySnippet(string? body, int maxLength)
+    {
+        if (string.IsNullOrEmpty(body)) return string.Empty;
+        var trimmed = body.Trim();
+        return trimmed.Length <= maxLength ? trimmed : trimmed.Substring(0, maxLength);
     }
 
     private Uri BuildCompletionUri()

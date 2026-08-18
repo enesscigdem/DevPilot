@@ -64,7 +64,7 @@ public sealed class CreateTaskCommandHandler : ICreateTaskCommandHandler
             Id = Guid.NewGuid(),
             RepositoryWorkspaceId = dto.RepositoryWorkspaceId,
             Title = dto.Title.Trim(),
-            Description = dto.Description.Trim(),
+            Description = dto.Description?.Trim() ?? string.Empty,
             AcceptanceCriteria = dto.AcceptanceCriteria?.Trim(),
             Priority = dto.Priority,
             Status = DevelopmentTaskStatus.Draft,
@@ -98,14 +98,14 @@ public sealed class CreateTaskCommandHandler : ICreateTaskCommandHandler
             return "Title is required.";
         }
 
-        if (string.IsNullOrWhiteSpace(dto.Description))
-        {
-            return "Description is required.";
-        }
-
         if (dto.Title.Length > 200)
         {
             return "Title must be at most 200 characters.";
+        }
+
+        if (dto.Description != null && dto.Description.Length > 10000)
+        {
+            return "Description must be at most 10,000 characters.";
         }
 
         if (!Enum.IsDefined(typeof(DevelopmentTaskPriority), dto.Priority))

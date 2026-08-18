@@ -39,8 +39,8 @@ namespace DevPilot.Infrastructure.Migrations
 
                     b.Property<string>("Description")
                         .IsRequired()
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)");
+                        .HasMaxLength(10000)
+                        .HasColumnType("character varying(10000)");
 
                     b.Property<string>("Priority")
                         .IsRequired()
@@ -539,6 +539,9 @@ namespace DevPilot.Infrastructure.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
+                    b.Property<Guid?>("RepositoryWorkspaceId")
+                        .HasColumnType("uuid");
+
                     b.Property<int>("StartLine")
                         .HasColumnType("integer");
 
@@ -570,8 +573,12 @@ namespace DevPilot.Infrastructure.Migrations
 
                     b.HasIndex("ContentHash");
 
-                    b.HasIndex("WorkspacePath", "RelativePath", "ChunkOrder")
+                    b.HasIndex("RepositoryWorkspaceId");
+
+                    b.HasIndex("RepositoryWorkspaceId", "RelativePath", "ChunkOrder")
                         .IsUnique();
+
+                    b.HasIndex("WorkspacePath", "RelativePath", "ChunkOrder");
 
                     b.ToTable("CodeChunks");
                 });
@@ -587,6 +594,10 @@ namespace DevPilot.Infrastructure.Migrations
 
                     b.Property<int>("ChunksSkipped")
                         .HasColumnType("integer");
+
+                    b.Property<string>("CommitSha")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<DateTime?>("CompletedAt")
                         .HasColumnType("timestamp with time zone");
@@ -607,6 +618,9 @@ namespace DevPilot.Infrastructure.Migrations
 
                     b.Property<int>("ProcessedFiles")
                         .HasColumnType("integer");
+
+                    b.Property<Guid?>("RepositoryWorkspaceId")
+                        .HasColumnType("uuid");
 
                     b.Property<DateTime>("StartedAt")
                         .HasColumnType("timestamp with time zone");
@@ -637,7 +651,11 @@ namespace DevPilot.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("RepositoryWorkspaceId");
+
                     b.HasIndex("WorkspacePath");
+
+                    b.HasIndex("RepositoryWorkspaceId", "StartedAt");
 
                     b.HasIndex("WorkspacePath", "StartedAt");
 
@@ -697,6 +715,26 @@ namespace DevPilot.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("DevelopmentTask");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.ProjectBrain.Entities.CodeChunk", b =>
+                {
+                    b.HasOne("DevPilot.Domain.Entities.RepositoryWorkspace", "RepositoryWorkspace")
+                        .WithMany()
+                        .HasForeignKey("RepositoryWorkspaceId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.Navigation("RepositoryWorkspace");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.ProjectBrain.Entities.IndexJob", b =>
+                {
+                    b.HasOne("DevPilot.Domain.Entities.RepositoryWorkspace", "RepositoryWorkspace")
+                        .WithMany()
+                        .HasForeignKey("RepositoryWorkspaceId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.Navigation("RepositoryWorkspace");
                 });
 
             modelBuilder.Entity("DevPilot.Domain.Entities.TaskExecution", b =>

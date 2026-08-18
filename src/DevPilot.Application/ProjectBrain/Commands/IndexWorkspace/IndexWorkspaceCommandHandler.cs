@@ -73,6 +73,7 @@ public sealed class IndexWorkspaceCommandHandler : IIndexWorkspaceCommandHandler
 
             var metadata = new ChunkMetadata
             {
+                RepositoryWorkspaceId = command.RepositoryWorkspaceId,
                 WorkspacePath = workspacePath,
                 WorkspaceName = workspaceName,
                 RoslynAnalysis = command.AnalysisResult,
@@ -108,10 +109,15 @@ public sealed class IndexWorkspaceCommandHandler : IIndexWorkspaceCommandHandler
             await _jobRepository.UpdateAsync(job, cancellationToken).ConfigureAwait(false);
 
             var relativePaths = chunks.Select(c => c.RelativePath).Distinct().ToList();
-            var existingChunks = await _chunkRepository.GetExistingChunksAsync(
-                workspacePath,
-                relativePaths,
-                cancellationToken).ConfigureAwait(false);
+            var existingChunks = command.RepositoryWorkspaceId.HasValue
+                ? await _chunkRepository.GetExistingChunksAsync(
+                    command.RepositoryWorkspaceId.Value,
+                    relativePaths,
+                    cancellationToken).ConfigureAwait(false)
+                : await _chunkRepository.GetExistingChunksAsync(
+                    workspacePath,
+                    relativePaths,
+                    cancellationToken).ConfigureAwait(false);
 
             var (chunksToInsert, chunksToUpdate, skipped) = BuildDiff(chunks, existingChunks);
 
@@ -144,9 +150,13 @@ public sealed class IndexWorkspaceCommandHandler : IIndexWorkspaceCommandHandler
             }
 
             var currentPaths = chunks.Select(c => c.RelativePath).Distinct().ToList();
-            var allExisting = await _chunkRepository.GetAllByWorkspaceAsync(
-                workspacePath,
-                cancellationToken).ConfigureAwait(false);
+            var allExisting = command.RepositoryWorkspaceId.HasValue
+                ? await _chunkRepository.GetAllByWorkspaceAsync(
+                    command.RepositoryWorkspaceId.Value,
+                    cancellationToken).ConfigureAwait(false)
+                : await _chunkRepository.GetAllByWorkspaceAsync(
+                    workspacePath,
+                    cancellationToken).ConfigureAwait(false);
             var chunksToDelete = allExisting
                 .Where(e => !currentPaths.Contains(e.RelativePath, StringComparer.OrdinalIgnoreCase))
                 .ToList();
@@ -184,14 +194,24 @@ public sealed class IndexWorkspaceCommandHandler : IIndexWorkspaceCommandHandler
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to index workspace {WorkspacePath}", command.WorkspacePath);
+            var sanitizedMessage = SanitizeErrorMessage(ex.Message, command.WorkspacePath);
+
             job.Status = IndexJobStatus.Failed;
-            job.ErrorMessage = ex.Message;
+            job.ErrorMessage = Truncate(sanitizedMessage, 1000);
             job.CompletedAt = DateTime.UtcNow;
             job.UpdatedAt = DateTime.UtcNow;
-            await _jobRepository.UpdateAsync(job, cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                await _jobRepository.UpdateAsync(job, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception persistEx)
+            {
+                _logger.LogError(persistEx, "Failed to persist IndexJob failure state for workspace {WorkspacePath}", command.WorkspacePath);
+            }
 
             result.Success = false;
-            result.ErrorMessage = ex.Message;
+            result.ErrorMessage = sanitizedMessage;
             result.Duration = stopwatch.Elapsed;
         }
 
@@ -204,6 +224,8 @@ public sealed class IndexWorkspaceCommandHandler : IIndexWorkspaceCommandHandler
         return new IndexJob
         {
             Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = command.RepositoryWorkspaceId,
+            CommitSha = command.CommitSha,
             WorkspacePath = command.WorkspacePath ?? string.Empty,
             WorkspaceName = command.WorkspaceName ?? string.Empty,
             Status = IndexJobStatus.Pending,
@@ -311,5 +333,35 @@ public sealed class IndexWorkspaceCommandHandler : IIndexWorkspaceCommandHandler
 
         return embeddingResult;
     }
-}
 
+    private static string SanitizeErrorMessage(string? rawMessage, string? workspacePath)
+    {
+        if (string.IsNullOrWhiteSpace(rawMessage))
+        {
+            return "An unexpected error occurred during repository indexing.";
+        }
+
+        var message = rawMessage;
+
+        if (!string.IsNullOrWhiteSpace(workspacePath))
+        {
+            var normalizedPath = Path.GetFullPath(workspacePath.Trim());
+            message = message.Replace(normalizedPath, "[workspace]", StringComparison.OrdinalIgnoreCase);
+            message = message.Replace(normalizedPath.Replace('\\', '/'), "[workspace]", StringComparison.OrdinalIgnoreCase);
+        }
+
+        message = System.Text.RegularExpressions.Regex.Replace(
+            message,
+            @"(Password|pwd|token|secret|key|bearer)\s*[:=]\s*[^\s;,]+",
+            "$1=***",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        return message.Length > 1000 ? message[..1000] : message;
+    }
+
+    private static string Truncate(string? value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        return value.Length <= maxLength ? value : value[..maxLength];
+    }
+}

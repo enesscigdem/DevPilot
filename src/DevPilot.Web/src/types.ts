@@ -34,13 +34,33 @@ export interface UpdateTaskStatusRequest {
   status: number;
 }
 
-export interface Workspace {
+export const RepositoryWorkspaceStatus = {
+  Cloning: 0,
+  Completed: 1,
+  Failed: 2,
+  AlreadyExists: 3,
+} as const;
+export type RepositoryWorkspaceStatusValue =
+  (typeof RepositoryWorkspaceStatus)[keyof typeof RepositoryWorkspaceStatus];
+
+export interface RepositoryWorkspace {
   id: string;
   owner: string;
   repository: string;
   branch: string;
   status: number;
-  displayName: string;
+  displayName?: string;
+  commitSha?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type Workspace = RepositoryWorkspace;
+
+export interface CreateRepositoryWorkspaceRequest {
+  owner: string;
+  repository: string;
+  branch: string;
 }
 
 export const TaskStatus = {
@@ -260,7 +280,6 @@ export interface ExecutionActivityItem {
   metadata?: ExecutionActivityMetadata | null;
 }
 
-
 // ---------------------------------------------------------------------------
 // Execution Review — DTOs
 // ---------------------------------------------------------------------------
@@ -390,4 +409,200 @@ export interface MergeExecutionResult {
   mergeCommitSha?: string | null;
   mergedAt?: string | null;
   mergeMethod?: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Analysis — DTOs
+// ---------------------------------------------------------------------------
+export interface WorkspaceRepositoryInfo {
+  owner: string;
+  repository: string;
+  fullName: string;
+  branch: string;
+  commitSha: string;
+}
+
+export interface WorkspaceAnalysisStep {
+  label: string;
+  done: boolean;
+}
+
+export interface WorkspaceAnalysisSummary {
+  status: string;
+  engine: string;
+  symbolsCount: number;
+  typesCount: number;
+  referencesCount: number;
+  analyzedAt: string;
+  steps: WorkspaceAnalysisStep[];
+}
+
+export interface WorkspaceFileNode {
+  name: string;
+  path: string;
+  type: "folder" | "file";
+  lang?: string;
+  children?: WorkspaceFileNode[];
+}
+
+export interface WorkspaceProjectReference {
+  name: string;
+  path: string;
+}
+
+export interface WorkspaceProject {
+  name: string;
+  path: string;
+  projectType: string;
+  layer: string;
+  fileCount: number;
+  targetFramework: string | null;
+  projectReferences: WorkspaceProjectReference[];
+  compilationSucceeded: boolean;
+  compilationErrors: string[];
+  warnings: string[];
+}
+
+export interface WorkspaceTechnology {
+  name: string;
+  version: string | null;
+  kind: string;
+}
+
+export interface WorkspaceEndpoint {
+  method: string;
+  route: string;
+  controller: string;
+  action: string;
+  auth: boolean;
+  sourcePath: string;
+}
+
+export interface WorkspaceAnalysis {
+  repository: WorkspaceRepositoryInfo;
+  summary: WorkspaceAnalysisSummary;
+  fileTree: WorkspaceFileNode[];
+  projects: WorkspaceProject[];
+  technologies: WorkspaceTechnology[];
+  endpoints: WorkspaceEndpoint[];
+  warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Architecture Graph — DTOs
+// ---------------------------------------------------------------------------
+export interface WorkspaceArchitectureNode {
+  id: string;
+  label: string;
+  sub: string;
+  layer: string;
+  projectType: string;
+  path: string;
+  keyFiles: string[];
+  incoming: string[];
+  outgoing: string[];
+  impacted: boolean;
+  why: string;
+}
+
+export interface WorkspaceArchitectureEdge {
+  from: string;
+  to: string;
+  type: string;
+}
+
+export interface WorkspaceArchitectureSummary {
+  status: string;
+  nodesCount: number;
+  edgesCount: number;
+  analyzedAt: string;
+}
+
+export interface WorkspaceArchitecture {
+  repository: WorkspaceRepositoryInfo;
+  summary: WorkspaceArchitectureSummary;
+  nodes: WorkspaceArchitectureNode[];
+  edges: WorkspaceArchitectureEdge[];
+}
+
+// ---------------------------------------------------------------------------
+// Project Brain — DTOs
+// ---------------------------------------------------------------------------
+export interface BrainIndexStep {
+  label: string;
+  done: boolean;
+}
+
+export interface BrainSourceGroup {
+  project: string;
+  layer: string;
+  files: number;
+  symbols: number;
+  indexed: boolean;
+}
+
+export interface BrainStatus {
+  workspaceId: string;
+  state: 'ready' | 'indexing' | 'unindexed' | 'stale' | 'failed';
+  totalFiles: number;
+  totalTypes: number;
+  totalSymbols: number;
+  totalChunks: number;
+  lastIndexedAt?: string | null;
+  lastIndexedRelative?: string | null;
+  engine: string;
+  steps: BrainIndexStep[];
+  sourceGroups: BrainSourceGroup[];
+  suggestedQuestions: string[];
+}
+
+export interface BrainCitation {
+  file: string;
+  path: string;
+  lines: string;
+  startLine?: number;
+  endLine?: number;
+  symbol?: string | null;
+  lang?: string | null;
+  snippet: string;
+}
+
+export interface BrainContextFile {
+  file: string;
+  path: string;
+  relevance: number;
+}
+
+export interface BrainMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  citations?: BrainCitation[];
+  confidence?: number;
+  elapsed?: string;
+}
+
+export interface BrainChatResponse {
+  success: boolean;
+  errorMessage?: string | null;
+  role: 'assistant';
+  content: string;
+  confidence?: number | null;
+  elapsed: string;
+  citations: BrainCitation[];
+  contextFiles: BrainContextFile[];
+  retrievalMode: string;
+  isUnindexed?: boolean;
+  isStale?: boolean;
+}
+
+export interface BrainIndexResponse {
+  jobId: string;
+  success: boolean;
+  filesIndexed: number;
+  chunksIndexed: number;
+  chunksUpdated: number;
+  chunksSkipped: number;
+  chunksDeleted: number;
+  duration: string;
+  errorMessage?: string | null;
 }

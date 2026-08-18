@@ -34,7 +34,7 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
     {
         if (request is null)
         {
-            return ErrorResult("Request is required.");
+            return ValidationErrorResult("Request is required.");
         }
 
         var owner = request.Owner?.Trim() ?? string.Empty;
@@ -43,86 +43,77 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
 
         if (string.IsNullOrWhiteSpace(owner))
         {
-            return ErrorResult("Owner is required.");
+            return ValidationErrorResult("Owner is required.");
         }
 
         if (string.IsNullOrWhiteSpace(repository))
         {
-            return ErrorResult("Repository is required.");
+            return ValidationErrorResult("Repository is required.");
         }
 
         if (string.IsNullOrWhiteSpace(branch))
         {
-            return ErrorResult("Branch is required.");
+            return ValidationErrorResult("Branch is required.");
         }
 
         var workspaceRoot = GetWorkspaceRoot();
 
         string sanitizedOwner;
         string sanitizedRepository;
-        string sanitizedBranch;
+        string sanitizedBranchPath;
 
         try
         {
             sanitizedOwner = SanitizePathSegment(owner);
             sanitizedRepository = SanitizePathSegment(repository);
-            sanitizedBranch = SanitizePathSegment(branch);
+            sanitizedBranchPath = SanitizeBranchPath(branch);
         }
         catch (ArgumentException ex)
         {
-            return ErrorResult(ex.Message);
+            return ValidationErrorResult(ex.Message);
         }
 
         var targetPath = Path.GetFullPath(
-            Path.Combine(workspaceRoot, sanitizedOwner, sanitizedRepository, sanitizedBranch));
+            Path.Combine(workspaceRoot, sanitizedOwner, sanitizedRepository, sanitizedBranchPath));
 
         if (!IsWithinWorkspaceRoot(targetPath, workspaceRoot))
         {
-            return ErrorResult("Target path is outside the workspace root.");
+            return ValidationErrorResult("Target path is outside the workspace root.");
         }
 
         if (!await IsGitAvailableAsync(cancellationToken).ConfigureAwait(false))
         {
-            return ErrorResult("Git executable is not available.");
+            return OperationalErrorResult("Git executable is not available.");
         }
 
-        if (Directory.Exists(targetPath))
-        {
-            _logger.LogWarning(
-                "Workspace already exists for {Owner}/{Repository}@{Branch} at {LocalPath}.",
-                owner,
-                repository,
-                branch,
-                targetPath);
-
-            var existingWorkspace = await _dbContext.RepositoryWorkspaces
-                .FirstOrDefaultAsync(
-                    w => w.Owner == owner && w.Repository == repository && w.Branch == branch,
-                    cancellationToken)
-                .ConfigureAwait(false);
-
-            if (existingWorkspace is not null)
-            {
-                existingWorkspace.Status = RepositoryWorkspaceStatus.AlreadyExists;
-                existingWorkspace.UpdatedAt = DateTime.UtcNow;
-                _dbContext.RepositoryWorkspaces.Update(existingWorkspace);
-                await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            return ErrorResult("Workspace already exists for this repository and branch.");
-        }
-
-        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-
-        var workspace = await _dbContext.RepositoryWorkspaces
+        var existingWorkspace = await _dbContext.RepositoryWorkspaces
             .FirstOrDefaultAsync(
                 w => w.Owner == owner && w.Repository == repository && w.Branch == branch,
                 cancellationToken)
             .ConfigureAwait(false);
 
-        if (workspace is null)
+        if (Directory.Exists(targetPath))
         {
-            workspace = new RepositoryWorkspace
+            return await HandleExistingDirectoryAsync(
+                targetPath,
+                owner,
+                repository,
+                branch,
+                existingWorkspace,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (existingWorkspace is not null && existingWorkspace.Status == RepositoryWorkspaceStatus.Cloning)
+        {
+            return ConflictResult($"Repository workspace '{owner}/{repository}' ({branch}) is currently being cloned.");
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+
+        var now = DateTime.UtcNow;
+        if (existingWorkspace is null)
+        {
+            existingWorkspace = new RepositoryWorkspace
             {
                 Id = Guid.NewGuid(),
                 Owner = owner,
@@ -130,23 +121,31 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
                 Branch = branch,
                 LocalPath = targetPath,
                 Status = RepositoryWorkspaceStatus.Cloning,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow,
+                CreatedAt = now,
+                UpdatedAt = now,
             };
 
-            _dbContext.RepositoryWorkspaces.Add(workspace);
+            _dbContext.RepositoryWorkspaces.Add(existingWorkspace);
         }
         else
         {
-            workspace.Status = RepositoryWorkspaceStatus.Cloning;
-            workspace.ErrorMessage = null;
-            workspace.CommitSha = string.Empty;
-            workspace.LocalPath = targetPath;
-            workspace.UpdatedAt = DateTime.UtcNow;
-            _dbContext.RepositoryWorkspaces.Update(workspace);
+            existingWorkspace.Status = RepositoryWorkspaceStatus.Cloning;
+            existingWorkspace.ErrorMessage = null;
+            existingWorkspace.CommitSha = string.Empty;
+            existingWorkspace.LocalPath = targetPath;
+            existingWorkspace.UpdatedAt = now;
+            _dbContext.RepositoryWorkspaces.Update(existingWorkspace);
         }
 
-        await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogWarning(ex, "Concurrency conflict while registering cloning state for {Owner}/{Repository}@{Branch}.", owner, repository, branch);
+            return ConflictResult($"Repository workspace '{owner}/{repository}' ({branch}) already exists or is being created.");
+        }
 
         var cloneUrl = $"https://github.com/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}.git";
         var token = GetToken();
@@ -172,45 +171,39 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
 
             if (!cloneOutcome.IsSuccess)
             {
-                workspace.Status = RepositoryWorkspaceStatus.Failed;
-                workspace.ErrorMessage = cloneOutcome.ErrorMessage;
-                workspace.UpdatedAt = DateTime.UtcNow;
-                _dbContext.RepositoryWorkspaces.Update(workspace);
-                await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                existingWorkspace.Status = RepositoryWorkspaceStatus.Failed;
+                existingWorkspace.ErrorMessage = cloneOutcome.ErrorMessage;
+                existingWorkspace.UpdatedAt = DateTime.UtcNow;
+                _dbContext.RepositoryWorkspaces.Update(existingWorkspace);
+                await _dbContext.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
 
                 TryDeleteDirectory(targetPath);
 
-                return ErrorResult(cloneOutcome.ErrorMessage ?? "Git clone failed.");
+                return OperationalErrorResult(cloneOutcome.ErrorMessage ?? "Git clone failed.");
             }
 
             var commitSha = await ReadHeadCommitShaAsync(targetPath, cancellationToken).ConfigureAwait(false);
 
-            workspace.Status = RepositoryWorkspaceStatus.Completed;
-            workspace.CommitSha = commitSha;
-            workspace.ErrorMessage = null;
-            workspace.UpdatedAt = DateTime.UtcNow;
-            _dbContext.RepositoryWorkspaces.Update(workspace);
+            existingWorkspace.Status = RepositoryWorkspaceStatus.Completed;
+            existingWorkspace.CommitSha = commitSha;
+            existingWorkspace.ErrorMessage = null;
+            existingWorkspace.UpdatedAt = DateTime.UtcNow;
+            _dbContext.RepositoryWorkspaces.Update(existingWorkspace);
             await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-            return new CloneResult
-            {
-                LocalPath = targetPath,
-                Branch = branch,
-                CommitSha = commitSha,
-                Success = true,
-            };
+            return SuccessResult(existingWorkspace);
         }
         catch (OperationCanceledException)
         {
-            workspace.Status = RepositoryWorkspaceStatus.Failed;
-            workspace.ErrorMessage = "Clone operation was cancelled or timed out.";
-            workspace.UpdatedAt = DateTime.UtcNow;
-            _dbContext.RepositoryWorkspaces.Update(workspace);
+            existingWorkspace.Status = RepositoryWorkspaceStatus.Failed;
+            existingWorkspace.ErrorMessage = "Clone operation was cancelled or timed out.";
+            existingWorkspace.UpdatedAt = DateTime.UtcNow;
+            _dbContext.RepositoryWorkspaces.Update(existingWorkspace);
             await _dbContext.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
 
             TryDeleteDirectory(targetPath);
 
-            return ErrorResult("Clone operation was cancelled or timed out.");
+            return OperationalErrorResult("Clone operation was cancelled or timed out.");
         }
         catch (Exception ex)
         {
@@ -221,15 +214,15 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
                 repository,
                 branch);
 
-            workspace.Status = RepositoryWorkspaceStatus.Failed;
-            workspace.ErrorMessage = ex.Message;
-            workspace.UpdatedAt = DateTime.UtcNow;
-            _dbContext.RepositoryWorkspaces.Update(workspace);
+            existingWorkspace.Status = RepositoryWorkspaceStatus.Failed;
+            existingWorkspace.ErrorMessage = ex.Message;
+            existingWorkspace.UpdatedAt = DateTime.UtcNow;
+            _dbContext.RepositoryWorkspaces.Update(existingWorkspace);
             await _dbContext.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
 
             TryDeleteDirectory(targetPath);
 
-            return ErrorResult($"Unexpected error: {ex.Message}");
+            return OperationalErrorResult($"Unexpected error during git clone: {ex.Message}");
         }
         finally
         {
@@ -247,12 +240,161 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         }
     }
 
-    private static CloneResult ErrorResult(string error)
+    private async Task<CloneResult> HandleExistingDirectoryAsync(
+        string targetPath,
+        string owner,
+        string repository,
+        string branch,
+        RepositoryWorkspace? existingWorkspace,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogInformation(
+            "Target directory exists at {LocalPath} for {Owner}/{Repository}@{Branch}. Verifying repository validity.",
+            targetPath,
+            owner,
+            repository,
+            branch);
+
+        var isGitRepo = await IsGitRepositoryAsync(targetPath, cancellationToken).ConfigureAwait(false);
+        if (!isGitRepo)
+        {
+            _logger.LogWarning("Existing directory at {LocalPath} is not a valid git repository.", targetPath);
+            return ConflictResult($"The directory at '{targetPath}' already exists but is not a valid git repository.");
+        }
+
+        var remoteUrl = await GetRemoteOriginUrlAsync(targetPath, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(remoteUrl) || !IsRemoteUrlMatch(remoteUrl, owner, repository))
+        {
+            _logger.LogWarning(
+                "Existing directory at {LocalPath} has remote URL '{RemoteUrl}', which does not match requested {Owner}/{Repository}.",
+                targetPath,
+                remoteUrl,
+                owner,
+                repository);
+            return ConflictResult(
+                $"The existing directory at '{targetPath}' has remote origin URL '{remoteUrl ?? "(none)"}', which does not match requested repository '{owner}/{repository}'.");
+        }
+
+        var currentBranch = await GetCurrentBranchAsync(targetPath, cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(currentBranch, branch, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "Existing directory at {LocalPath} is on branch '{CurrentBranch}', which does not match requested branch '{Branch}'.",
+                targetPath,
+                currentBranch,
+                branch);
+            return ConflictResult(
+                $"The existing directory at '{targetPath}' is on branch '{currentBranch ?? "(detached)"}', which does not match requested branch '{branch}'.");
+        }
+
+        var commitSha = await ReadHeadCommitShaAsync(targetPath, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(commitSha))
+        {
+            _logger.LogWarning("Could not resolve HEAD commit SHA for existing repository at {LocalPath}.", targetPath);
+            return ConflictResult($"Could not resolve HEAD commit SHA for existing repository at '{targetPath}'.");
+        }
+
+        if (existingWorkspace is not null && existingWorkspace.Status == RepositoryWorkspaceStatus.Completed)
+        {
+            _logger.LogInformation(
+                "Workspace already actively registered in DB for {Owner}/{Repository}@{Branch}.",
+                owner,
+                repository,
+                branch);
+            return ConflictResult($"Repository workspace '{owner}/{repository}' ({branch}) already exists.");
+        }
+
+        var now = DateTime.UtcNow;
+        if (existingWorkspace is null)
+        {
+            existingWorkspace = new RepositoryWorkspace
+            {
+                Id = Guid.NewGuid(),
+                Owner = owner,
+                Repository = repository,
+                Branch = branch,
+                LocalPath = targetPath,
+                CommitSha = commitSha,
+                Status = RepositoryWorkspaceStatus.Completed,
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+
+            _dbContext.RepositoryWorkspaces.Add(existingWorkspace);
+        }
+        else
+        {
+            existingWorkspace.Status = RepositoryWorkspaceStatus.Completed;
+            existingWorkspace.CommitSha = commitSha;
+            existingWorkspace.ErrorMessage = null;
+            existingWorkspace.LocalPath = targetPath;
+            existingWorkspace.UpdatedAt = now;
+            _dbContext.RepositoryWorkspaces.Update(existingWorkspace);
+        }
+
+        try
+        {
+            await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex)
+        {
+            _logger.LogWarning(ex, "Concurrency conflict while saving reconnected workspace for {Owner}/{Repository}@{Branch}.", owner, repository, branch);
+            return ConflictResult($"Repository workspace '{owner}/{repository}' ({branch}) already exists.");
+        }
+
+        _logger.LogInformation(
+            "Successfully safely reconnected and registered existing repository workspace {WorkspaceId} at {LocalPath}.",
+            existingWorkspace.Id,
+            targetPath);
+
+        return SuccessResult(existingWorkspace);
+    }
+
+    private static CloneResult ValidationErrorResult(string error)
     {
         return new CloneResult
         {
             Success = false,
+            IsValidationError = true,
             Error = error,
+        };
+    }
+
+    private static CloneResult ConflictResult(string error)
+    {
+        return new CloneResult
+        {
+            Success = false,
+            IsConflict = true,
+            Error = error,
+        };
+    }
+
+    private static CloneResult OperationalErrorResult(string error)
+    {
+        return new CloneResult
+        {
+            Success = false,
+            IsValidationError = false,
+            IsConflict = false,
+            Error = error,
+        };
+    }
+
+    private static CloneResult SuccessResult(RepositoryWorkspace workspace)
+    {
+        return new CloneResult
+        {
+            Success = true,
+            WorkspaceId = workspace.Id,
+            Owner = workspace.Owner,
+            Repository = workspace.Repository,
+            Branch = workspace.Branch,
+            LocalPath = workspace.LocalPath,
+            CommitSha = workspace.CommitSha,
+            Status = workspace.Status,
+            CreatedAt = workspace.CreatedAt,
+            UpdatedAt = workspace.UpdatedAt,
         };
     }
 
@@ -272,6 +414,29 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         return Path.GetFullPath(fallback);
     }
 
+    private static string SanitizeBranchPath(string branch)
+    {
+        if (string.IsNullOrWhiteSpace(branch))
+        {
+            throw new ArgumentException("Branch cannot be empty.", nameof(branch));
+        }
+
+        var segments = branch.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0)
+        {
+            throw new ArgumentException("Invalid branch name.", nameof(branch));
+        }
+
+        var sanitizedSegments = new List<string>(segments.Length);
+        foreach (var segment in segments)
+        {
+            var sanitized = SanitizePathSegment(segment);
+            sanitizedSegments.Add(sanitized);
+        }
+
+        return Path.Combine(sanitizedSegments.ToArray());
+    }
+
     private static string SanitizePathSegment(string segment)
     {
         if (string.IsNullOrWhiteSpace(segment))
@@ -279,14 +444,17 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
             throw new ArgumentException("Path segment cannot be empty.", nameof(segment));
         }
 
-        var builder = new StringBuilder(segment.Trim());
+        var trimmed = segment.Trim();
+        if (trimmed == "." || trimmed == ".." || trimmed.Contains(".."))
+        {
+            throw new ArgumentException($"Invalid path segment: '{segment}'.");
+        }
+
+        var builder = new StringBuilder(trimmed);
         foreach (var invalidChar in Path.GetInvalidFileNameChars())
         {
             builder.Replace(invalidChar, '_');
         }
-
-        builder.Replace('/', '_');
-        builder.Replace('\\', '_');
 
         var result = builder.ToString().Trim();
         if (string.IsNullOrWhiteSpace(result) || result == "." || result == "..")
@@ -308,6 +476,47 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
             || normalizedTarget.StartsWith(
                 normalizedRoot + Path.DirectorySeparatorChar,
                 StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsRemoteUrlMatch(string? remoteUrl, string owner, string repository)
+    {
+        if (string.IsNullOrWhiteSpace(remoteUrl) ||
+            string.IsNullOrWhiteSpace(owner) ||
+            string.IsNullOrWhiteSpace(repository))
+        {
+            return false;
+        }
+
+        var normalizedUrl = remoteUrl.Trim().Replace('\\', '/');
+        if (normalizedUrl.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+        {
+            normalizedUrl = normalizedUrl[..^4];
+        }
+        normalizedUrl = normalizedUrl.TrimEnd('/');
+
+        var expectedSuffix = $"{owner.Trim()}/{repository.Trim()}".Replace('\\', '/').Trim('/');
+
+        if (normalizedUrl.Equals(expectedSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (normalizedUrl.EndsWith("/" + expectedSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (normalizedUrl.EndsWith(":" + expectedSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (normalizedUrl.EndsWith(":/" + expectedSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     private string? GetToken()
@@ -423,6 +632,109 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         return (true, null);
     }
 
+    private static async Task<bool> IsGitRepositoryAsync(string path, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(path))
+        {
+            return false;
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = path,
+        };
+
+        psi.ArgumentList.Add("rev-parse");
+        psi.ArgumentList.Add("--is-inside-work-tree");
+
+        try
+        {
+            using var process = new Process { StartInfo = psi };
+            process.Start();
+
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var output = await outputTask.ConfigureAwait(false);
+
+            return process.ExitCode == 0 && string.Equals(output.Trim(), "true", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<string?> GetRemoteOriginUrlAsync(string path, CancellationToken cancellationToken)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = path,
+        };
+
+        psi.ArgumentList.Add("config");
+        psi.ArgumentList.Add("--get");
+        psi.ArgumentList.Add("remote.origin.url");
+
+        try
+        {
+            using var process = new Process { StartInfo = psi };
+            process.Start();
+
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var output = await outputTask.ConfigureAwait(false);
+
+            return process.ExitCode == 0 ? output.Trim() : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<string?> GetCurrentBranchAsync(string path, CancellationToken cancellationToken)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "git",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = path,
+        };
+
+        psi.ArgumentList.Add("rev-parse");
+        psi.ArgumentList.Add("--abbrev-ref");
+        psi.ArgumentList.Add("HEAD");
+
+        try
+        {
+            using var process = new Process { StartInfo = psi };
+            process.Start();
+
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var output = await outputTask.ConfigureAwait(false);
+
+            return process.ExitCode == 0 ? output.Trim() : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static async Task<string> ReadHeadCommitShaAsync(string repoPath, CancellationToken cancellationToken)
     {
         var psi = new ProcessStartInfo
@@ -438,13 +750,21 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         psi.ArgumentList.Add("rev-parse");
         psi.ArgumentList.Add("HEAD");
 
-        using var process = new Process { StartInfo = psi };
-        process.Start();
+        try
+        {
+            using var process = new Process { StartInfo = psi };
+            process.Start();
 
-        var output = await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var output = await outputTask.ConfigureAwait(false);
 
-        return output.Trim();
+            return process.ExitCode == 0 ? output.Trim() : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     private static async Task<bool> IsGitAvailableAsync(CancellationToken cancellationToken)

@@ -166,8 +166,20 @@ public class DeveloperAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_AllImpactedFilesMissing_FailsBeforeAiProviderCall()
+    public async Task GenerateAndApplyEditsAsync_AllImpactedFilesMissing_ContinuesWithEmptyContextAndCallsAiProvider()
     {
+        _fakeAiProvider.ResponseToReturn = """
+            {
+              "files": [
+                {
+                  "filePath": "NewApp.cs",
+                  "action": "Create",
+                  "newContent": "public class NewApp {}"
+                }
+              ]
+            }
+            """;
+
         var request = new DeveloperAgentRequest(
             TaskId: Guid.NewGuid(),
             ExecutionId: Guid.NewGuid(),
@@ -182,11 +194,8 @@ public class DeveloperAgentTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("Context loading failed");
-
-        // CRITICAL REQUIREMENT: Assert failure occurs before any AI provider call
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(0);
+        result.Success.Should().BeTrue();
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
     }
 
     [Fact]

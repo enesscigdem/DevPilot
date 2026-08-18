@@ -12,6 +12,10 @@ public sealed class FakeAiProvider : IAiProvider
 
     public Exception? ExceptionToThrow { get; set; }
 
+    public bool IsSuccessToReturn { get; set; } = true;
+
+    public string? ErrorMessageToReturn { get; set; }
+
     public Task<AiResponse> SendAsync(AiRequest request, CancellationToken cancellationToken = default)
     {
         SendAsyncCallCount++;
@@ -21,11 +25,16 @@ public sealed class FakeAiProvider : IAiProvider
             throw ExceptionToThrow;
         }
 
-        if (string.IsNullOrWhiteSpace(ResponseToReturn))
+        if (string.IsNullOrWhiteSpace(ResponseToReturn) && IsSuccessToReturn)
         {
             throw new InvalidOperationException("FakeAiProvider: ResponseToReturn was not set for test.");
         }
 
-        return Task.FromResult(new AiResponse { Content = ResponseToReturn });
+        return Task.FromResult(new AiResponse
+        {
+            Content = ResponseToReturn,
+            IsSuccess = IsSuccessToReturn,
+            ErrorMessage = ErrorMessageToReturn,
+        });
     }
 }

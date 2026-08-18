@@ -138,5 +138,7 @@ public sealed class ControllerActionAnalysisResult
 
     public string? RouteTemplate { get; set; }
 
+    public bool IsAuthorized { get; set; }
+
     public string SourcePath { get; set; } = string.Empty;
 }
