@@ -480,7 +480,9 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
 
     public static bool IsRemoteUrlMatch(string? remoteUrl, string owner, string repository)
     {
-        if (string.IsNullOrWhiteSpace(remoteUrl))
+        if (string.IsNullOrWhiteSpace(remoteUrl) ||
+            string.IsNullOrWhiteSpace(owner) ||
+            string.IsNullOrWhiteSpace(repository))
         {
             return false;
         }
@@ -492,7 +494,7 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         }
         normalizedUrl = normalizedUrl.TrimEnd('/');
 
-        var expectedSuffix = $"{owner}/{repository}".Replace('\\', '/').Trim('/');
+        var expectedSuffix = $"{owner.Trim()}/{repository.Trim()}".Replace('\\', '/').Trim('/');
 
         if (normalizedUrl.Equals(expectedSuffix, StringComparison.OrdinalIgnoreCase))
         {
@@ -504,16 +506,14 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
             return true;
         }
 
-        var colonIndex = normalizedUrl.LastIndexOf(':');
-        var slashIndex = normalizedUrl.LastIndexOf('/');
-        if (colonIndex > 0 && (slashIndex == -1 || colonIndex > slashIndex))
+        if (normalizedUrl.EndsWith(":" + expectedSuffix, StringComparison.OrdinalIgnoreCase))
         {
-            var scpPath = normalizedUrl[(colonIndex + 1)..].TrimStart('/');
-            if (scpPath.Equals(expectedSuffix, StringComparison.OrdinalIgnoreCase) ||
-                scpPath.EndsWith("/" + expectedSuffix, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
+            return true;
+        }
+
+        if (normalizedUrl.EndsWith(":/" + expectedSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
         }
 
         return false;
