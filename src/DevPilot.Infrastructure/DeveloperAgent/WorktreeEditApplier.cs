@@ -377,6 +377,74 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         return DeveloperAgentResult.Ok(modifiedRelativePaths);
     }
 
+    private static bool IsWindowsDriveRooted(string path)
+    {
+        return path.Length >= 2 &&
+               char.IsAsciiLetter(path[0]) &&
+               path[1] == ':' &&
+               (path.Length == 2 || path[2] == '\\' || path[2] == '/');
+    }
+
+    private static bool IsUncPath(string path)
+    {
+        return path.Length >= 2 && ((path[0] == '\\' && path[1] == '\\') || (path[0] == '/' && path[1] == '/'));
+    }
+
+    public static string NormalizeAndValidateRelativePath(string relativePath)
+    {
+        // Normalize both \ and / to /
+        var normalized = relativePath.Replace('\\', '/');
+
+        // Trim leading single slash if present (from \src or /src repository-root relative paths)
+        if (normalized.StartsWith('/'))
+        {
+            normalized = normalized.TrimStart('/');
+        }
+
+        var rawSegments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var resolvedSegments = new List<string>();
+
+        foreach (var segment in rawSegments)
+        {
+            if (segment == ".")
+            {
+                continue;
+            }
+
+            if (segment == "..")
+            {
+                if (resolvedSegments.Count == 0)
+                {
+                    throw new InvalidOperationException($"Path safety violation: '{relativePath}' resolves outside the allowed execution workspace.");
+                }
+                resolvedSegments.RemoveAt(resolvedSegments.Count - 1);
+                continue;
+            }
+
+            if (segment.Equals(".git", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Modification of .git directory or files is rejected: '{relativePath}'.");
+            }
+
+            resolvedSegments.Add(segment);
+        }
+
+        if (resolvedSegments.Count == 0)
+        {
+            throw new InvalidOperationException($"Path safety violation: '{relativePath}' resolves outside the allowed execution workspace.");
+        }
+
+        var fileName = resolvedSegments[^1];
+        if (SensitiveFileNameExact.Any(s => fileName.Equals(s, StringComparison.OrdinalIgnoreCase)) ||
+            fileName.StartsWith(".env.", StringComparison.OrdinalIgnoreCase) ||
+            SensitiveExtensions.Any(ext => fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException($"Access to sensitive configuration/credential file is rejected: '{relativePath}'.");
+        }
+
+        return string.Join('/', resolvedSegments);
+    }
+
     public static string ValidateAndResolvePath(string workspacePath, string relativePath)
     {
         if (string.IsNullOrWhiteSpace(workspacePath))
@@ -391,52 +459,23 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
 
         relativePath = relativePath.Trim();
 
-        // Trim leading root slashes for repository-root relative paths (e.g. "/src/File.cs" or "\src\File.cs")
-        if (relativePath.StartsWith('/') || relativePath.StartsWith('\\'))
-        {
-            relativePath = relativePath.TrimStart('/', '\\');
-        }
-
         var canonicalWorkspace = GetCanonicalRealPath(workspacePath);
 
-        // If a drive-rooted absolute path is provided that resides within the execution workspace, convert it to a relative path
-        if (Path.IsPathRooted(relativePath))
+        // 1. Reject all absolute / UNC paths unconditionally
+        if (IsWindowsDriveRooted(relativePath) || IsUncPath(relativePath) || Path.IsPathFullyQualified(relativePath))
         {
-            var fullPathCandidate = Path.GetFullPath(relativePath);
-            var canonicalCandidate = GetCanonicalRealPath(fullPathCandidate);
-            if (IsSubPath(canonicalWorkspace, canonicalCandidate))
-            {
-                relativePath = Path.GetRelativePath(canonicalWorkspace, canonicalCandidate);
-            }
-            else
-            {
-                throw new InvalidOperationException($"Absolute paths are rejected (outside workspace): '{relativePath}'.");
-            }
+            throw new InvalidOperationException($"Absolute paths are rejected: '{relativePath}'.");
         }
 
-        // Reject .git segment anywhere in relative path
-        var segments = relativePath.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
-        foreach (var segment in segments)
-        {
-            if (segment.Equals(".git", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException($"Modification of .git directory or files is rejected: '{relativePath}'.");
-            }
-        }
+        // 2. Logical relative path normalization & traversal validation
+        var logicalRelative = NormalizeAndValidateRelativePath(relativePath);
 
-        // Reject sensitive files and credentials
-        var fileName = Path.GetFileName(relativePath);
-        if (SensitiveFileNameExact.Any(s => fileName.Equals(s, StringComparison.OrdinalIgnoreCase)) ||
-            fileName.StartsWith(".env.", StringComparison.OrdinalIgnoreCase) ||
-            SensitiveExtensions.Any(ext => fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
-        {
-            throw new InvalidOperationException($"Access to sensitive configuration/credential file is rejected: '{relativePath}'.");
-        }
-
-        var combinedPath = Path.Combine(canonicalWorkspace, relativePath);
+        // 3. Convert to host filesystem path
+        var hostRelative = logicalRelative.Replace('/', Path.DirectorySeparatorChar);
+        var combinedPath = Path.Combine(canonicalWorkspace, hostRelative);
         var canonicalTarget = GetCanonicalRealPath(combinedPath);
 
-        // Symlink / Traversal check: Canonical target path must remain inside Canonical workspace path
+        // 4. Containment / symlink breakout check
         if (!IsSubPath(canonicalWorkspace, canonicalTarget))
         {
             throw new InvalidOperationException(
@@ -501,13 +540,26 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         return Path.GetFullPath(fullPath);
     }
 
-    private static bool IsSubPath(string basePath, string candidatePath)
+    public static bool IsSubPath(string basePath, string candidatePath)
     {
-        var normBase = Path.GetFullPath(basePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var normCand = Path.GetFullPath(candidatePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normBase = Path.GetFullPath(basePath);
+        var normCand = Path.GetFullPath(candidatePath);
 
-        return normCand.Equals(normBase, StringComparison.OrdinalIgnoreCase) ||
-               normCand.StartsWith(normBase + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        normBase = normBase.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        normCand = normCand.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+        if (normCand.Equals(normBase, comparison))
+        {
+            return true;
+        }
+
+        var baseWithSep = normBase.EndsWith(Path.DirectorySeparatorChar)
+            ? normBase
+            : normBase + Path.DirectorySeparatorChar;
+
+        return normCand.StartsWith(baseWithSep, comparison);
     }
 
     private static bool IsBinaryContent(byte[] bytes)
@@ -759,11 +811,17 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                     var include = (string?)pref.Attribute("Include") ?? (string?)pref.Attribute("include");
                     if (!string.IsNullOrWhiteSpace(include))
                     {
-                        var resolvedFull = Path.GetFullPath(Path.Combine(projDir, include));
-                        var relRef = Path.GetRelativePath(canonicalWorkspace, resolvedFull).Replace('\\', '/');
-                        if (!references.Contains(relRef, StringComparer.OrdinalIgnoreCase))
+                        var normalizedInclude = include.Trim().Replace('\\', '/');
+                        var hostInclude = normalizedInclude.Replace('/', Path.DirectorySeparatorChar);
+                        var resolvedFull = Path.GetFullPath(Path.Combine(projDir, hostInclude));
+                        var canonicalRef = GetCanonicalRealPath(resolvedFull);
+                        if (IsSubPath(canonicalWorkspace, canonicalRef))
                         {
-                            references.Add(relRef);
+                            var relRef = Path.GetRelativePath(canonicalWorkspace, canonicalRef).Replace('\\', '/');
+                            if (!references.Contains(relRef, StringComparer.OrdinalIgnoreCase))
+                            {
+                                references.Add(relRef);
+                            }
                         }
                     }
                 }
