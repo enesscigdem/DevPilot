@@ -18,6 +18,9 @@ import type {
   CreateRepositoryWorkspaceRequest,
   WorkspaceAnalysis,
   WorkspaceArchitecture,
+  BrainStatus,
+  BrainChatResponse,
+  BrainIndexResponse,
 } from './types';
 
 const BASE_URL = '/api';
@@ -202,4 +205,28 @@ export async function getRepositoryWorkspaceAnalysis(workspaceId: string): Promi
 
 export async function getRepositoryWorkspaceArchitecture(workspaceId: string): Promise<WorkspaceArchitecture> {
   return http<WorkspaceArchitecture>(`/repositoryworkspaces/${workspaceId}/architecture`);
+}
+
+export async function getBrainStatus(workspaceId: string): Promise<BrainStatus> {
+  return http<BrainStatus>(`/repositoryworkspaces/${workspaceId}/brain/status`);
+}
+
+export async function indexBrain(
+  workspaceId: string,
+  generateEmbeddings = true,
+): Promise<BrainIndexResponse> {
+  return http<BrainIndexResponse>(`/repositoryworkspaces/${workspaceId}/brain/index`, {
+    method: 'POST',
+    body: JSON.stringify({ generateEmbeddings }),
+  });
+}
+
+export async function askBrain(
+  workspaceId: string,
+  question: string,
+): Promise<BrainChatResponse> {
+  return http<BrainChatResponse>(`/repositoryworkspaces/${workspaceId}/brain/chat`, {
+    method: 'POST',
+    body: JSON.stringify({ question }),
+  });
 }

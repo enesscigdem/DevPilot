@@ -1,3 +1,4 @@
+using DevPilot.Domain.Entities;
 using Pgvector;
 
 namespace DevPilot.Domain.ProjectBrain.Entities;
@@ -5,6 +6,10 @@ namespace DevPilot.Domain.ProjectBrain.Entities;
 public class CodeChunk
 {
     public Guid Id { get; set; }
+
+    public Guid? RepositoryWorkspaceId { get; set; }
+
+    public RepositoryWorkspace? RepositoryWorkspace { get; set; }
 
     public string WorkspacePath { get; set; } = string.Empty;
 

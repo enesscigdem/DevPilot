@@ -6,7 +6,9 @@ public sealed record IndexWorkspaceCommand(
     string WorkspacePath,
     string? WorkspaceName = null,
     RepositoryAnalysisResult? AnalysisResult = null,
-    bool GenerateEmbeddings = true);
+    bool GenerateEmbeddings = true,
+    Guid? RepositoryWorkspaceId = null,
+    string? CommitSha = null);
 
 public sealed class IndexWorkspaceResult
 {

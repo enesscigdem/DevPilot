@@ -524,3 +524,85 @@ export interface WorkspaceArchitecture {
   nodes: WorkspaceArchitectureNode[];
   edges: WorkspaceArchitectureEdge[];
 }
+
+// ---------------------------------------------------------------------------
+// Project Brain — DTOs
+// ---------------------------------------------------------------------------
+export interface BrainIndexStep {
+  label: string;
+  done: boolean;
+}
+
+export interface BrainSourceGroup {
+  project: string;
+  layer: string;
+  files: number;
+  symbols: number;
+  indexed: boolean;
+}
+
+export interface BrainStatus {
+  workspaceId: string;
+  state: 'ready' | 'indexing' | 'unindexed' | 'stale' | 'failed';
+  totalFiles: number;
+  totalTypes: number;
+  totalSymbols: number;
+  totalChunks: number;
+  lastIndexedAt?: string | null;
+  lastIndexedRelative?: string | null;
+  engine: string;
+  steps: BrainIndexStep[];
+  sourceGroups: BrainSourceGroup[];
+  suggestedQuestions: string[];
+}
+
+export interface BrainCitation {
+  file: string;
+  path: string;
+  lines: string;
+  startLine?: number;
+  endLine?: number;
+  symbol?: string | null;
+  lang?: string | null;
+  snippet: string;
+}
+
+export interface BrainContextFile {
+  file: string;
+  path: string;
+  relevance: number;
+}
+
+export interface BrainMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  citations?: BrainCitation[];
+  confidence?: number;
+  elapsed?: string;
+}
+
+export interface BrainChatResponse {
+  success: boolean;
+  errorMessage?: string | null;
+  role: 'assistant';
+  content: string;
+  confidence?: number | null;
+  elapsed: string;
+  citations: BrainCitation[];
+  contextFiles: BrainContextFile[];
+  retrievalMode: string;
+  isUnindexed?: boolean;
+  isStale?: boolean;
+}
+
+export interface BrainIndexResponse {
+  jobId: string;
+  success: boolean;
+  filesIndexed: number;
+  chunksIndexed: number;
+  chunksUpdated: number;
+  chunksSkipped: number;
+  chunksDeleted: number;
+  duration: string;
+  errorMessage?: string | null;
+}

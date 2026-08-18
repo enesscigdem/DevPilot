@@ -60,7 +60,9 @@ public class DevPilotDbContext : DbContext
         modelBuilder.Entity<CodeChunk>(entity =>
         {
             entity.HasKey(e => e.Id);
-            entity.HasIndex(e => new { e.WorkspacePath, e.RelativePath, e.ChunkOrder }).IsUnique();
+            entity.HasIndex(e => e.RepositoryWorkspaceId);
+            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.RelativePath, e.ChunkOrder }).IsUnique();
+            entity.HasIndex(e => new { e.WorkspacePath, e.RelativePath, e.ChunkOrder });
             entity.HasIndex(e => e.ContentHash);
             entity.Property(e => e.WorkspacePath).HasMaxLength(500);
             entity.Property(e => e.WorkspaceName).HasMaxLength(200);
@@ -82,18 +84,29 @@ public class DevPilotDbContext : DbContext
                 entity.Property(e => e.Embedding)
                     .HasConversion(v => v == null ? null : v.ToString(), s => string.IsNullOrEmpty(s) ? null : new Pgvector.Vector(s));
             }
+            entity.HasOne(e => e.RepositoryWorkspace)
+                .WithMany()
+                .HasForeignKey(e => e.RepositoryWorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<IndexJob>(entity =>
         {
             entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.RepositoryWorkspaceId);
+            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.StartedAt });
             entity.HasIndex(e => e.WorkspacePath);
             entity.HasIndex(e => new { e.WorkspacePath, e.StartedAt });
             entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.WorkspacePath).HasMaxLength(500);
             entity.Property(e => e.WorkspaceName).HasMaxLength(200);
+            entity.Property(e => e.CommitSha).HasMaxLength(100);
             entity.Property(e => e.ErrorMessage).HasMaxLength(1000);
             entity.Property(e => e.EmbeddingProviderStatus).HasMaxLength(500);
+            entity.HasOne(e => e.RepositoryWorkspace)
+                .WithMany()
+                .HasForeignKey(e => e.RepositoryWorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<DevelopmentTask>(entity =>
