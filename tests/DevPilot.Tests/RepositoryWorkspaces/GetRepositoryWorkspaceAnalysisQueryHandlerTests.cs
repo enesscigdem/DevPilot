@@ -253,7 +253,7 @@ public class GetRepositoryWorkspaceAnalysisQueryHandlerTests : IDisposable
         dto.Repository.Branch.Should().Be("master");
         dto.Repository.CommitSha.Should().Be("abc1234");
 
-        dto.Summary.Status.Should().Be("Ready");
+        dto.Summary.Status.Should().Be("Partial");
         dto.Summary.SymbolsCount.Should().Be(1);
         dto.Summary.TypesCount.Should().Be(1);
         dto.Summary.ReferencesCount.Should().Be(1);

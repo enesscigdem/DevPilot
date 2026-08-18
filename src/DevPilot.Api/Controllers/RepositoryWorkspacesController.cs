@@ -1,6 +1,7 @@
 using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspace;
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceArchitecture;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure;
@@ -18,15 +19,18 @@ public class RepositoryWorkspacesController : ControllerBase
     private readonly DevPilotDbContext _dbContext;
     private readonly ICreateRepositoryWorkspaceCommandHandler _createWorkspaceHandler;
     private readonly IGetRepositoryWorkspaceAnalysisQueryHandler _analysisQueryHandler;
+    private readonly IGetRepositoryWorkspaceArchitectureQueryHandler _architectureQueryHandler;
 
     public RepositoryWorkspacesController(
         DevPilotDbContext dbContext,
         ICreateRepositoryWorkspaceCommandHandler createWorkspaceHandler,
-        IGetRepositoryWorkspaceAnalysisQueryHandler analysisQueryHandler)
+        IGetRepositoryWorkspaceAnalysisQueryHandler analysisQueryHandler,
+        IGetRepositoryWorkspaceArchitectureQueryHandler architectureQueryHandler)
     {
         _dbContext = dbContext;
         _createWorkspaceHandler = createWorkspaceHandler;
         _analysisQueryHandler = analysisQueryHandler;
+        _architectureQueryHandler = architectureQueryHandler;
     }
 
     [HttpGet]
@@ -135,6 +139,35 @@ public class RepositoryWorkspacesController : ControllerBase
         }
 
         return Ok(result.Analysis);
+    }
+
+    [HttpGet("{id:guid}/architecture")]
+    public async Task<IActionResult> GetArchitecture(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _architectureQueryHandler
+            .HandleAsync(new GetRepositoryWorkspaceArchitectureQuery(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.NotFound)
+        {
+            return NotFound(new { error = result.ErrorMessage ?? "Repository workspace not found." });
+        }
+
+        if (result.IsConflict)
+        {
+            return Conflict(new { error = result.ErrorMessage });
+        }
+
+        if (!result.Success)
+        {
+            return StatusCode(
+                StatusCodes.Status500InternalServerError,
+                new { error = result.ErrorMessage ?? "Failed to analyze repository workspace architecture." });
+        }
+
+        return Ok(result.Architecture);
     }
 
     public sealed class RepositoryWorkspaceListDto

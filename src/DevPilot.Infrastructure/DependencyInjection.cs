@@ -8,6 +8,7 @@ using DevPilot.Application.RepositoryClone;
 using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspace;
 using DevPilot.Application.RepositoryWorkspaces.Ports;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceArchitecture;
 using DevPilot.Infrastructure.RepositoryInspection;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
@@ -149,6 +150,7 @@ public static class DependencyInjection
         services.AddScoped<ICreateRepositoryWorkspaceCommandHandler, CreateRepositoryWorkspaceCommandHandler>();
         services.AddScoped<IRepositoryStructureScanner, RepositoryStructureScanner>();
         services.AddScoped<IGetRepositoryWorkspaceAnalysisQueryHandler, GetRepositoryWorkspaceAnalysisQueryHandler>();
+        services.AddScoped<IGetRepositoryWorkspaceArchitectureQueryHandler, GetRepositoryWorkspaceArchitectureQueryHandler>();
 
         return services;
     }

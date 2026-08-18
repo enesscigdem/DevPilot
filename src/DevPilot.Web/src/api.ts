@@ -17,6 +17,7 @@ import type {
   RepositoryWorkspace,
   CreateRepositoryWorkspaceRequest,
   WorkspaceAnalysis,
+  WorkspaceArchitecture,
 } from './types';
 
 const BASE_URL = '/api';
@@ -197,4 +198,8 @@ export async function mergeExecution(id: string): Promise<MergeExecutionResult> 
 
 export async function getRepositoryWorkspaceAnalysis(workspaceId: string): Promise<WorkspaceAnalysis> {
   return http<WorkspaceAnalysis>(`/repositoryworkspaces/${workspaceId}/analysis`);
+}
+
+export async function getRepositoryWorkspaceArchitecture(workspaceId: string): Promise<WorkspaceArchitecture> {
+  return http<WorkspaceArchitecture>(`/repositoryworkspaces/${workspaceId}/architecture`);
 }

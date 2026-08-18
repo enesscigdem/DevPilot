@@ -280,7 +280,6 @@ export interface ExecutionActivityItem {
   metadata?: ExecutionActivityMetadata | null;
 }
 
-
 // ---------------------------------------------------------------------------
 // Execution Review — DTOs
 // ---------------------------------------------------------------------------
@@ -487,4 +486,41 @@ export interface WorkspaceAnalysis {
   technologies: WorkspaceTechnology[];
   endpoints: WorkspaceEndpoint[];
   warnings: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Architecture Graph — DTOs
+// ---------------------------------------------------------------------------
+export interface WorkspaceArchitectureNode {
+  id: string;
+  label: string;
+  sub: string;
+  layer: string;
+  projectType: string;
+  path: string;
+  keyFiles: string[];
+  incoming: string[];
+  outgoing: string[];
+  impacted: boolean;
+  why: string;
+}
+
+export interface WorkspaceArchitectureEdge {
+  from: string;
+  to: string;
+  type: string;
+}
+
+export interface WorkspaceArchitectureSummary {
+  status: string;
+  nodesCount: number;
+  edgesCount: number;
+  analyzedAt: string;
+}
+
+export interface WorkspaceArchitecture {
+  repository: WorkspaceRepositoryInfo;
+  summary: WorkspaceArchitectureSummary;
+  nodes: WorkspaceArchitectureNode[];
+  edges: WorkspaceArchitectureEdge[];
 }
