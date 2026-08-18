@@ -2,6 +2,7 @@ using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspa
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceArchitecture;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetWorkspaceOverview;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure;
@@ -20,17 +21,20 @@ public class RepositoryWorkspacesController : ControllerBase
     private readonly ICreateRepositoryWorkspaceCommandHandler _createWorkspaceHandler;
     private readonly IGetRepositoryWorkspaceAnalysisQueryHandler _analysisQueryHandler;
     private readonly IGetRepositoryWorkspaceArchitectureQueryHandler _architectureQueryHandler;
+    private readonly IGetWorkspaceOverviewQueryHandler _overviewQueryHandler;
 
     public RepositoryWorkspacesController(
         DevPilotDbContext dbContext,
         ICreateRepositoryWorkspaceCommandHandler createWorkspaceHandler,
         IGetRepositoryWorkspaceAnalysisQueryHandler analysisQueryHandler,
-        IGetRepositoryWorkspaceArchitectureQueryHandler architectureQueryHandler)
+        IGetRepositoryWorkspaceArchitectureQueryHandler architectureQueryHandler,
+        IGetWorkspaceOverviewQueryHandler overviewQueryHandler)
     {
         _dbContext = dbContext;
         _createWorkspaceHandler = createWorkspaceHandler;
         _analysisQueryHandler = analysisQueryHandler;
         _architectureQueryHandler = architectureQueryHandler;
+        _overviewQueryHandler = overviewQueryHandler;
     }
 
     [HttpGet]
@@ -168,6 +172,35 @@ public class RepositoryWorkspacesController : ControllerBase
         }
 
         return Ok(result.Architecture);
+    }
+
+    [HttpGet("{id:guid}/overview")]
+    public async Task<IActionResult> GetOverview(
+        [FromRoute] Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _overviewQueryHandler
+            .HandleAsync(new GetWorkspaceOverviewQuery(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.NotFound)
+        {
+            return NotFound(new { error = result.ErrorMessage ?? "Repository workspace not found." });
+        }
+
+        if (result.IsConflict)
+        {
+            return Conflict(new { error = result.ErrorMessage });
+        }
+
+        if (!result.Success)
+        {
+            return StatusCode(
+                StatusCodes.Status500InternalServerError,
+                new { error = result.ErrorMessage ?? "Failed to retrieve repository workspace overview." });
+        }
+
+        return Ok(result.Overview);
     }
 
     public sealed class RepositoryWorkspaceListDto
