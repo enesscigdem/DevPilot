@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link as RouterLink, useParams as useReactParams } from "react-router-dom"
 import {
   ArrowLeft,
@@ -19,6 +19,7 @@ import {
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
 import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution } from "@/api"
+import { useWorkspace } from "@/lib/workspace"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
@@ -198,35 +199,50 @@ function DiffRow({ line }: { line: ParsedLine }) {
 
 export function CodeReview() {
   const { id } = useReactParams<{ id: string }>()
+  const { activeWorkspaceId, isLoading: isWorkspaceLoading } = useWorkspace()
+  const activeWorkspaceIdRef = useRef<string | null>(activeWorkspaceId)
+
+  useEffect(() => {
+    activeWorkspaceIdRef.current = activeWorkspaceId
+  }, [activeWorkspaceId])
 
   const [review, setReview] = useState<ExecutionReview | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
-
   const [isSubmittingDecision, setIsSubmittingDecision] = useState(false)
   const [decisionError, setDecisionError] = useState<string | null>(null)
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReasonInput, setRejectionReasonInput] = useState("")
 
+  const activeRequestIdRef = useRef(0)
+
   useEffect(() => {
-    if (!id) return
+    if (isWorkspaceLoading || !id) {
+      setIsLoading(true)
+      return
+    }
+
+    const currentRequestId = ++activeRequestIdRef.current
     const controller = new AbortController()
     let isCancelled = false
 
     setIsLoading(true)
     setError(null)
+    setReview(null)
 
-    getExecutionReview(id, { signal: controller.signal })
+    getExecutionReview(id, activeWorkspaceId, { signal: controller.signal })
       .then((data) => {
-        if (!isCancelled) {
+        if (!isCancelled && currentRequestId === activeRequestIdRef.current && activeWorkspaceIdRef.current === activeWorkspaceId) {
           setReview(data)
+          setError(null)
           setIsLoading(false)
         }
       })
       .catch((err) => {
-        if (!isCancelled && err.name !== "AbortError") {
+        if (!isCancelled && err.name !== "AbortError" && currentRequestId === activeRequestIdRef.current && activeWorkspaceIdRef.current === activeWorkspaceId) {
           setError(err instanceof Error ? err.message : "Failed to load execution review.")
+          setReview(null)
           setIsLoading(false)
         }
       })
@@ -235,7 +251,7 @@ export function CodeReview() {
       isCancelled = true
       controller.abort()
     }
-  }, [id])
+  }, [id, isWorkspaceLoading, activeWorkspaceId])
 
   const [isSubmittingCommit, setIsSubmittingCommit] = useState(false)
   const [isSubmittingPush, setIsSubmittingPush] = useState(false)
@@ -246,17 +262,23 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const decision = await approveExecutionReview(id, review.changeFingerprint)
-      setReview({
-        ...review,
-        reviewStatus: decision.reviewStatus,
-        decidedAt: decision.decidedAt,
-        rejectionReason: decision.rejectionReason,
-      })
+      const decision = await approveExecutionReview(id, review.changeFingerprint, activeWorkspaceId)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setReview({
+          ...review,
+          reviewStatus: decision.reviewStatus,
+          decidedAt: decision.decidedAt,
+          rejectionReason: decision.rejectionReason,
+        })
+      }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to approve review.")
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setDecisionError(err instanceof Error ? err.message : "Failed to approve review.")
+      }
     } finally {
-      setIsSubmittingDecision(false)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsSubmittingDecision(false)
+      }
     }
   }
 
@@ -266,19 +288,25 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const res = await commitExecution(id)
-      setReview({
-        ...review,
-        commitStatus: res.commitStatus,
-        commitSha: res.commitSha,
-        committedAt: res.committedAt,
-        commitEligible: false,
-        canRequestPush: true,
-      })
+      const res = await commitExecution(id, activeWorkspaceId)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setReview({
+          ...review,
+          commitStatus: res.commitStatus,
+          commitSha: res.commitSha,
+          committedAt: res.committedAt,
+          commitEligible: false,
+          canRequestPush: true,
+        })
+      }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to commit changes.")
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setDecisionError(err instanceof Error ? err.message : "Failed to commit changes.")
+      }
     } finally {
-      setIsSubmittingCommit(false)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsSubmittingCommit(false)
+      }
     }
   }
 
@@ -288,19 +316,25 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const res = await pushExecution(id)
-      setReview({
-        ...review,
-        pushStatus: res.pushStatus,
-        remoteBranchName: res.branchName,
-        remoteCommitSha: res.remoteCommitSha,
-        pushedAt: res.pushedAt,
-        canRequestPush: false,
-      })
+      const res = await pushExecution(id, activeWorkspaceId)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setReview({
+          ...review,
+          pushStatus: res.pushStatus,
+          remoteBranchName: res.branchName,
+          remoteCommitSha: res.remoteCommitSha,
+          pushedAt: res.pushedAt,
+          canRequestPush: false,
+        })
+      }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to push execution branch.")
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setDecisionError(err instanceof Error ? err.message : "Failed to push execution branch.")
+      }
     } finally {
-      setIsSubmittingPush(false)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsSubmittingPush(false)
+      }
     }
   }
 
@@ -316,20 +350,26 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const res = await mergeExecution(id)
-      setReview({
-        ...review,
-        mergeStatus: res.mergeStatus,
-        mergeCommitSha: res.mergeCommitSha,
-        mergedAt: res.mergedAt,
-        canRequestMerge: false,
-        pullRequestRemoteState: "Merged",
-      })
-      setShowMergeConfirmModal(false)
+      const res = await mergeExecution(id, activeWorkspaceId)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setReview({
+          ...review,
+          mergeStatus: res.mergeStatus,
+          mergeCommitSha: res.mergeCommitSha,
+          mergedAt: res.mergedAt,
+          canRequestMerge: false,
+          pullRequestRemoteState: "Merged",
+        })
+        setShowMergeConfirmModal(false)
+      }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to merge pull request.")
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setDecisionError(err instanceof Error ? err.message : "Failed to merge pull request.")
+      }
     } finally {
-      setIsSubmittingMerge(false)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsSubmittingMerge(false)
+      }
     }
   }
 
@@ -339,24 +379,30 @@ export function CodeReview() {
     setSyncError(null)
 
     try {
-      const res = await syncPullRequest(id)
-      setReview({
-        ...review,
-        pullRequestNumber: res.pullRequestNumber ?? review.pullRequestNumber,
-        pullRequestUrl: res.pullRequestUrl ?? review.pullRequestUrl,
-        pullRequestRemoteState: res.pullRequestRemoteState,
-        pullRequestIntegrityStatus: res.pullRequestIntegrityStatus,
-        pullRequestLastSyncedAt: res.lastSyncedAt,
-        ciStatus: res.ciStatus,
-        ciChecks: res.ciChecks,
-      })
-      if (res.syncError) {
-        setSyncError(res.syncError)
+      const res = await syncPullRequest(id, activeWorkspaceId)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setReview({
+          ...review,
+          pullRequestNumber: res.pullRequestNumber ?? review.pullRequestNumber,
+          pullRequestUrl: res.pullRequestUrl ?? review.pullRequestUrl,
+          pullRequestRemoteState: res.pullRequestRemoteState,
+          pullRequestIntegrityStatus: res.pullRequestIntegrityStatus,
+          pullRequestLastSyncedAt: res.lastSyncedAt,
+          ciStatus: res.ciStatus,
+          ciChecks: res.ciChecks,
+        })
+        if (res.syncError) {
+          setSyncError(res.syncError)
+        }
       }
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : "GitHub sync failed.")
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setSyncError(err instanceof Error ? err.message : "GitHub sync failed.")
+      }
     } finally {
-      setIsSyncingPr(false)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsSyncingPr(false)
+      }
     }
   }
 
@@ -366,19 +412,25 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const res = await createPullRequest(id)
-      setReview({
-        ...review,
-        pullRequestStatus: res.pullRequestStatus,
-        pullRequestNumber: res.pullRequestNumber,
-        pullRequestUrl: res.pullRequestUrl,
-        pullRequestCreatedAt: res.createdAt,
-        canRequestPullRequest: false,
-      })
+      const res = await createPullRequest(id, activeWorkspaceId)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setReview({
+          ...review,
+          pullRequestStatus: res.pullRequestStatus,
+          pullRequestNumber: res.pullRequestNumber,
+          pullRequestUrl: res.pullRequestUrl,
+          pullRequestCreatedAt: res.createdAt,
+          canRequestPullRequest: false,
+        })
+      }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to open pull request.")
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setDecisionError(err instanceof Error ? err.message : "Failed to open pull request.")
+      }
     } finally {
-      setIsSubmittingPr(false)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsSubmittingPr(false)
+      }
     }
   }
 
@@ -388,23 +440,29 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const decision = await rejectExecutionReview(id, rejectionReasonInput)
-      setReview({
-        ...review,
-        reviewStatus: decision.reviewStatus,
-        decidedAt: decision.decidedAt,
-        rejectionReason: decision.rejectionReason,
-      })
-      setShowRejectModal(false)
-      setRejectionReasonInput("")
+      const decision = await rejectExecutionReview(id, rejectionReasonInput, activeWorkspaceId)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setReview({
+          ...review,
+          reviewStatus: decision.reviewStatus,
+          decidedAt: decision.decidedAt,
+          rejectionReason: decision.rejectionReason,
+        })
+        setShowRejectModal(false)
+        setRejectionReasonInput("")
+      }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to reject review.")
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setDecisionError(err instanceof Error ? err.message : "Failed to reject review.")
+      }
     } finally {
-      setIsSubmittingDecision(false)
+      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsSubmittingDecision(false)
+      }
     }
   }
 
-  if (isLoading) {
+  if (isWorkspaceLoading || isLoading) {
     return (
       <PageContainer className="flex h-[calc(100vh-100px)] w-full items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-center">

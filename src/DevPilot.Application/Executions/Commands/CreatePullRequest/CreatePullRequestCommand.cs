@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Application.Executions.Commands.CreatePullRequest;
 
-public sealed record CreatePullRequestCommand(Guid ExecutionId);
+public sealed record CreatePullRequestCommand(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
 
 public enum CreatePullRequestResultStatus
 {
@@ -94,6 +94,12 @@ public sealed class CreatePullRequestCommandHandler : ICreatePullRequestCommandH
             .ConfigureAwait(false);
 
         if (execution is null)
+        {
+            return CreatePullRequestResult.NotFound("Execution not found.");
+        }
+
+        if (command.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask?.RepositoryWorkspaceId != command.RepositoryWorkspaceId.Value)
         {
             return CreatePullRequestResult.NotFound("Execution not found.");
         }

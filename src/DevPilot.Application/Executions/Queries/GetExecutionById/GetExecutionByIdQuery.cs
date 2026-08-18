@@ -1,12 +1,14 @@
 using DevPilot.Application.Executions.Dtos;
 using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Services;
+using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
 using Microsoft.Extensions.Options;
 
 namespace DevPilot.Application.Executions.Queries.GetExecutionById;
 
-public sealed record GetExecutionByIdQuery(Guid ExecutionId);
+public sealed record GetExecutionByIdQuery(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
 
 public sealed class GetExecutionByIdResult
 {
@@ -28,15 +30,18 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
 {
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionActivityRepository _activityRepository;
+    private readonly IImpactAnalysisRepository _impactAnalysisRepository;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
 
     public GetExecutionByIdQueryHandler(
         IExecutionRepository executionRepository,
         IExecutionActivityRepository activityRepository,
+        IImpactAnalysisRepository impactAnalysisRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions)
     {
         _executionRepository = executionRepository;
         _activityRepository = activityRepository;
+        _impactAnalysisRepository = impactAnalysisRepository;
         _mergePolicyOptions = mergePolicyOptions;
     }
 
@@ -57,19 +62,39 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             };
         }
 
+        if (query.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask.RepositoryWorkspaceId != query.RepositoryWorkspaceId.Value)
+        {
+            return new GetExecutionByIdResult
+            {
+                Found = false,
+                ErrorMessage = "Execution not found.",
+            };
+        }
+
         var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
         var buildPassed = activities.Any(a => a.Stage == DevPilot.Domain.Enums.ExecutionStage.Build && a.Status == DevPilot.Domain.Enums.ExecutionActivityStatus.Completed);
         var testPassed = activities.Any(a => a.Stage == DevPilot.Domain.Enums.ExecutionStage.Test && a.Status == DevPilot.Domain.Enums.ExecutionActivityStatus.Completed);
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
 
+        var analysis = await _impactAnalysisRepository.GetLatestByTaskIdAsync(execution.DevelopmentTaskId, cancellationToken).ConfigureAwait(false);
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, execution.DevelopmentTask, analysis, activities);
+        var progressPercentage = ExecutionStageEvaluator.CalculateProgressPercentage(stages);
+
         return new GetExecutionByIdResult
         {
             Found = true,
-            Execution = MapToDto(execution, allowNoChecks, buildPassed, testPassed),
+            Execution = MapToDto(execution, allowNoChecks, buildPassed, testPassed, stages, progressPercentage),
         };
     }
 
-    private static ExecutionDto MapToDto(TaskExecution execution, bool allowNoChecks, bool buildPassed, bool testPassed) =>
+    private static ExecutionDto MapToDto(
+        TaskExecution execution,
+        bool allowNoChecks,
+        bool buildPassed,
+        bool testPassed,
+        IReadOnlyList<ExecutionStageStepDto> stages,
+        int progressPercentage) =>
         new()
         {
             Id = execution.Id,
@@ -118,6 +143,8 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             MergeStatus = execution.MergeStatus.ToString(),
             MergeCommitSha = execution.MergeCommitSha,
             MergedAt = execution.MergedAt,
-            CanRequestMerge = DevPilot.Application.Executions.Services.ExecutionMergeEligibility.CalculateCanRequestMerge(execution, allowNoChecks, buildPassed, testPassed)
+            CanRequestMerge = DevPilot.Application.Executions.Services.ExecutionMergeEligibility.CalculateCanRequestMerge(execution, allowNoChecks, buildPassed, testPassed),
+            ProgressPercentage = progressPercentage,
+            Stages = stages,
         };
 }

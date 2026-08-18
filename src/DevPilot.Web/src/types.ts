@@ -217,6 +217,14 @@ export function getExecutionStatusMeta(status: number | string): { label: string
   return { label: String(status), tone: "neutral" };
 }
 
+export type ExecutionStageStepState = "Todo" | "Active" | "Done" | "Failed" | "Blocked";
+
+export interface ExecutionStageStep {
+  stageKey: string;
+  label: string;
+  state: ExecutionStageStepState;
+}
+
 export interface ExecutionListItem {
   id: string;
   developmentTaskId: string;
@@ -224,6 +232,18 @@ export interface ExecutionListItem {
   repositoryName: string;
   status: number;
   createdAt: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  reviewStatus?: string;
+  commitStatus?: string;
+  pushStatus?: string;
+  pullRequestStatus?: string;
+  pullRequestRemoteState?: string;
+  ciStatus?: string;
+  mergeStatus?: string;
+  errorMessage?: string | null;
+  progressPercentage?: number;
+  stages?: ExecutionStageStep[];
 }
 
 export interface ExecutionDetail {
@@ -261,6 +281,8 @@ export interface ExecutionDetail {
   startedAt: string | null;
   completedAt: string | null;
   errorMessage: string | null;
+  progressPercentage?: number;
+  stages?: ExecutionStageStep[];
 }
 
 export interface ExecutionActivityMetadata {

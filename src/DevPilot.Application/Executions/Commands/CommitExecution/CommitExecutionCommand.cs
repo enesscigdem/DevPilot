@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Application.Executions.Commands.CommitExecution;
 
-public sealed record CommitExecutionCommand(Guid ExecutionId);
+public sealed record CommitExecutionCommand(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
 
 public enum CommitExecutionResultStatus
 {
@@ -79,6 +79,12 @@ public sealed class CommitExecutionCommandHandler : ICommitExecutionCommandHandl
             .ConfigureAwait(false);
 
         if (execution is null)
+        {
+            return CommitExecutionResult.NotFound("Execution not found.");
+        }
+
+        if (command.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask?.RepositoryWorkspaceId != command.RepositoryWorkspaceId.Value)
         {
             return CommitExecutionResult.NotFound("Execution not found.");
         }

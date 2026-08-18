@@ -2,7 +2,7 @@ using DevPilot.Application.Executions.Dtos;
 
 namespace DevPilot.Application.Executions.Queries.GetExecutionReview;
 
-public sealed record GetExecutionReviewQuery(Guid ExecutionId);
+public sealed record GetExecutionReviewQuery(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
 
 public enum ExecutionReviewResultStatus
 {

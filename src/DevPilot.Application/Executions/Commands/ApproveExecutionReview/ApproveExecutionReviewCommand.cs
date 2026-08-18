@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Application.Executions.Commands.ApproveExecutionReview;
 
-public sealed record ApproveExecutionReviewCommand(Guid ExecutionId, string ExpectedChangeFingerprint);
+public sealed record ApproveExecutionReviewCommand(Guid ExecutionId, string ExpectedChangeFingerprint, Guid? RepositoryWorkspaceId = null);
 
 public enum ApproveExecutionReviewResultStatus
 {
@@ -70,6 +70,12 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
             .ConfigureAwait(false);
 
         if (execution is null)
+        {
+            return ApproveExecutionReviewResult.NotFound("Execution not found.");
+        }
+
+        if (command.RepositoryWorkspaceId.HasValue &&
+            execution.DevelopmentTask?.RepositoryWorkspaceId != command.RepositoryWorkspaceId.Value)
         {
             return ApproveExecutionReviewResult.NotFound("Execution not found.");
         }
