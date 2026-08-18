@@ -71,8 +71,8 @@ function Message({
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary-soft text-primary">
         <Sparkles className="h-3.5 w-3.5" />
       </div>
-      <div className="min-w-0 flex-1">
-        <div className="mb-1.5 flex items-center gap-2">
+      <div className="min-w-0 flex-1 rounded-[var(--radius-lg)] border border-border bg-surface p-4 shadow-[var(--shadow-sm)]">
+        <div className="mb-2.5 flex items-center gap-2 border-b border-border/80 pb-2">
           <span className="text-[12px] font-semibold text-foreground">Project Brain</span>
           {msg.confidence !== undefined && (
             <span className="flex items-center gap-1 font-mono text-[10.5px] text-subtle-foreground" title="Grounding score based on retrieval relevance and cited sources">
@@ -90,7 +90,7 @@ function Message({
         <p className="text-[13.5px] leading-relaxed text-foreground text-pretty whitespace-pre-line">{msg.content}</p>
 
         {msg.citations && msg.citations.length > 0 && (
-          <div className="mt-3">
+          <div className="mt-3.5 border-t border-border/80 pt-3">
             <div className="tech-label mb-1.5 flex items-center gap-1.5">
               <Quote className="h-3 w-3" />
               Grounded in {msg.citations.length} {msg.citations.length === 1 ? "source" : "sources"}
@@ -102,23 +102,24 @@ function Message({
                   <button
                     key={citationKey(c)}
                     onClick={() => onSelect(c)}
+                    title={`${c.file} (${c.lines})`}
                     className={cn(
                       "group flex items-center gap-2 rounded-[var(--radius-md)] border px-2.5 py-2 text-left transition-colors",
                       active
                         ? "border-primary-ring bg-primary-soft"
-                        : "border-border bg-surface hover:border-primary-ring/60 hover:bg-surface-2",
+                        : "border-border bg-surface-2 hover:border-primary-ring/60 hover:bg-surface-3",
                     )}
                   >
                     <FileCode2 className={cn("h-3.5 w-3.5 shrink-0", active ? "text-primary" : "text-subtle-foreground")} />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
-                        <span className={cn("truncate text-[12px] font-medium", active ? "text-primary" : "text-foreground")}>
+                        <span className={cn("truncate text-[12px] font-medium", active ? "text-primary" : "text-foreground")} title={c.file}>
                           {c.file}
                         </span>
                         <span className="font-mono text-[10px] text-subtle-foreground">{c.lines}</span>
                       </div>
                       {c.symbol && (
-                        <div className="truncate font-mono text-[10px] text-subtle-foreground">{c.symbol}</div>
+                        <div className="truncate font-mono text-[10px] text-subtle-foreground" title={c.symbol}>{c.symbol}</div>
                       )}
                     </div>
                   </button>
@@ -138,21 +139,21 @@ function SourcePreview({ citation }: { citation: BrainCitation }) {
   const lines = citation.snippet ? citation.snippet.split("\n") : []
   const start = citation.startLine ?? 1
   return (
-    <div className="overflow-hidden rounded-[var(--radius-md)] border border-border bg-inset">
+    <div className="min-w-0 overflow-hidden rounded-[var(--radius-md)] border border-border bg-inset">
       <div className="flex items-center gap-2 border-b border-border bg-surface-2 px-3 py-1.5">
-        <FileCode2 className="h-3.5 w-3.5 text-primary" />
-        <span className="text-[12px] font-medium text-foreground">{citation.file}</span>
-        <span className="ml-auto font-mono text-[10px] text-subtle-foreground">{citation.lang ?? "cs"}</span>
+        <FileCode2 className="h-3.5 w-3.5 shrink-0 text-primary" />
+        <span className="truncate text-[12px] font-medium text-foreground" title={citation.file}>{citation.file}</span>
+        <span className="ml-auto shrink-0 font-mono text-[10px] text-subtle-foreground">{citation.lang ?? "cs"}</span>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full border-collapse font-mono text-[11.5px] leading-relaxed">
           <tbody>
             {lines.map((ln, i) => (
               <tr key={i} className="align-top">
-                <td className="select-none whitespace-nowrap border-r border-border/70 px-2.5 py-0.5 text-right text-subtle-foreground">
+                <td className="select-none whitespace-nowrap border-r border-border/70 px-2.5 py-0.5 text-right font-mono text-subtle-foreground">
                   {start + i}
                 </td>
-                <td className="whitespace-pre px-3 py-0.5 text-muted-foreground">{ln || " "}</td>
+                <td className="whitespace-pre px-3 py-0.5 font-mono text-muted-foreground">{ln || " "}</td>
               </tr>
             ))}
           </tbody>
@@ -292,7 +293,7 @@ export function ProjectBrain() {
   const isStale = status?.state === "stale"
 
   return (
-    <div className="mx-auto grid h-full max-w-[1600px] grid-cols-1 lg:h-[calc(100vh-56px)] lg:max-h-[calc(100vh-56px)] lg:grid-cols-[276px_minmax(0,1fr)_384px] lg:overflow-hidden">
+    <div className="mx-auto grid h-full max-w-[1720px] grid-cols-1 lg:h-[calc(100vh-56px)] lg:max-h-[calc(100vh-56px)] lg:grid-cols-[276px_minmax(0,1fr)_440px] xl:grid-cols-[276px_minmax(0,1fr)_520px] lg:overflow-hidden">
       {/* LEFT — knowledge index */}
       <aside className="flex min-h-0 min-w-0 flex-col overflow-y-auto border-b border-border p-5 lg:border-b-0 lg:border-r">
         <div className="flex items-center justify-between mb-2.5">
@@ -314,7 +315,7 @@ export function ProjectBrain() {
               <Boxes className="h-4 w-4" />
             </div>
             <div className="min-w-0">
-              <div className="truncate font-mono text-[12.5px] font-medium text-foreground">{repoFullName}</div>
+              <div className="truncate font-mono text-[12.5px] font-medium text-foreground" title={repoFullName}>{repoFullName}</div>
               <div className="font-mono text-[10.5px] text-subtle-foreground">
                 {status ? `${status.totalChunks} chunks indexed` : "C# · TypeScript"}
               </div>
@@ -403,11 +404,12 @@ export function ProjectBrain() {
               return (
                 <div
                   key={g.project}
+                  title={`${g.project} (${g.layer}) — ${g.files} files, ${g.symbols.toLocaleString()} symbols`}
                   className="flex items-center gap-2 rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-2"
                 >
                   <StatusDot tone={tone} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate font-mono text-[11.5px] font-medium text-foreground">{g.project}</div>
+                    <div className="truncate font-mono text-[11.5px] font-medium text-foreground" title={g.project}>{g.project}</div>
                     <div className="font-mono text-[10px] text-subtle-foreground">
                       {g.files} files · {g.symbols.toLocaleString()} symbols
                     </div>
@@ -466,22 +468,26 @@ export function ProjectBrain() {
           )}
 
           {suggestedQuestions.length > 0 && (
-            <div className="pt-1">
-              <div className="tech-label mb-2">Try asking</div>
-              <div className="flex flex-wrap gap-1.5">
-                {suggestedQuestions.map((q) => (
-                  <button
-                    key={q}
-                    onClick={() => {
-                      setDraft(q)
-                      handleAsk(q)
-                    }}
-                    disabled={isAsking}
-                    className="rounded-full border border-border bg-surface px-3 py-1.5 text-[12px] text-muted-foreground transition-colors hover:border-primary-ring/60 hover:bg-primary-soft hover:text-primary disabled:opacity-50"
-                  >
-                    {q}
-                  </button>
-                ))}
+            <div className="flex gap-3 pt-1">
+              <div className="w-7 shrink-0" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <div className="tech-label mb-2">Try asking</div>
+                <div className="flex flex-wrap items-center justify-start gap-1.5">
+                  {suggestedQuestions.map((q) => (
+                    <button
+                      key={q}
+                      onClick={() => {
+                        setDraft(q)
+                        handleAsk(q)
+                      }}
+                      disabled={isAsking}
+                      title={q}
+                      className="rounded-full border border-border bg-surface px-3 py-1.5 text-[12px] text-muted-foreground transition-colors hover:border-primary-ring/60 hover:bg-primary-soft hover:text-primary disabled:opacity-50 text-left"
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}
@@ -524,21 +530,21 @@ export function ProjectBrain() {
       </section>
 
       {/* RIGHT — source inspector */}
-      <aside className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-5">
+      <aside className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-4 lg:p-5">
         <div className="tech-label mb-3 flex items-center gap-1.5">
           <FileCode2 className="h-3 w-3" />
           Source inspector
         </div>
 
         {selected ? (
-          <div className="rounded-[var(--radius-lg)] border border-border bg-surface p-4 shadow-[var(--shadow-sm)]">
+          <div className="min-w-0 rounded-[var(--radius-lg)] border border-border bg-surface p-3.5 shadow-[var(--shadow-sm)]">
             <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-md)] bg-primary-soft text-primary">
+              <div className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-md)] bg-primary-soft text-primary shrink-0">
                 <FileCode2 className="h-4 w-4" />
               </div>
-              <div className="min-w-0">
-                <div className="truncate text-[13.5px] font-semibold text-foreground">{selected.file}</div>
-                <div className="truncate font-mono text-[10px] text-subtle-foreground">{selected.path}</div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[13.5px] font-semibold text-foreground" title={selected.file}>{selected.file}</div>
+                <div className="truncate font-mono text-[10px] text-subtle-foreground" title={selected.path}>{selected.path}</div>
               </div>
             </div>
 
@@ -547,7 +553,7 @@ export function ProjectBrain() {
                 {selected.lines}
               </Badge>
               {selected.symbol && (
-                <span className="truncate font-mono text-[11px] text-muted-foreground">{selected.symbol}</span>
+                <span className="truncate font-mono text-[11px] text-muted-foreground" title={selected.symbol}>{selected.symbol}</span>
               )}
             </div>
 
@@ -588,13 +594,13 @@ export function ProjectBrain() {
             </div>
           ) : (
             contextFiles.map((f) => (
-              <div key={f.file} className="rounded-[var(--radius-md)] border border-border bg-surface p-2.5">
+              <div key={f.file} className="rounded-[var(--radius-md)] border border-border bg-surface p-2.5" title={f.path}>
                 <div className="flex items-center gap-2">
                   <FileCode2 className="h-3.5 w-3.5 text-subtle-foreground" />
-                  <span className="truncate text-[12px] font-medium text-foreground">{f.file}</span>
+                  <span className="truncate text-[12px] font-medium text-foreground" title={f.file}>{f.file}</span>
                   <span className="ml-auto font-mono text-[10.5px] text-muted-foreground">{f.relevance}%</span>
                 </div>
-                <div className="mt-1 truncate font-mono text-[10px] text-subtle-foreground">{f.path}</div>
+                <div className="mt-1 truncate font-mono text-[10px] text-subtle-foreground" title={f.path}>{f.path}</div>
                 <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-surface-3">
                   <div className="h-full rounded-full bg-primary" style={{ width: `${f.relevance}%` }} />
                 </div>
