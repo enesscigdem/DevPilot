@@ -21,6 +21,7 @@ import type {
   BrainStatus,
   BrainChatResponse,
   BrainIndexResponse,
+  WorkspaceOverview,
 } from './types';
 
 const BASE_URL = '/api';
@@ -229,4 +230,11 @@ export async function askBrain(
     method: 'POST',
     body: JSON.stringify({ question }),
   });
+}
+
+export async function getWorkspaceOverview(
+  workspaceId: string,
+  init?: RequestInit,
+): Promise<WorkspaceOverview> {
+  return http<WorkspaceOverview>(`/repositoryworkspaces/${workspaceId}/overview`, init);
 }

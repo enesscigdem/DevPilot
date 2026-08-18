@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import {
   ArrowRight,
@@ -9,36 +10,281 @@ import {
   Cpu,
   CircleStop,
   GitPullRequest,
+  Loader2,
+  AlertCircle,
 } from "lucide-react"
 import { PageContainer, SectionHead } from "@/components/shared"
 import { Badge, Button, Meter, Panel, StatusDot } from "@/components/ui/primitives"
-import {
-  attention,
-  tasks,
-  recentActivity,
-  repository,
-  execution,
-  stages,
-} from "@/data/mock"
+import { getWorkspaceOverview } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import { cn } from "@/lib/utils"
+import type {
+  WorkspaceOverview,
+  WorkspaceAttentionItem,
+  WorkspaceActivityItem,
+  WorkspaceActivityActor,
+  Tone,
+} from "@/types"
+
+const stageDefinitions = [
+  { key: "analyze", label: "Analyze" },
+  { key: "plan", label: "Plan" },
+  { key: "approved", label: "Approved" },
+  { key: "implement", label: "Implement" },
+  { key: "build", label: "Build & Test" },
+  { key: "review", label: "Review" },
+  { key: "pr", label: "Pull Request" },
+]
+
+function formatRelativeTime(dateStr?: string | null): string {
+  if (!dateStr) return "never"
+  try {
+    const d = new Date(dateStr)
+    const now = new Date()
+    const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000)
+    if (diffSec < 60) return "just now"
+    const diffMin = Math.floor(diffSec / 60)
+    if (diffMin < 60) return `${diffMin}m ago`
+    const diffHours = Math.floor(diffMin / 60)
+    if (diffHours < 24) return `${diffHours}h ago`
+    const diffDays = Math.floor(diffHours / 24)
+    if (diffDays < 30) return `${diffDays}d ago`
+    return d.toLocaleDateString()
+  } catch {
+    return dateStr
+  }
+}
+
+function formatElapsed(elapsedSeconds?: number | null, startedAt?: string | null): string {
+  if (elapsedSeconds != null) {
+    const mins = Math.floor(elapsedSeconds / 60)
+    const secs = elapsedSeconds % 60
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+  }
+  if (startedAt) {
+    const start = new Date(startedAt).getTime()
+    const diffSec = Math.max(0, Math.floor((Date.now() - start) / 1000))
+    const mins = Math.floor(diffSec / 60)
+    const secs = diffSec % 60
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+  }
+  return "—"
+}
+
+function mapAttentionPresentation(item: WorkspaceAttentionItem): {
+  tone: Tone
+  cta: string
+  href: string
+} {
+  const kind = String(item.kind).toLowerCase()
+
+  if (
+    kind === "executionfailed" ||
+    kind === "buildfailed" ||
+    kind === "testfailed" ||
+    kind === "developeragentfailed" ||
+    kind === "pullrequestfailed" ||
+    kind === "cifailed" ||
+    kind === "0" ||
+    kind === "5" ||
+    kind === "6" ||
+    kind === "7" ||
+    kind === "8" ||
+    kind === "9"
+  ) {
+    return {
+      tone: "red",
+      cta: "Inspect failure",
+      href: item.executionId ? `/executions/${item.executionId}` : item.taskId ? `/tasks/${item.taskId}` : "/executions",
+    }
+  }
+
+  if (kind === "reviewpending" || kind === "1") {
+    return {
+      tone: "amber",
+      cta: "Open review",
+      href: item.executionId ? `/review/${item.executionId}` : "/executions",
+    }
+  }
+
+  if (kind === "planapprovalrequired" || kind === "2") {
+    return {
+      tone: "amber",
+      cta: "Review plan",
+      href: item.taskId ? `/tasks/${item.taskId}` : "/tasks",
+    }
+  }
+
+  if (kind === "reviewrejected" || kind === "3") {
+    return {
+      tone: "red",
+      cta: "Open review",
+      href: item.executionId ? `/review/${item.executionId}` : "/executions",
+    }
+  }
+
+  if (kind === "taskrejected" || kind === "4") {
+    return {
+      tone: "red",
+      cta: "View task",
+      href: item.taskId ? `/tasks/${item.taskId}` : "/tasks",
+    }
+  }
+
+  return {
+    tone: "neutral",
+    cta: "View",
+    href: item.taskId ? `/tasks/${item.taskId}` : "/tasks",
+  }
+}
+
+function formatActorName(actor: WorkspaceActivityActor | string | number): string {
+  const a = String(actor).toLowerCase()
+  if (a === "developer" || a === "1") return "Developer"
+  if (a === "reviewer" || a === "2") return "Reviewer"
+  if (a === "system" || a === "3") return "System"
+  if (a === "planner" || a === "0") return "Planner"
+  if (a === "user" || a === "4") return "You"
+  return "System"
+}
+
+function mapActivityPresentation(item: WorkspaceActivityItem): {
+  tone: Tone
+  actor: string
+  action: string
+} {
+  const kind = String(item.kind).toLowerCase()
+  const actor = formatActorName(item.actor)
+  const action = (item.action || "").trim()
+
+  let tone: Tone = "neutral"
+  if (kind.includes("failed") || kind === "1" || kind === "3" || kind === "6") {
+    tone = "red"
+  } else if (kind.includes("approved") || kind.includes("completed") || kind.includes("passed") || kind === "0" || kind === "2" || kind === "5" || kind === "7") {
+    tone = "green"
+  } else if (kind.includes("created") || kind === "4") {
+    tone = "blue"
+  }
+
+  return { tone, actor, action }
+}
+
+function mapFailureBadge(kindVal: string | number): string {
+  const k = String(kindVal).toLowerCase()
+  if (k === "buildfailed" || k === "0") return "Build failed"
+  if (k === "testfailed" || k === "1") return "Test failed"
+  if (k === "developeragentfailed" || k === "2") return "Agent failed"
+  if (k === "reviewrejected" || k === "4") return "Rejected"
+  if (k === "taskrejected" || k === "5") return "Blocked"
+  if (k === "pullrequestfailed" || k === "6") return "PR failed"
+  if (k === "cifailed" || k === "7") return "CI failed"
+  return "Failed"
+}
 
 export function Workspace() {
-  const { activeWorkspace } = useWorkspace()
-  const awaiting = tasks.filter((t) => t.status === "awaiting-approval" || t.status === "planning")
-  const trouble = tasks.filter((t) => t.status === "blocked" || t.status === "failed")
+  const { activeWorkspace, activeWorkspaceId } = useWorkspace()
+  const [overview, setOverview] = useState<WorkspaceOverview | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const repoFullName = activeWorkspace
-    ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
-    : repository.fullName
-  const branchName = activeWorkspace ? activeWorkspace.branch : repository.branch
+  const activeReqWorkspaceIdRef = useRef<string | null>(null)
+
+  const fetchOverview = useCallback(async () => {
+    if (!activeWorkspaceId) {
+      setOverview(null)
+      setIsLoading(false)
+      setError(null)
+      return
+    }
+
+    activeReqWorkspaceIdRef.current = activeWorkspaceId
+    setIsLoading(true)
+    setError(null)
+
+    const controller = new AbortController()
+
+    try {
+      const data = await getWorkspaceOverview(activeWorkspaceId, { signal: controller.signal })
+      if (activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        setOverview(data)
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return
+      }
+      if (activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        setError(err instanceof Error ? err.message : "Failed to load workspace overview.")
+      }
+    } finally {
+      if (activeReqWorkspaceIdRef.current === activeWorkspaceId) {
+        setIsLoading(false)
+      }
+    }
+
+    return () => {
+      controller.abort()
+    }
+  }, [activeWorkspaceId])
+
+  useEffect(() => {
+    fetchOverview()
+  }, [fetchOverview])
+
+  const now = new Date()
+  const dayName = now.toLocaleDateString(undefined, { weekday: "long" })
+  const timeStr = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+
+  const repoFullName = overview?.header.repositoryFullName ||
+    (activeWorkspace ? `${activeWorkspace.owner}/${activeWorkspace.repository}` : "No workspace selected")
+
+  const branchName = overview?.header.branch || (activeWorkspace ? activeWorkspace.branch : "main")
+  const fileCountDisplay = overview?.header.fileCount ?? 0
+  const lastIndexedRelative = overview?.header.lastIndexedAt
+    ? formatRelativeTime(overview.header.lastIndexedAt)
+    : "never"
+
+  const attention = overview?.needsAttention ?? []
+  const activeExecution = overview?.activeExecution ?? null
+  const awaiting = overview?.awaitingApproval ?? []
+  const trouble = overview?.failedOrBlocked ?? []
+  const recentActivity = overview?.recentActivity ?? []
+  const recentlyAnalyzed = overview?.recentlyAnalyzed
+  const shipped = overview?.shippedRecently ?? []
+
+  if (isLoading && !overview) {
+    return (
+      <PageContainer>
+        <div className="flex min-h-[400px] flex-col items-center justify-center gap-3 text-center">
+          <Loader2 className="h-6 w-6 animate-spin text-subtle-foreground" />
+          <p className="text-[13.5px] font-medium text-foreground">Loading workspace dashboard…</p>
+        </div>
+      </PageContainer>
+    )
+  }
+
+  if (error && !overview) {
+    return (
+      <PageContainer>
+        <Panel className="my-8 flex flex-col items-center justify-center gap-3 p-8 text-center">
+          <AlertCircle className="h-7 w-7 text-danger" />
+          <div>
+            <h2 className="text-[15px] font-semibold text-foreground">Failed to Load Dashboard</h2>
+            <p className="mt-1 text-[13px] text-muted-foreground">{error}</p>
+          </div>
+          <Button variant="default" size="sm" onClick={() => fetchOverview()}>
+            Retry
+          </Button>
+        </Panel>
+      </PageContainer>
+    )
+  }
 
   return (
     <PageContainer>
       {/* Greeting */}
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="tech-label mb-1.5">Tuesday · 09:42 · {branchName}</div>
+          <div className="tech-label mb-1.5">{dayName} · {timeStr} · {branchName}</div>
           <h1 className="text-[24px] font-semibold tracking-tight text-foreground">
             What should you work on right now?
           </h1>
@@ -46,48 +292,58 @@ export function Workspace() {
             <GitBranch className="h-3.5 w-3.5" />
             {repoFullName}
             <span className="text-border-strong">·</span>
-            {repository.files} files
+            {fileCountDisplay} files
             <span className="text-border-strong">·</span>
-            indexed {repository.lastIndexed}
+            indexed {lastIndexedRelative}
           </p>
         </div>
-        <Button variant="primary" size="lg" className="gap-2">
-          New task
-          <ArrowRight className="h-4 w-4" />
-        </Button>
+        <Link to="/tasks">
+          <Button variant="primary" size="lg" className="gap-2">
+            New task
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        </Link>
       </div>
 
       {/* Needs your attention */}
       <SectionHead title="Needs your attention" count={attention.length} />
       <div className="mb-8 grid grid-cols-1 gap-3 md:grid-cols-3">
-        {attention.map((item) => (
-          <Link
-            key={item.id}
-            to={item.href}
-            className="group relative overflow-hidden rounded-[var(--radius-lg)] border border-border bg-surface p-4 shadow-[var(--shadow-sm)] transition-all hover:shadow-[var(--shadow-md)]"
-          >
-            <span
-              className={cn(
-                "absolute inset-x-0 top-0 h-[3px]",
-                item.tone === "red" && "bg-danger",
-                item.tone === "amber" && "bg-accent",
-                item.tone === "blue" && "bg-primary",
-              )}
-            />
-            <div className="flex items-center gap-2">
-              <StatusDot tone={item.tone} pulse={item.tone === "red"} />
-              <span className="text-[13.5px] font-semibold text-foreground">{item.title}</span>
-            </div>
-            <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">{item.reason}</p>
-            <div className="mt-3 flex items-center justify-between">
-              <span className="font-mono text-[11px] text-subtle-foreground">{item.meta}</span>
-              <span className="flex items-center gap-1 text-[12px] font-medium text-primary opacity-0 transition-opacity group-hover:opacity-100">
-                {item.cta}
-                <ArrowRight className="h-3.5 w-3.5" />
-              </span>
-            </div>
-          </Link>
-        ))}
+        {attention.map((item) => {
+          const { tone, cta, href } = mapAttentionPresentation(item)
+          return (
+            <Link
+              key={item.id}
+              to={href}
+              className="group relative overflow-hidden rounded-[var(--radius-lg)] border border-border bg-surface p-4 shadow-[var(--shadow-sm)] transition-all hover:shadow-[var(--shadow-md)]"
+            >
+              <span
+                className={cn(
+                  "absolute inset-x-0 top-0 h-[3px]",
+                  tone === "red" && "bg-danger",
+                  tone === "amber" && "bg-accent",
+                  tone === "blue" && "bg-primary",
+                )}
+              />
+              <div className="flex items-center gap-2">
+                <StatusDot tone={tone} pulse={tone === "red"} />
+                <span className="text-[13.5px] font-semibold text-foreground">{item.title}</span>
+              </div>
+              <p className="mt-2 text-[12.5px] leading-relaxed text-muted-foreground">{item.reason}</p>
+              <div className="mt-3 flex items-center justify-between">
+                <span className="font-mono text-[11px] text-subtle-foreground">{item.metaDetail || formatRelativeTime(item.occurredAt)}</span>
+                <span className="flex items-center gap-1 text-[12px] font-medium text-primary opacity-0 transition-opacity group-hover:opacity-100">
+                  {cta}
+                  <ArrowRight className="h-3.5 w-3.5" />
+                </span>
+              </div>
+            </Link>
+          )
+        })}
+        {attention.length === 0 && (
+          <div className="col-span-full rounded-[var(--radius-lg)] border border-border bg-surface p-6 text-center text-[13px] text-subtle-foreground">
+            No items require your attention.
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
@@ -102,74 +358,126 @@ export function Workspace() {
                 </Link>
               }
             />
-            <Panel className="overflow-hidden">
-              <div className="flex items-center justify-between border-b border-border bg-surface-2 px-4 py-3">
-                <div className="flex items-center gap-2.5">
-                  <StatusDot tone="blue" pulse />
-                  <span className="font-mono text-[12px] font-medium text-foreground">TASK-142</span>
-                  <span className="text-[13px] text-foreground">Add status filtering to the orders endpoint</span>
+            {activeExecution ? (
+              <Panel className="overflow-hidden">
+                <div className="flex items-center justify-between border-b border-border bg-surface-2 px-4 py-3">
+                  <div className="flex items-center gap-2.5">
+                    <StatusDot tone="blue" pulse />
+                    <span className="font-mono text-[12px] font-medium text-foreground">{activeExecution.taskDisplayId}</span>
+                    <span className="text-[13px] text-foreground">{activeExecution.taskTitle}</span>
+                  </div>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    className="gap-1.5 opacity-60 cursor-not-allowed"
+                    disabled
+                    title="Active execution cancellation is currently unavailable"
+                  >
+                    <CircleStop className="h-3.5 w-3.5" />
+                    Cancel
+                  </Button>
                 </div>
-                <Button variant="danger" size="sm" className="gap-1.5">
-                  <CircleStop className="h-3.5 w-3.5" />
-                  Cancel
-                </Button>
-              </div>
 
-              {/* stage rail */}
-              <div className="flex items-center gap-1 px-4 py-4">
-                {stages.map((stage, i) => {
-                  const currentIndex = stages.findIndex((s) => s.key === execution.currentStage)
-                  const state = i < currentIndex ? "done" : i === currentIndex ? "active" : "todo"
-                  return (
-                    <div key={stage.key} className="flex flex-1 items-center gap-1">
-                      <div className="flex flex-col items-center gap-1.5">
-                        <div
-                          className={cn(
-                            "flex h-6 w-6 items-center justify-center rounded-full border text-[10px] font-semibold transition-colors",
-                            state === "done" && "border-success bg-success-soft text-success",
-                            state === "active" && "border-primary bg-primary text-primary-foreground",
-                            state === "todo" && "border-border bg-surface text-subtle-foreground",
-                          )}
-                        >
-                          {state === "active" ? <span className="h-1.5 w-1.5 rounded-full bg-primary-foreground animate-pulse-dot" /> : i + 1}
+                {/* stage rail */}
+                <div className="flex items-center gap-1 px-4 py-4">
+                  {stageDefinitions.map((stageDef, i) => {
+                    const foundStep = activeExecution.stages.find((s) => s.stageKey === stageDef.key)
+                    const stateStr = foundStep ? String(foundStep.state).toLowerCase() : "todo"
+                    const state = stateStr === "done" || stateStr === "2"
+                      ? "done"
+                      : stateStr === "active" || stateStr === "1"
+                        ? "active"
+                        : stateStr === "failed" || stateStr === "3"
+                          ? "failed"
+                          : stateStr === "blocked" || stateStr === "4"
+                            ? "blocked"
+                            : "todo"
+
+                    return (
+                      <div key={stageDef.key} className="flex flex-1 items-center gap-1">
+                        <div className="flex flex-col items-center gap-1.5">
+                          <div
+                            className={cn(
+                              "flex h-6 w-6 items-center justify-center rounded-full border text-[10px] font-semibold transition-colors",
+                              state === "done" && "border-success bg-success-soft text-success",
+                              state === "active" && "border-primary bg-primary text-primary-foreground",
+                              state === "failed" && "border-danger bg-danger text-primary-foreground",
+                              state === "blocked" && "border-accent bg-accent text-primary-foreground",
+                              state === "todo" && "border-border bg-surface text-subtle-foreground",
+                            )}
+                          >
+                            {state === "active" ? (
+                              <span className="h-1.5 w-1.5 rounded-full bg-primary-foreground animate-pulse-dot" />
+                            ) : (
+                              i + 1
+                            )}
+                          </div>
+                          <span
+                            className={cn(
+                              "whitespace-nowrap text-[10.5px] font-medium",
+                              state === "active" ? "text-foreground" : "text-subtle-foreground",
+                            )}
+                          >
+                            {stageDef.label}
+                          </span>
                         </div>
-                        <span
-                          className={cn(
-                            "whitespace-nowrap text-[10.5px] font-medium",
-                            state === "active" ? "text-foreground" : "text-subtle-foreground",
-                          )}
-                        >
-                          {stage.label}
-                        </span>
+                        {i < stageDefinitions.length - 1 && (
+                          <div
+                            className={cn(
+                              "mb-4 h-[2px] flex-1 rounded-full",
+                              state === "done" ? "bg-success" : "bg-border",
+                            )}
+                          />
+                        )}
                       </div>
-                      {i < stages.length - 1 && (
-                        <div
-                          className={cn(
-                            "mb-4 h-[2px] flex-1 rounded-full",
-                            i < currentIndex ? "bg-success" : "bg-border",
-                          )}
-                        />
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
+                    )
+                  })}
+                </div>
 
-              <div className="grid grid-cols-2 gap-px border-t border-border bg-border sm:grid-cols-4">
-                <Metric icon={<Clock className="h-3.5 w-3.5" />} label="Elapsed" value={execution.elapsed} />
-                <Metric icon={<Cpu className="h-3.5 w-3.5" />} label="Tokens" value={`${(execution.tokensUsed / 1000).toFixed(0)}K`} />
-                <Metric icon={<Coins className="h-3.5 w-3.5" />} label="Est. cost" value={`$${execution.estCost.toFixed(2)}`} />
-                <Metric icon={<FileCode2 className="h-3.5 w-3.5" />} label="Files" value="6" />
-              </div>
-            </Panel>
+                <div className="grid grid-cols-2 gap-px border-t border-border bg-border sm:grid-cols-4">
+                  <Metric
+                    icon={<Clock className="h-3.5 w-3.5" />}
+                    label="Elapsed"
+                    value={formatElapsed(activeExecution.elapsedSeconds, activeExecution.startedAt)}
+                  />
+                  <Metric
+                    icon={<Cpu className="h-3.5 w-3.5" />}
+                    label="Tokens"
+                    value={activeExecution.tokensUsed != null ? `${(activeExecution.tokensUsed / 1000).toFixed(0)}K` : "—"}
+                  />
+                  <Metric
+                    icon={<Coins className="h-3.5 w-3.5" />}
+                    label="Est. cost"
+                    value={activeExecution.estimatedCost != null ? `$${activeExecution.estimatedCost.toFixed(2)}` : "—"}
+                  />
+                  <Metric
+                    icon={<FileCode2 className="h-3.5 w-3.5" />}
+                    label="Files"
+                    value={activeExecution.modifiedFileCount != null ? String(activeExecution.modifiedFileCount) : "—"}
+                  />
+                </div>
+              </Panel>
+            ) : (
+              <Panel className="overflow-hidden">
+                <Empty text="No active agent execution running for this workspace." />
+              </Panel>
+            )}
           </section>
 
           {/* Awaiting approval */}
           <section>
             <SectionHead title="Awaiting your approval" count={awaiting.length} />
             <Panel className="overflow-hidden">
-              {awaiting.map((task) => (
-                <ApprovalRow key={task.id} id={task.id} title={task.title} branch={task.branch} files={task.filesTouched} />
+              {awaiting.map((item) => (
+                <ApprovalRow
+                  key={item.id}
+                  id={item.taskDisplayId}
+                  title={item.title}
+                  branch={item.branch}
+                  files={item.filesTouched}
+                  href={item.kind === "CodeReviewApproval" || item.kind === 1 ? `/review/${item.executionId || item.taskId}` : `/tasks/${item.taskId}`}
+                  actionLabel={item.kind === "CodeReviewApproval" || item.kind === 1 ? "Review code" : "Review plan"}
+                />
               ))}
               {awaiting.length === 0 && <Empty text="Nothing waiting on you." />}
             </Panel>
@@ -179,23 +487,24 @@ export function Workspace() {
           <section>
             <SectionHead title="Failed or blocked" count={trouble.length} />
             <Panel className="divide-y divide-border overflow-hidden">
-              {trouble.map((task) => (
+              {trouble.map((item) => (
                 <Link
-                  key={task.id}
-                  to={task.status === "failed" ? `/executions/EXEC-${task.id.split("-")[1]}` : `/tasks/${task.id}`}
+                  key={item.id}
+                  to={item.executionId ? `/executions/${item.executionId}` : `/tasks/${item.taskId}`}
                   className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-2"
                 >
-                  <StatusDot tone="red" pulse={task.status === "failed"} />
+                  <StatusDot tone="red" pulse />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-[11px] text-subtle-foreground">{task.id}</span>
-                      <span className="truncate text-[13px] font-medium text-foreground">{task.title}</span>
+                      <span className="font-mono text-[11px] text-subtle-foreground">{item.taskDisplayId}</span>
+                      <span className="truncate text-[13px] font-medium text-foreground">{item.title}</span>
                     </div>
-                    <p className="mt-0.5 truncate text-[12px] text-muted-foreground">{task.summary}</p>
+                    <p className="mt-0.5 truncate text-[12px] text-muted-foreground">{item.summary}</p>
                   </div>
-                  <Badge tone="red">{task.status === "failed" ? "Build failed" : "Blocked"}</Badge>
+                  <Badge tone="red">{mapFailureBadge(item.kind)}</Badge>
                 </Link>
               ))}
+              {trouble.length === 0 && <Empty text="No failed or blocked tasks." />}
             </Panel>
           </section>
         </div>
@@ -206,27 +515,35 @@ export function Workspace() {
             <SectionHead title="Recent engineering activity" />
             <Panel className="p-4">
               <ol className="relative ml-1.5 border-l border-border">
-                {recentActivity.map((item) => (
-                  <li key={item.id} className="relative mb-4 pl-4 last:mb-0">
-                    <span
-                      className={cn(
-                        "absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full border-2 border-surface",
-                        item.tone === "green" && "bg-success",
-                        item.tone === "red" && "bg-danger",
-                        item.tone === "blue" && "bg-primary",
-                        item.tone === "amber" && "bg-accent",
-                        item.tone === "neutral" && "bg-subtle-foreground",
-                        item.tone === "gray" && "bg-subtle-foreground",
-                      )}
-                    />
-                    <p className="text-[12.5px] leading-snug text-foreground">
-                      <span className="font-medium">{item.actor}</span>{" "}
-                      <span className="text-muted-foreground">{item.action}</span>{" "}
-                      <span className="font-mono text-[11.5px] text-foreground">{item.target}</span>
-                    </p>
-                    <span className="font-mono text-[10.5px] text-subtle-foreground">{item.time} ago</span>
+                {recentActivity.map((item) => {
+                  const { tone, actor, action } = mapActivityPresentation(item)
+                  return (
+                    <li key={item.id} className="relative mb-4 pl-4 last:mb-0">
+                      <span
+                        className={cn(
+                          "absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full border-2 border-surface",
+                          tone === "green" && "bg-success",
+                          tone === "red" && "bg-danger",
+                          tone === "blue" && "bg-primary",
+                          tone === "amber" && "bg-accent",
+                          tone === "neutral" && "bg-subtle-foreground",
+                          tone === "gray" && "bg-subtle-foreground",
+                        )}
+                      />
+                      <p className="text-[12.5px] leading-snug text-foreground">
+                        <span className="font-medium">{actor}</span>{" "}
+                        <span className="text-muted-foreground">{action}</span>{" "}
+                        <span className="font-mono text-[11.5px] text-foreground">{item.target}</span>
+                      </p>
+                      <span className="font-mono text-[10.5px] text-subtle-foreground">{formatRelativeTime(item.occurredAt)}</span>
+                    </li>
+                  )
+                })}
+                {recentActivity.length === 0 && (
+                  <li className="text-center text-[12.5px] text-subtle-foreground py-4">
+                    No recent activity recorded.
                   </li>
-                ))}
+                )}
               </ol>
             </Panel>
           </section>
@@ -243,14 +560,26 @@ export function Workspace() {
                     {repoFullName}
                   </div>
                   <div className="font-mono text-[11px] text-subtle-foreground">
-                    {repository.language} · {repository.loc.toLocaleString()} LOC
+                    {recentlyAnalyzed?.language || "Unknown"} · {recentlyAnalyzed?.loc != null ? `${recentlyAnalyzed.loc.toLocaleString()} LOC` : "— LOC"}
                   </div>
                 </div>
               </div>
               <div className="mt-3.5 space-y-2.5">
-                <MiniStat label="Symbols indexed" value="8,421" pct={100} />
-                <MiniStat label="Types resolved" value="1,140" pct={92} />
-                <MiniStat label="References mapped" value="26,308" pct={78} />
+                <MiniStat
+                  label="Symbols indexed"
+                  value={recentlyAnalyzed ? recentlyAnalyzed.symbolsCount.toLocaleString() : "0"}
+                  pct={recentlyAnalyzed?.isIndexed ? 100 : 0}
+                />
+                <MiniStat
+                  label="Types resolved"
+                  value={recentlyAnalyzed ? recentlyAnalyzed.typesCount.toLocaleString() : "0"}
+                  pct={recentlyAnalyzed?.isIndexed ? 100 : 0}
+                />
+                <MiniStat
+                  label="References mapped"
+                  value={recentlyAnalyzed?.referencesCount != null ? recentlyAnalyzed.referencesCount.toLocaleString() : "—"}
+                  pct={recentlyAnalyzed?.referencesCount != null ? (recentlyAnalyzed.isIndexed ? 100 : 0) : null}
+                />
               </div>
               <Link
                 to="/projects"
@@ -265,14 +594,24 @@ export function Workspace() {
           <section>
             <SectionHead title="Shipped recently" />
             <Panel className="divide-y divide-border overflow-hidden">
-              <div className="flex items-center gap-2.5 px-4 py-3">
-                <GitPullRequest className="h-4 w-4 text-success" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[12.5px] font-medium text-foreground">Enforce role claims on customer endpoints</div>
-                  <div className="font-mono text-[11px] text-subtle-foreground">#412 · merged 2h ago</div>
+              {shipped.map((item) => (
+                <div key={item.id} className="flex items-center gap-2.5 px-4 py-3">
+                  <GitPullRequest className="h-4 w-4 text-success" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[12.5px] font-medium text-foreground">{item.title}</div>
+                    <div className="font-mono text-[11px] text-subtle-foreground">
+                      {item.pullRequestNumber != null ? `#${item.pullRequestNumber} · ` : ""}
+                      merged {formatRelativeTime(item.mergedAt)}
+                    </div>
+                  </div>
+                  <Badge tone="green">Merged</Badge>
                 </div>
-                <Badge tone="green">Merged</Badge>
-              </div>
+              ))}
+              {shipped.length === 0 && (
+                <div className="px-4 py-4 text-center text-[12.5px] text-subtle-foreground">
+                  No shipped changes yet.
+                </div>
+              )}
             </Panel>
           </section>
         </div>
@@ -293,7 +632,21 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
   )
 }
 
-function ApprovalRow({ id, title, branch, files }: { id: string; title: string; branch: string; files: number }) {
+function ApprovalRow({
+  id,
+  title,
+  branch,
+  files,
+  href,
+  actionLabel,
+}: {
+  id: string
+  title: string
+  branch: string
+  files?: number | null
+  href: string
+  actionLabel: string
+}) {
   return (
     <div className="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0">
       <StatusDot tone="amber" />
@@ -303,12 +656,12 @@ function ApprovalRow({ id, title, branch, files }: { id: string; title: string; 
           <span className="truncate text-[13px] font-medium text-foreground">{title}</span>
         </div>
         <div className="font-mono text-[11px] text-subtle-foreground">
-          {branch} · {files} files
+          {branch} · {files != null ? `${files} files` : "— files"}
         </div>
       </div>
-      <Link to={`/tasks/${id}`}>
+      <Link to={href}>
         <Button variant="default" size="sm" className="gap-1.5">
-          Review plan
+          {actionLabel}
           <ArrowRight className="h-3.5 w-3.5" />
         </Button>
       </Link>
@@ -316,14 +669,19 @@ function ApprovalRow({ id, title, branch, files }: { id: string; title: string; 
   )
 }
 
-function MiniStat({ label, value, pct }: { label: string; value: string; pct: number }) {
+function MiniStat({ label, value, pct }: { label: string; value: string; pct?: number | null }) {
+  const isAvailable = pct !== null && pct !== undefined
   return (
     <div>
       <div className="mb-1 flex items-center justify-between text-[12px]">
         <span className="text-muted-foreground">{label}</span>
         <span className="font-mono text-foreground">{value}</span>
       </div>
-      <Meter value={pct} tone="blue" />
+      <Meter
+        value={isAvailable ? pct : 0}
+        tone={isAvailable ? "blue" : "neutral"}
+        className={!isAvailable ? "opacity-35" : undefined}
+      />
     </div>
   )
 }

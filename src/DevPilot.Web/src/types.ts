@@ -606,3 +606,171 @@ export interface BrainIndexResponse {
   duration: string;
   errorMessage?: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Workspace Overview — Dashboard DTOs
+// ---------------------------------------------------------------------------
+export type WorkspaceAttentionKind =
+  | 'ExecutionFailed'
+  | 'ReviewPending'
+  | 'PlanApprovalRequired'
+  | 'ReviewRejected'
+  | 'TaskRejected'
+  | 'BuildFailed'
+  | 'TestFailed'
+  | 'DeveloperAgentFailed'
+  | 'PullRequestFailed'
+  | 'CiFailed'
+  | number;
+
+export interface WorkspaceAttentionItem {
+  id: string;
+  kind: WorkspaceAttentionKind;
+  taskId?: string | null;
+  executionId?: string | null;
+  taskDisplayId: string;
+  title: string;
+  reason: string;
+  metaDetail?: string | null;
+  occurredAt: string;
+}
+
+export type WorkspaceStageState =
+  | 'Todo'
+  | 'Active'
+  | 'Done'
+  | 'Failed'
+  | 'Blocked'
+  | number;
+
+export interface WorkspaceStageStep {
+  stageKey: string;
+  state: WorkspaceStageState;
+}
+
+export interface WorkspaceActiveExecution {
+  executionId: string;
+  taskId: string;
+  taskDisplayId: string;
+  taskTitle: string;
+  currentStageKey: string;
+  stages: WorkspaceStageStep[];
+  startedAt?: string | null;
+  completedAt?: string | null;
+  elapsedSeconds?: number | null;
+  tokensUsed?: number | null;
+  estimatedCost?: number | null;
+  modifiedFileCount?: number | null;
+}
+
+export type WorkspaceApprovalKind =
+  | 'PlanApproval'
+  | 'CodeReviewApproval'
+  | number;
+
+export interface WorkspaceApprovalItem {
+  id: string;
+  kind: WorkspaceApprovalKind;
+  taskId: string;
+  executionId?: string | null;
+  taskDisplayId: string;
+  title: string;
+  branch: string;
+  filesTouched?: number | null;
+  requestedAt: string;
+}
+
+export type WorkspaceFailureKind =
+  | 'BuildFailed'
+  | 'TestFailed'
+  | 'DeveloperAgentFailed'
+  | 'ExecutionFailed'
+  | 'ReviewRejected'
+  | 'TaskRejected'
+  | 'PullRequestFailed'
+  | 'CiFailed'
+  | number;
+
+export interface WorkspaceFailedOrBlockedItem {
+  id: string;
+  kind: WorkspaceFailureKind;
+  taskId: string;
+  executionId?: string | null;
+  taskDisplayId: string;
+  title: string;
+  summary: string;
+  failedAt: string;
+}
+
+export type WorkspaceActivityKind =
+  | 'ExecutionStageCompleted'
+  | 'ExecutionStageFailed'
+  | 'ReviewApproved'
+  | 'ReviewRejected'
+  | 'PullRequestCreated'
+  | 'CiPassed'
+  | 'CiFailed'
+  | 'MergeCompleted'
+  | 'RepositoryIndexed'
+  | number;
+
+export type WorkspaceActivityActor =
+  | 'Planner'
+  | 'Developer'
+  | 'Reviewer'
+  | 'System'
+  | 'User'
+  | number;
+
+export interface WorkspaceActivityItem {
+  id: string;
+  kind: WorkspaceActivityKind;
+  actor: WorkspaceActivityActor;
+  action: string;
+  target: string;
+  taskId?: string | null;
+  executionId?: string | null;
+  occurredAt: string;
+}
+
+export interface WorkspaceAnalysisOverview {
+  repositoryFullName: string;
+  language?: string | null;
+  loc?: number | null;
+  symbolsCount: number;
+  typesCount: number;
+  referencesCount?: number | null;
+  lastIndexedAt?: string | null;
+  isIndexed: boolean;
+}
+
+export interface WorkspaceShippedItem {
+  id: string;
+  taskId: string;
+  executionId: string;
+  taskDisplayId: string;
+  title: string;
+  pullRequestNumber?: number | null;
+  mergeCommitSha?: string | null;
+  mergedAt: string;
+}
+
+export interface WorkspaceHeader {
+  workspaceId: string;
+  repositoryFullName: string;
+  branch: string;
+  fileCount: number;
+  lastIndexedAt?: string | null;
+  isIndexed: boolean;
+}
+
+export interface WorkspaceOverview {
+  header: WorkspaceHeader;
+  needsAttention: WorkspaceAttentionItem[];
+  activeExecution?: WorkspaceActiveExecution | null;
+  awaitingApproval: WorkspaceApprovalItem[];
+  failedOrBlocked: WorkspaceFailedOrBlockedItem[];
+  recentActivity: WorkspaceActivityItem[];
+  recentlyAnalyzed: WorkspaceAnalysisOverview;
+  shippedRecently: WorkspaceShippedItem[];
+}
