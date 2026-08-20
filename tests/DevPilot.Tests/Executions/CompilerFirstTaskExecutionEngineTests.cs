@@ -387,8 +387,8 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         var act = async () => await processor.ProcessAsync(context);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
-        agent.CallCount.Should().Be(4); // 1 initial + 3 repairs
-        runner.BuildCallCount.Should().Be(4);
+        agent.CallCount.Should().Be(2); // initial + one focused repair; identical diagnostic stops
+        runner.BuildCallCount.Should().Be(2);
     }
 
     // Scenario 12: Test failure -> repair -> targeted tests success
@@ -400,7 +400,8 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         var agent = new TestDeveloperAgent();
         var testQueue = new Queue<TestValidationResult>(new[]
         {
-            new TestValidationResult { Success = false, ExitCode = 1, ErrorMessage = "dotnet test failed.", StdOut = "Failed TestMethod1\nExpected 100 but got 0" },
+            FocusedTestFailure(),
+            new TestValidationResult { Success = true, ExitCode = 0 },
             new TestValidationResult { Success = true, ExitCode = 0 }
         });
         var runner = new QueuedTestValidationRunner(testQueue);
@@ -419,7 +420,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         await processor.ProcessAsync(context);
 
         agent.CallCount.Should().Be(2); // 1 initial + 1 test repair
-        runner.TestCallCount.Should().Be(2);
+        runner.TestCallCount.Should().Be(3); // initial full, targeted retry, required full suite
     }
 
     // Scenario 13: Test failure after max rounds -> terminal TestFailure
@@ -431,7 +432,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         var agent = new TestDeveloperAgent();
         var runner = new TestExecutionValidationRunner
         {
-            TestResultToReturn = TestValidationResult.FailResult("dotnet test failed with exit code 1.")
+            TestResultToReturn = FocusedTestFailure()
         };
         var recorder = new TestActivityRecorder();
 
@@ -448,8 +449,8 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         var act = async () => await processor.ProcessAsync(context);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Test validation failed*");
-        agent.CallCount.Should().Be(3); // 1 initial + 2 test repairs
-        runner.TestCallCount.Should().Be(3);
+        agent.CallCount.Should().Be(2); // identical targeted failure stops before a second repair
+        runner.TestCallCount.Should().Be(2);
     }
 
     // Scenario 14: Build and test activity exposes concise sanitized diagnostics
@@ -593,6 +594,21 @@ public sealed class CompilerFirstTaskExecutionEngineTests
     }
 
     // ── Helper Test Fakes ──────────────────────────────────────────────────────────
+    private static TestValidationResult FocusedTestFailure() => new()
+    {
+        Success = false,
+        ExitCode = 1,
+        ErrorMessage = "dotnet test failed.",
+        StdOut = """
+            Failed DevPilot.Tests.AppTests.TestMethod1 [5 ms]
+              Error Message:
+               Expected 100 but got 0.
+              Stack Trace:
+                 at DevPilot.Tests.AppTests.TestMethod1() in /workspace/path/src/App.cs:line 20
+            Failed! - Failed: 1, Passed: 5, Skipped: 0, Total: 6
+            """
+    };
+
     private class TestAiProvider : IAiProvider
     {
         public string ProviderName => "TestProvider";

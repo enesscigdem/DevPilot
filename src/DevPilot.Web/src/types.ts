@@ -293,6 +293,22 @@ export interface ExecutionActivityMetadata {
   buildPassed?: boolean | null;
   testPassed?: boolean | null;
   model?: string | null;
+  eventKind?: string | null;
+  logicalProviderCallCount?: number | null;
+  providerCallKind?: string | null;
+  providerAttemptCount?: number | null;
+  requestedOutputTokens?: number | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  stageDurationMs?: number | null;
+  targetFile?: string | null;
+  repairKind?: string | null;
+  repairRound?: number | null;
+  repairFiles?: string[] | null;
+  failureFingerprint?: string | null;
+  beforeChangeFingerprint?: string | null;
+  afterChangeFingerprint?: string | null;
+  progressResult?: string | null;
 }
 
 export interface ExecutionActivityItem {
