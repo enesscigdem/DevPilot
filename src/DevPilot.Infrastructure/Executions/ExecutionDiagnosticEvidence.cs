@@ -2,7 +2,6 @@ using DevPilot.Application.DeveloperAgent.Models;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
-using DevPilot.Infrastructure.DeveloperAgent;
 
 namespace DevPilot.Infrastructure.Executions;
 
@@ -35,8 +34,14 @@ public static class ExecutionDiagnosticEvidence
     private const int MaxTestEvidenceLines = 80;
     private const int MaxTestEvidenceChars = 12000;
 
-    private static readonly Regex CompilerDiagnosticRegex = new(
-        @"(?<path>(?:[A-Za-z]:)?[^\r\n]*?\.cs)\((?<line>\d+),(?<column>\d+)\):\s*error\s+(?<code>[A-Za-z]+\d+):\s*(?<message>.*?)(?:\s+\[[^\]]+\])?$",
+    private const string SourceExtensionPattern = @"(?:cs|fs|vb|ts|tsx|js|jsx|py|java|kt|go|rs)";
+
+    private static readonly Regex ParenthesizedDiagnosticRegex = new(
+        $@"(?<path>(?:[A-Za-z]:)?[^\r\n]*?\.{SourceExtensionPattern})\((?<line>\d+),(?<column>\d+)\):\s*error\s*(?<code>[A-Za-z]+\d+)?\s*:\s*(?<message>.*?)(?:\s+\[[^\]]+\])?$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex ColonDiagnosticRegex = new(
+        $@"(?<path>(?:[A-Za-z]:)?[^\r\n]*?\.{SourceExtensionPattern}):(?<line>\d+)(?::(?<column>\d+))?:\s*(?:error|fatal)\s*(?<code>[A-Za-z]+\d+)?\s*:?\s*(?<message>.*)$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex FailedTestRegex = new(
@@ -44,10 +49,20 @@ public static class ExecutionDiagnosticEvidence
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex StackLocationRegex = new(
-        @"\bin\s+(?<path>(?:[A-Za-z]:)?[^\r\n]+?\.cs):line\s+(?<line>\d+)",
+        $@"(?:\bin\s+|\bat\s+[^\r\n]*?\()?\s*(?<path>(?:[A-Za-z]:)?[^\r\n()]*?\.{SourceExtensionPattern})(?::line\s+|:)(?<line>\d+)(?::(?<column>\d+))?",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex PythonStackLocationRegex = new(
+        @"\bFile\s+[""'](?<path>(?:[A-Za-z]:)?[^""'\r\n]+?\.py)[""'],\s*line\s+(?<line>\d+)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static CompilerFailureEvidence ParseCompilerFailure(
+        string? stdOut,
+        string? stdErr,
+        string? errorMessage) =>
+        ParseVerificationFailure(stdOut, stdErr, errorMessage);
+
+    public static CompilerFailureEvidence ParseVerificationFailure(
         string? stdOut,
         string? stdErr,
         string? errorMessage)
@@ -55,7 +70,7 @@ public static class ExecutionDiagnosticEvidence
         var lines = JoinOutput(stdOut, stdErr, errorMessage)
             .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(line => line.Trim())
-            .Where(line => line.Contains("error ", StringComparison.OrdinalIgnoreCase))
+            .Where(line => Regex.IsMatch(line, @"\b(?:error|fatal)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(MaxCompilerDiagnostics)
             .ToList();
@@ -65,7 +80,12 @@ public static class ExecutionDiagnosticEvidence
 
         foreach (var line in lines)
         {
-            var match = CompilerDiagnosticRegex.Match(line);
+            var match = ParenthesizedDiagnosticRegex.Match(line);
+            if (!match.Success)
+            {
+                match = ColonDiagnosticRegex.Match(line);
+            }
+
             if (!match.Success)
             {
                 normalized.Add(NormalizeText(line));
@@ -155,7 +175,9 @@ public static class ExecutionDiagnosticEvidence
         }
 
         var locations = relevant
-            .SelectMany(line => StackLocationRegex.Matches(line).Cast<Match>())
+            .SelectMany(line =>
+                StackLocationRegex.Matches(line).Cast<Match>()
+                    .Concat(PythonStackLocationRegex.Matches(line).Cast<Match>()))
             .Select(match => new DiagnosticSourceLocation(
                 NormalizePath(match.Groups["path"].Value),
                 int.TryParse(match.Groups["line"].Value, out var parsedLine) ? parsedLine : (int?)null))

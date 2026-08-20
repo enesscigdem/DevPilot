@@ -9,12 +9,12 @@ namespace DevPilot.Infrastructure.Executions;
 /// Infrastructure implementation of process runner using ProcessStartInfo.
 /// Restricts execution strictly to direct binary execution without shell interpolation (no sh/bash/zsh/cmd/powershell/eval).
 /// </summary>
-public sealed class DotnetProcessRunner : IProcessRunner
+public sealed class BoundedProcessRunner : IProcessRunner
 {
     private const int MaxCapturedOutputChars = 1_048_576; // 1 MB limit
-    private readonly ILogger<DotnetProcessRunner> _logger;
+    private readonly ILogger<BoundedProcessRunner> _logger;
 
-    public DotnetProcessRunner(ILogger<DotnetProcessRunner> logger)
+    public BoundedProcessRunner(ILogger<BoundedProcessRunner> logger)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }

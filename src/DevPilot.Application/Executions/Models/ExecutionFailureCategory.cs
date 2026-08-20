@@ -12,5 +12,7 @@ public enum ExecutionFailureCategory
     TestFailure,
     ArchitecturePolicyViolation,
     InfrastructureFailure,
-    UserDecisionRequired
+    UserDecisionRequired,
+    VerificationFailure,
+    VerificationUnconfigured
 }

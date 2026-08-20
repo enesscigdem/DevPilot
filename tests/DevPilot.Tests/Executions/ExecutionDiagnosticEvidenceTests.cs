@@ -57,6 +57,22 @@ public sealed class ExecutionDiagnosticEvidenceTests
     }
 
     [Fact]
+    public void TypeScriptDiagnostic_UsesTheSameFocusedFileCorrelationContract()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
+            "src/todos/todo-service.ts(14,9): error TS2322: Type 'string' is not assignable to type 'boolean'.",
+            null,
+            "npm build failed");
+
+        var selected = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(
+            evidence,
+            new[] { "src/todos/todo-service.ts", "src/todos/todo-controller.ts" });
+
+        selected.Should().Equal("src/todos/todo-service.ts");
+        evidence.Locations.Should().ContainSingle(location => location.Line == 14 && location.Column == 9);
+    }
+
+    [Fact]
     public void FailingTest_WithTestStackLocation_SelectsOnlyLikelyTouchedTestFile()
     {
         var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
@@ -106,5 +122,51 @@ public sealed class ExecutionDiagnosticEvidenceTests
         selected.Should().HaveCount(2);
         selected.Should().Contain("src/Todos/TodoService.cs");
         selected.Should().Contain("tests/TodoServiceTests.cs");
+    }
+
+    [Fact]
+    public void JavaScriptTestStack_PreservesTouchedSourceLocation()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            FAIL src/todos/todo-service.test.ts
+            Expected: true
+            Received: false
+                at filtersCompleted (src/todos/todo-service.test.ts:22:7)
+                at Object.<anonymous> (src/todos/todo-service.ts:41:3)
+            """,
+            null,
+            "npm test failed");
+
+        var selected = ExecutionDiagnosticEvidence.SelectTestRepairFiles(
+            evidence,
+            new[] { "src/todos/todo-service.test.ts", "src/todos/todo-service.ts", "src/valid.ts" });
+
+        evidence.Locations.Should().Contain(location =>
+            location.FilePath.EndsWith("todo-service.test.ts") && location.Line == 22);
+        selected.Should().Contain("src/todos/todo-service.test.ts");
+        selected.Should().NotContain("src/valid.ts");
+    }
+
+    [Fact]
+    public void PythonTraceback_PreservesFileAndLineForFocusedRepair()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            AssertionError: expected completed todo
+              File "/repo/tests/test_todos.py", line 18, in test_filters_completed
+              File "/repo/src/todos.py", line 42, in filter_todos
+            """,
+            null,
+            "python pytest failed");
+
+        var selected = ExecutionDiagnosticEvidence.SelectTestRepairFiles(
+            evidence,
+            new[] { "tests/test_todos.py", "src/todos.py", "src/valid.py" });
+
+        evidence.Locations.Should().Contain(location =>
+            location.FilePath.EndsWith("tests/test_todos.py") && location.Line == 18);
+        selected.Should().Contain("tests/test_todos.py");
+        selected.Should().NotContain("src/valid.py");
     }
 }

@@ -28,4 +28,14 @@ public sealed record ExecutionActivityMetadata(
     string? ProgressResult = null,
     int? CompactRetryCount = null,
     int? ApplicabilityRepairCount = null,
-    long? TotalGenerationTimeMs = null);
+    long? TotalGenerationTimeMs = null,
+    int? DiscoveredCheckCount = null,
+    IReadOnlyList<string>? DiscoveredChecks = null,
+    IReadOnlyList<string>? DetectedEcosystems = null,
+    string? RepositoryCheckId = null,
+    string? RepositoryCheckKind = null,
+    string? RepositoryCheckSource = null,
+    int? ProcessExitCode = null,
+    string? VerificationFailureCategory = null,
+    bool? DeterministicCheck = null,
+    bool? VerificationUnresolved = null);

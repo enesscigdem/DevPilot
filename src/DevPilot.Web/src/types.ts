@@ -312,6 +312,16 @@ export interface ExecutionActivityMetadata {
   compactRetryCount?: number | null;
   applicabilityRepairCount?: number | null;
   totalGenerationTimeMs?: number | null;
+  discoveredCheckCount?: number | null;
+  discoveredChecks?: string[] | null;
+  detectedEcosystems?: string[] | null;
+  repositoryCheckId?: string | null;
+  repositoryCheckKind?: string | null;
+  repositoryCheckSource?: string | null;
+  processExitCode?: number | null;
+  verificationFailureCategory?: string | null;
+  deterministicCheck?: boolean | null;
+  verificationUnresolved?: boolean | null;
 }
 
 export interface ExecutionActivityItem {
