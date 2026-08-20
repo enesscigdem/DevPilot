@@ -243,6 +243,7 @@ export interface ExecutionListItem {
   mergeStatus?: string;
   errorMessage?: string | null;
   progressPercentage?: number;
+  model?: string | null;
   stages?: ExecutionStageStep[];
 }
 
@@ -282,6 +283,7 @@ export interface ExecutionDetail {
   completedAt: string | null;
   errorMessage: string | null;
   progressPercentage?: number;
+  model?: string | null;
   stages?: ExecutionStageStep[];
 }
 
@@ -290,6 +292,7 @@ export interface ExecutionActivityMetadata {
   modifiedFileCount?: number | null;
   buildPassed?: boolean | null;
   testPassed?: boolean | null;
+  model?: string | null;
 }
 
 export interface ExecutionActivityItem {
@@ -790,6 +793,7 @@ export interface WorkspaceOverview {
   header: WorkspaceHeader;
   needsAttention: WorkspaceAttentionItem[];
   activeExecution?: WorkspaceActiveExecution | null;
+  activeAgentExecution?: WorkspaceActiveExecution | null;
   awaitingApproval: WorkspaceApprovalItem[];
   failedOrBlocked: WorkspaceFailedOrBlockedItem[];
   recentActivity: WorkspaceActivityItem[];

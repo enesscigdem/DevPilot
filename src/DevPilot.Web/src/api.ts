@@ -140,6 +140,12 @@ export async function startExecution(taskId: string): Promise<ExecutionDetail> {
   });
 }
 
+export async function retryExecution(taskId: string, workspaceId?: string | null): Promise<ExecutionDetail> {
+  return http<ExecutionDetail>(appendWorkspaceQuery(`/tasks/${taskId}/executions/retry`, workspaceId), {
+    method: 'POST',
+  });
+}
+
 function appendWorkspaceQuery(url: string, workspaceId?: string | null): string {
   if (!workspaceId) return url;
   const separator = url.includes('?') ? '&' : '?';
@@ -152,6 +158,13 @@ export async function getExecutions(workspaceId?: string | null, init?: RequestI
 
 export async function getExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<ExecutionDetail> {
   return http<ExecutionDetail>(appendWorkspaceQuery(`/executions/${id}`, workspaceId), init);
+}
+
+export async function cancelExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<{ message: string }> {
+  return http<{ message: string }>(appendWorkspaceQuery(`/executions/${id}/cancel`, workspaceId), {
+    ...init,
+    method: 'POST',
+  });
 }
 
 export async function getExecutionActivity(id: string, workspaceId?: string | null, init?: RequestInit): Promise<ExecutionActivityItem[]> {

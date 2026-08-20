@@ -17,6 +17,8 @@ internal sealed class GeminiAiProvider : IAiProvider
             OutputTokens = 0,
             Duration = TimeSpan.Zero,
             IsSuccess = true,
+            StatusCode = 200,
+            FailureKind = AiFailureKind.None,
         };
 
         return Task.FromResult(response);

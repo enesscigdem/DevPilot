@@ -379,19 +379,106 @@ export function AppShell({ children }: { children: ReactNode }) {
 }
 
 function ActiveExecutionMini() {
+  const { activeAgentExecution } = useWorkspace()
+  const [, setTick] = useState(0)
+
+  const isRunning = Boolean(activeAgentExecution && !activeAgentExecution.completedAt)
+
+  useEffect(() => {
+    if (!isRunning) return
+    const interval = setInterval(() => {
+      setTick((t) => t + 1)
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [isRunning])
+
+  if (!activeAgentExecution) {
+    return (
+      <div className="block rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-2 text-subtle-foreground">
+        <div className="flex items-center gap-1.5">
+          <StatusDot tone="neutral" />
+          <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">Agent idle</span>
+        </div>
+        <div className="mt-1 truncate text-[12px] text-muted-foreground">No active execution</div>
+      </div>
+    )
+  }
+
+  const elapsedText = formatElapsed(activeAgentExecution.elapsedSeconds, activeAgentExecution.startedAt, activeAgentExecution.completedAt)
+  const currentStage = activeAgentExecution.currentStageKey
+    ? `${activeAgentExecution.currentStageKey.charAt(0).toUpperCase() + activeAgentExecution.currentStageKey.slice(1)} stage`
+    : "Running"
+
   return (
     <NavLink
-      to="/executions/EXEC-142"
+      to={`/executions/${activeAgentExecution.executionId}`}
       className="block rounded-[var(--radius-md)] border border-primary-ring/60 bg-primary-soft px-2.5 py-2 transition-colors hover:border-primary/50"
     >
       <div className="flex items-center gap-1.5">
         <StatusDot tone="blue" pulse />
         <span className="font-mono text-[10px] uppercase tracking-wide text-primary">Agent running</span>
       </div>
-      <div className="mt-1 truncate text-[12px] font-medium text-foreground">TASK-142 · Review stage</div>
-      <div className="mt-0.5 font-mono text-[11px] text-primary/80">00:41 elapsed · Reviewer</div>
+      <div className="mt-1 truncate text-[12px] font-medium text-foreground">
+        {activeAgentExecution.taskDisplayId} · {currentStage}
+      </div>
+      <div className="mt-0.5 font-mono text-[11px] text-primary/80">
+        {elapsedText} elapsed
+      </div>
     </NavLink>
   )
+}
+
+function formatElapsed(elapsedSeconds?: number | null, startedAt?: string | null, completedAt?: string | null): string {
+  if (completedAt && startedAt) {
+    const start = new Date(startedAt).getTime()
+    const end = new Date(completedAt).getTime()
+    if (!isNaN(start) && !isNaN(end) && end >= start) {
+      const diffSec = Math.floor((end - start) / 1000)
+      const mins = Math.floor(diffSec / 60)
+      const secs = diffSec % 60
+      if (mins >= 60) {
+        const hrs = Math.floor(mins / 60)
+        const remMins = mins % 60
+        return `${String(hrs).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+      }
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
+  }
+  if (completedAt && elapsedSeconds != null) {
+    const mins = Math.floor(elapsedSeconds / 60)
+    const secs = elapsedSeconds % 60
+    if (mins >= 60) {
+      const hrs = Math.floor(mins / 60)
+      const remMins = mins % 60
+      return `${String(hrs).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+  }
+  if (startedAt && !completedAt) {
+    const start = new Date(startedAt).getTime()
+    if (!isNaN(start)) {
+      const diffSec = Math.max(0, Math.floor((Date.now() - start) / 1000))
+      const mins = Math.floor(diffSec / 60)
+      const secs = diffSec % 60
+      if (mins >= 60) {
+        const hrs = Math.floor(mins / 60)
+        const remMins = mins % 60
+        return `${String(hrs).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+      }
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
+  }
+  if (elapsedSeconds != null) {
+    const mins = Math.floor(elapsedSeconds / 60)
+    const secs = elapsedSeconds % 60
+    if (mins >= 60) {
+      const hrs = Math.floor(mins / 60)
+      const remMins = mins % 60
+      return `${String(hrs).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+  }
+  return "00:00"
 }
 
 const routeTitles: Record<string, string> = {

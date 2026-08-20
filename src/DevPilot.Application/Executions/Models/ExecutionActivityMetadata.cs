@@ -8,4 +8,5 @@ public sealed record ExecutionActivityMetadata(
     string? BranchName = null,
     int? ModifiedFileCount = null,
     bool? BuildPassed = null,
-    bool? TestPassed = null);
+    bool? TestPassed = null,
+    string? Model = null);

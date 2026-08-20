@@ -1,4 +1,5 @@
 using DevPilot.Application.Executions.Commands.StartExecution;
+using DevPilot.Application.Executions.Commands.RetryExecution;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
 using DevPilot.Application.Tasks.Commands.ApproveTask;
@@ -31,6 +32,7 @@ public class TasksController : ControllerBase
     private readonly IApproveTaskCommandHandler _approveHandler;
     private readonly IRejectTaskCommandHandler _rejectHandler;
     private readonly IStartExecutionCommandHandler _startExecutionHandler;
+    private readonly IRetryExecutionCommandHandler _retryExecutionHandler;
 
     public TasksController(
         ICreateTaskCommandHandler createHandler,
@@ -43,7 +45,8 @@ public class TasksController : ControllerBase
         IGetTaskImpactAnalysisQueryHandler getImpactAnalysisHandler,
         IApproveTaskCommandHandler approveHandler,
         IRejectTaskCommandHandler rejectHandler,
-        IStartExecutionCommandHandler startExecutionHandler)
+        IStartExecutionCommandHandler startExecutionHandler,
+        IRetryExecutionCommandHandler retryExecutionHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -56,6 +59,7 @@ public class TasksController : ControllerBase
         _approveHandler = approveHandler;
         _rejectHandler = rejectHandler;
         _startExecutionHandler = startExecutionHandler;
+        _retryExecutionHandler = retryExecutionHandler;
     }
 
     [HttpGet]
@@ -294,6 +298,37 @@ public class TasksController : ControllerBase
     {
         var result = await _startExecutionHandler
             .HandleAsync(new StartExecutionCommand(id), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!result.Success)
+        {
+            if (result.NotFound)
+            {
+                return NotFound(new { error = result.ErrorMessage ?? "Task not found." });
+            }
+
+            if (result.Conflict)
+            {
+                return Conflict(new { error = result.ErrorMessage });
+            }
+
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return CreatedAtRoute(
+            nameof(ExecutionsController.GetExecutionById),
+            new { id = result.Execution!.Id },
+            result.Execution);
+    }
+
+    [HttpPost("{id:guid}/executions/retry")]
+    public async Task<IActionResult> RetryExecution(
+        [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _retryExecutionHandler
+            .HandleAsync(new RetryExecutionCommand(id, repositoryWorkspaceId), cancellationToken)
             .ConfigureAwait(false);
 
         if (!result.Success)

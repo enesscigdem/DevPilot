@@ -11,20 +11,26 @@ import {
   GitBranch,
   Hammer,
   FlaskConical,
+  Play,
   Terminal,
   X,
   Loader2,
   AlertCircle,
+  RotateCcw,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
 } from "lucide-react"
 import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
 import { cn } from "@/lib/utils"
-import { getExecution, getExecutionActivity } from "@/api"
+import { getExecution, getExecutionActivity, retryExecution, cancelExecution, getExecutions } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import {
   TaskExecutionStatus,
   getExecutionStatusMeta,
   type ExecutionDetail,
   type ExecutionActivityItem,
+  type ExecutionListItem,
 } from "@/types"
 import { stages } from "@/data/mock"
 
@@ -103,7 +109,7 @@ function getMetadataDisplay(act: ExecutionActivityItem): string | null {
 export function ExecutionWorkspace() {
   const navigate = useNavigate()
   const { id } = useParams<{ id: string }>()
-  const { activeWorkspaceId, isLoading: isWorkspaceLoading } = useWorkspace()
+  const { activeWorkspaceId, isLoading: isWorkspaceLoading, refreshOverview } = useWorkspace()
   const activeReqWorkspaceIdRef = useRef<string | null>(activeWorkspaceId)
 
   useEffect(() => {
@@ -112,8 +118,47 @@ export function ExecutionWorkspace() {
 
   const [execution, setExecution] = useState<ExecutionDetail | null>(null)
   const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
+  const [activeExecutionForTask, setActiveExecutionForTask] = useState<ExecutionListItem | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [isRetrying, setIsRetrying] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
+  const [isCanceling, setIsCanceling] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+  const [showGenDetails, setShowGenDetails] = useState(false)
+
+  const handleRetryExecution = async () => {
+    if (!execution || isRetrying) return
+    setIsRetrying(true)
+    setRetryError(null)
+
+    try {
+      const newExecution = await retryExecution(execution.developmentTaskId, activeWorkspaceId)
+      refreshOverview(true)
+      navigate(`/executions/${newExecution.id}`)
+    } catch (err) {
+      await fetchData(false)
+      setRetryError(err instanceof Error ? err.message : "Failed to retry execution.")
+    } finally {
+      setIsRetrying(false)
+    }
+  }
+
+  const handleCancelExecution = async () => {
+    if (!execution || isCanceling) return
+    setIsCanceling(true)
+    setCancelError(null)
+
+    try {
+      await cancelExecution(execution.id, activeWorkspaceId)
+      refreshOverview(true)
+      await fetchData(false)
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : "Failed to cancel execution.")
+    } finally {
+      setIsCanceling(false)
+    }
+  }
 
   const activeRequestIdRef = useRef(0)
 
@@ -127,18 +172,27 @@ export function ExecutionWorkspace() {
     }
 
     try {
-      const [execData, actData] = await Promise.all([
+      const [execData, actData, allExecs] = await Promise.all([
         getExecution(id, activeWorkspaceId, { signal }),
         getExecutionActivity(id, activeWorkspaceId, { signal }).catch(() => []),
+        getExecutions(activeWorkspaceId, { signal }).catch(() => []),
       ])
 
       if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
         if (activeWorkspaceId && execData.repositoryWorkspaceId && execData.repositoryWorkspaceId !== activeWorkspaceId) {
           setError(`Execution run "${id}" does not belong to the selected workspace.`)
           setExecution(null)
+          setActiveExecutionForTask(null)
         } else {
           setExecution(execData)
           setActivities(actData)
+          const activeForTask = allExecs.find(
+            (e) =>
+              e.developmentTaskId === execData.developmentTaskId &&
+              (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running) &&
+              e.id !== execData.id,
+          )
+          setActiveExecutionForTask(activeForTask ?? null)
           setError(null)
         }
       }
@@ -148,6 +202,7 @@ export function ExecutionWorkspace() {
         if (showLoadingSpinner) {
           setError(err instanceof Error ? err.message : "Failed to load execution detail.")
           setExecution(null)
+          setActiveExecutionForTask(null)
         }
       }
     } finally {
@@ -227,11 +282,36 @@ export function ExecutionWorkspace() {
   const statusMeta = getExecutionStatusMeta(execution.status)
   const isRunning = execution.status === TaskExecutionStatus.Running
   const isPending = execution.status === TaskExecutionStatus.Pending
+  const isFailed = execution.status === TaskExecutionStatus.Failed
+  const isCancelled = execution.status === TaskExecutionStatus.Cancelled
 
-  const buildPassed = activities.some((a) => a.stage === "Build" && a.status === "Completed")
-  const buildFailed = activities.some((a) => a.stage === "Build" && a.status === "Failed")
-  const testPassed = activities.some((a) => a.stage === "Test" && a.status === "Completed")
-  const testFailed = activities.some((a) => a.stage === "Test" && a.status === "Failed")
+  // Authoritative build/test outcome derived from final validation activity and execution status
+  const buildActivities = activities.filter((a) => a.stage === "Build" && (a.status === "Completed" || a.status === "Failed"))
+  const lastBuildAct = buildActivities.length > 0 ? buildActivities[buildActivities.length - 1] : null
+  const lastBuildMeta = activities.slice().reverse().find((a) => a.metadata?.buildPassed !== undefined && a.metadata?.buildPassed !== null)?.metadata?.buildPassed
+
+  const buildFailed =
+    lastBuildMeta === false ||
+    (lastBuildAct ? lastBuildAct.status === "Failed" : false) ||
+    (isFailed && activities.some((a) => a.stage === "Build" && a.status === "Failed"))
+
+  const buildPassed =
+    !buildFailed &&
+    (lastBuildMeta === true ||
+      (lastBuildAct ? lastBuildAct.status === "Completed" && !lastBuildAct.message.includes("Compile repair") : false))
+
+  const testActivities = activities.filter((a) => a.stage === "Test" && (a.status === "Completed" || a.status === "Failed"))
+  const lastTestAct = testActivities.length > 0 ? testActivities[testActivities.length - 1] : null
+  const lastTestMeta = activities.slice().reverse().find((a) => a.metadata?.testPassed !== undefined && a.metadata?.testPassed !== null)?.metadata?.testPassed
+
+  const testFailed =
+    lastTestMeta === false ||
+    (lastTestAct ? lastTestAct.status === "Failed" : false)
+
+  const testPassed =
+    !testFailed &&
+    (lastTestMeta === true ||
+      (lastTestAct ? lastTestAct.status === "Completed" : false))
 
   return (
     <div className="w-full">
@@ -255,6 +335,12 @@ export function ExecutionWorkspace() {
               <GitBranch className="h-3 w-3" />
               {execution.repositoryOwner}/{execution.repositoryName}
             </div>
+            {(retryError || cancelError) && (
+              <div className="mt-1 flex items-center gap-1.5 text-[11.5px] font-medium text-danger">
+                <AlertCircle className="h-3 w-3 shrink-0" />
+                <span>{retryError || cancelError}</span>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <Button
@@ -265,10 +351,63 @@ export function ExecutionWorkspace() {
               <Eye className="h-3.5 w-3.5" />
               View task
             </Button>
+            {(isPending || isRunning) && (
+              <Button
+                variant="default"
+                size="sm"
+                disabled={isCanceling}
+                onClick={handleCancelExecution}
+                className="text-danger hover:bg-danger/10 hover:text-danger border-danger/30"
+              >
+                {isCanceling ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Canceling…
+                  </>
+                ) : (
+                  <>
+                    <X className="h-3.5 w-3.5" />
+                    Cancel execution
+                  </>
+                )}
+              </Button>
+            )}
+            {(isFailed || isCancelled) && (
+              activeExecutionForTask ? (
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => navigate(`/executions/${activeExecutionForTask.id}`)}
+                >
+                  <Play className="h-3.5 w-3.5 text-primary" />
+                  View active execution
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={isRetrying}
+                  onClick={handleRetryExecution}
+                >
+                  {isRetrying ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Retrying…
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      Retry execution
+                    </>
+                  )}
+                </Button>
+              )
+            )}
             <Button
-              variant="primary"
+              variant={isFailed || isCancelled ? "default" : "primary"}
               size="sm"
-              disabled={isPending || isRunning}
+              disabled={isPending || isRunning || isCancelled}
               onClick={() => navigate(`/review/${execution.id}`)}
             >
               <FileCode2 className="h-3.5 w-3.5" />
@@ -352,11 +491,6 @@ export function ExecutionWorkspace() {
               )
             })}
           </ol>
-
-          <div className="tech-label mb-2 mt-6">Agents</div>
-          <div className="rounded-[var(--radius-md)] border border-border bg-surface p-3 text-[11px] text-subtle-foreground">
-            No agent instances running for this execution.
-          </div>
         </aside>
 
         {/* CENTER — activity stream */}
@@ -393,52 +527,194 @@ export function ExecutionWorkspace() {
               )
             ) : (
               <div className="space-y-3">
-                {activities.map((act) => {
-                  const isDone = act.status === "Completed"
-                  const isFailedStatus = act.status === "Failed"
-                  const isRejectedStatus = act.status === "Rejected"
-                  const formattedTime = formatTimeOnly(act.createdAt)
-                  const metaText = getMetadataDisplay(act)
+                {(() => {
+                  const genActivities = activities.filter(
+                    (a) =>
+                      a.stage === "DeveloperAgent" &&
+                      (a.message.startsWith("Generating edit") ||
+                        a.message.startsWith("Generated edit") ||
+                        a.message.startsWith("Escalating token budget") ||
+                        a.message.startsWith("Preparing") ||
+                        a.message.startsWith("Validating"))
+                  )
+
+                  const nonGenActivities = activities.filter(
+                    (a) => !genActivities.includes(a)
+                  )
+
+                  // Split primary generation activities from compile repair activities
+                  const compileRepairIdx = activities.findIndex(
+                    (a) => a.message.includes("Compile repair started")
+                  )
+
+                  const primaryGenActivities = compileRepairIdx >= 0
+                    ? genActivities.filter((a) => activities.indexOf(a) < compileRepairIdx)
+                    : genActivities
+
+                  const repairGenActivities = compileRepairIdx >= 0
+                    ? genActivities.filter((a) => activities.indexOf(a) >= compileRepairIdx)
+                    : []
+
+                  // Compute primary generation progress (capped to planned totalFiles)
+                  let totalFiles = 0
+                  let completedFiles = 0
+
+                  for (const a of primaryGenActivities) {
+                    const prepMatch = a.message.match(/Preparing\s+(\d+)\s+file/i)
+                    if (prepMatch) {
+                      totalFiles = Math.max(totalFiles, parseInt(prepMatch[1], 10))
+                    }
+                    const genMatch = a.message.match(/Generated edit\s+(\d+)\/(\d+)/i)
+                    if (genMatch) {
+                      completedFiles++
+                      totalFiles = Math.max(totalFiles, parseInt(genMatch[2], 10))
+                    }
+                    const generatingMatch = a.message.match(/Generating edit\s+(\d+)\/(\d+)/i)
+                    if (generatingMatch) {
+                      totalFiles = Math.max(totalFiles, parseInt(generatingMatch[2], 10))
+                    }
+                  }
+
+                  if (totalFiles > 0) {
+                    completedFiles = Math.min(completedFiles, totalFiles)
+                  }
+
+                  let repairTotalFiles = 0
+                  for (const a of repairGenActivities) {
+                    const prepMatch = a.message.match(/Preparing\s+(\d+)\s+file/i)
+                    if (prepMatch) {
+                      repairTotalFiles = Math.max(repairTotalFiles, parseInt(prepMatch[1], 10))
+                    }
+                    const genMatch = a.message.match(/Generated edit\s+(\d+)\/(\d+)/i)
+                    if (genMatch) {
+                      repairTotalFiles = Math.max(repairTotalFiles, parseInt(genMatch[2], 10))
+                    }
+                  }
+
+                  const percent = totalFiles > 0 ? Math.min(100, Math.round((completedFiles / totalFiles) * 100)) : 0
+                  const isGenDone = primaryGenActivities.some((a) => a.message.startsWith("Validating") || a.status === "Completed")
 
                   return (
-                    <div
-                      key={act.id}
-                      className="flex items-start gap-3 rounded-[var(--radius-md)] border border-border/60 bg-surface p-3 transition-colors"
-                    >
-                      <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full">
-                        {isDone ? (
-                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success/15 text-success">
-                            <Check className="h-3 w-3" />
-                          </span>
-                        ) : isFailedStatus || isRejectedStatus ? (
-                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-danger/15 text-danger">
-                            <X className="h-3 w-3" />
-                          </span>
-                        ) : (
-                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/15 text-primary">
-                            <CircleDot className="h-3 w-3 animate-pulse-dot" />
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-[13px] font-medium text-foreground">
-                            {act.message}
-                          </span>
-                          <span className="font-mono text-[11px] text-subtle-foreground">
-                            {formattedTime}
-                          </span>
-                        </div>
-                        {metaText && (
-                          <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                            {metaText}
+                    <>
+                      {primaryGenActivities.length > 0 && (
+                        <div className="rounded-[var(--radius-md)] border border-primary/20 bg-surface p-3.5 shadow-sm">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <Cpu className="h-4 w-4 text-primary" />
+                              <span className="text-[13px] font-semibold text-foreground">
+                                Developer Agent Code Generation
+                              </span>
+                              {repairGenActivities.length > 0 && (
+                                <span className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">
+                                  Compile repair · {repairTotalFiles || repairGenActivities.length} files
+                                </span>
+                              )}
+                            </div>
+                            <span className="font-mono text-[11px] text-muted-foreground">
+                              {completedFiles}/{totalFiles || primaryGenActivities.length} files ({percent}%)
+                            </span>
                           </div>
-                        )}
-                      </div>
-                    </div>
+
+                          <div className="mt-2.5 h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
+                            <div
+                              className={cn(
+                                "h-full transition-all duration-300",
+                                isGenDone ? "bg-success" : "bg-primary animate-pulse"
+                              )}
+                              style={{ width: `${Math.max(5, percent)}%` }}
+                            />
+                          </div>
+
+                          <div className="mt-2.5 flex items-center justify-between border-t border-border/40 pt-2">
+                            <span className="text-[11px] text-subtle-foreground">
+                              {isGenDone
+                                ? "All planned files generated and validated."
+                                : genActivities[genActivities.length - 1]?.message ?? "Generating..."}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setShowGenDetails(!showGenDetails)}
+                              className="flex items-center gap-1 font-mono text-[10.5px] text-primary hover:underline"
+                            >
+                              {showGenDetails ? (
+                                <>
+                                  Hide details <ChevronUp className="h-3 w-3" />
+                                </>
+                              ) : (
+                                <>
+                                  Show {genActivities.length} details <ChevronDown className="h-3 w-3" />
+                                </>
+                              )}
+                            </button>
+                          </div>
+
+                          {showGenDetails && (
+                            <div className="mt-2.5 space-y-1.5 border-t border-border/40 pt-2.5">
+                              {genActivities.map((act) => (
+                                <div
+                                  key={act.id}
+                                  className="flex items-center justify-between text-[11.5px] text-muted-foreground"
+                                >
+                                  <span className="font-mono">{act.message}</span>
+                                  <span className="font-mono text-[10px] text-subtle-foreground">
+                                    {formatTimeOnly(act.createdAt)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {nonGenActivities.map((act) => {
+                        const isDone = act.status === "Completed"
+                        const isFailedStatus = act.status === "Failed"
+                        const isRejectedStatus = act.status === "Rejected"
+                        const formattedTime = formatTimeOnly(act.createdAt)
+                        const metaText = getMetadataDisplay(act)
+
+                        return (
+                          <div
+                            key={act.id}
+                            className="flex items-start gap-3 rounded-[var(--radius-md)] border border-border/60 bg-surface p-3 transition-colors"
+                          >
+                            <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full">
+                              {isDone ? (
+                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success/15 text-success">
+                                  <Check className="h-3 w-3" />
+                                </span>
+                              ) : isFailedStatus || isRejectedStatus ? (
+                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-danger/15 text-danger">
+                                  <X className="h-3 w-3" />
+                                </span>
+                              ) : (
+                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/15 text-primary">
+                                  <CircleDot className="h-3 w-3 animate-pulse-dot" />
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[13px] font-medium text-foreground">
+                                  {act.message}
+                                </span>
+                                <span className="font-mono text-[11px] text-subtle-foreground">
+                                  {formattedTime}
+                                </span>
+                              </div>
+                              {metaText && (
+                                <div className="mt-1 font-mono text-[11px] text-muted-foreground">
+                                  {metaText}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </>
                   )
-                })}
+                })()}
               </div>
             )}
           </div>
@@ -511,7 +787,7 @@ export function ExecutionWorkspace() {
             <Panel className="p-3.5">
               <div className="flex items-center justify-between">
                 <span className="tech-label">Model</span>
-                <span className="font-mono text-[11px] text-muted-foreground">Not assigned</span>
+                <span className="font-mono text-[11px] text-muted-foreground">{execution.model || "Not recorded"}</span>
               </div>
             </Panel>
           </div>

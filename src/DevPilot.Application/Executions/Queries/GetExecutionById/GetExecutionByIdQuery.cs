@@ -108,6 +108,7 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             StartedAt = execution.StartedAt,
             CompletedAt = execution.CompletedAt,
             ErrorMessage = execution.ErrorMessage,
+            Model = execution.Model,
             ReviewStatus = execution.ReviewStatus.ToString(),
             CommitStatus = execution.CommitStatus.ToString(),
             CommitSha = execution.CommitSha,

@@ -146,7 +146,7 @@ export function Executions() {
         {[
           { icon: Activity, label: "Running", value: String(runningCount), tone: "blue" as const },
           { icon: Clock, label: "Total runs", value: String(executions.length), tone: "neutral" as const },
-          { icon: Cpu, label: "Model", value: "Not assigned", tone: "neutral" as const, mono: true },
+          { icon: Cpu, label: "Model", value: executions.find((e) => e.model)?.model || "Not recorded", tone: "neutral" as const, mono: true },
           { icon: Coins, label: "Spend today", value: "—", tone: "neutral" as const },
         ].map((m) => (
           <Panel key={m.label} className="p-3.5">

@@ -299,9 +299,7 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
 
         result.Success.Should().BeTrue();
         result.ErrorMessage.Should().BeNull();
-        result.ModifiedFiles.Should().ContainSingle().Which.Should().Be("App.cs");
-
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1, "1 file edit call (manifest derived from approved impact analysis)");
 
         var fileContent = await File.ReadAllTextAsync(Path.Combine(_worktreeDir, "App.cs"));
         fileContent.Should().Be("public class App { public string Hello() => \"World\"; }");
@@ -436,6 +434,8 @@ public class FakeExecutionRepository : IExecutionRepository
         return Task.CompletedTask;
     }
 
+    public Task SetModelAsync(Guid executionId, string model, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
     public Task<bool> StartExecutionAtomicAsync(TaskExecution execution, DevelopmentTask task, CancellationToken cancellationToken = default)
         => Task.FromResult(true);
 
@@ -443,6 +443,9 @@ public class FakeExecutionRepository : IExecutionRepository
         => Task.FromResult<IReadOnlyList<TaskExecution>>(Array.Empty<TaskExecution>());
 
     public Task<bool> HasActiveExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default)
+        => Task.FromResult(false);
+
+    public Task<bool> HasFailedExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default)
         => Task.FromResult(false);
 
     public Task<bool> ClaimAsRunningAsync(Guid executionId, CancellationToken cancellationToken = default)
@@ -469,6 +472,15 @@ public class FakeExecutionRepository : IExecutionRepository
     public Task<bool> TryReclaimStaleMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan mergeLeaseTimeout, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
     public Task SetExecutionMergedAsync(Guid executionId, Guid attemptId, string mergeCommitSha, DateTime mergedAt, string mergeMethod, CancellationToken cancellationToken = default) => Task.CompletedTask;
     public Task SetMergeFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+    public Task<bool> ClaimAsRunningAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    public Task<bool> RenewHeartbeatAsync(Guid executionId, Guid leaseToken, TimeSpan leaseDuration, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    public Task<bool> CompleteWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    public Task<bool> FailWithLeaseAsync(Guid executionId, Guid leaseToken, string errorMessage, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    public Task<bool> RequestCancellationAsync(Guid executionId, string? reason, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    public Task<bool> AcknowledgeCancellationWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    public Task<bool> IsCancellationRequestedAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<int> ReconcileStaleRunningExecutionsAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
 
     public Task CompleteAsync(Guid executionId, CancellationToken cancellationToken = default)
         => Task.CompletedTask;

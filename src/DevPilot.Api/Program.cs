@@ -7,6 +7,15 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddInfrastructure(builder.Configuration);
 
+if (builder.Environment.IsDevelopment())
+{
+    builder.Logging.AddSimpleConsole(options =>
+    {
+        options.TimestampFormat = "[yyyy-MM-dd HH:mm:ss.fff] ";
+        options.SingleLine = true;
+    });
+}
+
 builder.Services.AddHangfire(configuration =>
 {
     var connectionString = builder.Configuration.GetConnectionString("DevPilotDb")

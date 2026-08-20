@@ -48,7 +48,10 @@ public sealed class EfExecutionRepository : IExecutionRepository
             return true;
         }
         catch (DbUpdateException ex)
-            when (ex.InnerException is PostgresException pg && pg.SqlState == "23505")
+            when (ex.GetBaseException() is PostgresException pg &&
+                  pg.SqlState == "23505" &&
+                  (pg.ConstraintName == "IX_TaskExecutions_ActivePerTask" ||
+                   (pg.MessageText != null && pg.MessageText.Contains("IX_TaskExecutions_ActivePerTask", StringComparison.OrdinalIgnoreCase))))
         {
             // Unique partial index violation: a concurrent request already created an
             // active execution for this task. Clear the change-tracker so the caller
@@ -94,6 +97,18 @@ public sealed class EfExecutionRepository : IExecutionRepository
             .ConfigureAwait(false);
     }
 
+    public async Task<bool> HasFailedExecutionForTaskAsync(
+        Guid taskId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.TaskExecutions
+            .AsNoTracking()
+            .AnyAsync(
+                e => e.DevelopmentTaskId == taskId && e.Status == TaskExecutionStatus.Failed,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     /// <inheritdoc />
     /// <remarks>
     /// Uses a targeted <c>ExecuteUpdateAsync</c> (single UPDATE statement with a WHERE clause)
@@ -106,14 +121,47 @@ public sealed class EfExecutionRepository : IExecutionRepository
         Guid executionId,
         CancellationToken cancellationToken = default)
     {
+        return await ClaimAsRunningAsync(executionId, Guid.NewGuid(), cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> ClaimAsRunningAsync(
+        Guid executionId,
+        Guid leaseToken,
+        CancellationToken cancellationToken = default)
+    {
         var now = DateTime.UtcNow;
+        var leaseExpires = now.AddSeconds(45);
 
         var affected = await _dbContext.TaskExecutions
             .Where(e => e.Id == executionId && e.Status == TaskExecutionStatus.Pending)
             .ExecuteUpdateAsync(
                 setters => setters
                     .SetProperty(e => e.Status, TaskExecutionStatus.Running)
-                    .SetProperty(e => e.StartedAt, now),
+                    .SetProperty(e => e.StartedAt, now)
+                    .SetProperty(e => e.LeaseToken, leaseToken)
+                    .SetProperty(e => e.HeartbeatAt, now)
+                    .SetProperty(e => e.LeaseExpiresAt, leaseExpires),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    public async Task<bool> RenewHeartbeatAsync(
+        Guid executionId,
+        Guid leaseToken,
+        TimeSpan leaseDuration,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var leaseExpires = now.Add(leaseDuration);
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.LeaseToken == leaseToken && e.Status == TaskExecutionStatus.Running)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.HeartbeatAt, now)
+                    .SetProperty(e => e.LeaseExpiresAt, leaseExpires),
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -140,7 +188,8 @@ public sealed class EfExecutionRepository : IExecutionRepository
             .ExecuteUpdateAsync(
                 setters => setters
                     .SetProperty(e => e.Status, TaskExecutionStatus.Completed)
-                    .SetProperty(e => e.CompletedAt, now),
+                    .SetProperty(e => e.CompletedAt, now)
+                    .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null),
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -152,6 +201,46 @@ public sealed class EfExecutionRepository : IExecutionRepository
                     .SetProperty(t => t.UpdatedAt, now),
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<bool> CompleteWithLeaseAsync(
+        Guid executionId,
+        Guid leaseToken,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+
+        var execution = await _dbContext.TaskExecutions
+            .FirstOrDefaultAsync(e => e.Id == executionId && e.LeaseToken == leaseToken && e.Status == TaskExecutionStatus.Running, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (execution is null)
+            return false;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.LeaseToken == leaseToken && e.Status == TaskExecutionStatus.Running)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.Status, TaskExecutionStatus.Completed)
+                    .SetProperty(e => e.CompletedAt, now)
+                    .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            await _dbContext.DevelopmentTasks
+                .Where(t => t.Id == execution.DevelopmentTaskId)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(t => t.Status, DevelopmentTaskStatus.Completed)
+                        .SetProperty(t => t.UpdatedAt, now),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return true;
+        }
+
+        return false;
     }
 
     /// <inheritdoc />
@@ -178,7 +267,8 @@ public sealed class EfExecutionRepository : IExecutionRepository
                 setters => setters
                     .SetProperty(e => e.Status, TaskExecutionStatus.Failed)
                     .SetProperty(e => e.CompletedAt, now)
-                    .SetProperty(e => e.ErrorMessage, truncated),
+                    .SetProperty(e => e.ErrorMessage, truncated)
+                    .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null),
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -190,6 +280,173 @@ public sealed class EfExecutionRepository : IExecutionRepository
                     .SetProperty(t => t.UpdatedAt, now),
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<bool> FailWithLeaseAsync(
+        Guid executionId,
+        Guid leaseToken,
+        string errorMessage,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var truncated = errorMessage.Length > 4000
+            ? errorMessage[..4000]
+            : errorMessage;
+
+        var execution = await _dbContext.TaskExecutions
+            .FirstOrDefaultAsync(e => e.Id == executionId && e.LeaseToken == leaseToken && e.Status == TaskExecutionStatus.Running, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (execution is null)
+            return false;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.LeaseToken == leaseToken && e.Status == TaskExecutionStatus.Running)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.Status, TaskExecutionStatus.Failed)
+                    .SetProperty(e => e.CompletedAt, now)
+                    .SetProperty(e => e.ErrorMessage, truncated)
+                    .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            await _dbContext.DevelopmentTasks
+                .Where(t => t.Id == execution.DevelopmentTaskId)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(t => t.Status, DevelopmentTaskStatus.Failed)
+                        .SetProperty(t => t.UpdatedAt, now),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return true;
+        }
+
+        return false;
+    }
+
+    public async Task<bool> RequestCancellationAsync(
+        Guid executionId,
+        string? reason,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var truncatedReason = reason != null && reason.Length > 500 ? reason[..500] : reason;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        (e.Status == TaskExecutionStatus.Pending || e.Status == TaskExecutionStatus.Running) &&
+                        e.CancellationRequestedAt == null)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.CancellationRequestedAt, now)
+                    .SetProperty(e => e.CancellationReason, truncatedReason),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    public async Task<bool> AcknowledgeCancellationWithLeaseAsync(
+        Guid executionId,
+        Guid leaseToken,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+
+        var execution = await _dbContext.TaskExecutions
+            .FirstOrDefaultAsync(e => e.Id == executionId && e.LeaseToken == leaseToken && e.Status == TaskExecutionStatus.Running, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (execution is null)
+            return false;
+
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.LeaseToken == leaseToken && e.Status == TaskExecutionStatus.Running)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.Status, TaskExecutionStatus.Cancelled)
+                    .SetProperty(e => e.CancelledAt, now)
+                    .SetProperty(e => e.CompletedAt, now)
+                    .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0)
+        {
+            await _dbContext.DevelopmentTasks
+                .Where(t => t.Id == execution.DevelopmentTaskId)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(t => t.Status, DevelopmentTaskStatus.Approved)
+                        .SetProperty(t => t.UpdatedAt, now),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return true;
+        }
+
+        return false;
+    }
+
+    public async Task<bool> IsCancellationRequestedAsync(
+        Guid executionId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.TaskExecutions
+            .AsNoTracking()
+            .AnyAsync(e => e.Id == executionId && e.CancellationRequestedAt != null, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<int> ReconcileStaleRunningExecutionsAsync(
+        DateTime cutoffUtc,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        const string staleReason = "Execution interrupted because the worker stopped unexpectedly.";
+
+        var staleExecutions = await _dbContext.TaskExecutions
+            .Where(e => e.Status == TaskExecutionStatus.Running &&
+                        ((e.LeaseExpiresAt != null && e.LeaseExpiresAt < now) ||
+                         (e.LeaseExpiresAt == null && e.CreatedAt < cutoffUtc)))
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (staleExecutions.Count == 0)
+            return 0;
+
+        int reconciledCount = 0;
+        foreach (var exec in staleExecutions)
+        {
+            var affected = await _dbContext.TaskExecutions
+                .Where(e => e.Id == exec.Id && e.Status == TaskExecutionStatus.Running)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(e => e.Status, TaskExecutionStatus.Failed)
+                        .SetProperty(e => e.CompletedAt, now)
+                        .SetProperty(e => e.ErrorMessage, staleReason)
+                        .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (affected > 0)
+            {
+                await _dbContext.DevelopmentTasks
+                    .Where(t => t.Id == exec.DevelopmentTaskId)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(t => t.Status, DevelopmentTaskStatus.Failed)
+                            .SetProperty(t => t.UpdatedAt, now),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                reconciledCount++;
+            }
+        }
+
+        return reconciledCount;
     }
 
     /// <inheritdoc />
@@ -205,6 +462,20 @@ public sealed class EfExecutionRepository : IExecutionRepository
                 setters => setters
                     .SetProperty(e => e.WorkspacePath, workspacePath)
                     .SetProperty(e => e.BranchName, branchName),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task SetModelAsync(
+        Guid executionId,
+        string model,
+        CancellationToken cancellationToken = default)
+    {
+        await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId)
+            .ExecuteUpdateAsync(
+                setters => setters.SetProperty(e => e.Model, model),
                 cancellationToken)
             .ConfigureAwait(false);
     }

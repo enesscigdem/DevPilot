@@ -10,6 +10,8 @@ public sealed class WorkspaceOverviewDto
 
     public WorkspaceActiveExecutionDto? ActiveExecution { get; set; }
 
+    public WorkspaceActiveExecutionDto? ActiveAgentExecution { get; set; }
+
     public List<WorkspaceApprovalItemDto> AwaitingApproval { get; set; } = new();
 
     public List<WorkspaceFailedOrBlockedItemDto> FailedOrBlocked { get; set; } = new();

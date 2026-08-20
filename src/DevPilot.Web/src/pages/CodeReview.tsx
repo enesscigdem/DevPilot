@@ -18,12 +18,13 @@ import {
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
   type ExecutionReviewFile,
+  type ExecutionActivityItem,
 } from "@/types"
 import { cn } from "@/lib/utils"
 
@@ -207,6 +208,7 @@ export function CodeReview() {
   }, [activeWorkspaceId])
 
   const [review, setReview] = useState<ExecutionReview | null>(null)
+  const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
@@ -231,10 +233,14 @@ export function CodeReview() {
     setError(null)
     setReview(null)
 
-    getExecutionReview(id, activeWorkspaceId, { signal: controller.signal })
-      .then((data) => {
+    Promise.all([
+      getExecutionReview(id, activeWorkspaceId, { signal: controller.signal }),
+      getExecutionActivity(id, activeWorkspaceId, { signal: controller.signal }).catch(() => []),
+    ])
+      .then(([reviewData, actData]) => {
         if (!isCancelled && currentRequestId === activeRequestIdRef.current && activeWorkspaceIdRef.current === activeWorkspaceId) {
-          setReview(data)
+          setReview(reviewData)
+          setActivities(actData)
           setError(null)
           setIsLoading(false)
         }
@@ -745,33 +751,48 @@ export function CodeReview() {
 
           <div className="mt-5 space-y-3">
             <div className="tech-label">Review decision</div>
-            {isPendingDecision && (
-              <div className="space-y-2">
-                <Panel className="p-3 text-[12px] text-muted-foreground">
-                  Review is pending developer decision. You may inspect the diff and approve or reject the changes.
-                </Panel>
-                <div className="grid grid-cols-2 gap-2">
-                  <Button
-                    variant="default"
-                    size="md"
-                    disabled={isSubmittingDecision}
-                    onClick={() => setShowRejectModal(true)}
-                    className="w-full border-danger/30 text-danger hover:bg-danger-soft"
-                  >
-                    Reject
-                  </Button>
-                  <Button
-                    variant="primary"
-                    size="md"
-                    disabled={isSubmittingDecision}
-                    onClick={handleApprove}
-                    className="w-full"
-                  >
-                    {isSubmittingDecision ? <Loader2 className="h-4 w-4 animate-spin" /> : "Approve"}
-                  </Button>
+            {isPendingDecision && (() => {
+              const buildPassed = activities.some((a) => a.stage === "Build" && a.status === "Completed")
+              const buildFailed = activities.some((a) => a.stage === "Build" && a.status === "Failed")
+              const testPassed = activities.some((a) => a.stage === "Test" && a.status === "Completed")
+              const testFailed = activities.some((a) => a.stage === "Test" && a.status === "Failed")
+              const hasValidationResults = activities.some((a) => a.stage === "Build" || a.stage === "Test")
+              const validationPassed = !hasValidationResults || (buildPassed && !buildFailed && testPassed && !testFailed)
+
+              return (
+                <div className="space-y-2">
+                  <Panel className="p-3 text-[12px] text-muted-foreground">
+                    Review is pending developer decision. You may inspect the diff and approve or reject the changes.
+                  </Panel>
+                  {!validationPassed && (
+                    <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-danger/30 bg-danger/10 p-2.5 text-[12px] text-danger">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      <span>Build or Test validation did not pass. Approval is blocked.</span>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      variant="default"
+                      size="md"
+                      disabled={isSubmittingDecision}
+                      onClick={() => setShowRejectModal(true)}
+                      className="w-full border-danger/30 text-danger hover:bg-danger-soft"
+                    >
+                      Reject
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="md"
+                      disabled={isSubmittingDecision || !validationPassed}
+                      onClick={handleApprove}
+                      className="w-full"
+                    >
+                      {isSubmittingDecision ? <Loader2 className="h-4 w-4 animate-spin" /> : "Approve"}
+                    </Button>
+                  </div>
                 </div>
-              </div>
-            )}
+              )
+            })()}
 
             {isApproved && (
               <div className="space-y-3">

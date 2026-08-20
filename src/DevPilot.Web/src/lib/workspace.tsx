@@ -3,24 +3,37 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react"
-import { getRepositoryWorkspaces, createRepositoryWorkspace } from "@/api"
+import {
+  getRepositoryWorkspaces,
+  createRepositoryWorkspace,
+  getWorkspaceOverview,
+} from "@/api"
 import {
   RepositoryWorkspaceStatus,
   type RepositoryWorkspace,
   type CreateRepositoryWorkspaceRequest,
+  type WorkspaceActiveExecution,
+  type WorkspaceOverview,
 } from "@/types"
 
 interface WorkspaceContextValue {
   workspaces: RepositoryWorkspace[]
   activeWorkspace: RepositoryWorkspace | null
   activeWorkspaceId: string | null
+  overview: WorkspaceOverview | null
+  activeExecution: WorkspaceActiveExecution | null
+  activeAgentExecution: WorkspaceActiveExecution | null
   isLoading: boolean
+  isLoadingOverview: boolean
   error: string | null
+  overviewError: string | null
   selectWorkspace: (id: string) => void
   refreshWorkspaces: () => Promise<void>
+  refreshOverview: (isBackground?: boolean) => Promise<void>
   connectWorkspace: (request: CreateRepositoryWorkspaceRequest) => Promise<RepositoryWorkspace>
 }
 
@@ -31,8 +44,15 @@ const STORAGE_KEY = "devpilot-active-workspace-id"
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<RepositoryWorkspace[]>([])
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null)
+  const [overview, setOverview] = useState<WorkspaceOverview | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingOverview, setIsLoadingOverview] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [overviewError, setOverviewError] = useState<string | null>(null)
+
+  const activeReqOverviewWorkspaceIdRef = useRef<string | null>(null)
+  const isFetchingOverviewRef = useRef(false)
+  const abortOverviewControllerRef = useRef<AbortController | null>(null)
 
   const resolveActiveWorkspace = useCallback(
     (
@@ -92,6 +112,95 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     refreshWorkspaces()
   }, [refreshWorkspaces])
 
+  const fetchOverview = useCallback(
+    async (isBackground = false) => {
+      if (!activeWorkspaceId) {
+        setOverview(null)
+        setIsLoadingOverview(false)
+        setOverviewError(null)
+        return
+      }
+
+      if (isFetchingOverviewRef.current) {
+        return
+      }
+
+      isFetchingOverviewRef.current = true
+      activeReqOverviewWorkspaceIdRef.current = activeWorkspaceId
+
+      if (!isBackground) {
+        setIsLoadingOverview(true)
+        setOverviewError(null)
+      }
+
+      if (abortOverviewControllerRef.current) {
+        abortOverviewControllerRef.current.abort()
+      }
+      const controller = new AbortController()
+      abortOverviewControllerRef.current = controller
+
+      try {
+        const data = await getWorkspaceOverview(activeWorkspaceId, {
+          signal: controller.signal,
+        })
+        if (activeReqOverviewWorkspaceIdRef.current === activeWorkspaceId) {
+          setOverview(data)
+          setOverviewError(null)
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return
+        }
+        if (activeReqOverviewWorkspaceIdRef.current === activeWorkspaceId) {
+          if (!isBackground) {
+            setOverviewError(
+              err instanceof Error ? err.message : "Failed to load workspace overview.",
+            )
+          }
+        }
+      } finally {
+        isFetchingOverviewRef.current = false
+        if (
+          activeReqOverviewWorkspaceIdRef.current === activeWorkspaceId &&
+          !isBackground
+        ) {
+          setIsLoadingOverview(false)
+        }
+      }
+    },
+    [activeWorkspaceId],
+  )
+
+  // Trigger overview fetch when active workspace changes
+  useEffect(() => {
+    setOverview(null)
+    setOverviewError(null)
+    fetchOverview(false)
+
+    return () => {
+      if (abortOverviewControllerRef.current) {
+        abortOverviewControllerRef.current.abort()
+      }
+    }
+  }, [fetchOverview])
+
+  // Single global overview polling owner: 3.5s when active execution running, 15s when idle
+  useEffect(() => {
+    if (!activeWorkspaceId) return
+
+    const hasActiveExecution = Boolean(
+      (overview?.activeAgentExecution && !overview.activeAgentExecution.completedAt) ||
+      (overview?.activeExecution && !overview.activeExecution.completedAt),
+    )
+    const intervalMs = hasActiveExecution ? 3500 : 15000
+
+    const timer = setInterval(() => {
+      fetchOverview(true)
+    }, intervalMs)
+
+    return () => clearInterval(timer)
+  }, [activeWorkspaceId, overview?.activeAgentExecution, overview?.activeExecution, fetchOverview])
+
   const selectWorkspace = useCallback(
     (id: string) => {
       const target = workspaces.find((w) => w.id === id)
@@ -142,14 +251,23 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         w.status === RepositoryWorkspaceStatus.Completed,
     ) ?? null
 
+  const activeExecution = overview?.activeExecution ?? null
+  const activeAgentExecution = overview?.activeAgentExecution ?? null
+
   const value: WorkspaceContextValue = {
     workspaces,
     activeWorkspace,
     activeWorkspaceId: activeWorkspace?.id ?? null,
+    overview,
+    activeExecution,
+    activeAgentExecution,
     isLoading,
+    isLoadingOverview,
     error,
+    overviewError,
     selectWorkspace,
     refreshWorkspaces,
+    refreshOverview: fetchOverview,
     connectWorkspace,
   }
 

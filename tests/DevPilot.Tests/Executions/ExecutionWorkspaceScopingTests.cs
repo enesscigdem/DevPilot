@@ -150,6 +150,7 @@ public sealed class ExecutionWorkspaceScopingTests
         var activityRecorder = new FakeExecutionActivityRecorder();
         var handler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
+            _activityRepository,
             workspaceManager,
             fpCalc,
             activityRecorder,
