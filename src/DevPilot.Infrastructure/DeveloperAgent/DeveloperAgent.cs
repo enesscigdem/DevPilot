@@ -859,7 +859,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits);
             var filteredLockedContracts = FilterRelevantContracts(fileEntry, lockedContracts, targetContent, request);
             var repairUserPrompt = BuildSingleFileRepairUserPrompt(
-                validationError,
+                validationError ?? "Generated edit validation failed.",
                 fileResponse.Content,
                 fileEntry,
                 targetContent,
