@@ -165,7 +165,11 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 MergeStatus: execution.MergeStatus.ToString(),
                 MergeCommitSha: execution.MergeCommitSha,
                 MergedAt: execution.MergedAt,
-                CanRequestMerge: canRequestMerge);
+                CanRequestMerge: canRequestMerge,
+                MergeBlockedReason: mergeBlockedReason,
+                RepositoryWorkspaceId: execution.DevelopmentTask?.RepositoryWorkspaceId,
+                RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
+                RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository);
 
             return GetExecutionReviewResult.Ok(committedReview);
         }

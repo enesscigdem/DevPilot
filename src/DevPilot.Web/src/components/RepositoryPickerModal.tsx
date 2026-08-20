@@ -408,24 +408,44 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
             {/* Footer Toolbar */}
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-surface-secondary/30 px-3.5 py-2.5 text-xs text-subtle-foreground">
               <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleConnectGitHub}
-                  className="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  Connect account
-                </button>
-                {ghStatus?.isConnected && (
-                  <a
-                    href={manageUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-subtle-foreground hover:text-foreground hover:underline"
+                {!ghStatus?.isConnected ? (
+                  <button
+                    type="button"
+                    onClick={handleConnectGitHub}
+                    className="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
                   >
-                    Manage access
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
+                    <Plus className="h-3.5 w-3.5" />
+                    Connect GitHub
+                  </button>
+                ) : (
+                  <>
+                    <a
+                      href={manageUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add repositories
+                    </a>
+                    <a
+                      href={manageUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-subtle-foreground hover:text-foreground hover:underline"
+                    >
+                      Manage GitHub access
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                    <button
+                      type="button"
+                      onClick={handleConnectGitHub}
+                      className="inline-flex items-center gap-1 text-subtle-foreground hover:text-foreground hover:underline"
+                      title="Connect another GitHub account or organization"
+                    >
+                      + Connect another account
+                    </button>
+                  </>
                 )}
                 <button
                   type="button"
