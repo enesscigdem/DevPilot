@@ -20,7 +20,7 @@ public sealed class GitExecutionPushServiceTests : IDisposable
         var (worktreePath, bareRemotePath, commitSha, branchName) = await SetupLocalGitRepoWithBareRemoteAsync(executionId);
 
         var repository = new InMemoryExecutionRepository();
-        var service = new GitExecutionPushService(repository, NullLogger<GitExecutionPushService>.Instance);
+        var service = new GitExecutionPushService(repository, new GitProviders.FakeGitHubAppTokenService(), NullLogger<GitExecutionPushService>.Instance);
 
         var execution = CreateExecution(executionId, worktreePath, branchName, commitSha);
 
@@ -47,7 +47,7 @@ public sealed class GitExecutionPushServiceTests : IDisposable
         await RunGitAsync(worktreePath, "push", "origin", $"{commitSha}:refs/heads/{branchName}");
 
         var repository = new InMemoryExecutionRepository();
-        var service = new GitExecutionPushService(repository, NullLogger<GitExecutionPushService>.Instance);
+        var service = new GitExecutionPushService(repository, new GitProviders.FakeGitHubAppTokenService(), NullLogger<GitExecutionPushService>.Instance);
 
         var execution = CreateExecution(executionId, worktreePath, branchName, commitSha);
 
@@ -72,7 +72,7 @@ public sealed class GitExecutionPushServiceTests : IDisposable
         await RunGitAsync(worktreePath, "push", "origin", $"{firstCommit.Trim()}:refs/heads/{branchName}");
 
         var repository = new InMemoryExecutionRepository();
-        var service = new GitExecutionPushService(repository, NullLogger<GitExecutionPushService>.Instance);
+        var service = new GitExecutionPushService(repository, new GitProviders.FakeGitHubAppTokenService(), NullLogger<GitExecutionPushService>.Instance);
 
         var execution = CreateExecution(executionId, worktreePath, branchName, commitSha);
 

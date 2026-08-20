@@ -83,6 +83,7 @@ public static class DependencyInjection
             npgsql.MigrationsAssembly(typeof(DependencyInjection).Assembly.FullName);
         }));
 
+        services.Configure<FrontendOptions>(configuration.GetSection(FrontendOptions.SectionName));
         services.AddAiProviders(configuration);
         services.AddGitProviders(configuration);
         services.AddRepositoryClone(configuration);
@@ -205,6 +206,10 @@ public static class DependencyInjection
     private static IServiceCollection AddGitProviders(this IServiceCollection services, IConfiguration configuration)
     {
         var providerName = configuration["GitProvider:Provider"] ?? string.Empty;
+
+        services.Configure<GitHubAppOptions>(configuration.GetSection(GitHubAppOptions.SectionName));
+        services.AddSingleton<IGitHubOAuthStateService, GitHubOAuthStateService>();
+        services.AddScoped<IGitHubAppTokenService, GitHubAppTokenService>();
 
         switch (providerName)
         {

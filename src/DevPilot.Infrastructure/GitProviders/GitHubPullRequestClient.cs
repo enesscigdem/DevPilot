@@ -3,8 +3,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Infrastructure.Executions;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace DevPilot.Infrastructure.GitProviders;
 
@@ -14,25 +14,20 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
     private const string ApiVersion = "2022-11-28";
 
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IGitHubAppTokenService _tokenService;
+    private readonly IOptions<GitHubAppOptions> _options;
     private readonly ILogger<GitHubPullRequestClient> _logger;
-    private readonly string _baseUrl;
-    private readonly string _token;
-    private readonly bool _isConfigured;
 
     public GitHubPullRequestClient(
         IHttpClientFactory httpClientFactory,
-        IConfiguration configuration,
+        IGitHubAppTokenService tokenService,
+        IOptions<GitHubAppOptions> options,
         ILogger<GitHubPullRequestClient> logger)
     {
         _httpClientFactory = httpClientFactory;
+        _tokenService = tokenService;
+        _options = options;
         _logger = logger;
-
-        _baseUrl = configuration["GitProvider:GitHub:BaseUrl"] ?? string.Empty;
-        _token = configuration["GitProvider:GitHub:Token"]
-            ?? configuration["GITHUB_TOKEN"]
-            ?? string.Empty;
-
-        _isConfigured = !string.IsNullOrWhiteSpace(_baseUrl) && !string.IsNullOrWhiteSpace(_token);
     }
 
     public async Task<GitHubPullRequestClientResult<GitHubPullRequestDto>> CreatePullRequestAsync(
@@ -44,11 +39,10 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         string body,
         CancellationToken cancellationToken = default)
     {
-        if (!_isConfigured)
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
         {
-            return GitHubPullRequestClientResult<GitHubPullRequestDto>.Failure(
-                "GitHub API credentials or base URL are not configured.",
-                isConfigurationError: true);
+            return MapTokenFailure<GitHubPullRequestDto>(tokenResult);
         }
 
         var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/pulls";
@@ -63,7 +57,7 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         var jsonPayload = JsonSerializer.Serialize(payload);
         using var content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
 
-        var response = await SendAsync(HttpMethod.Post, relativeUri, content, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(HttpMethod.Post, relativeUri, content, tokenResult.Token, cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -88,25 +82,23 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         string baseBranch,
         CancellationToken cancellationToken = default)
     {
-        if (!_isConfigured)
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
         {
-            return GitHubPullRequestClientResult<IReadOnlyList<GitHubPullRequestDto>>.Failure(
-                "GitHub API credentials or base URL are not configured.",
-                isConfigurationError: true);
+            return MapTokenFailure<IReadOnlyList<GitHubPullRequestDto>>(tokenResult);
         }
 
         var allPrs = new List<GitHubPullRequestDto>();
         var page = 1;
         const int perPage = 100;
 
-        // Head filter in GitHub REST API for same repo is "head=owner:branch" or "head=branch"
         var headQuery = $"{owner}:{head}";
 
-        while (true)
+        while (page <= 5)
         {
             var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/pulls?state=all&head={Escape(headQuery)}&base={Escape(baseBranch)}&per_page={perPage}&page={page}";
 
-            using var response = await SendAsync(HttpMethod.Get, relativeUri, null, cancellationToken).ConfigureAwait(false);
+            using var response = await SendAsync(HttpMethod.Get, relativeUri, null, tokenResult.Token, cancellationToken).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -140,14 +132,15 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         string branch,
         CancellationToken cancellationToken = default)
     {
-        if (!_isConfigured)
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
         {
-            return new GitHubBranchRefResult(false, false, null, "GitHub API credentials or base URL are not configured.");
+            return new GitHubBranchRefResult(false, false, null, tokenResult.ErrorMessage ?? "Repository authorization failed.");
         }
 
         var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/branches/{Escape(branch)}";
 
-        using var response = await SendAsync(HttpMethod.Get, relativeUri, null, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(HttpMethod.Get, relativeUri, null, tokenResult.Token, cancellationToken).ConfigureAwait(false);
 
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
@@ -177,16 +170,15 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         int pullNumber,
         CancellationToken cancellationToken = default)
     {
-        if (!_isConfigured)
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
         {
-            return GitHubPullRequestClientResult<GitHubPullRequestDto>.Failure(
-                "GitHub API credentials or base URL are not configured.",
-                isConfigurationError: true);
+            return MapTokenFailure<GitHubPullRequestDto>(tokenResult);
         }
 
         var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/pulls/{pullNumber}";
 
-        using var response = await SendAsync(HttpMethod.Get, relativeUri, null, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(HttpMethod.Get, relativeUri, null, tokenResult.Token, cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -210,11 +202,10 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         string refSha,
         CancellationToken cancellationToken = default)
     {
-        if (!_isConfigured)
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
         {
-            return GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>.Failure(
-                "GitHub API credentials or base URL are not configured.",
-                isConfigurationError: true);
+            return MapTokenFailure<IReadOnlyList<GitHubCheckRunDto>>(tokenResult);
         }
 
         var seenIds = new HashSet<long>();
@@ -227,7 +218,7 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         {
             var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/commits/{Escape(refSha)}/check-runs?filter=latest&per_page={perPage}&page={page}";
 
-            using var response = await SendAsync(HttpMethod.Get, relativeUri, null, cancellationToken).ConfigureAwait(false);
+            using var response = await SendAsync(HttpMethod.Get, relativeUri, null, tokenResult.Token, cancellationToken).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -256,15 +247,6 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
                 break;
             }
 
-            if (page == maxPages)
-            {
-                // Has more items beyond page safety bound
-                _logger.LogWarning("Check runs for SHA {RefSha} exceeded maximum pagination safety limit of {MaxPages} pages.", refSha, maxPages);
-                return GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>.Failure(
-                    "GitHub check runs exceeded maximum pagination safety limit.",
-                    isExceededLimit: true);
-            }
-
             page++;
         }
 
@@ -277,11 +259,10 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         string refSha,
         CancellationToken cancellationToken = default)
     {
-        if (!_isConfigured)
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
         {
-            return GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>.Failure(
-                "GitHub API credentials or base URL are not configured.",
-                isConfigurationError: true);
+            return MapTokenFailure<IReadOnlyList<GitHubCommitStatusDto>>(tokenResult);
         }
 
         var seenContexts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -294,7 +275,7 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         {
             var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/commits/{Escape(refSha)}/statuses?per_page={perPage}&page={page}";
 
-            using var response = await SendAsync(HttpMethod.Get, relativeUri, null, cancellationToken).ConfigureAwait(false);
+            using var response = await SendAsync(HttpMethod.Get, relativeUri, null, tokenResult.Token, cancellationToken).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -309,8 +290,6 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
                 break;
             }
 
-            // GitHub returns statuses in reverse chronological order (newest first).
-            // Keep first occurrence per context.
             foreach (var item in pageItems)
             {
                 var contextName = string.IsNullOrWhiteSpace(item.Context) ? "default" : item.Context.Trim();
@@ -335,11 +314,10 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         string? commitMessage = null,
         CancellationToken cancellationToken = default)
     {
-        if (!_isConfigured)
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
         {
-            return GitHubPullRequestClientResult<GitHubMergeResultDto>.Failure(
-                "GitHub API credentials or base URL are not configured.",
-                isConfigurationError: true);
+            return MapTokenFailure<GitHubMergeResultDto>(tokenResult);
         }
 
         var relativeUri = $"repos/{Escape(owner)}/{Escape(repository)}/pulls/{pullNumber}/merge";
@@ -354,7 +332,7 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         var jsonPayload = JsonSerializer.Serialize(payload, JsonSerializerOptions.Web);
         using var content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
 
-        using var response = await SendAsync(HttpMethod.Put, relativeUri, content, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(HttpMethod.Put, relativeUri, content, tokenResult.Token, cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -372,10 +350,32 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         return GitHubPullRequestClientResult<GitHubMergeResultDto>.Success(new GitHubMergeResultDto(apiDto.Sha, apiDto.Merged));
     }
 
+    private static GitHubPullRequestClientResult<T> MapTokenFailure<T>(GitHubTokenResult tokenResult)
+    {
+        var isConfigErr = tokenResult.FailureKind is GitHubTokenFailureKind.ConfigurationError
+            or GitHubTokenFailureKind.Disconnected
+            or GitHubTokenFailureKind.InstallationInvalidOrRevoked
+            or GitHubTokenFailureKind.RepositoryUnauthorized
+            or GitHubTokenFailureKind.PermissionDenied;
+
+        var message = tokenResult.FailureKind switch
+        {
+            GitHubTokenFailureKind.Disconnected => "Connect GitHub to create pull requests.",
+            GitHubTokenFailureKind.RepositoryUnauthorized => "DevPilot does not have access to this repository. Please update repository access in GitHub App settings.",
+            GitHubTokenFailureKind.InstallationInvalidOrRevoked => "GitHub connection needs attention. Please reconnect GitHub.",
+            GitHubTokenFailureKind.ConfigurationError => tokenResult.ErrorMessage ?? "GitHub App credentials are not configured.",
+            GitHubTokenFailureKind.RateLimited => "GitHub API rate limit exceeded. Please try again later.",
+            _ => tokenResult.ErrorMessage ?? "GitHub API authentication failed."
+        };
+
+        return GitHubPullRequestClientResult<T>.Failure(message, isConfigurationError: isConfigErr, isRateLimit: tokenResult.FailureKind == GitHubTokenFailureKind.RateLimited);
+    }
+
     private async Task<HttpResponseMessage> SendAsync(
         HttpMethod method,
         string relativeUri,
         HttpContent? content,
+        string token,
         CancellationToken cancellationToken)
     {
         var client = _httpClientFactory.CreateClient(HttpClientName);
@@ -385,7 +385,7 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         request.Headers.UserAgent.Add(new ProductInfoHeaderValue("DevPilot", "1.0"));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
         request.Headers.Add("X-GitHub-Api-Version", ApiVersion);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
         if (content != null)
         {
@@ -416,7 +416,7 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         if (statusCode is 401 or 403)
         {
             _logger.LogWarning("GitHub API authentication or permission failed (HTTP {StatusCode}).", statusCode);
-            return GitHubPullRequestClientResult<T>.Failure("GitHub API authentication or permission failed. Check configured token.", isConfigurationError: true);
+            return GitHubPullRequestClientResult<T>.Failure("GitHub API authentication or permission failed.", isConfigurationError: true);
         }
 
         if (statusCode is 409 or 422)
@@ -431,7 +431,7 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
 
     private Uri BuildUri(string relativeUri)
     {
-        var baseUrl = _baseUrl.TrimEnd('/');
+        var baseUrl = _options.Value.BaseUrl.TrimEnd('/');
         return new Uri($"{baseUrl}/{relativeUri}", UriKind.Absolute);
     }
 

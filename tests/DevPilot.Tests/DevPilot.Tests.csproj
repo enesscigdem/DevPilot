@@ -23,6 +23,7 @@
     <ProjectReference Include="..\..\src\DevPilot.Domain\DevPilot.Domain.csproj" />
     <ProjectReference Include="..\..\src\DevPilot.Application\DevPilot.Application.csproj" />
     <ProjectReference Include="..\..\src\DevPilot.Infrastructure\DevPilot.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\DevPilot.Api\DevPilot.Api.csproj" />
   </ItemGroup>
 
 </Project>

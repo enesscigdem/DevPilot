@@ -374,6 +374,10 @@ export interface ExecutionReview {
   mergedAt?: string | null;
   mergeMethod?: string | null;
   canRequestMerge?: boolean;
+  mergeBlockedReason?: string | null;
+  repositoryWorkspaceId?: string;
+  repositoryOwner?: string;
+  repositoryName?: string;
 }
 
 export interface ExecutionReviewDecision {
@@ -421,6 +425,8 @@ export interface SyncPullRequestResult {
   ciChecks: ExecutionCiCheck[];
   lastSyncedAt?: string | null;
   syncError?: string | null;
+  canRequestMerge?: boolean;
+  mergeBlockedReason?: string | null;
 }
 
 export interface MergeExecutionResult {
@@ -799,4 +805,44 @@ export interface WorkspaceOverview {
   recentActivity: WorkspaceActivityItem[];
   recentlyAnalyzed: WorkspaceAnalysisOverview;
   shippedRecently: WorkspaceShippedItem[];
+}
+
+// ---------------------------------------------------------------------------
+// GitHub App Integration & Repository Picker — DTOs
+// ---------------------------------------------------------------------------
+export interface GitHubInstallationSummary {
+  id: string;
+  externalInstallationId: number;
+  accountLogin: string;
+  accountType: string;
+  targetAvatarUrl?: string | null;
+  status: string;
+  connectedAt: string;
+  manageUrl: string;
+}
+
+export interface GitHubConnectionStatus {
+  isConfigured: boolean;
+  isConnected: boolean;
+  installations: GitHubInstallationSummary[];
+}
+
+export interface GitHubDiscoveredRepository {
+  id: number;
+  fullName: string;
+  name: string;
+  owner: string;
+  isPrivate: boolean;
+  defaultBranch: string;
+  url: string;
+  description?: string | null;
+  externalInstallationId: number;
+  isConnectedToDevPilot: boolean;
+  devPilotWorkspaceId?: string | null;
+}
+
+export interface GitHubBranch {
+  name: string;
+  commitSha: string;
+  isProtected: boolean;
 }

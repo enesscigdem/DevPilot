@@ -1,7 +1,10 @@
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Services;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace DevPilot.Application.Executions.Commands.SyncPullRequest;
 
@@ -37,7 +40,9 @@ public sealed record SyncPullRequestResponseDto(
     int CheckCount,
     IReadOnlyList<ExecutionCiCheckDto> Checks,
     DateTime? LastSyncedAt,
-    string? SyncError = null);
+    string? SyncError = null,
+    bool CanRequestMerge = false,
+    string? MergeBlockedReason = null);
 
 public sealed class SyncPullRequestResult
 {
@@ -74,15 +79,29 @@ public sealed class SyncPullRequestCommandHandler : ISyncPullRequestCommandHandl
 
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionGitHubSyncService _githubSyncService;
+    private readonly IExecutionActivityRepository? _activityRepository;
+    private readonly IOptions<MergePolicyOptions>? _mergePolicyOptions;
     private readonly ILogger<SyncPullRequestCommandHandler> _logger;
 
     public SyncPullRequestCommandHandler(
         IExecutionRepository executionRepository,
         IExecutionGitHubSyncService githubSyncService,
         ILogger<SyncPullRequestCommandHandler> logger)
+        : this(executionRepository, githubSyncService, null, null, logger)
+    {
+    }
+
+    public SyncPullRequestCommandHandler(
+        IExecutionRepository executionRepository,
+        IExecutionGitHubSyncService githubSyncService,
+        IExecutionActivityRepository? activityRepository,
+        IOptions<MergePolicyOptions>? mergePolicyOptions,
+        ILogger<SyncPullRequestCommandHandler> logger)
     {
         _executionRepository = executionRepository;
         _githubSyncService = githubSyncService;
+        _activityRepository = activityRepository;
+        _mergePolicyOptions = mergePolicyOptions;
         _logger = logger;
     }
 
@@ -120,7 +139,8 @@ public sealed class SyncPullRequestCommandHandler : ISyncPullRequestCommandHandl
         // Freshness window: if synced less than 10s ago, return current persisted snapshot without calling GitHub
         if (execution.PullRequestLastSyncedAt.HasValue && (now - execution.PullRequestLastSyncedAt.Value) < FreshnessWindow)
         {
-            return SyncPullRequestResult.Ok(MapToResponseDto(execution));
+            var (canMergeFresh, blockedReasonFresh) = await EvaluateMergeEligibilityAsync(execution, cancellationToken).ConfigureAwait(false);
+            return SyncPullRequestResult.Ok(MapToResponseDto(execution, null, canMergeFresh, blockedReasonFresh));
         }
 
         // Acquire sync lease
@@ -152,7 +172,8 @@ public sealed class SyncPullRequestCommandHandler : ISyncPullRequestCommandHandl
                 .ReleasePullRequestSyncLeaseAsync(execution.Id, attemptId, now, cancellationToken)
                 .ConfigureAwait(false);
 
-            var fallbackResponse = MapToResponseDto(execution, syncResult.ErrorMessage);
+            var (canMergeErr, blockedReasonErr) = await EvaluateMergeEligibilityAsync(execution, cancellationToken).ConfigureAwait(false);
+            var fallbackResponse = MapToResponseDto(execution, syncResult.ErrorMessage, canMergeErr, blockedReasonErr);
             return SyncPullRequestResult.ExternalFailure(syncResult.ErrorMessage ?? "GitHub synchronization failed.", fallbackResponse);
         }
 
@@ -181,10 +202,35 @@ public sealed class SyncPullRequestCommandHandler : ISyncPullRequestCommandHandl
             .GetByIdAsync(execution.Id, cancellationToken)
             .ConfigureAwait(false);
 
-        return SyncPullRequestResult.Ok(MapToResponseDto(updatedExecution ?? execution));
+        var finalExec = updatedExecution ?? execution;
+        var (canMergeFinal, blockedReasonFinal) = await EvaluateMergeEligibilityAsync(finalExec, cancellationToken).ConfigureAwait(false);
+
+        return SyncPullRequestResult.Ok(MapToResponseDto(finalExec, null, canMergeFinal, blockedReasonFinal));
     }
 
-    public static SyncPullRequestResponseDto MapToResponseDto(TaskExecution execution, string? syncError = null)
+    private async Task<(bool CanMerge, string? BlockedReason)> EvaluateMergeEligibilityAsync(
+        TaskExecution execution,
+        CancellationToken cancellationToken)
+    {
+        var buildPassed = true;
+        var testPassed = true;
+
+        if (_activityRepository != null)
+        {
+            var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
+            buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
+            testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
+        }
+
+        var allowNoChecks = _mergePolicyOptions?.Value.AllowNoChecks ?? false;
+        return ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks, buildPassed, testPassed);
+    }
+
+    public static SyncPullRequestResponseDto MapToResponseDto(
+        TaskExecution execution,
+        string? syncError = null,
+        bool canRequestMerge = false,
+        string? mergeBlockedReason = null)
     {
         var checks = (execution.CiChecks ?? Array.Empty<ExecutionCiCheck>())
             .Select(c => new ExecutionCiCheckDto(
@@ -210,6 +256,8 @@ public sealed class SyncPullRequestCommandHandler : ISyncPullRequestCommandHandl
             CheckCount: checks.Count,
             Checks: checks,
             LastSyncedAt: execution.PullRequestLastSyncedAt,
-            SyncError: syncError);
+            SyncError: syncError,
+            CanRequestMerge: canRequestMerge,
+            MergeBlockedReason: mergeBlockedReason);
     }
 }
