@@ -452,7 +452,9 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
             .Where(metadata => metadata?.LogicalProviderCallCount == 1)
             .ToList();
         providerCalls.Should().HaveCount(2);
-        providerCalls.Should().OnlyContain(metadata => metadata?.ProviderCallKind == "Generation");
+        providerCalls.Should().OnlyContain(metadata =>
+            metadata != null &&
+            metadata.ProviderCallKind == "Generation");
         providerCalls.Select(metadata => metadata!.TargetFile).Should().BeEquivalentTo(f1, f2);
 
         // Ensure no prompt content or raw source code is leaked into messages

@@ -755,7 +755,8 @@ public class GitWorkspaceExecutionProcessorTests
         runner.TestRequests.Should().HaveCount(1);
         recorder.RecordedActivities.Should().Contain(activity =>
             activity.stage == ExecutionStage.Build &&
-            activity.metadata?.ProgressResult == "NewBuildFailure" &&
+            activity.metadata != null &&
+            activity.metadata.ProgressResult == "NewBuildFailure" &&
             activity.metadata.FailureFingerprint != null);
     }
 
