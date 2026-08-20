@@ -1131,101 +1131,249 @@ public class ExecutionEngineHardeningTests
     [Fact]
     public void ArchitecturalGuard_Level1FixtureCandidatePatch_PassesAllValidators()
     {
-        var fixtureWorkspace = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "fixtures", "DevPilot.E2EFixture"));
-        if (!Directory.Exists(fixtureWorkspace))
+        var fixtureWorkspace = Path.Combine(Path.GetTempPath(), "DevPilotFixtureTest_" + Guid.NewGuid().ToString("N"));
+        try
         {
-            var currentDir = Directory.GetCurrentDirectory();
-            while (!File.Exists(Path.Combine(currentDir, "DevPilot.sln")) && Directory.GetParent(currentDir) != null)
+            var srcTodoApiDir = Path.Combine(fixtureWorkspace, "src", "TodoApi");
+            var srcModelsDir = Path.Combine(srcTodoApiDir, "Models");
+            var srcServicesDir = Path.Combine(srcTodoApiDir, "Services");
+            var testTodoApiDir = Path.Combine(fixtureWorkspace, "tests", "TodoApi.Tests");
+
+            Directory.CreateDirectory(srcModelsDir);
+            Directory.CreateDirectory(srcServicesDir);
+            Directory.CreateDirectory(testTodoApiDir);
+
+            File.WriteAllText(Path.Combine(srcTodoApiDir, "TodoApi.csproj"), """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net10.0</TargetFramework>
+                  </PropertyGroup>
+                </Project>
+                """);
+
+            File.WriteAllText(Path.Combine(srcModelsDir, "CreateTodoRequest.cs"), """
+                namespace TodoApi.Models;
+
+                public class CreateTodoRequest
+                {
+                    public string Title { get; set; } = string.Empty;
+                }
+                """);
+
+            File.WriteAllText(Path.Combine(srcModelsDir, "TodoItem.cs"), """
+                namespace TodoApi.Models;
+
+                public class TodoItem
+                {
+                    public Guid Id { get; set; }
+                    public string Title { get; set; } = string.Empty;
+                    public bool IsCompleted { get; set; }
+                }
+                """);
+
+            File.WriteAllText(Path.Combine(srcServicesDir, "ITodoAuditLogger.cs"), """
+                using System.Collections.Generic;
+
+                namespace TodoApi.Services;
+
+                public interface ITodoAuditLogger
+                {
+                    IReadOnlyList<string> Logs { get; }
+                    void Log(string message);
+                }
+                """);
+
+            File.WriteAllText(Path.Combine(srcServicesDir, "TodoAuditLogger.cs"), """
+                using System.Collections.Generic;
+
+                namespace TodoApi.Services;
+
+                public class TodoAuditLogger : ITodoAuditLogger
+                {
+                    public List<string> Logs { get; } = new();
+                    IReadOnlyList<string> ITodoAuditLogger.Logs => Logs;
+                    public void Log(string message) => Logs.Add(message);
+                }
+                """);
+
+            File.WriteAllText(Path.Combine(srcServicesDir, "ITodoService.cs"), """
+                using System;
+                using TodoApi.Models;
+
+                namespace TodoApi.Services;
+
+                public interface ITodoService
+                {
+                    TodoItem Create(CreateTodoRequest request);
+                    TodoItem? GetById(Guid id);
+                }
+                """);
+
+            File.WriteAllText(Path.Combine(srcServicesDir, "TodoService.cs"), """
+                using System;
+                using TodoApi.Models;
+
+                namespace TodoApi.Services;
+
+                public class TodoService : ITodoService
+                {
+                    private readonly ITodoAuditLogger _auditLogger;
+                    public TodoService(ITodoAuditLogger auditLogger) => _auditLogger = auditLogger;
+                    public TodoItem Create(CreateTodoRequest request) => new() { Id = Guid.NewGuid(), Title = request.Title };
+                    public TodoItem? GetById(Guid id) => new() { Id = id, Title = "Existing item" };
+                }
+                """);
+
+            File.WriteAllText(Path.Combine(testTodoApiDir, "TodoApi.Tests.csproj"), """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net10.0</TargetFramework>
+                    <IsTestProject>true</IsTestProject>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <PackageReference Include="xunit" Version="2.9.2" />
+                    <PackageReference Include="FluentAssertions" Version="8.0.1" />
+                    <ProjectReference Include="..\..\src\TodoApi\TodoApi.csproj" />
+                  </ItemGroup>
+                </Project>
+                """);
+
+            var originalTestFile = Path.Combine(testTodoApiDir, "TodoServiceTests.cs");
+            var originalContent = """
+                using System;
+                using FluentAssertions;
+                using TodoApi.Models;
+                using TodoApi.Services;
+                using Xunit;
+
+                namespace TodoApi.Tests;
+
+                public class TodoServiceTests
+                {
+                    private readonly TodoAuditLogger _auditLogger;
+                    private readonly TodoService _sut;
+
+                    public TodoServiceTests()
+                    {
+                        _auditLogger = new TodoAuditLogger();
+                        _sut = new TodoService(_auditLogger);
+                    }
+
+                    [Fact]
+                    public void GetById_ExistingItem_ReturnsTodo()
+                    {
+                        // Arrange
+                        var created = _sut.Create(new CreateTodoRequest { Title = "Existing item" });
+
+                        // Act
+                        var result = _sut.GetById(created.Id);
+
+                        // Assert
+                        result.Should().NotBeNull();
+                        result!.Id.Should().Be(created.Id);
+                        result.Title.Should().Be("Existing item");
+                    }
+                }
+                """;
+            File.WriteAllText(originalTestFile, originalContent);
+
+            var projectGraph = WorktreeEditApplier.DiscoverProjectGraph(fixtureWorkspace);
+            projectGraph.Should().NotBeEmpty();
+
+            File.Exists(originalTestFile).Should().BeTrue();
+
+            var searchBlock = """
+                    [Fact]
+                    public void GetById_ExistingItem_ReturnsTodo()
+                    {
+                        // Arrange
+                        var created = _sut.Create(new CreateTodoRequest { Title = "Existing item" });
+
+                        // Act
+                        var result = _sut.GetById(created.Id);
+
+                        // Assert
+                        result.Should().NotBeNull();
+                        result!.Id.Should().Be(created.Id);
+                        result.Title.Should().Be("Existing item");
+                    }
+                """;
+
+            var replaceBlock = """
+                    [Fact]
+                    public void GetById_ExistingItem_ReturnsTodo()
+                    {
+                        // Arrange
+                        var created = _sut.Create(new CreateTodoRequest { Title = "Existing item" });
+
+                        // Act
+                        var result = _sut.GetById(created.Id);
+
+                        // Assert
+                        result.Should().NotBeNull();
+                        result!.Id.Should().Be(created.Id);
+                        result.Title.Should().Be("Existing item");
+                    }
+
+                    [Fact]
+                    public void GetById_NonExistentItem_ReturnsNull()
+                    {
+                        // Act
+                        var result = _sut.GetById(Guid.NewGuid());
+
+                        // Assert
+                        result.Should().BeNull();
+                    }
+                """;
+
+            var edits = new List<DevPilot.Application.DeveloperAgent.Models.SearchReplaceEdit>
             {
-                currentDir = Directory.GetParent(currentDir)!.FullName;
-            }
-            fixtureWorkspace = Path.Combine(currentDir, "tests", "fixtures", "DevPilot.E2EFixture");
+                new(searchBlock, replaceBlock)
+            };
+
+            var appResult = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
+                originalContent,
+                edits,
+                "tests/TodoApi.Tests/TodoServiceTests.cs");
+
+            appResult.Success.Should().BeTrue();
+            var candidateCode = appResult.ModifiedContent!;
+
+            var (archValid, archError) = RoslynContractExtractor.ValidateProjectArchitecturalDependencies(
+                "tests/TodoApi.Tests/TodoServiceTests.cs",
+                candidateCode,
+                projectGraph,
+                null);
+
+            archValid.Should().BeTrue($"Level-1 fixture candidate must pass architectural validation but failed: {archError}");
+            archError.Should().BeNull();
+
+            var (symValid, symError) = RoslynContractExtractor.ValidateSymbolResolution(
+                "tests/TodoApi.Tests/TodoServiceTests.cs",
+                candidateCode,
+                fixtureWorkspace);
+
+            symValid.Should().BeTrue($"Level-1 fixture candidate must pass symbol resolution but failed: {symError}");
+            symError.Should().BeNull();
+
+            var (syntaxValid, syntaxErrors) = RoslynContractExtractor.ValidateSyntax(candidateCode);
+            syntaxValid.Should().BeTrue();
+            syntaxErrors.Should().BeEmpty();
         }
-
-        var projectGraph = WorktreeEditApplier.DiscoverProjectGraph(fixtureWorkspace);
-        projectGraph.Should().NotBeEmpty();
-
-        var originalTestFile = Path.Combine(fixtureWorkspace, "tests", "TodoApi.Tests", "TodoServiceTests.cs");
-        File.Exists(originalTestFile).Should().BeTrue();
-        var originalContent = File.ReadAllText(originalTestFile);
-
-        var searchBlock = """
-                [Fact]
-                public void GetById_ExistingItem_ReturnsTodo()
-                {
-                    // Arrange
-                    var created = _sut.Create(new CreateTodoRequest { Title = "Existing item" });
-
-                    // Act
-                    var result = _sut.GetById(created.Id);
-
-                    // Assert
-                    result.Should().NotBeNull();
-                    result!.Id.Should().Be(created.Id);
-                    result.Title.Should().Be("Existing item");
-                }
-            """;
-
-        var replaceBlock = """
-                [Fact]
-                public void GetById_ExistingItem_ReturnsTodo()
-                {
-                    // Arrange
-                    var created = _sut.Create(new CreateTodoRequest { Title = "Existing item" });
-
-                    // Act
-                    var result = _sut.GetById(created.Id);
-
-                    // Assert
-                    result.Should().NotBeNull();
-                    result!.Id.Should().Be(created.Id);
-                    result.Title.Should().Be("Existing item");
-                }
-
-                [Fact]
-                public void GetById_NonExistentItem_ReturnsNull()
-                {
-                    // Act
-                    var result = _sut.GetById(Guid.NewGuid());
-
-                    // Assert
-                    result.Should().BeNull();
-                }
-            """;
-
-        var edits = new List<DevPilot.Application.DeveloperAgent.Models.SearchReplaceEdit>
+        finally
         {
-            new(searchBlock, replaceBlock)
-        };
-
-        var appResult = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
-            originalContent,
-            edits,
-            "tests/TodoApi.Tests/TodoServiceTests.cs");
-
-        // If the file in working copy already contains the test or original, normalize test application:
-        var candidateCode = appResult.Success ? appResult.ModifiedContent! : originalContent;
-
-        var (archValid, archError) = RoslynContractExtractor.ValidateProjectArchitecturalDependencies(
-            "tests/TodoApi.Tests/TodoServiceTests.cs",
-            candidateCode,
-            projectGraph,
-            null);
-
-        archValid.Should().BeTrue($"Level-1 fixture candidate must pass architectural validation but failed: {archError}");
-        archError.Should().BeNull();
-
-        var (symValid, symError) = RoslynContractExtractor.ValidateSymbolResolution(
-            "tests/TodoApi.Tests/TodoServiceTests.cs",
-            candidateCode,
-            fixtureWorkspace);
-
-        symValid.Should().BeTrue($"Level-1 fixture candidate must pass symbol resolution but failed: {symError}");
-        symError.Should().BeNull();
-
-        var (syntaxValid, syntaxErrors) = RoslynContractExtractor.ValidateSyntax(candidateCode);
-        syntaxValid.Should().BeTrue();
-        syntaxErrors.Should().BeEmpty();
+            try
+            {
+                if (Directory.Exists(fixtureWorkspace))
+                {
+                    Directory.Delete(fixtureWorkspace, recursive: true);
+                }
+            }
+            catch
+            {
+                // Ignore cleanup errors
+            }
+        }
     }
 
     [Fact]
