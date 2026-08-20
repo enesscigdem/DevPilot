@@ -615,6 +615,7 @@ export interface BrainMessage {
 export interface BrainChatResponse {
   success: boolean;
   errorMessage?: string | null;
+  conversationId?: string | null;
   role: 'assistant';
   content: string;
   confidence?: number | null;
@@ -624,6 +625,36 @@ export interface BrainChatResponse {
   retrievalMode: string;
   isUnindexed?: boolean;
   isStale?: boolean;
+}
+
+export interface BrainConversation {
+  id: string;
+  repositoryWorkspaceId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+export interface BrainConversationDetail {
+  id: string;
+  repositoryWorkspaceId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: BrainPersistedMessage[];
+}
+
+export interface BrainPersistedMessage {
+  id: string;
+  conversationId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  confidence?: number | null;
+  elapsed?: string | null;
+  citations?: BrainCitation[] | null;
+  contextFiles?: BrainContextFile[] | null;
+  createdAt: string;
 }
 
 export interface BrainIndexResponse {

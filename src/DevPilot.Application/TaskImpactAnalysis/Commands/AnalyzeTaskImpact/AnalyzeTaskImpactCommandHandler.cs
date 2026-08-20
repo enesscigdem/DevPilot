@@ -294,6 +294,54 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             }
 
             var parseResult = TryParseStructuredResult(rawResponse, projectGraph, projectRoots, workspace.LocalPath);
+
+            // Bounded single repair attempt if deterministic grounding failure occurs
+            if (!parseResult.Success && parseResult.IsGroundingError && parseResult.GroundingErrorDetails != null)
+            {
+                _logger.LogWarning(
+                    "Impact analysis for task {TaskId} encountered grounding error: {Error}. Initiating bounded 1-attempt impact plan repair.",
+                    task.Id,
+                    parseResult.ErrorMessage);
+
+                var repairPrompt = BuildImpactPlanRepairPrompt(
+                    task,
+                    workspace,
+                    parseResult.GroundingErrorDetails,
+                    projectGraph,
+                    projectRoots);
+
+                var repairAiRequest = new AiRequest
+                {
+                    SystemPrompt =
+                        "You are DevPilot's impact analysis repair engine. " +
+                        "Correct the deterministic grounding errors in the proposed impact analysis. " +
+                        "Preserve all valid entries. Use ONLY real existing repository file paths for Modify/Delete. " +
+                        "Use Create/Add ONLY for new files that do not currently exist in the repository. " +
+                        "Respond with a single JSON object only matching the required schema. Do not wrap in markdown fences or commentary.",
+                    UserPrompt = repairPrompt,
+                };
+
+                var repairAiResponse = await _aiProvider
+                    .SendAsync(repairAiRequest, executionToken)
+                    .ConfigureAwait(false);
+
+                if (repairAiResponse.IsSuccess && !string.IsNullOrWhiteSpace(repairAiResponse.Content))
+                {
+                    rawResponse = repairAiResponse.Content;
+                    model = repairAiResponse.Model ?? model;
+                    providerName = string.IsNullOrWhiteSpace(repairAiResponse.Provider) ? providerName : repairAiResponse.Provider;
+
+                    parseResult = TryParseStructuredResult(rawResponse, projectGraph, projectRoots, workspace.LocalPath);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Impact plan repair call failed for task {TaskId}: {Error}",
+                        task.Id,
+                        repairAiResponse.ErrorMessage);
+                }
+            }
+
             if (!parseResult.Success)
             {
                 return await FailAnalysisAsync(
@@ -587,6 +635,131 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         return builder.ToString().Trim();
     }
 
+    private static string BuildRepositoryFileInventory(string workspacePath, int maxFiles = 250)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
+            return string.Empty;
+
+        try
+        {
+            var canonical = Path.GetFullPath(workspacePath);
+            var files = ProjectGraphHelper.SafeFindFiles(canonical, "*.cs")
+                .Select(f => Path.GetRelativePath(canonical, f).Replace('\\', '/'))
+                .Where(f => !f.StartsWith("..", StringComparison.Ordinal))
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .Take(maxFiles)
+                .ToList();
+
+            if (files.Count == 0) return string.Empty;
+
+            var sb = new StringBuilder();
+            sb.AppendLine("# Existing Repository Files (Grounding Inventory)");
+            foreach (var file in files)
+            {
+                sb.AppendLine($"- {file}");
+            }
+            return sb.ToString().TrimEnd();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static List<string> FindCandidatePaths(string targetPath, string workspaceLocalPath, IReadOnlyList<string> projectRoots)
+    {
+        var candidates = new List<string>();
+        if (string.IsNullOrWhiteSpace(workspaceLocalPath) || !Directory.Exists(workspaceLocalPath))
+            return candidates;
+
+        try
+        {
+            var canonical = Path.GetFullPath(workspaceLocalPath);
+            var allCsFiles = ProjectGraphHelper.SafeFindFiles(canonical, "*.cs")
+                .Select(f => Path.GetRelativePath(canonical, f).Replace('\\', '/'))
+                .Where(f => !f.StartsWith("..", StringComparison.Ordinal))
+                .ToList();
+
+            var targetFileName = Path.GetFileNameWithoutExtension(targetPath);
+
+            // 1. Files containing target stem / domain name
+            var stemMatches = allCsFiles
+                .Where(f => !string.IsNullOrEmpty(targetFileName) && Path.GetFileName(f).Contains(targetFileName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            candidates.AddRange(stemMatches);
+
+            // 2. Files in same project folder
+            var targetProjectRoot = projectRoots?.FirstOrDefault(r =>
+                !string.IsNullOrEmpty(r) && targetPath.StartsWith(r.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase));
+
+            if (targetProjectRoot != null)
+            {
+                var projectFiles = allCsFiles
+                    .Where(f => f.StartsWith(targetProjectRoot.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase))
+                    .Take(25);
+                candidates.AddRange(projectFiles);
+            }
+
+            // 3. Fallback to all files
+            candidates.AddRange(allCsFiles.Take(30));
+
+            return candidates.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch
+        {
+            return candidates;
+        }
+    }
+
+    private static string BuildImpactPlanRepairPrompt(
+        DevelopmentTask task,
+        RepositoryWorkspace workspace,
+        ImpactGroundingErrorDetails errorDetails,
+        IReadOnlyList<DiscoveredProjectNode> projectGraph,
+        IReadOnlyList<string> projectRoots)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("# Task");
+        builder.AppendLine($"Title: {task.Title}");
+        builder.AppendLine($"Description: {task.Description}");
+        builder.AppendLine();
+
+        builder.AppendLine("# Grounding Error Detected in Previous Impact Plan");
+        builder.AppendLine($"Error: {errorDetails.ExactError}");
+        builder.AppendLine($"Invalid Entry: '{errorDetails.InvalidFilePath}' with Action '{errorDetails.InvalidChangeType}'");
+        builder.AppendLine();
+
+        if (errorDetails.ValidImpactedFiles.Count > 0)
+        {
+            builder.AppendLine("# Valid Impacted Entries to Preserve");
+            foreach (var vf in errorDetails.ValidImpactedFiles)
+            {
+                builder.AppendLine($"- {vf.FilePath} ({vf.ChangeType}): {vf.Reason}");
+            }
+            builder.AppendLine();
+        }
+
+        if (errorDetails.CandidateRepositoryPaths.Count > 0)
+        {
+            builder.AppendLine("# Available Real Repository Files for Selection");
+            foreach (var cf in errorDetails.CandidateRepositoryPaths.Take(50))
+            {
+                builder.AppendLine($"- {cf}");
+            }
+            builder.AppendLine();
+        }
+
+        builder.AppendLine("# Instructions for Repair");
+        builder.AppendLine(
+            "1. Correct ONLY the invalid impacted entries while preserving all valid entries.\n" +
+            "2. For changeType 'Modify' or 'Delete': Select ONLY from the available real repository files listed above. Do NOT propose nonexistent files.\n" +
+            "3. For changeType 'Add' (or 'Create'): Use Add ONLY for genuinely new files that do not currently exist in the repository.\n" +
+            "4. Return the complete corrected impact analysis as a single JSON object matching the schema below (no markdown fences, no commentary):");
+        builder.AppendLine(JsonSchema);
+
+        return builder.ToString();
+    }
+
     private static string BuildUserPrompt(
         DevelopmentTask task,
         RepositoryWorkspace workspace,
@@ -631,6 +804,13 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         }
         builder.AppendLine();
 
+        var inventory = BuildRepositoryFileInventory(workspace.LocalPath);
+        if (!string.IsNullOrWhiteSpace(inventory))
+        {
+            builder.AppendLine(inventory);
+            builder.AppendLine();
+        }
+
         builder.AppendLine("# Context");
         builder.AppendLine(context);
         builder.AppendLine();
@@ -639,12 +819,13 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         builder.AppendLine(
             "Analyze the impact of implementing this task on the repository. " +
             "Respond with a single JSON object only, no markdown fences, no extra commentary. " +
-            "CRITICAL PROJECT RULES:\n" +
+            "CRITICAL GROUNDING & INVENTORY RULES:\n" +
             "1. All proposed C# (*.cs) file paths MUST be located within one of the discovered .NET project directories listed above.\n" +
-            "2. Do NOT invent new or nonexistent project directories (e.g. if the test project is 'tests/DevPilot.Tests', do NOT invent 'tests/DevPilot.Api.Tests').\n" +
-            "3. Unit and integration test files MUST be placed in an existing discovered test project.\n" +
-            "4. STRICT ARCHITECTURAL GROUNDING: You MUST strictly adhere to the existing architectural patterns, interfaces, abstractions, and libraries referenced in the project graph.\n" +
-            "5. DO NOT INVENT FRAMEWORKS OR PATTERNS: Do NOT introduce or propose third-party packages, libraries, or architectural patterns (such as MediatR, direct Entity Framework Core access in Application layer, or nonexistent DbContext interfaces) that are not referenced in the target project.\n" +
+            "2. For changeType 'Modify' or 'Delete': The file path MUST EXACTLY match an existing file from the 'Existing Repository Files' inventory above. Never invent a file path for Modify or Delete.\n" +
+            "3. For changeType 'Add' (or 'Create'): Use Add ONLY for genuinely NEW files that do not currently exist in the repository inventory.\n" +
+            "4. Unit and integration test files MUST be placed in an existing discovered test project.\n" +
+            "5. STRICT ARCHITECTURAL GROUNDING: You MUST strictly adhere to the existing architectural patterns, interfaces, abstractions, and libraries referenced in the project graph.\n" +
+            "6. DO NOT INVENT FRAMEWORKS OR PATTERNS: Do NOT introduce or propose third-party packages, libraries, or architectural patterns (such as MediatR, direct Entity Framework Core access in Application layer, or nonexistent DbContext interfaces) that are not referenced in the target project.\n" +
             "Confidence must be an integer 0-100. Use the following schema:");
         builder.AppendLine(JsonSchema);
 
@@ -763,12 +944,32 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                             }
                             else
                             {
-                                return ParseResult.Failure(err ?? $"Impacted C# test file '{rawPath}' is outside all discovered .NET project roots.");
+                                var remapErr = err ?? $"Impacted C# test file '{rawPath}' is outside all discovered .NET project roots.";
+                                return ParseResult.GroundingFailure(
+                                    remapErr,
+                                    new ImpactGroundingErrorDetails
+                                    {
+                                        InvalidFilePath = rawPath,
+                                        InvalidChangeType = changeType.ToString(),
+                                        ExactError = remapErr,
+                                        ValidImpactedFiles = impactedFiles.ToList(),
+                                        CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                                    });
                             }
                         }
                         else
                         {
-                            return ParseResult.Failure($"Impacted C# file '{rawPath}' is outside all discovered .NET project roots.");
+                            var outsideErr = $"Impacted C# file '{rawPath}' is outside all discovered .NET project roots.";
+                            return ParseResult.GroundingFailure(
+                                outsideErr,
+                                new ImpactGroundingErrorDetails
+                                {
+                                    InvalidFilePath = rawPath,
+                                    InvalidChangeType = changeType.ToString(),
+                                    ExactError = outsideErr,
+                                    ValidImpactedFiles = impactedFiles.ToList(),
+                                    CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                                });
                         }
                     }
                 }
@@ -784,9 +985,37 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                         out var resolvedModifyPath,
                         out var modifyErr))
                     {
-                        return ParseResult.Failure(modifyErr ?? $"Impacted file path '{rawPath}' with action '{changeType}' does not exist in the repository and cannot be deterministically resolved.");
+                        var err = modifyErr ?? $"Impacted file path '{rawPath}' with action '{changeType}' does not exist in the repository and cannot be deterministically resolved.";
+                        return ParseResult.GroundingFailure(
+                            err,
+                            new ImpactGroundingErrorDetails
+                            {
+                                InvalidFilePath = rawPath,
+                                InvalidChangeType = changeType.ToString(),
+                                ExactError = err,
+                                ValidImpactedFiles = impactedFiles.ToList(),
+                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                            });
                     }
                     normalizedPath = resolvedModifyPath;
+                }
+                else if (changeType == ImpactFileChangeType.Add && !string.IsNullOrWhiteSpace(workspaceLocalPath) && Directory.Exists(workspaceLocalPath))
+                {
+                    var fullPath = Path.Combine(workspaceLocalPath, normalizedPath.Replace('/', Path.DirectorySeparatorChar));
+                    if (File.Exists(fullPath))
+                    {
+                        var err = $"Impacted file path '{normalizedPath}' with action 'Create' already exists in the repository. Use action 'Modify' to update an existing file.";
+                        return ParseResult.GroundingFailure(
+                            err,
+                            new ImpactGroundingErrorDetails
+                            {
+                                InvalidFilePath = rawPath,
+                                InvalidChangeType = "Create",
+                                ExactError = err,
+                                ValidImpactedFiles = impactedFiles.ToList(),
+                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                            });
+                    }
                 }
 
                 impactedFiles.Add(new ImpactedFile
@@ -893,6 +1122,12 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
     private static ImpactFileChangeType ParseChangeType(string? value)
     {
+        if (string.Equals(value, "Create", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(value, "New", StringComparison.OrdinalIgnoreCase))
+        {
+            return ImpactFileChangeType.Add;
+        }
+
         return Enum.TryParse<ImpactFileChangeType>(value, ignoreCase: true, out var parsed)
             ? parsed
             : ImpactFileChangeType.Unknown;
@@ -1044,6 +1279,15 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         return value[..maxLength] + "...";
     }
 
+    private sealed class ImpactGroundingErrorDetails
+    {
+        public string InvalidFilePath { get; init; } = string.Empty;
+        public string InvalidChangeType { get; init; } = string.Empty;
+        public string ExactError { get; init; } = string.Empty;
+        public List<ImpactedFile> ValidImpactedFiles { get; init; } = new();
+        public List<string> CandidateRepositoryPaths { get; init; } = new();
+    }
+
     private sealed class ParseResult
     {
         public bool Success { get; private init; }
@@ -1051,6 +1295,10 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         public string? ErrorMessage { get; private init; }
 
         public ImpactAnalysisResultData? ResultData { get; private init; }
+
+        public bool IsGroundingError { get; private init; }
+
+        public ImpactGroundingErrorDetails? GroundingErrorDetails { get; private init; }
 
         public static ParseResult Succeeded(ImpactAnalysisResultData resultData)
         {
@@ -1067,6 +1315,17 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             {
                 Success = false,
                 ErrorMessage = errorMessage,
+            };
+        }
+
+        public static ParseResult GroundingFailure(string errorMessage, ImpactGroundingErrorDetails details)
+        {
+            return new ParseResult
+            {
+                Success = false,
+                ErrorMessage = errorMessage,
+                IsGroundingError = true,
+                GroundingErrorDetails = details,
             };
         }
     }

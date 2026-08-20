@@ -250,7 +250,7 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
-    public async Task ProcessAsync_TestFails_RecordsTestFailed()
+    public async Task ProcessAsync_TestFails_ExhaustsTestRepairRounds_RecordsTestFailed()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -292,10 +292,72 @@ public class GitWorkspaceExecutionProcessorTests
         var ex = await act.Should().ThrowAsync<InvalidOperationException>();
         ex.WithMessage("Test validation failed: dotnet test failed with exit code 1.");
 
-        validationRunner.BuildCallCount.Should().Be(1);
-        validationRunner.TestCallCount.Should().Be(1);
+        // Initial build (1) + 2 repair round builds (2) = 3 total build calls
+        validationRunner.BuildCallCount.Should().Be(3);
+        // Initial test (1) + 2 repair round tests (2) = 3 total test calls
+        validationRunner.TestCallCount.Should().Be(3);
+        // Initial agent (1) + 2 test repairs (2) = 3 total agent calls
+        agent.CallCount.Should().Be(3);
 
         recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.Test && a.status == ExecutionActivityStatus.Failed);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_TestFails_TestRepairSucceeds_CompletesExecutionSuccessfully()
+    {
+        var executionId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+
+        var workspaceManager = new TestWorkspaceManager();
+        var executionRepo = new TestExecutionRepository();
+        var impactRepo = new TestImpactAnalysisRepository
+        {
+            AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed }
+        };
+        var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "App.cs" }) };
+
+        var testResults = new Queue<TestValidationResult>(new[]
+        {
+            new TestValidationResult { Success = false, ExitCode = 1, ErrorMessage = "dotnet test failed with exit code 1.", StdOut = "Failed TestMethod1\nExpected 10 but got 5" },
+            new TestValidationResult { Success = true, ExitCode = 0 }
+        });
+
+        var validationRunner = new QueuedTestValidationRunner(testResults);
+        var recorder = new TestActivityRecorder();
+
+        var processor = new GitWorkspaceExecutionProcessor(
+            workspaceManager,
+            executionRepo,
+            impactRepo,
+            agent,
+            validationRunner,
+            recorder,
+            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
+
+        var context = new ExecutionProcessingContext(
+            ExecutionId: executionId,
+            TaskId: taskId,
+            TaskTitle: "Title",
+            TaskDescription: "Desc",
+            AcceptanceCriteria: null,
+            WorkspaceId: Guid.NewGuid(),
+            WorkspaceLocalPath: "/source",
+            ImpactAnalysisSummary: "Summary");
+
+        await processor.ProcessAsync(context);
+
+        // Initial build (1) + 1 test repair build (1) = 2
+        validationRunner.BuildCallCount.Should().Be(2);
+        // Initial test (1, failed) + 1 test retry (1, passed) = 2
+        validationRunner.TestCallCount.Should().Be(2);
+        // Initial agent (1) + 1 test repair (1) = 2
+        agent.CallCount.Should().Be(2);
+
+        var messages = recorder.RecordedActivities.Select(a => a.message).ToList();
+        messages.Should().Contain("Test repair started (round 1/2).");
+        messages.Should().Contain("Test repair completed (round 1).");
+        messages.Should().Contain("Test retry passed.");
+        messages.Should().Contain("Tests passed.");
     }
 
     // ── Helper Test Fakes ──────────────────────────────────────────────────────────
@@ -482,15 +544,8 @@ public class GitWorkspaceExecutionProcessorTests
             ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs" })
         };
 
-        // First build fails with compiler error, second build (retry) also fails
-        var initialBuildFailed = new BuildValidationResult
-        {
-            Success = false,
-            ExitCode = 1,
-            ErrorMessage = "dotnet build failed with exit code 1.",
-            StdOut = "src/App.cs(12,15): error CS0246: The type or namespace name 'IMediator' could not be found\n"
-        };
-        var rebuildFailed = new BuildValidationResult
+        // First build fails with compiler error, subsequent repair rebuilds also fail
+        var buildFailed = new BuildValidationResult
         {
             Success = false,
             ExitCode = 1,
@@ -498,7 +553,7 @@ public class GitWorkspaceExecutionProcessorTests
             StdOut = "src/App.cs(12,15): error CS0246: The type or namespace name 'IMediator' could not be found\n"
         };
 
-        var buildResults = new Queue<BuildValidationResult>(new[] { initialBuildFailed, rebuildFailed });
+        var buildResults = new Queue<BuildValidationResult>(new[] { buildFailed, buildFailed, buildFailed, buildFailed });
         var validationRunner = new QueuedValidationRunner(buildResults);
         var recorder = new TestActivityRecorder();
 
@@ -524,9 +579,9 @@ public class GitWorkspaceExecutionProcessorTests
         var act = () => processor.ProcessAsync(context);
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
 
-        // Verify Developer Agent called twice: initial generation + compile repair
-        agent.CallCount.Should().Be(2);
-        validationRunner.BuildCallCount.Should().Be(2);
+        // Developer Agent called 4 times: initial generation + 3 compile repairs
+        agent.CallCount.Should().Be(4);
+        validationRunner.BuildCallCount.Should().Be(4);
 
         // Verify explicit compile repair activities recorded
         var messages = recorder.RecordedActivities.Select(a => a.message).ToList();
@@ -551,13 +606,37 @@ public class GitWorkspaceExecutionProcessorTests
         public Task<BuildValidationResult> ValidateBuildAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
         {
             BuildCallCount++;
-            return Task.FromResult(_buildResults.Count > 0 ? _buildResults.Dequeue() : new BuildValidationResult { Success = true });
+            return Task.FromResult(_buildResults.Count > 0 ? _buildResults.Dequeue() : new BuildValidationResult { Success = false, ErrorMessage = "dotnet build failed." });
         }
 
         public Task<TestValidationResult> ValidateTestAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
         {
             TestCallCount++;
             return Task.FromResult(new TestValidationResult { Success = true });
+        }
+    }
+
+    private class QueuedTestValidationRunner : IExecutionValidationRunner
+    {
+        private readonly Queue<TestValidationResult> _testResults;
+        public int BuildCallCount { get; private set; }
+        public int TestCallCount { get; private set; }
+
+        public QueuedTestValidationRunner(Queue<TestValidationResult> testResults)
+        {
+            _testResults = testResults;
+        }
+
+        public Task<BuildValidationResult> ValidateBuildAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
+        {
+            BuildCallCount++;
+            return Task.FromResult(new BuildValidationResult { Success = true });
+        }
+
+        public Task<TestValidationResult> ValidateTestAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
+        {
+            TestCallCount++;
+            return Task.FromResult(_testResults.Count > 0 ? _testResults.Dequeue() : new TestValidationResult { Success = true });
         }
     }
 

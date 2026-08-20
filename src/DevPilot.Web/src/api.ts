@@ -21,6 +21,8 @@ import type {
   BrainStatus,
   BrainChatResponse,
   BrainIndexResponse,
+  BrainConversation,
+  BrainConversationDetail,
   WorkspaceOverview,
   GitHubConnectionStatus,
   GitHubDiscoveredRepository,
@@ -264,10 +266,43 @@ export async function indexBrain(
 export async function askBrain(
   workspaceId: string,
   question: string,
+  conversationId?: string | null,
 ): Promise<BrainChatResponse> {
   return http<BrainChatResponse>(`/repositoryworkspaces/${workspaceId}/brain/chat`, {
     method: 'POST',
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({ question, conversationId: conversationId ?? undefined }),
+  });
+}
+
+export async function getBrainConversations(
+  workspaceId: string,
+): Promise<BrainConversation[]> {
+  return http<BrainConversation[]>(`/repositoryworkspaces/${workspaceId}/brain/conversations`);
+}
+
+export async function getBrainConversationById(
+  workspaceId: string,
+  conversationId: string,
+): Promise<BrainConversationDetail> {
+  return http<BrainConversationDetail>(`/repositoryworkspaces/${workspaceId}/brain/conversations/${conversationId}`);
+}
+
+export async function createBrainConversation(
+  workspaceId: string,
+  title?: string,
+): Promise<BrainConversation> {
+  return http<BrainConversation>(`/repositoryworkspaces/${workspaceId}/brain/conversations`, {
+    method: 'POST',
+    body: JSON.stringify({ title }),
+  });
+}
+
+export async function deleteBrainConversation(
+  workspaceId: string,
+  conversationId: string,
+): Promise<{ success: boolean }> {
+  return http<{ success: boolean }>(`/repositoryworkspaces/${workspaceId}/brain/conversations/${conversationId}`, {
+    method: 'DELETE',
   });
 }
 

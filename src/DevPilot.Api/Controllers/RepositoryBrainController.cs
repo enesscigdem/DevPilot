@@ -1,6 +1,10 @@
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.ProjectBrain.Commands.AskBrain;
+using DevPilot.Application.ProjectBrain.Commands.CreateBrainConversation;
+using DevPilot.Application.ProjectBrain.Commands.DeleteBrainConversation;
 using DevPilot.Application.ProjectBrain.Commands.IndexWorkspace;
+using DevPilot.Application.ProjectBrain.Queries.GetBrainConversationById;
+using DevPilot.Application.ProjectBrain.Queries.GetBrainConversations;
 using DevPilot.Application.ProjectBrain.Queries.GetBrainStatus;
 using DevPilot.Application.Tasks.Ports;
 using DevPilot.Domain.Enums;
@@ -15,6 +19,10 @@ public sealed class RepositoryBrainController : ControllerBase
     private readonly IGetBrainStatusQueryHandler _statusHandler;
     private readonly IIndexWorkspaceCommandHandler _indexHandler;
     private readonly IAskBrainCommandHandler _askHandler;
+    private readonly IGetBrainConversationsQueryHandler _getConversationsHandler;
+    private readonly IGetBrainConversationByIdQueryHandler _getConversationByIdHandler;
+    private readonly ICreateBrainConversationCommandHandler _createConversationHandler;
+    private readonly IDeleteBrainConversationCommandHandler _deleteConversationHandler;
     private readonly IRepositoryWorkspaceQuery _workspaceQuery;
     private readonly IRepositoryAnalyzer _repositoryAnalyzer;
     private readonly ILogger<RepositoryBrainController> _logger;
@@ -23,6 +31,10 @@ public sealed class RepositoryBrainController : ControllerBase
         IGetBrainStatusQueryHandler statusHandler,
         IIndexWorkspaceCommandHandler indexHandler,
         IAskBrainCommandHandler askHandler,
+        IGetBrainConversationsQueryHandler getConversationsHandler,
+        IGetBrainConversationByIdQueryHandler getConversationByIdHandler,
+        ICreateBrainConversationCommandHandler createConversationHandler,
+        IDeleteBrainConversationCommandHandler deleteConversationHandler,
         IRepositoryWorkspaceQuery workspaceQuery,
         IRepositoryAnalyzer repositoryAnalyzer,
         ILogger<RepositoryBrainController> logger)
@@ -30,6 +42,10 @@ public sealed class RepositoryBrainController : ControllerBase
         _statusHandler = statusHandler;
         _indexHandler = indexHandler;
         _askHandler = askHandler;
+        _getConversationsHandler = getConversationsHandler;
+        _getConversationByIdHandler = getConversationByIdHandler;
+        _createConversationHandler = createConversationHandler;
+        _deleteConversationHandler = deleteConversationHandler;
         _workspaceQuery = workspaceQuery;
         _repositoryAnalyzer = repositoryAnalyzer;
         _logger = logger;
@@ -55,6 +71,67 @@ public sealed class RepositoryBrainController : ControllerBase
         }
 
         return Ok(result.Status);
+    }
+
+    [HttpGet("conversations")]
+    public async Task<IActionResult> GetConversations(
+        [FromRoute] Guid workspaceId,
+        CancellationToken cancellationToken)
+    {
+        var conversations = await _getConversationsHandler
+            .HandleAsync(new GetBrainConversationsQuery(workspaceId), cancellationToken)
+            .ConfigureAwait(false);
+
+        return Ok(conversations);
+    }
+
+    [HttpGet("conversations/{conversationId:guid}")]
+    public async Task<IActionResult> GetConversationById(
+        [FromRoute] Guid workspaceId,
+        [FromRoute] Guid conversationId,
+        CancellationToken cancellationToken)
+    {
+        var conversation = await _getConversationByIdHandler
+            .HandleAsync(new GetBrainConversationByIdQuery(workspaceId, conversationId), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (conversation is null)
+        {
+            return NotFound(new { error = $"Conversation {conversationId} not found for this workspace." });
+        }
+
+        return Ok(conversation);
+    }
+
+    [HttpPost("conversations")]
+    public async Task<IActionResult> CreateConversation(
+        [FromRoute] Guid workspaceId,
+        [FromBody] CreateConversationRequestDto? request,
+        CancellationToken cancellationToken)
+    {
+        var created = await _createConversationHandler
+            .HandleAsync(new CreateBrainConversationCommand(workspaceId, request?.Title), cancellationToken)
+            .ConfigureAwait(false);
+
+        return Ok(created);
+    }
+
+    [HttpDelete("conversations/{conversationId:guid}")]
+    public async Task<IActionResult> DeleteConversation(
+        [FromRoute] Guid workspaceId,
+        [FromRoute] Guid conversationId,
+        CancellationToken cancellationToken)
+    {
+        var deleted = await _deleteConversationHandler
+            .HandleAsync(new DeleteBrainConversationCommand(workspaceId, conversationId), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!deleted)
+        {
+            return NotFound(new { error = $"Conversation {conversationId} not found." });
+        }
+
+        return Ok(new { success = true });
     }
 
     [HttpPost("index")]
@@ -84,7 +161,6 @@ public sealed class RepositoryBrainController : ControllerBase
                 return BadRequest(new { error = "Workspace local directory does not exist." });
             }
 
-            // Run Roslyn analysis for symbol extraction
             RepositoryAnalysisResult? analysisResult = null;
             try
             {
@@ -138,7 +214,7 @@ public sealed class RepositoryBrainController : ControllerBase
         }
 
         var result = await _askHandler
-            .HandleAsync(new AskBrainCommand(workspaceId, request.Question), cancellationToken)
+            .HandleAsync(new AskBrainCommand(workspaceId, request.Question, request.ConversationId), cancellationToken)
             .ConfigureAwait(false);
 
         if (result.IsUnindexed)
@@ -163,8 +239,14 @@ public sealed class RepositoryBrainController : ControllerBase
         public bool GenerateEmbeddings { get; set; } = true;
     }
 
+    public sealed class CreateConversationRequestDto
+    {
+        public string? Title { get; set; }
+    }
+
     public sealed class BrainChatRequestDto
     {
         public string Question { get; set; } = string.Empty;
+        public Guid? ConversationId { get; set; }
     }
 }

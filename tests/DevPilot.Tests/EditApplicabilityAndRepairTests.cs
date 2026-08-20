@@ -477,23 +477,35 @@ public class EditApplicabilityAndRepairTests : IDisposable
         written.Should().Be("public class WindowsSource\r\n{\r\n    public int Counter = 100;\r\n}\r\n");
     }
 
-    // 11. Post-repair applicable output still goes through semantic symbol resolution
+    // 11. Post-repair applicable output proceeds to worktree for compilation without pre-build semantic repair
     [Fact]
-    public async Task EditRepair_PostRepairApplicableOutput_StillRunsSemanticSymbolResolution()
+    public async Task EditRepair_PostRepairApplicableOutput_ProceedsToWorktreeForCompilation()
     {
         var targetFile = Path.Combine(_worktreeDir, "src/DevPilot.Application/MyQueryHandler.cs");
         Directory.CreateDirectory(Path.GetDirectoryName(targetFile)!);
+
         var initialCode = """
             namespace DevPilot.Application;
 
             public sealed class MyQueryHandler
             {
+                private readonly IMyService _service;
+                public MyQueryHandler(IMyService service) => _service = service;
                 public int Handle() => 1;
             }
             """;
         await File.WriteAllTextAsync(targetFile, initialCode);
 
-        // Initial response fails applicability
+        // Response 1: Creates IMyService contract with 2 parameters
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "src/DevPilot.Application/IMyService.cs",
+              "action": "Create",
+              "newContent": "namespace DevPilot.Application;\npublic interface IMyService { void Execute(int a, int b); }"
+            }
+            """);
+
+        // Response 2: Initial attempt for MyQueryHandler fails applicability
         _fakeAiProvider.ResponsesToReturn.Enqueue("""
             {
               "filePath": "src/DevPilot.Application/MyQueryHandler.cs",
@@ -504,15 +516,15 @@ public class EditApplicabilityAndRepairTests : IDisposable
             }
             """);
 
-        // Repair response has valid search/replace applicability, but injects an invented unknown interface
+        // Response 3: Repair response has valid search/replace applicability (code-correctness is deferred to build)
         _fakeAiProvider.ResponsesToReturn.Enqueue("""
             {
               "filePath": "src/DevPilot.Application/MyQueryHandler.cs",
               "action": "Modify",
               "searchReplaceEdits": [
                 {
-                  "search": "public sealed class MyQueryHandler\n{\n    public int Handle() => 1;\n}",
-                  "replace": "public sealed class MyQueryHandler\n{\n    private readonly IInventedUnknownRepository _repo;\n    public MyQueryHandler(IInventedUnknownRepository repo) => _repo = repo;\n    public int Handle() => 1;\n}"
+                  "search": "public int Handle() => 1;",
+                  "replace": "public int Handle() { _service.Execute(1); return 1; }"
                 }
               ]
             }
@@ -521,28 +533,27 @@ public class EditApplicabilityAndRepairTests : IDisposable
         var request = new DeveloperAgentRequest(
             TaskId: Guid.NewGuid(),
             ExecutionId: Guid.NewGuid(),
-            TaskTitle: "Symbol Resolution Guard",
+            TaskTitle: "Semantic Contract Guard",
             TaskDescription: "Desc",
             AcceptanceCriteria: null,
             ImpactAnalysisSummary: "Summary",
             ProposedPlan: "Plan",
-            ImpactedFilePaths: new[] { "src/DevPilot.Application/MyQueryHandler.cs" },
+            ImpactedFilePaths: new[] { "src/DevPilot.Application/IMyService.cs", "src/DevPilot.Application/MyQueryHandler.cs" },
             WorkspacePath: _worktreeDir,
             BranchName: _branchName);
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("Unresolved symbol");
-        result.ErrorMessage.Should().Contain("IInventedUnknownRepository");
+        result.Success.Should().BeTrue();
+        result.ModifiedFiles.Should().Contain("src/DevPilot.Application/MyQueryHandler.cs");
 
-        // Target file remains untouched
-        (await File.ReadAllTextAsync(targetFile)).Should().Be(initialCode);
+        // Target file receives the repaired applicable edits
+        (await File.ReadAllTextAsync(targetFile)).Should().Contain("_service.Execute(1);");
     }
 
-    // 12. Post-repair applicable output still goes through duplicate-type validation
+    // 12. Post-repair applicable output proceeds to worktree for compiler diagnostics
     [Fact]
-    public async Task EditRepair_PostRepairApplicableOutput_StillRunsDuplicateTypeValidation()
+    public async Task EditRepair_PostRepairApplicableOutput_ProceedsToWorktreeForCompilerDiagnostics()
     {
         var f1 = Path.Combine(_worktreeDir, "src/F1.cs");
         var f2 = Path.Combine(_worktreeDir, "src/F2.cs");
@@ -575,7 +586,7 @@ public class EditApplicabilityAndRepairTests : IDisposable
             }
             """);
 
-        // F2 repair applies cleanly, but ALSO declares "SharedHelper" (duplicate type across plan overlay)
+        // F2 repair applies cleanly
         _fakeAiProvider.ResponsesToReturn.Enqueue("""
             {
               "filePath": "src/F2.cs",
@@ -608,9 +619,10 @@ public class EditApplicabilityAndRepairTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("Duplicate type declaration");
-        result.ErrorMessage.Should().Contain("SharedHelper");
+        result.Success.Should().BeTrue();
+        result.ModifiedFiles.Should().Contain("src/F1.cs");
+        result.ModifiedFiles.Should().Contain("src/F2.cs");
+        (await File.ReadAllTextAsync(f2)).Should().Contain("public class SharedHelper {}");
     }
 
     private static void InitGitRepo(string path)

@@ -4,12 +4,13 @@ import { PageContainer, PageHeading } from "@/components/shared"
 import { Button, Panel, Badge, StatusDot } from "@/components/ui/primitives"
 import { useWorkspace } from "@/lib/workspace"
 import { getRepositoryWorkspaceArchitecture } from "@/api"
+import { getCachedWorkspaceArchitecture, setCachedWorkspaceArchitecture } from "@/lib/workspaceCache"
 import type { WorkspaceArchitecture, WorkspaceArchitectureNode, Tone } from "@/types"
 
-const NODE_W = 180
-const NODE_H = 76
-const CANVAS_W = 600
-const CANVAS_H = 640
+const NODE_W = 210
+const NODE_H = 80
+const CANVAS_W = 660
+const CANVAS_H = 660
 
 interface LayoutNode extends WorkspaceArchitectureNode {
   x: number
@@ -100,8 +101,8 @@ function computeNodeLayout(rawNodes: WorkspaceArchitectureNode[]): LayoutNode[] 
 
     occupied.add(`${row},${col}`)
 
-    const x = col === 0 ? 60 : 330
-    const y = 60 + row * 150
+    const x = col === 0 ? 40 : 350
+    const y = 50 + row * 150
 
     return {
       ...n,
@@ -115,34 +116,53 @@ function computeNodeLayout(rawNodes: WorkspaceArchitectureNode[]): LayoutNode[] 
 
 export function Architecture() {
   const { activeWorkspaceId } = useWorkspace()
-  const [architecture, setArchitecture] = useState<WorkspaceArchitecture | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
+  const cached = activeWorkspaceId ? getCachedWorkspaceArchitecture(activeWorkspaceId) : { data: null, isStale: true }
+  const [architecture, setArchitecture] = useState<WorkspaceArchitecture | null>(cached.data)
+  const [isLoading, setIsLoading] = useState(!cached.data && !!activeWorkspaceId)
   const [error, setError] = useState<string | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    if (cached.data?.nodes && cached.data.nodes.length > 0) {
+      const defaultNode =
+        cached.data.nodes.find((n) => n.layer.toLowerCase() === "application") ??
+        cached.data.nodes.find((n) => n.layer.toLowerCase() === "domain") ??
+        cached.data.nodes.find((n) => n.layer.toLowerCase() === "web") ??
+        cached.data.nodes[0]
+      return defaultNode?.id ?? null
+    }
+    return null
+  })
   const [onlyImpacted, setOnlyImpacted] = useState(false)
 
   const fetchArchitecture = useCallback(async (workspaceId: string) => {
-    setIsLoading(true)
+    const c = getCachedWorkspaceArchitecture(workspaceId)
+    if (c.data) {
+      setArchitecture(c.data)
+      setIsLoading(false)
+    } else {
+      setIsLoading(true)
+    }
     setError(null)
     try {
       const data = await getRepositoryWorkspaceArchitecture(workspaceId)
       setArchitecture(data)
+      setCachedWorkspaceArchitecture(workspaceId, data)
       if (data.nodes.length > 0) {
-        // Prefer selecting Application, Domain, or Web node first, else first node
-        const defaultNode =
-          data.nodes.find((n) => n.layer.toLowerCase() === "application") ??
-          data.nodes.find((n) => n.layer.toLowerCase() === "domain") ??
-          data.nodes.find((n) => n.layer.toLowerCase() === "web") ??
-          data.nodes[0]
-        setSelectedId(defaultNode.id)
+        setSelectedId((prev) => {
+          if (prev && data.nodes.some((n) => n.id === prev)) return prev
+          const defaultNode =
+            data.nodes.find((n) => n.layer.toLowerCase() === "application") ??
+            data.nodes.find((n) => n.layer.toLowerCase() === "domain") ??
+            data.nodes.find((n) => n.layer.toLowerCase() === "web") ??
+            data.nodes[0]
+          return defaultNode.id
+        })
       } else {
         setSelectedId(null)
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load architecture graph."
       setError(msg)
-      setArchitecture(null)
-      setSelectedId(null)
+      setArchitecture((prev) => prev)
     } finally {
       setIsLoading(false)
     }
@@ -307,11 +327,11 @@ export function Architecture() {
                           (isSel ? " ring-2 ring-primary ring-offset-2 ring-offset-surface" : "")
                         }
                       >
-                        <div className="flex items-center gap-1.5">
-                          <span className="truncate text-[12.5px] font-semibold text-foreground">{n.label}</span>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="truncate text-[12.5px] font-semibold text-foreground" title={n.label}>{n.label}</span>
                           {n.impacted && <Zap className="h-3 w-3 shrink-0 text-accent" />}
                         </div>
-                        <div className="mt-0.5 truncate font-mono text-[10px] text-subtle-foreground">{n.sub}</div>
+                        <div className="mt-0.5 truncate font-mono text-[10px] text-subtle-foreground" title={n.sub}>{n.sub}</div>
                         <div className="mt-1 tech-label text-[9px]">{n.layer}</div>
                       </div>
                     </foreignObject>
@@ -412,12 +432,12 @@ export function Architecture() {
                 </div>
 
                 <div className="tech-label mb-2 mt-4">Key files</div>
-                <div className="space-y-1">
+                <div className="space-y-1 max-h-52 overflow-y-auto pr-1">
                   {selected.files.length > 0 ? (
                     selected.files.map((f) => (
-                      <div key={f} className="flex items-center gap-2 font-mono text-[11.5px] text-muted-foreground">
-                        <FileCode2 className="h-3.5 w-3.5 text-subtle-foreground" />
-                        {f}
+                      <div key={f} className="flex items-center gap-2 font-mono text-[11.5px] text-muted-foreground min-w-0" title={f}>
+                        <FileCode2 className="h-3.5 w-3.5 shrink-0 text-subtle-foreground" />
+                        <span className="truncate">{f}</span>
                       </div>
                     ))
                   ) : (

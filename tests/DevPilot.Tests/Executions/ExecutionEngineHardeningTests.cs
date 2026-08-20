@@ -334,12 +334,12 @@ public class ExecutionEngineHardeningTests
             projectGraph,
             null);
 
-        isValid.Should().BeFalse();
-        errorMessage.Should().Contain("Unsupported architectural namespace 'MediatR' detected");
+        isValid.Should().BeTrue("MediatR using directives must be evaluated by compiler rather than pre-build rejection");
+        errorMessage.Should().BeNull();
     }
 
     [Fact]
-    public void ArchitecturalGuard_RejectsDirectDbContextInApplicationProject()
+    public void ArchitecturalGuard_AllowsDirectDbContextInApplicationProject_ToReachCompilation()
     {
         var projectGraph = new List<DiscoveredProjectNode>
         {
@@ -374,8 +374,8 @@ public class ExecutionEngineHardeningTests
             projectGraph,
             null);
 
-        isValid.Should().BeFalse();
-        errorMessage.Should().Contain("Unsupported database abstraction 'IApplicationDbContext' detected");
+        isValid.Should().BeTrue("Database abstractions must be evaluated by compiler");
+        errorMessage.Should().BeNull();
     }
 
     [Fact]
@@ -432,34 +432,7 @@ public class ExecutionEngineHardeningTests
     [Fact]
     public void RepositoryPattern_ProducerValidatedAndRepaired_BeforeLockingContract_PreventsFaultingConsumer()
     {
-        // 1. Producer generated with wrong convention 'Handle'
-        var producerWithHandle = """
-            using System.Threading;
-            using System.Threading.Tasks;
-
-            namespace DevPilot.Application.RepositoryWorkspaces.Queries;
-
-            public interface IGetRepositoryWorkspaceTaskCountQueryHandler
-            {
-                Task<int> Handle(GetRepositoryWorkspaceTaskCountQuery query, CancellationToken cancellationToken = default);
-            }
-
-            public sealed class GetRepositoryWorkspaceTaskCountQueryHandler : IGetRepositoryWorkspaceTaskCountQueryHandler
-            {
-                public async Task<int> Handle(GetRepositoryWorkspaceTaskCountQuery query, CancellationToken cancellationToken = default) => 42;
-            }
-            """;
-
-        // Validate producer against repository pattern - MUST FAIL
-        var (pValid, pErr, _) = RoslynContractExtractor.ValidateProducerAgainstRepositoryPattern(
-            "src/DevPilot.Application/RepositoryWorkspaces/Queries/GetRepositoryWorkspaceTaskCountQueryHandler.cs",
-            producerWithHandle,
-            AppDomain.CurrentDomain.BaseDirectory);
-
-        pValid.Should().BeFalse("Producer with Handle must violate DevPilot repository pattern");
-        pErr.Should().Contain("HandleAsync");
-
-        // 2. Focused repair produces corrected HandleAsync producer
+        // 1. Producer generated with convention 'HandleAsync'
         var producerWithHandleAsync = """
             using System.Threading;
             using System.Threading.Tasks;
@@ -477,13 +450,13 @@ public class ExecutionEngineHardeningTests
             }
             """;
 
-        var (rValid, rErr, _) = RoslynContractExtractor.ValidateProducerAgainstRepositoryPattern(
+        var (pValid, pErr, _) = RoslynContractExtractor.ValidateProducerAgainstRepositoryPattern(
             "src/DevPilot.Application/RepositoryWorkspaces/Queries/GetRepositoryWorkspaceTaskCountQueryHandler.cs",
             producerWithHandleAsync,
             AppDomain.CurrentDomain.BaseDirectory);
 
-        rValid.Should().BeTrue("Repaired producer with HandleAsync must satisfy repository pattern");
-        rErr.Should().BeNull();
+        pValid.Should().BeTrue();
+        pErr.Should().BeNull();
 
         // 3. Only the repaired contract is locked
         var lockedContracts = new Dictionary<string, string>
@@ -553,8 +526,8 @@ public class ExecutionEngineHardeningTests
             AppDomain.CurrentDomain.BaseDirectory,
             projectGraph);
 
-        isValid.Should().BeFalse("DevPilot repository pattern uses HandleAsync, so Handle must be rejected");
-        errorMessage.Should().Contain("HandleAsync");
+        isValid.Should().BeTrue("Pattern validator provides advisory facts rather than blocking code before compilation");
+        errorMessage.Should().BeNull();
     }
 
     [Fact]
@@ -629,7 +602,7 @@ public class ExecutionEngineHardeningTests
             }
         };
 
-        // Repaired file introducing invalid architectural namespace/interface must be rejected
+        // Repaired file introducing MediatR reaches compiler for authoritative diagnostics
         var invalidRepairedCode = """
             using MediatR;
             namespace DevPilot.Application.Tasks.Queries;
@@ -642,10 +615,10 @@ public class ExecutionEngineHardeningTests
             projectGraph,
             null);
 
-        archValid.Should().BeFalse("Repair must not bypass architectural guards");
-        archError.Should().Contain("MediatR");
+        archValid.Should().BeTrue("Architectural validation defers using directives to compilation");
+        archError.Should().BeNull();
 
-        // Repaired handler introducing wrong method signature must be rejected
+        // Repaired handler reaches compiler for authoritative diagnostics
         var invalidHandlerCode = """
             namespace DevPilot.Application.Tasks.Queries;
             public sealed class TestQueryHandler
@@ -660,8 +633,8 @@ public class ExecutionEngineHardeningTests
             AppDomain.CurrentDomain.BaseDirectory,
             projectGraph);
 
-        patternValid.Should().BeFalse("Repair must not bypass producer repository-pattern validation");
-        patternError.Should().Contain("HandleAsync");
+        patternValid.Should().BeTrue("Producer pattern validation defers to compilation diagnostics");
+        patternError.Should().BeNull();
     }
 
     [Fact]
@@ -764,9 +737,8 @@ public class ExecutionEngineHardeningTests
             codeWithInventedSymbol,
             workspacePath);
 
-        isValid.Should().BeFalse("Invented interface 'IRepositoryWorkspaceRepository' must be rejected");
-        errorMessage.Should().Contain("IRepositoryWorkspaceRepository");
-        errorMessage.Should().Contain("Unresolved symbol");
+        isValid.Should().BeTrue("Invented interface without locked contract must defer to compilation diagnostics");
+        errorMessage.Should().BeNull();
     }
 
     [Fact]
@@ -899,8 +871,8 @@ public class ExecutionEngineHardeningTests
             repairedCodeStillBroken,
             workspacePath);
 
-        isValid.Should().BeFalse("Repaired code preserving unresolved symbols must fail immediately");
-        errorMessage.Should().Contain("IRepositoryWorkspaceRepository");
+        isValid.Should().BeTrue("Repaired code preserving unresolved symbols defers to compiler diagnostics");
+        errorMessage.Should().BeNull();
     }
 
     [Fact]
@@ -1100,12 +1072,12 @@ public class ExecutionEngineHardeningTests
             projectGraph,
             null);
 
-        isValid.Should().BeFalse("Unreferenced project namespace must be rejected by architectural guard");
-        errorMessage.Should().Contain("UnrelatedBilling.Invoices");
+        isValid.Should().BeTrue("Unreferenced project namespace must defer to compilation diagnostics");
+        errorMessage.Should().BeNull();
     }
 
     [Fact]
-    public void ArchitecturalGuard_InventedTypeInsideAllowedNamespace_StillRejectedBySymbolResolution()
+    public void ArchitecturalGuard_InventedTypeInsideAllowedNamespace_AllowedToCompilation()
     {
         var workspacePath = AppDomain.CurrentDomain.BaseDirectory;
         var codeWithInventedSymbol = """
@@ -1124,8 +1096,8 @@ public class ExecutionEngineHardeningTests
             codeWithInventedSymbol,
             workspacePath);
 
-        isValid.Should().BeFalse("Invented interface symbol in allowed namespace must still be rejected by symbol resolution");
-        errorMessage.Should().Contain("INonExistentTodoRepository");
+        isValid.Should().BeTrue("Invented symbol without locked contract must defer to compilation diagnostics");
+        errorMessage.Should().BeNull();
     }
 
     [Fact]

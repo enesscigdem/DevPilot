@@ -4,7 +4,8 @@ namespace DevPilot.Application.ProjectBrain.Commands.AskBrain;
 
 public sealed record AskBrainCommand(
     Guid WorkspaceId,
-    string Question);
+    string Question,
+    Guid? ConversationId = null);
 
 public interface IAskBrainCommandHandler
 {

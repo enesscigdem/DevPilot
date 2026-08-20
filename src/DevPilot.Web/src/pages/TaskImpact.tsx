@@ -259,8 +259,36 @@ export function TaskImpact() {
     if (!id || isAnalyzing) return
     setIsAnalyzing(true)
     setAnalysisError(null)
+
+    // Launch server-side impact analysis
+    const analysisPromise = analyzeTaskImpact(id)
+
+    // Bounded authoritative hydration: poll immediately and deterministically until InProgress is observed
+    const hydrateAnalyzingState = async () => {
+      for (let attempt = 0; attempt < 12; attempt++) {
+        try {
+          const [updatedTask, updatedAnalysis] = await Promise.all([
+            getTask(id).catch(() => null),
+            getTaskImpactAnalysis(id).catch(() => null),
+          ])
+          const isTaskAnalyzing = updatedTask?.status === TaskStatus.Analyzing
+          const isAnalysisInProgress = updatedAnalysis?.status === ImpactAnalysisStatus.InProgress
+
+          if (isTaskAnalyzing || isAnalysisInProgress) {
+            if (updatedTask) setTask(updatedTask)
+            if (updatedAnalysis) setAnalysis(updatedAnalysis)
+            break
+          }
+        } catch {
+          // ignore transient hydration error
+        }
+        await new Promise((r) => setTimeout(r, 20))
+      }
+    }
+    void hydrateAnalyzingState()
+
     try {
-      const result = await analyzeTaskImpact(id)
+      const result = await analysisPromise
       setAnalysis(result)
 
       // Re-fetch updated task so task status in header refreshes immediately
@@ -272,7 +300,7 @@ export function TaskImpact() {
       }
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "Failed to generate impact analysis.")
-      // Re-fetch in case backend marked it Failed
+      // Re-fetch authoritative terminal state (Completed or Failed)
       try {
         const [updatedTask, updatedAnalysis] = await Promise.all([
           getTask(id).catch(() => null),
