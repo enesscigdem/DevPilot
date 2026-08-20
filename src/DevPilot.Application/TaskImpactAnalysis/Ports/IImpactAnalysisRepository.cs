@@ -12,4 +12,21 @@ public interface IImpactAnalysisRepository
     Task AddAsync(
         TaskImpactAnalysisEntity analysis,
         CancellationToken cancellationToken = default);
+
+    Task UpdateAsync(
+        TaskImpactAnalysisEntity analysis,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> StartAnalysisAtomicAsync(
+        TaskImpactAnalysisEntity analysis,
+        DevelopmentTask task,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> HasActiveAnalysisForTaskAsync(
+        Guid taskId,
+        CancellationToken cancellationToken = default);
+
+    Task<int> ReconcileStaleAnalysesAsync(
+        DateTime cutoffUtc,
+        CancellationToken cancellationToken = default);
 }

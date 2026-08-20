@@ -505,6 +505,11 @@ public class FakeImpactAnalysisRepository : IImpactAnalysisRepository
     {
         return Task.CompletedTask;
     }
+
+    public Task UpdateAsync(TaskImpactAnalysis analysis, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public Task<bool> StartAnalysisAtomicAsync(TaskImpactAnalysis analysis, DevelopmentTask task, CancellationToken cancellationToken = default) => Task.FromResult(true);
+    public Task<bool> HasActiveAnalysisForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<int> ReconcileStaleAnalysesAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
 }
 
 public class FakeExecutionValidationRunner : IExecutionValidationRunner

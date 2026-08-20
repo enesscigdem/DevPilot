@@ -338,6 +338,21 @@ public sealed class RetryExecutionCommandTests
             Analyses[analysis.DevelopmentTaskId] = analysis;
             return Task.CompletedTask;
         }
+
+        public Task UpdateAsync(TaskImpactAnalysis analysis, CancellationToken cancellationToken = default)
+        {
+            Analyses[analysis.DevelopmentTaskId] = analysis;
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> StartAnalysisAtomicAsync(TaskImpactAnalysis analysis, DevelopmentTask task, CancellationToken cancellationToken = default)
+        {
+            Analyses[analysis.DevelopmentTaskId] = analysis;
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> HasActiveAnalysisForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<int> ReconcileStaleAnalysesAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
     }
 
     private sealed class FakeExecutionRepository : IExecutionRepository

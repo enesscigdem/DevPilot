@@ -10,6 +10,10 @@ public sealed class AnalyzeTaskImpactResult
 
     public string? ErrorMessage { get; set; }
 
+    public bool NotFound { get; set; }
+
+    public bool Conflict { get; set; }
+
     public Guid? AnalysisId { get; set; }
 
     public ImpactAnalysisDto? Analysis { get; set; }

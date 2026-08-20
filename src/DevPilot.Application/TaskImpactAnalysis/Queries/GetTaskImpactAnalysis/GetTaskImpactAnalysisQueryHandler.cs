@@ -38,6 +38,27 @@ public sealed class GetTaskImpactAnalysisQueryHandler : IGetTaskImpactAnalysisQu
             };
         }
 
+        // Auto-reconcile stale InProgress analysis (e.g. after crash / restart)
+        if (analysis.Status == ImpactAnalysisStatus.InProgress &&
+            analysis.CreatedAt < DateTime.UtcNow - TimeSpan.FromMinutes(5))
+        {
+            await _analysisRepository
+                .ReconcileStaleAnalysesAsync(DateTime.UtcNow - TimeSpan.FromMinutes(5), cancellationToken)
+                .ConfigureAwait(false);
+
+            analysis = await _analysisRepository
+                .GetLatestByTaskIdAsync(query.TaskId, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (analysis is null)
+            {
+                return new GetTaskImpactAnalysisResult
+                {
+                    ErrorMessage = "No impact analysis found for this task.",
+                };
+            }
+        }
+
         return new GetTaskImpactAnalysisResult
         {
             Found = true,
