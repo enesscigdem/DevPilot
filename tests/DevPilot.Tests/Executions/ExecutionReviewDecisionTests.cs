@@ -555,6 +555,10 @@ public class ExecutionReviewDecisionTests : IDisposable
     private sealed class FakeImpactAnalysisRepository : DevPilot.Application.TaskImpactAnalysis.Ports.IImpactAnalysisRepository
     {
         public Task AddAsync(TaskImpactAnalysis analysis, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task UpdateAsync(TaskImpactAnalysis analysis, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<bool> StartAnalysisAtomicAsync(TaskImpactAnalysis analysis, DevelopmentTask task, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> HasActiveAnalysisForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<int> ReconcileStaleAnalysesAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
         public Task<TaskImpactAnalysis?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) => Task.FromResult<TaskImpactAnalysis?>(null);
         public Task<TaskImpactAnalysis?> GetLatestByTaskIdAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult<TaskImpactAnalysis?>(null);
         public Task<IReadOnlyList<TaskImpactAnalysis>> GetByTaskIdAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<TaskImpactAnalysis>>(Array.Empty<TaskImpactAnalysis>());

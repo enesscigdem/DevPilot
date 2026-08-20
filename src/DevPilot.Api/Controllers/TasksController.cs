@@ -205,13 +205,18 @@ public class TasksController : ControllerBase
                 result.Analysis);
         }
 
+        if (result.NotFound)
+        {
+            return NotFound(new { error = result.ErrorMessage ?? "Task not found." });
+        }
+
+        if (result.Conflict)
+        {
+            return Conflict(new { error = result.ErrorMessage });
+        }
+
         if (result.AnalysisId is null)
         {
-            if (result.ErrorMessage == "Task not found.")
-            {
-                return NotFound(new { error = result.ErrorMessage });
-            }
-
             return BadRequest(new { error = result.ErrorMessage });
         }
 

@@ -153,6 +153,10 @@ public class DevPilotDbContext : DbContext
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => e.DevelopmentTaskId);
             entity.HasIndex(e => new { e.DevelopmentTaskId, e.CreatedAt });
+            entity.HasIndex(e => e.DevelopmentTaskId)
+                .HasFilter("\"Status\" = 'InProgress'")
+                .IsUnique()
+                .HasDatabaseName("IX_TaskImpactAnalyses_ActivePerTask");
             entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.Summary).HasMaxLength(4000);
             entity.Property(e => e.Model).HasMaxLength(200);

@@ -137,6 +137,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 return new AnalyzeTaskImpactResult
                 {
                     Success = false,
+                    NotFound = true,
                     ErrorMessage = "Task not found.",
                 };
             }
@@ -154,6 +155,43 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             {
                 Success = false,
                 ErrorMessage = "Failed to load the task.",
+            };
+        }
+
+        if (task.Status is DevelopmentTaskStatus.Executing or DevelopmentTaskStatus.Completed)
+        {
+            return new AnalyzeTaskImpactResult
+            {
+                Success = false,
+                Conflict = true,
+                ErrorMessage = $"Cannot analyze impact for a task in '{task.Status}' status.",
+            };
+        }
+
+        // Auto-reconcile any stale InProgress analysis before evaluating active state
+        try
+        {
+            await _analysisRepository
+                .ReconcileStaleAnalysesAsync(DateTime.UtcNow - TimeSpan.FromMinutes(5), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to reconcile stale analyses before starting analysis for task {TaskId}.", task.Id);
+        }
+
+        // Optimistic pre-check for active analysis
+        var hasActive = await _analysisRepository
+            .HasActiveAnalysisForTaskAsync(command.TaskId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (hasActive)
+        {
+            return new AnalyzeTaskImpactResult
+            {
+                Success = false,
+                Conflict = true,
+                ErrorMessage = "An impact analysis is already in progress for this task.",
             };
         }
 
@@ -180,23 +218,33 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             };
         }
 
-        try
+        var now = DateTime.UtcNow;
+        var analysis = new TaskImpactAnalysisEntity
         {
-            task.Status = DevelopmentTaskStatus.Analyzing;
-            task.UpdatedAt = DateTime.UtcNow;
-            await _taskRepository.UpdateAsync(task, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            _logger.LogError(
-                exception,
-                "Failed to set task {TaskId} status to Analyzing.",
-                task.Id);
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task.Id,
+            Status = ImpactAnalysisStatus.InProgress,
+            Summary = string.Empty,
+            Confidence = 0,
+            CreatedAt = now,
+            CompletedAt = null,
+            ErrorMessage = null,
+        };
 
+        task.Status = DevelopmentTaskStatus.Analyzing;
+        task.UpdatedAt = now;
+
+        var persisted = await _analysisRepository
+            .StartAnalysisAtomicAsync(analysis, task, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!persisted)
+        {
             return new AnalyzeTaskImpactResult
             {
                 Success = false,
-                ErrorMessage = "Failed to start the analysis.",
+                Conflict = true,
+                ErrorMessage = "An impact analysis is already in progress for this task.",
             };
         }
 
@@ -204,12 +252,17 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         string? model = null;
         var providerName = _aiProvider.ProviderName;
 
+        // Use a server-owned timeout token so that client disconnect / browser refresh
+        // does not abort the server-side analysis execution.
+        using var serverTimeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        var executionToken = serverTimeoutCts.Token;
+
         try
         {
             var projectGraph = ProjectGraphHelper.DiscoverProjectGraph(workspace.LocalPath);
             var projectRoots = ProjectGraphHelper.DiscoverProjectRoots(workspace.LocalPath);
 
-            var context = await BuildContextAsync(task, workspace, cancellationToken).ConfigureAwait(false);
+            var context = await BuildContextAsync(task, workspace, executionToken).ConfigureAwait(false);
             var aiRequest = new AiRequest
             {
                 SystemPrompt = SystemPrompt,
@@ -218,7 +271,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
             var stopwatch = Stopwatch.StartNew();
             var aiResponse = await _aiProvider
-                .SendAsync(aiRequest, cancellationToken)
+                .SendAsync(aiRequest, executionToken)
                 .ConfigureAwait(false);
             stopwatch.Stop();
 
@@ -231,50 +284,48 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             if (!aiResponse.IsSuccess)
             {
                 return await FailAnalysisAsync(
+                    analysis,
                     task,
                     aiResponse.ErrorMessage ?? "AI provider returned an unsuccessful response.",
                     rawResponse,
                     model,
                     providerName,
-                    cancellationToken).ConfigureAwait(false);
+                    executionToken).ConfigureAwait(false);
             }
 
             var parseResult = TryParseStructuredResult(rawResponse, projectGraph, projectRoots, workspace.LocalPath);
             if (!parseResult.Success)
             {
                 return await FailAnalysisAsync(
+                    analysis,
                     task,
                     parseResult.ErrorMessage ?? "Failed to parse the AI response.",
                     rawResponse,
                     model,
                     providerName,
-                    cancellationToken).ConfigureAwait(false);
+                    executionToken).ConfigureAwait(false);
             }
 
-            var now = DateTime.UtcNow;
+            var completedAt = DateTime.UtcNow;
             var structuredResult = parseResult.ResultData!;
-            var analysis = new TaskImpactAnalysisEntity
-            {
-                Id = Guid.NewGuid(),
-                DevelopmentTaskId = task.Id,
-                Status = ImpactAnalysisStatus.Completed,
-                Summary = structuredResult.Summary,
-                Confidence = structuredResult.Confidence,
-                Model = model,
-                ProviderName = providerName,
-                RawResponse = rawResponse,
-                StructuredResult = structuredResult,
-                CreatedAt = now,
-                CompletedAt = now,
-            };
+
+            analysis.Status = ImpactAnalysisStatus.Completed;
+            analysis.Summary = structuredResult.Summary;
+            analysis.Confidence = structuredResult.Confidence;
+            analysis.Model = model;
+            analysis.ProviderName = providerName;
+            analysis.RawResponse = rawResponse;
+            analysis.StructuredResult = structuredResult;
+            analysis.CompletedAt = completedAt;
+            analysis.ErrorMessage = null;
 
             await _analysisRepository
-                .AddAsync(analysis, cancellationToken)
+                .UpdateAsync(analysis, executionToken)
                 .ConfigureAwait(false);
 
             task.Status = DevelopmentTaskStatus.AwaitingApproval;
-            task.UpdatedAt = now;
-            await _taskRepository.UpdateAsync(task, cancellationToken).ConfigureAwait(false);
+            task.UpdatedAt = completedAt;
+            await _taskRepository.UpdateAsync(task, executionToken).ConfigureAwait(false);
 
             _logger.LogInformation(
                 "Impact analysis {AnalysisId} completed for task {TaskId} in {ElapsedMs}ms.",
@@ -291,7 +342,14 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         }
         catch (OperationCanceledException)
         {
-            throw;
+            return await FailAnalysisAsync(
+                analysis,
+                task,
+                "Impact analysis operation timed out.",
+                rawResponse,
+                model,
+                providerName,
+                CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -301,12 +359,13 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 task.Id);
 
             return await FailAnalysisAsync(
+                analysis,
                 task,
                 "An unexpected error occurred during impact analysis.",
                 rawResponse,
                 model,
                 providerName,
-                cancellationToken).ConfigureAwait(false);
+                CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -854,6 +913,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     }
 
     private async Task<AnalyzeTaskImpactResult> FailAnalysisAsync(
+        TaskImpactAnalysisEntity analysis,
         DevelopmentTask task,
         string errorMessage,
         string? rawResponse,
@@ -867,25 +927,17 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             errorMessage);
 
         var now = DateTime.UtcNow;
-        var failedAnalysis = new TaskImpactAnalysisEntity
-        {
-            Id = Guid.NewGuid(),
-            DevelopmentTaskId = task.Id,
-            Status = ImpactAnalysisStatus.Failed,
-            Summary = string.Empty,
-            Confidence = 0,
-            Model = model,
-            ProviderName = providerName,
-            RawResponse = rawResponse,
-            ErrorMessage = errorMessage,
-            CreatedAt = now,
-            CompletedAt = now,
-        };
+        analysis.Status = ImpactAnalysisStatus.Failed;
+        analysis.Model = model;
+        analysis.ProviderName = providerName;
+        analysis.RawResponse = rawResponse;
+        analysis.ErrorMessage = errorMessage;
+        analysis.CompletedAt = now;
 
         try
         {
             await _analysisRepository
-                .AddAsync(failedAnalysis, cancellationToken)
+                .UpdateAsync(analysis, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -914,7 +966,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         {
             Success = false,
             ErrorMessage = errorMessage,
-            AnalysisId = failedAnalysis.Id,
+            AnalysisId = analysis.Id,
         };
     }
 

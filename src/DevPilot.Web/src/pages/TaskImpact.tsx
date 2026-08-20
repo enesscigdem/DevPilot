@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import {
   ArrowLeft,
@@ -21,9 +21,10 @@ import {
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Panel, Badge, Meter, StatusDot, IconChip } from "@/components/ui/primitives"
+import { FormattedText } from "@/components/FormattedText"
 import { getTask, getTaskImpactAnalysis, analyzeTaskImpact, approveTask, rejectTask, startExecution, retryExecution, getExecutions } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
-import { deriveTaskImpactActionState } from "@/lib/taskImpactState"
+import { deriveTaskImpactActionState, deriveTaskImpactLifecycle } from "@/lib/taskImpactState"
 import {
   TaskStatus,
   TaskPriority,
@@ -33,33 +34,9 @@ import {
   type ImpactAnalysis,
   type ImpactedFile,
   type ExecutionListItem,
+  type Tone,
 } from "@/types"
-import { activeTask, affectedFiles as mockAffectedFiles, impactSummary as mockImpactSummary, statusMeta, riskMeta, type Tone } from "@/data/mock"
-
-function getStatusToneAndLabel(status: number): { tone: Tone; label: string } {
-  switch (status) {
-    case TaskStatus.Draft:
-      return { tone: "gray", label: "Draft" }
-    case TaskStatus.ReadyForAnalysis:
-      return { tone: "neutral", label: "Ready for Analysis" }
-    case TaskStatus.Analyzing:
-      return { tone: "blue", label: "Analyzing" }
-    case TaskStatus.AwaitingApproval:
-      return { tone: "amber", label: "Awaiting approval" }
-    case TaskStatus.Approved:
-      return { tone: "blue", label: "Approved" }
-    case TaskStatus.Executing:
-      return { tone: "blue", label: "Executing" }
-    case TaskStatus.Completed:
-      return { tone: "green", label: "Merged" }
-    case TaskStatus.Failed:
-      return { tone: "red", label: "Failed" }
-    case TaskStatus.Rejected:
-      return { tone: "red", label: "Rejected" }
-    default:
-      return { tone: "neutral", label: "Unknown" }
-  }
-}
+import { activeTask, affectedFiles as mockAffectedFiles, impactSummary as mockImpactSummary, riskMeta } from "@/data/mock"
 
 function getPriorityToneAndLabel(priority: number): { tone: Tone; label: string } {
   switch (priority) {
@@ -117,6 +94,32 @@ export function TaskImpact() {
   const [isRetryingExecution, setIsRetryingExecution] = useState(false)
   const [retryExecutionError, setRetryExecutionError] = useState<string | null>(null)
 
+  // 1-second ticker for live elapsed time updates
+  const [nowMs, setNowMs] = useState<number>(Date.now())
+  useEffect(() => {
+    const ticker = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(ticker)
+  }, [])
+
+  // Fallback to mock data if viewing mock task ID
+  const isMockView = !id || id === activeTask.id || id === "TASK-142"
+
+  const lifecycleState = deriveTaskImpactLifecycle(
+    task,
+    analysis,
+    activeExecution,
+    isMockView,
+    mockStatus,
+    nowMs,
+  )
+
+  const actionState = deriveTaskImpactActionState(
+    task?.status,
+    activeExecution,
+    isMockView,
+    mockStatus,
+  )
+
   const handleStartExecution = async () => {
     if (!id || isStartingExecution) return
     setIsStartingExecution(true)
@@ -128,22 +131,6 @@ export function TaskImpact() {
       navigate(`/executions/${execution.id}`)
     } catch (err) {
       setStartExecutionError(err instanceof Error ? err.message : "Failed to start execution.")
-      // Refetch task and executions from server to surface any existing active execution
-      try {
-        const [updatedTask, execs] = await Promise.all([
-          getTask(id),
-          getExecutions(activeWorkspaceId).catch(() => []),
-        ])
-        setTask(updatedTask)
-        const active = execs.find(
-          (e) =>
-            e.developmentTaskId === id &&
-            (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running),
-        )
-        setActiveExecution(active ?? null)
-      } catch {
-        // ignore
-      }
     } finally {
       setIsStartingExecution(false)
     }
@@ -160,42 +147,22 @@ export function TaskImpact() {
       navigate(`/executions/${execution.id}`)
     } catch (err) {
       setRetryExecutionError(err instanceof Error ? err.message : "Failed to retry execution.")
-      // Refetch task and executions from server to surface any existing active execution
-      try {
-        const [updatedTask, execs] = await Promise.all([
-          getTask(id),
-          getExecutions(activeWorkspaceId).catch(() => []),
-        ])
-        setTask(updatedTask)
-        const active = execs.find(
-          (e) =>
-            e.developmentTaskId === id &&
-            (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running),
-        )
-        setActiveExecution(active ?? null)
-      } catch {
-        // ignore
-      }
     } finally {
       setIsRetryingExecution(false)
     }
   }
 
   const loadData = useCallback(async () => {
-    if (!id) return
+    if (!id || id === activeTask.id || id === "TASK-142") {
+      setIsLoading(false)
+      return
+    }
+
     setIsLoading(true)
     setError(null)
-    try {
-      // Check if this matches mock task id
-      if (id === activeTask.id || id === "TASK-142") {
-        setTask(null)
-        setAnalysis(null)
-        setActiveExecution(null)
-        setIsLoading(false)
-        return
-      }
 
-      // 1. Fetch task details & executions in parallel
+    try {
+      // 1. Fetch task details & active executions in parallel
       const [loadedTask, execs] = await Promise.all([
         getTask(id),
         getExecutions(activeWorkspaceId).catch(() => []),
@@ -228,20 +195,50 @@ export function TaskImpact() {
     loadData()
   }, [loadData])
 
+  // Dedicated scoped polling while analysis is in progress
+  const isPollingAnalysisRef = useRef(false)
+  useEffect(() => {
+    if (!lifecycleState.isAnalyzing || !id || isMockView) return
+
+    const interval = setInterval(async () => {
+      if (isPollingAnalysisRef.current) return
+      isPollingAnalysisRef.current = true
+      try {
+        const [updatedTask, updatedAnalysis] = await Promise.all([
+          getTask(id).catch(() => null),
+          getTaskImpactAnalysis(id).catch(() => null),
+        ])
+        if (updatedTask) setTask(updatedTask)
+        if (updatedAnalysis) setAnalysis(updatedAnalysis)
+      } catch {
+        // ignore polling network errors
+      } finally {
+        isPollingAnalysisRef.current = false
+      }
+    }, 2500)
+
+    return () => {
+      clearInterval(interval)
+    }
+  }, [id, lifecycleState.isAnalyzing, isMockView])
+
   // Scoped polling while task has an actual active execution OR task.status claims Executing
+  const isPollingExecRef = useRef(false)
   useEffect(() => {
     const isExecutingOrSyncing =
       activeExecution != null || task?.status === TaskStatus.Executing
 
-    if (!isExecutingOrSyncing || !id) return
+    if (!isExecutingOrSyncing || !id || isMockView) return
 
     const interval = setInterval(async () => {
+      if (isPollingExecRef.current) return
+      isPollingExecRef.current = true
       try {
         const [updatedTask, execs] = await Promise.all([
-          getTask(id),
+          getTask(id).catch(() => null),
           getExecutions(activeWorkspaceId).catch(() => []),
         ])
-        setTask(updatedTask)
+        if (updatedTask) setTask(updatedTask)
         const active = execs.find(
           (e) =>
             e.developmentTaskId === id &&
@@ -250,11 +247,13 @@ export function TaskImpact() {
         setActiveExecution(active ?? null)
       } catch {
         // ignore polling failures
+      } finally {
+        isPollingExecRef.current = false
       }
     }, 3500)
 
     return () => clearInterval(interval)
-  }, [id, activeWorkspaceId, activeExecution, task?.status])
+  }, [id, activeWorkspaceId, activeExecution, task?.status, isMockView])
 
   const handleStartAnalysis = async () => {
     if (!id || isAnalyzing) return
@@ -264,7 +263,7 @@ export function TaskImpact() {
       const result = await analyzeTaskImpact(id)
       setAnalysis(result)
 
-      // Re-fetch updated task so task status in header refreshes immediately (e.g. to AwaitingApproval)
+      // Re-fetch updated task so task status in header refreshes immediately
       try {
         const updatedTask = await getTask(id)
         setTask(updatedTask)
@@ -273,37 +272,36 @@ export function TaskImpact() {
       }
     } catch (err) {
       setAnalysisError(err instanceof Error ? err.message : "Failed to generate impact analysis.")
+      // Re-fetch in case backend marked it Failed
+      try {
+        const [updatedTask, updatedAnalysis] = await Promise.all([
+          getTask(id).catch(() => null),
+          getTaskImpactAnalysis(id).catch(() => null),
+        ])
+        if (updatedTask) setTask(updatedTask)
+        if (updatedAnalysis) setAnalysis(updatedAnalysis)
+      } catch {
+        // ignore
+      }
     } finally {
       setIsAnalyzing(false)
     }
   }
 
-  // Fallback to mock data if viewing mock task ID
-  const isMockView = !id || id === activeTask.id || id === "TASK-142"
-
   const handleApprove = async () => {
     if (!id || isApproving || isRejecting) return
-    if (isMockView) {
-      setMockStatus("approved")
-      return
-    }
-
     setIsApproving(true)
     setApprovalError(null)
-
     try {
-      await approveTask(id)
-      const updatedTask = await getTask(id)
-      setTask(updatedTask)
+      if (isMockView) {
+        setMockStatus("approved")
+      } else {
+        await approveTask(id)
+        const updatedTask = await getTask(id)
+        setTask(updatedTask)
+      }
     } catch (err) {
       setApprovalError(err instanceof Error ? err.message : "Failed to approve task.")
-      // Sync latest task status from backend in case of 409 Conflict
-      try {
-        const currentTask = await getTask(id)
-        setTask(currentTask)
-      } catch {
-        // ignore secondary fetch failure
-      }
     } finally {
       setIsApproving(false)
     }
@@ -311,27 +309,18 @@ export function TaskImpact() {
 
   const handleReject = async () => {
     if (!id || isApproving || isRejecting) return
-    if (isMockView) {
-      setMockStatus("rejected")
-      return
-    }
-
     setIsRejecting(true)
     setApprovalError(null)
-
     try {
-      await rejectTask(id)
-      const updatedTask = await getTask(id)
-      setTask(updatedTask)
+      if (isMockView) {
+        setMockStatus("rejected")
+      } else {
+        await rejectTask(id)
+        const updatedTask = await getTask(id)
+        setTask(updatedTask)
+      }
     } catch (err) {
       setApprovalError(err instanceof Error ? err.message : "Failed to reject task.")
-      // Sync latest task status from backend in case of 409 Conflict
-      try {
-        const currentTask = await getTask(id)
-        setTask(currentTask)
-      } catch {
-        // ignore secondary fetch failure
-      }
     } finally {
       setIsRejecting(false)
     }
@@ -339,59 +328,34 @@ export function TaskImpact() {
 
   if (isLoading) {
     return (
-      <PageContainer className="flex flex-col items-center justify-center py-24">
-        <Loader2 className="h-6 w-6 animate-spin text-subtle-foreground" />
-        <p className="mt-3 text-[13.5px] text-muted-foreground">Loading task impact analysis…</p>
+      <PageContainer className="flex items-center justify-center py-24">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="h-6 w-6 animate-spin text-primary" />
+          <span className="tech-label">Loading task impact analysis…</span>
+        </div>
       </PageContainer>
     )
   }
 
-  if (error) {
+  if (error || (!isMockView && !task)) {
     return (
-      <PageContainer className="flex flex-col items-center justify-center py-20">
-        <AlertCircle className="h-8 w-8 text-danger" />
-        <h2 className="mt-3 text-[16px] font-semibold text-foreground">Task not found</h2>
-        <p className="mt-1 text-[13px] text-muted-foreground">{error}</p>
-        <Button variant="default" size="sm" className="mt-4" onClick={() => navigate("/tasks")}>
-          <ArrowLeft className="h-3.5 w-3.5" />
-          Back to tasks
-        </Button>
+      <PageContainer className="py-12">
+        <div className="mx-auto max-w-md text-center">
+          <AlertCircle className="mx-auto h-8 w-8 text-danger" />
+          <h2 className="mt-3 text-[15px] font-semibold text-foreground">Task not found</h2>
+          <p className="mt-1 text-[13px] text-muted-foreground">{error || "The requested task could not be loaded."}</p>
+          <Button variant="default" size="md" className="mt-4" onClick={() => navigate("/tasks")}>
+            <ArrowLeft className="h-4 w-4" />
+            Back to tasks
+          </Button>
+        </div>
       </PageContainer>
     )
   }
 
-  // Render variables derived from either real API or mock fallback
-  const displayId = isMockView
-    ? activeTask.id
-    : task
-      ? task.id.length > 12
-        ? `TASK-${task.id.slice(0, 8)}`
-        : task.id
-      : id || ""
-
-  const displayTitle = isMockView ? activeTask.title : task?.title || "Untitled Task"
-  const displayBranch = isMockView
-    ? activeTask.branch
-    : task
-      ? `${task.repositoryOwner}/${task.repositoryName}`
-      : "master"
-
-  const actionState = deriveTaskImpactActionState(
-    task?.status,
-    activeExecution,
-    isMockView,
-    mockStatus,
-  )
-
-  const statusInfo = isMockView
-    ? (mockStatus === "approved"
-        ? { tone: "blue" as Tone, label: "Approved" }
-        : mockStatus === "rejected"
-          ? { tone: "red" as Tone, label: "Rejected" }
-          : statusMeta[mockStatus as keyof typeof statusMeta] || { tone: "amber" as Tone, label: "Awaiting approval" })
-    : task
-      ? getStatusToneAndLabel(task.status)
-      : { tone: "neutral" as Tone, label: "Unknown" }
+  const displayTitle = isMockView ? activeTask.title : task?.title || "Untitled task"
+  const displayId = isMockView ? activeTask.id : `TASK-${task?.id.slice(0, 6).toUpperCase()}`
+  const displayBranch = isMockView ? activeTask.branch : `feature/${task?.title.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30)}`
 
   const priorityInfo = isMockView
     ? { tone: riskMeta[activeTask.risk].tone, label: activeTask.risk === "low" ? "Low" : activeTask.risk === "high" ? "High" : "Medium" }
@@ -401,11 +365,7 @@ export function TaskImpact() {
 
   const structured = analysis?.structuredResult
 
-  const hasCompletedAnalysis =
-    isMockView ||
-    (analysis !== null &&
-      analysis.status === ImpactAnalysisStatus.Completed &&
-      structured !== null)
+  const hasCompletedAnalysis = lifecycleState.isSucceeded
 
   // Risk badge comes ONLY from real persisted impact analysis data (or mock view)
   let analysisRiskInfo: { tone: Tone; label: string } | null = null
@@ -476,7 +436,22 @@ export function TaskImpact() {
               <span className="truncate">{displayBranch}</span>
             </div>
           </div>
-          <Badge tone={statusInfo.tone} className="shrink-0">{statusInfo.label}</Badge>
+          <Badge tone={lifecycleState.statusTone} className="shrink-0">
+            {lifecycleState.isAnalyzing && (
+              <span className="relative flex h-2 w-2 mr-1.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+              </span>
+            )}
+            {lifecycleState.statusLabel}
+          </Badge>
+          {lifecycleState.durationFormatted && (
+            <Badge tone="neutral" className="shrink-0 font-mono text-[11px]">
+              {lifecycleState.isSucceeded
+                ? `Completed in ${lifecycleState.durationFormatted}`
+                : `Failed after ${lifecycleState.durationFormatted}`}
+            </Badge>
+          )}
           <Badge tone={priorityInfo.tone} className="shrink-0">Priority: {priorityInfo.label}</Badge>
           {analysisRiskInfo && (
             <Badge tone={analysisRiskInfo.tone} className="shrink-0">{analysisRiskInfo.label}</Badge>
@@ -493,11 +468,13 @@ export function TaskImpact() {
       {/* Three-pane analysis */}
       <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-0 lg:grid-cols-[340px_minmax(0,1fr)_380px]">
         {/* LEFT — Requirement + plan */}
-        <aside className="border-b border-border p-5 lg:border-b-0 lg:border-r min-w-0 overflow-hidden">
-          <div className="tech-label mb-2">Requirement</div>
-          <p className="text-[13.5px] leading-relaxed text-foreground text-pretty break-words min-w-0">
-            {requirementText}
-          </p>
+        <aside className="border-b border-border p-5 lg:border-b-0 lg:border-r min-w-0 overflow-hidden max-h-[calc(100vh-140px)] min-h-0 overflow-y-auto pr-3">
+          <div className="sticky top-0 bg-canvas/95 backdrop-blur-sm z-10 pb-2 mb-2 border-b border-border/40 flex items-center justify-between">
+            <span className="tech-label">Requirement</span>
+          </div>
+          <div className="text-[13px] leading-relaxed text-foreground min-w-0">
+            <FormattedText text={requirementText} />
+          </div>
 
           {acceptanceList.length > 0 && (
             <>
@@ -549,9 +526,45 @@ export function TaskImpact() {
           )}
         </aside>
 
-        {/* CENTER — Affected files + inspector */}
+        {/* CENTER — Affected files + inspector / Analyzing / Failed states */}
         <section className="border-b border-border p-5 lg:border-b-0 min-w-0 overflow-hidden">
-          {!hasCompletedAnalysis ? (
+          {lifecycleState.lifecycle === "analyzing" ? (
+            <div className="flex flex-col items-center justify-center rounded-[var(--radius-lg)] border border-border bg-surface-2/40 px-6 py-16 text-center">
+              <Loader2 className="h-8 w-8 text-primary animate-spin" />
+              <h3 className="mt-3 text-[14px] font-semibold text-foreground">Analyzing workspace…</h3>
+              <p className="mt-1 max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
+                DevPilot is inspecting Roslyn project references, symbol graphs, and generating impact predictions.
+              </p>
+              <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 font-mono text-[12px] text-subtle-foreground">
+                <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+                Elapsed: {lifecycleState.elapsedSeconds}s
+              </div>
+            </div>
+          ) : lifecycleState.lifecycle === "failed" ? (
+            <div className="flex flex-col items-center justify-center rounded-[var(--radius-lg)] border border-danger/30 bg-danger-soft/20 px-6 py-12 text-center min-w-0">
+              <AlertCircle className="h-9 w-9 text-danger" />
+              <h3 className="mt-3 text-[14.5px] font-semibold text-foreground">Impact analysis failed</h3>
+              {lifecycleState.durationFormatted && (
+                <span className="mt-0.5 font-mono text-[11.5px] text-muted-foreground">
+                  Failed after {lifecycleState.durationFormatted}
+                </span>
+              )}
+              <div className="mt-4 max-w-lg w-full text-left rounded-[var(--radius-md)] border border-danger/30 bg-surface p-3.5 text-[12px] leading-relaxed text-foreground break-words font-mono">
+                {lifecycleState.sanitizedErrorMessage || analysisError || "Impact analysis failed."}
+              </div>
+
+              <Button
+                variant="primary"
+                size="md"
+                className="mt-5 gap-2"
+                disabled={!lifecycleState.canRetry || isAnalyzing}
+                onClick={handleStartAnalysis}
+              >
+                <RotateCcw className="h-4 w-4" />
+                Retry analysis
+              </Button>
+            </div>
+          ) : lifecycleState.lifecycle === "idle" ? (
             <div className="flex flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-6 py-16 text-center">
               <BrainCircuit className="h-8 w-8 text-primary opacity-80" />
               <h3 className="mt-3 text-[14px] font-semibold text-foreground">No impact analysis generated yet</h3>
@@ -569,21 +582,12 @@ export function TaskImpact() {
               <Button
                 variant="primary"
                 size="md"
-                className="mt-5"
-                disabled={isAnalyzing}
+                className="mt-5 gap-2"
+                disabled={!lifecycleState.canRun || isAnalyzing}
                 onClick={handleStartAnalysis}
               >
-                {isAnalyzing ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Analyzing workspace…
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="h-4 w-4" />
-                    Run Impact Analysis
-                  </>
-                )}
+                <Sparkles className="h-4 w-4" />
+                Run Impact Analysis
               </Button>
             </div>
           ) : (

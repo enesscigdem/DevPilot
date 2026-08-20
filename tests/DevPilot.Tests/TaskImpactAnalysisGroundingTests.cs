@@ -339,9 +339,42 @@ public class TaskImpactAnalysisGroundingTests
 
     private class FakeAnalysisRepository : IImpactAnalysisRepository
     {
+        public Dictionary<Guid, Domain.Entities.TaskImpactAnalysis> Analyses { get; } = new();
         public Task<Domain.Entities.TaskImpactAnalysis?> GetLatestByTaskIdAsync(Guid taskId, CancellationToken cancellationToken = default)
-            => Task.FromResult<Domain.Entities.TaskImpactAnalysis?>(null);
-        public Task AddAsync(Domain.Entities.TaskImpactAnalysis analysis, CancellationToken cancellationToken = default) => Task.CompletedTask;
+            => Task.FromResult(Analyses.Values.Where(a => a.DevelopmentTaskId == taskId).OrderByDescending(a => a.CreatedAt).FirstOrDefault());
+        public Task AddAsync(Domain.Entities.TaskImpactAnalysis analysis, CancellationToken cancellationToken = default)
+        {
+            Analyses[analysis.Id] = analysis;
+            return Task.CompletedTask;
+        }
+        public Task UpdateAsync(Domain.Entities.TaskImpactAnalysis analysis, CancellationToken cancellationToken = default)
+        {
+            Analyses[analysis.Id] = analysis;
+            return Task.CompletedTask;
+        }
+        public Task<bool> StartAnalysisAtomicAsync(Domain.Entities.TaskImpactAnalysis analysis, DevelopmentTask task, CancellationToken cancellationToken = default)
+        {
+            if (Analyses.Values.Any(a => a.DevelopmentTaskId == task.Id && a.Status == ImpactAnalysisStatus.InProgress))
+            {
+                return Task.FromResult(false);
+            }
+            Analyses[analysis.Id] = analysis;
+            return Task.FromResult(true);
+        }
+        public Task<bool> HasActiveAnalysisForTaskAsync(Guid taskId, CancellationToken cancellationToken = default)
+            => Task.FromResult(Analyses.Values.Any(a => a.DevelopmentTaskId == taskId && a.Status == ImpactAnalysisStatus.InProgress));
+        public Task<int> ReconcileStaleAnalysesAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+        {
+            int count = 0;
+            foreach (var a in Analyses.Values.Where(a => a.Status == ImpactAnalysisStatus.InProgress && a.CreatedAt < cutoffUtc))
+            {
+                a.Status = ImpactAnalysisStatus.Failed;
+                a.CompletedAt = DateTime.UtcNow;
+                a.ErrorMessage = "Impact analysis did not complete before the execution timeout.";
+                count++;
+            }
+            return Task.FromResult(count);
+        }
     }
 
     private class FakeRepositoryAnalyzer : IRepositoryAnalyzer
