@@ -93,6 +93,12 @@ function formatTimeOnly(dateStr: string): string {
 function getMetadataDisplay(act: ExecutionActivityItem): string | null {
   if (act.metadata) {
     const m = act.metadata
+    if (m.repairKind && m.repairRound) {
+      const fileCount = m.repairFiles?.length ?? m.modifiedFileCount
+      const scope = fileCount ? ` · ${fileCount} ${fileCount === 1 ? "file" : "files"}` : ""
+      const progress = m.progressResult ? ` · ${m.progressResult}` : ""
+      return `${m.repairKind} repair ${m.repairRound}${scope}${progress}`
+    }
     if (m.modifiedFileCount !== undefined && m.modifiedFileCount !== null) {
       return `${m.modifiedFileCount} ${m.modifiedFileCount === 1 ? "file" : "files"} modified`
     }
@@ -104,6 +110,25 @@ function getMetadataDisplay(act: ExecutionActivityItem): string | null {
     return "Ready for review"
   }
   return null
+}
+
+function getPrimaryActivityLabel(act: ExecutionActivityItem): string {
+  switch (act.metadata?.eventKind) {
+    case "GeneratingChange":
+      return act.status === "Completed" ? "Generating change completed" : "Generating change"
+    case "VerifyingRepository":
+      return "Verifying repository"
+    case "FixingBuildIssue":
+      return "Fixing build issue"
+    case "FixingFailingTest":
+      return "Fixing failing test"
+    case "ReadyForReview":
+      return "Ready for review"
+    case "StoppedWithEvidence":
+      return "Stopped with evidence"
+    default:
+      return act.message
+  }
 }
 
 export function ExecutionWorkspace() {
@@ -530,12 +555,17 @@ export function ExecutionWorkspace() {
                 {(() => {
                   const genActivities = activities.filter(
                     (a) =>
-                      a.stage === "DeveloperAgent" &&
-                      (a.message.startsWith("Generating edit") ||
+                      a.metadata?.eventKind === "ProviderCall" ||
+                      (a.stage === "DeveloperAgent" &&
+                       (a.message.startsWith("Generating edit") ||
                         a.message.startsWith("Generated edit") ||
                         a.message.startsWith("Escalating token budget") ||
+                        a.message.startsWith("Performing compact") ||
+                        a.message.startsWith("AI provider") ||
+                        a.message.startsWith("Repair triggered") ||
                         a.message.startsWith("Preparing") ||
-                        a.message.startsWith("Validating"))
+                        a.message.startsWith("Validating") ||
+                        a.message.startsWith("Applying")))
                   )
 
                   const nonGenActivities = activities.filter(
@@ -602,7 +632,7 @@ export function ExecutionWorkspace() {
                             <div className="flex items-center gap-2">
                               <Cpu className="h-4 w-4 text-primary" />
                               <span className="text-[13px] font-semibold text-foreground">
-                                Developer Agent Code Generation
+                                Generation technical details
                               </span>
                               {repairGenActivities.length > 0 && (
                                 <span className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">
@@ -697,7 +727,7 @@ export function ExecutionWorkspace() {
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center justify-between gap-2">
                                 <span className="text-[13px] font-medium text-foreground">
-                                  {act.message}
+                                  {getPrimaryActivityLabel(act)}
                                 </span>
                                 <span className="font-mono text-[11px] text-subtle-foreground">
                                   {formattedTime}

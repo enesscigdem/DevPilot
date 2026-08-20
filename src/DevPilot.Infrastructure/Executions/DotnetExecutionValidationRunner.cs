@@ -110,7 +110,18 @@ public sealed class DotnetExecutionValidationRunner : IExecutionValidationRunner
         var relativeTarget = Path.GetRelativePath(canonicalWorkspace, targetPath);
         _logger.LogInformation("Executing dotnet test for target '{TargetPath}' in workspace '{WorkspacePath}'.", relativeTarget, canonicalWorkspace);
 
-        var arguments = new[] { "test", relativeTarget };
+        var arguments = new List<string> { "test", relativeTarget };
+        if (request.SkipBuild)
+        {
+            arguments.Add("--no-build");
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.TestFilter))
+        {
+            arguments.Add("--filter");
+            arguments.Add($"FullyQualifiedName={request.TestFilter}");
+        }
+
         var processResult = await _processRunner.RunProcessAsync("dotnet", arguments, canonicalWorkspace, timeout, cancellationToken).ConfigureAwait(false);
 
         return new TestValidationResult

@@ -86,6 +86,46 @@ public class DotnetExecutionValidationRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task ValidateTestAsync_AfterConfirmedBuild_UsesNoBuild()
+    {
+        var testProjPath = Path.Combine(_workspaceDir, "App.Tests.csproj");
+        File.WriteAllText(testProjPath, "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>");
+        var request = new ExecutionValidationRequest(
+            _workspaceDir,
+            _branchName,
+            "App.Tests.csproj",
+            SkipBuild: true);
+
+        var result = await _runner.ValidateTestAsync(request);
+
+        result.Success.Should().BeTrue();
+        _processRunner.LastArguments.Should().Equal("test", "App.Tests.csproj", "--no-build");
+    }
+
+    [Fact]
+    public async Task ValidateTestAsync_ReliableTarget_AddsExactFullyQualifiedFilter()
+    {
+        var testProjPath = Path.Combine(_workspaceDir, "App.Tests.csproj");
+        File.WriteAllText(testProjPath, "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>");
+        var request = new ExecutionValidationRequest(
+            _workspaceDir,
+            _branchName,
+            "App.Tests.csproj",
+            SkipBuild: true,
+            TestFilter: "App.Tests.TodoServiceTests.Filters_completed_todos");
+
+        var result = await _runner.ValidateTestAsync(request);
+
+        result.Success.Should().BeTrue();
+        _processRunner.LastArguments.Should().Equal(
+            "test",
+            "App.Tests.csproj",
+            "--no-build",
+            "--filter",
+            "FullyQualifiedName=App.Tests.TodoServiceTests.Filters_completed_todos");
+    }
+
+    [Fact]
     public void Architecture_DoesNotExposeArbitraryCommandExecution()
     {
         // Assert via reflection that IExecutionValidationRunner has no RunAsync(string command) method

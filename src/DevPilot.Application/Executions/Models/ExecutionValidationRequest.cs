@@ -7,4 +7,6 @@ public sealed record ExecutionValidationRequest(
     string WorkspacePath,
     string BranchName,
     string? TargetPath = null,
-    TimeSpan? Timeout = null);
+    TimeSpan? Timeout = null,
+    bool SkipBuild = false,
+    string? TestFilter = null);

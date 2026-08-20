@@ -448,6 +448,15 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
         messages.Should().Contain("Validating 2 generated edits.");
         messages.Should().Contain("Applying generated edits.");
 
+        var providerCalls = _activityRecorder.RecordedMetadata
+            .Where(metadata => metadata?.LogicalProviderCallCount == 1)
+            .ToList();
+        providerCalls.Should().HaveCount(2);
+        providerCalls.Should().OnlyContain(metadata =>
+            metadata != null &&
+            metadata.ProviderCallKind == "Generation");
+        providerCalls.Select(metadata => metadata!.TargetFile).Should().BeEquivalentTo(f1, f2);
+
         // Ensure no prompt content or raw source code is leaked into messages
         foreach (var msg in messages)
         {
@@ -483,6 +492,7 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
     private sealed class FakeExecutionActivityRecorder : IExecutionActivityRecorder
     {
         public ConcurrentQueue<string> RecordedMessages { get; } = new();
+        public ConcurrentQueue<ExecutionActivityMetadata?> RecordedMetadata { get; } = new();
 
         public Task RecordActivityAsync(
             Guid executionId,
@@ -493,6 +503,7 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
             CancellationToken cancellationToken = default)
         {
             RecordedMessages.Enqueue(message);
+            RecordedMetadata.Enqueue(metadata);
             return Task.CompletedTask;
         }
     }

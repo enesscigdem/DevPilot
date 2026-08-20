@@ -250,7 +250,7 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
-    public async Task ProcessAsync_TestFails_ExhaustsTestRepairRounds_RecordsTestFailed()
+    public async Task ProcessAsync_TestFailsWithoutCorrelatableEvidence_StopsWithoutRepair()
     {
         var executionId = Guid.NewGuid();
         var taskId = Guid.NewGuid();
@@ -292,12 +292,9 @@ public class GitWorkspaceExecutionProcessorTests
         var ex = await act.Should().ThrowAsync<InvalidOperationException>();
         ex.WithMessage("Test validation failed: dotnet test failed with exit code 1.");
 
-        // Initial build (1) + 2 repair round builds (2) = 3 total build calls
-        validationRunner.BuildCallCount.Should().Be(3);
-        // Initial test (1) + 2 repair round tests (2) = 3 total test calls
-        validationRunner.TestCallCount.Should().Be(3);
-        // Initial agent (1) + 2 test repairs (2) = 3 total agent calls
-        agent.CallCount.Should().Be(3);
+        validationRunner.BuildCallCount.Should().Be(1);
+        validationRunner.TestCallCount.Should().Be(1);
+        agent.CallCount.Should().Be(1, "uncorrelated test output must not trigger broad repair");
 
         recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.Test && a.status == ExecutionActivityStatus.Failed);
     }
@@ -314,11 +311,12 @@ public class GitWorkspaceExecutionProcessorTests
         {
             AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed }
         };
-        var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "App.cs" }) };
+        var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/TodoService.cs" }) };
 
         var testResults = new Queue<TestValidationResult>(new[]
         {
-            new TestValidationResult { Success = false, ExitCode = 1, ErrorMessage = "dotnet test failed with exit code 1.", StdOut = "Failed TestMethod1\nExpected 10 but got 5" },
+            FailedTodoTest(),
+            new TestValidationResult { Success = true, ExitCode = 0 },
             new TestValidationResult { Success = true, ExitCode = 0 }
         });
 
@@ -348,8 +346,8 @@ public class GitWorkspaceExecutionProcessorTests
 
         // Initial build (1) + 1 test repair build (1) = 2
         validationRunner.BuildCallCount.Should().Be(2);
-        // Initial test (1, failed) + 1 test retry (1, passed) = 2
-        validationRunner.TestCallCount.Should().Be(2);
+        // Initial full test + targeted retry + final full suite
+        validationRunner.TestCallCount.Should().Be(3);
         // Initial agent (1) + 1 test repair (1) = 2
         agent.CallCount.Should().Be(2);
 
@@ -510,6 +508,7 @@ public class GitWorkspaceExecutionProcessorTests
 
         // Developer Agent called twice: initial generation + compile repair
         agent.CallCount.Should().Be(2);
+        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/App.cs");
         validationRunner.BuildCallCount.Should().Be(2);
         validationRunner.TestCallCount.Should().Be(1);
 
@@ -522,7 +521,7 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
-    public async Task CompileRepair_WhenSecondBuildFails_TerminatesWithTerminalFailedExecution()
+    public async Task CompileRepair_WhenSameDiagnosticRepeats_StopsAfterFirstFocusedRepair()
     {
         var workspaceId = Guid.NewGuid();
         var executionId = Guid.NewGuid();
@@ -579,9 +578,8 @@ public class GitWorkspaceExecutionProcessorTests
         var act = () => processor.ProcessAsync(context);
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
 
-        // Developer Agent called 4 times: initial generation + 3 compile repairs
-        agent.CallCount.Should().Be(4);
-        validationRunner.BuildCallCount.Should().Be(4);
+        agent.CallCount.Should().Be(2);
+        validationRunner.BuildCallCount.Should().Be(2);
 
         // Verify explicit compile repair activities recorded
         var messages = recorder.RecordedActivities.Select(a => a.message).ToList();
@@ -590,6 +588,313 @@ public class GitWorkspaceExecutionProcessorTests
         messages.Should().Contain("Build retry started.");
         messages.Should().Contain("Build retry failed.");
         messages.Should().Contain(m => m.Contains("Build validation failed:"));
+    }
+
+    [Fact]
+    public async Task CompileRepair_UncorrelatedDiagnostic_DoesNotFallbackToAllModifiedFiles()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Valid.cs" })
+        };
+        var runner = new ScriptedValidationRunner(
+            new[]
+            {
+                new BuildValidationResult
+                {
+                    Success = false,
+                    ErrorMessage = "dotnet build failed.",
+                    StdOut = "src/Unrelated.cs(8,3): error CS1002: ; expected"
+                }
+            });
+
+        var processor = CreateProcessor(taskId, agent, runner);
+        var act = () => processor.ProcessAsync(CreateContext(taskId));
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+        agent.CallCount.Should().Be(1, "uncorrelated diagnostics must not regenerate all touched files");
+        runner.BuildRequests.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task CompileRepair_SameFingerprintAfterRepair_StopsWithoutAnotherBuildOrRepair()
+    {
+        var taskId = Guid.NewGuid();
+        var failure = new BuildValidationResult
+        {
+            Success = false,
+            ErrorMessage = "dotnet build failed.",
+            StdOut = "src/App.cs(8,3): error CS1002: ; expected"
+        };
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Valid.cs" })
+        };
+        var runner = new ScriptedValidationRunner(new[] { failure });
+        var fingerprint = new TestFingerprintCalculator("same", "same");
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+
+        var act = () => processor.ProcessAsync(CreateContext(taskId));
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+        agent.CallCount.Should().Be(2);
+        runner.BuildRequests.Should().HaveCount(1, "a no-diff repair should stop before another build");
+        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/App.cs");
+    }
+
+    [Fact]
+    public async Task CompileRepair_SameDiagnosticAfterChangedRepair_DoesNotLaunchAnotherRound()
+    {
+        var taskId = Guid.NewGuid();
+        var failure = new BuildValidationResult
+        {
+            Success = false,
+            ErrorMessage = "dotnet build failed.",
+            StdOut = "src/App.cs(8,3): error CS1002: ; expected"
+        };
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Valid.cs" })
+        };
+        var runner = new ScriptedValidationRunner(new[] { failure, failure });
+        var fingerprint = new TestFingerprintCalculator("before", "after");
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+
+        var act = () => processor.ProcessAsync(CreateContext(taskId));
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+        agent.CallCount.Should().Be(2, "the identical diagnostic must stop before a second repair");
+        runner.BuildRequests.Should().HaveCount(2);
+        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/App.cs");
+    }
+
+    [Fact]
+    public async Task CompileRepair_ChangedDiagnostic_AllowsOneFurtherFocusedRepair()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Other.cs", "src/Valid.cs" })
+        };
+        var runner = new ScriptedValidationRunner(new[]
+        {
+            new BuildValidationResult { Success = false, ErrorMessage = "build failed", StdOut = "src/App.cs(8,3): error CS1002: ; expected" },
+            new BuildValidationResult { Success = false, ErrorMessage = "build failed", StdOut = "src/Other.cs(9,4): error CS0103: Name is not defined" },
+            new BuildValidationResult { Success = true }
+        });
+        var fingerprint = new TestFingerprintCalculator("a", "b", "c", "d");
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.CallCount.Should().Be(3);
+        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/App.cs");
+        agent.Requests[2].ImpactedFilePaths.Should().Equal("src/Other.cs");
+        agent.Requests[1].ImpactedFilePaths.Should().NotContain("src/Valid.cs");
+        agent.Requests[2].ImpactedFilePaths.Should().NotContain("src/Valid.cs");
+    }
+
+    [Fact]
+    public async Task TestRepair_RerunsTargetedTestBeforeRequiredFullSuite_WithoutBuild()
+    {
+        var taskId = Guid.NewGuid();
+        var failedTest = FailedTodoTest();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/TodoService.cs", "src/Valid.cs" })
+        };
+        var runner = new ScriptedValidationRunner(
+            new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
+            new[] { failedTest, new TestValidationResult { Success = true }, new TestValidationResult { Success = true } });
+        var fingerprint = new TestFingerprintCalculator("before", "after");
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.CallCount.Should().Be(2);
+        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/TodoService.cs");
+        runner.TestRequests.Should().HaveCount(3);
+        runner.TestRequests[0].SkipBuild.Should().BeTrue();
+        runner.TestRequests[0].TestFilter.Should().BeNull();
+        runner.TestRequests[1].SkipBuild.Should().BeTrue();
+        runner.TestRequests[1].TestFilter.Should().Be("DevPilot.Tests.TodoServiceTests.Filters_completed_todos");
+        runner.TestRequests[2].SkipBuild.Should().BeTrue();
+        runner.TestRequests[2].TestFilter.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task TestRepair_WhenRepairBreaksBuild_StopsWithCompilerEvidenceInsteadOfStaleTestRound()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/TodoService.cs", "src/Valid.cs" })
+        };
+        var runner = new ScriptedValidationRunner(
+            new[]
+            {
+                new BuildValidationResult { Success = true },
+                new BuildValidationResult
+                {
+                    Success = false,
+                    ErrorMessage = "dotnet build failed after test repair",
+                    StdOut = "src/TodoService.cs(51,7): error CS1002: ; expected"
+                }
+            },
+            new[] { FailedTodoTest() });
+        var fingerprint = new TestFingerprintCalculator("before", "after");
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        var act = () => processor.ProcessAsync(CreateContext(taskId));
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Build validation failed after test repair:*");
+        agent.CallCount.Should().Be(2, "stale test evidence must not start a second test repair");
+        runner.TestRequests.Should().HaveCount(1);
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.stage == ExecutionStage.Build &&
+            activity.metadata != null &&
+            activity.metadata.ProgressResult == "NewBuildFailure" &&
+            activity.metadata.FailureFingerprint != null);
+    }
+
+    [Fact]
+    public async Task TestRepair_SameAuthoritativeFailure_StopsWithoutBroadSecondRepair()
+    {
+        var taskId = Guid.NewGuid();
+        var failedTest = FailedTodoTest();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/TodoService.cs", "src/Valid.cs" })
+        };
+        var runner = new ScriptedValidationRunner(
+            new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
+            new[] { failedTest, failedTest });
+        var fingerprint = new TestFingerprintCalculator("before", "after");
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+
+        var act = () => processor.ProcessAsync(CreateContext(taskId));
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Test validation failed*");
+        agent.CallCount.Should().Be(2);
+        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/TodoService.cs");
+        runner.TestRequests.Should().HaveCount(2, "the same targeted failure stops before another repair");
+    }
+
+    private static GitWorkspaceExecutionProcessor CreateProcessor(
+        Guid taskId,
+        TestDeveloperAgent agent,
+        IExecutionValidationRunner runner,
+        IExecutionChangeFingerprintCalculator? fingerprint = null,
+        TestActivityRecorder? recorder = null)
+    {
+        return new GitWorkspaceExecutionProcessor(
+            new TestWorkspaceManager(),
+            new TestExecutionRepository(),
+            new TestImpactAnalysisRepository
+            {
+                AnalysisToReturn = new TaskImpactAnalysis
+                {
+                    Id = Guid.NewGuid(),
+                    DevelopmentTaskId = taskId,
+                    Status = ImpactAnalysisStatus.Completed
+                }
+            },
+            agent,
+            runner,
+            recorder ?? new TestActivityRecorder(),
+            NullLogger<GitWorkspaceExecutionProcessor>.Instance,
+            configuration: null,
+            changeFingerprintCalculator: fingerprint);
+    }
+
+    private static ExecutionProcessingContext CreateContext(Guid taskId) => new(
+        Guid.NewGuid(),
+        taskId,
+        "Focused repair",
+        "Repair only the implicated behavior",
+        null,
+        Guid.NewGuid(),
+        "/source",
+        "Summary");
+
+    private static TestValidationResult FailedTodoTest() => new()
+    {
+        Success = false,
+        ExitCode = 1,
+        ErrorMessage = "dotnet test failed.",
+        StdOut = """
+            Failed DevPilot.Tests.TodoServiceTests.Filters_completed_todos [10 ms]
+              Error Message:
+               Expected one completed todo, but found two.
+              Stack Trace:
+                 at DevPilot.Todos.TodoService.Filter(Boolean completed) in /workspace/path/src/TodoService.cs:line 41
+            Failed! - Failed: 1, Passed: 10, Skipped: 0, Total: 11
+            """
+    };
+
+    private sealed class ScriptedValidationRunner : IExecutionValidationRunner
+    {
+        private readonly Queue<BuildValidationResult> _buildResults;
+        private readonly Queue<TestValidationResult> _testResults;
+
+        public ScriptedValidationRunner(
+            IEnumerable<BuildValidationResult> buildResults,
+            IEnumerable<TestValidationResult>? testResults = null)
+        {
+            _buildResults = new Queue<BuildValidationResult>(buildResults);
+            _testResults = new Queue<TestValidationResult>(testResults ?? new[] { new TestValidationResult { Success = true } });
+        }
+
+        public List<ExecutionValidationRequest> BuildRequests { get; } = new();
+        public List<ExecutionValidationRequest> TestRequests { get; } = new();
+
+        public Task<BuildValidationResult> ValidateBuildAsync(
+            ExecutionValidationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            BuildRequests.Add(request);
+            return Task.FromResult(_buildResults.Count > 0
+                ? _buildResults.Dequeue()
+                : new BuildValidationResult { Success = true });
+        }
+
+        public Task<TestValidationResult> ValidateTestAsync(
+            ExecutionValidationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            TestRequests.Add(request);
+            return Task.FromResult(_testResults.Count > 0
+                ? _testResults.Dequeue()
+                : new TestValidationResult { Success = true });
+        }
+    }
+
+    private sealed class TestFingerprintCalculator : IExecutionChangeFingerprintCalculator
+    {
+        private readonly Queue<string> _fingerprints;
+
+        public TestFingerprintCalculator(params string[] fingerprints)
+        {
+            _fingerprints = new Queue<string>(fingerprints);
+        }
+
+        public Task<ExecutionFingerprintResult> ComputeFingerprintAsync(
+            string workspacePath,
+            CancellationToken cancellationToken = default)
+        {
+            var fingerprint = _fingerprints.Count > 0 ? _fingerprints.Dequeue() : "fallback";
+            return Task.FromResult(new ExecutionFingerprintResult(true, Fingerprint: fingerprint));
+        }
+
+        public Task<ExecutionFingerprintResult> ComputeStagedTreeFingerprintAsync(
+            string workspacePath,
+            string treeSha,
+            string baseHeadSha,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ExecutionFingerprintResult(true, Fingerprint: treeSha, BaseHeadSha: baseHeadSha));
     }
 
     private class QueuedValidationRunner : IExecutionValidationRunner
@@ -658,10 +963,12 @@ public class GitWorkspaceExecutionProcessorTests
     {
         public DeveloperAgentResult ResultToReturn { get; set; } = DeveloperAgentResult.Ok(new List<string> { "Modified.cs" });
         public int CallCount { get; private set; }
+        public List<DeveloperAgentRequest> Requests { get; } = new();
 
         public Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(DeveloperAgentRequest request, CancellationToken cancellationToken = default)
         {
             CallCount++;
+            Requests.Add(request);
             return Task.FromResult(ResultToReturn);
         }
     }

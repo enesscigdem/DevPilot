@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
+using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Configuration;
@@ -631,6 +632,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         LogGenerationAudit(fileEntry.FilePath, fileEntry.Action.ToString(), callNumber, fileAiRequest, fileResponse, fileSw.Elapsed);
+        await RecordProviderCallActivityAsync(
+            request.ExecutionId,
+            fileEntry.FilePath,
+            "Generation",
+            fileAiRequest,
+            fileResponse,
+            fileSw.Elapsed,
+            cancellationToken).ConfigureAwait(false);
 
         // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
         if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
@@ -668,6 +677,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
 
                     LogGenerationAudit(fileEntry.FilePath, "CompactRetry", escCallNumber, compactRequest, compactResponse, escSw.Elapsed, isCompactRetry: true);
+                    await RecordProviderCallActivityAsync(
+                        request.ExecutionId,
+                        fileEntry.FilePath,
+                        "CompactGenerationRetry",
+                        compactRequest,
+                        compactResponse,
+                        escSw.Elapsed,
+                        cancellationToken).ConfigureAwait(false);
 
                     if (compactResponse.IsSuccess)
                     {
@@ -733,6 +750,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
 
                     LogGenerationAudit(fileEntry.FilePath, "TransientRecovery", retryCallNumber, fileAiRequest, retryResponse, retrySw.Elapsed);
+                    await RecordProviderCallActivityAsync(
+                        request.ExecutionId,
+                        fileEntry.FilePath,
+                        "TransientRecovery",
+                        fileAiRequest,
+                        retryResponse,
+                        retrySw.Elapsed,
+                        cancellationToken).ConfigureAwait(false);
 
                     fileResponse = retryResponse;
                 }
@@ -870,6 +895,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
 
             LogGenerationAudit(fileEntry.FilePath, "Repair", repairCallNumber, repairRequest, repairResponse, repairSw.Elapsed);
+            await RecordProviderCallActivityAsync(
+                request.ExecutionId,
+                fileEntry.FilePath,
+                "ApplicabilityRepair",
+                repairRequest,
+                repairResponse,
+                repairSw.Elapsed,
+                cancellationToken).ConfigureAwait(false);
 
             // Bounded Compact Repair Retry (max 1 attempt if repair response hits length limit)
             if (repairResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
@@ -910,6 +943,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         }
 
                         LogGenerationAudit(fileEntry.FilePath, "CompactRepairRetry", escRepairCallNumber, compactRepairRequest, compactRepairResponse, escRepairSw.Elapsed, isCompactRetry: true);
+                        await RecordProviderCallActivityAsync(
+                            request.ExecutionId,
+                            fileEntry.FilePath,
+                            "CompactApplicabilityRetry",
+                            compactRepairRequest,
+                            compactRepairResponse,
+                            escRepairSw.Elapsed,
+                            cancellationToken).ConfigureAwait(false);
 
                         if (compactRepairResponse.IsSuccess)
                         {
@@ -1035,7 +1076,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
         Guid executionId,
         string message,
         CancellationToken cancellationToken,
-        ExecutionActivityStatus status = ExecutionActivityStatus.Started)
+        ExecutionActivityStatus status = ExecutionActivityStatus.Started,
+        ExecutionActivityMetadata? metadata = null)
     {
         if (executionId == Guid.Empty || _activityRecorder == null) return;
         try
@@ -1045,7 +1087,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 ExecutionStage.DeveloperAgent,
                 status,
                 message,
-                metadata: null,
+                metadata,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1056,6 +1098,34 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             _logger.LogWarning(ex, "DeveloperAgent: failed to record activity '{Message}' for execution {ExecutionId}.", message, executionId);
         }
+    }
+
+    private async Task RecordProviderCallActivityAsync(
+        Guid executionId,
+        string targetFile,
+        string callKind,
+        AiRequest request,
+        AiResponse response,
+        TimeSpan duration,
+        CancellationToken cancellationToken)
+    {
+        var metadata = new ExecutionActivityMetadata(
+            EventKind: "ProviderCall",
+            LogicalProviderCallCount: 1,
+            ProviderCallKind: callKind,
+            ProviderAttemptCount: response.AttemptCount,
+            RequestedOutputTokens: request.MaxTokens,
+            InputTokens: response.InputTokens,
+            OutputTokens: response.OutputTokens,
+            StageDurationMs: (long)duration.TotalMilliseconds,
+            TargetFile: targetFile);
+
+        await SafeRecordActivityAsync(
+            executionId,
+            $"Provider call completed: {callKind}.",
+            cancellationToken,
+            response.IsSuccess ? ExecutionActivityStatus.Completed : ExecutionActivityStatus.Failed,
+            metadata).ConfigureAwait(false);
     }
 
     private void LogGenerationAudit(
