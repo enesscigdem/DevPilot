@@ -272,12 +272,19 @@ export function CodeReview() {
     try {
       const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
       const decision = await approveExecutionReview(id, review.changeFingerprint, wsId)
-      setReview((prev) => prev ? {
-        ...prev,
-        reviewStatus: decision.reviewStatus,
-        decidedAt: decision.decidedAt,
-        rejectionReason: decision.rejectionReason,
-      } : null)
+      try {
+        const fresh = await getExecutionReview(id, wsId)
+        setReview(fresh)
+      } catch {
+        setReview((prev) => prev ? {
+          ...prev,
+          reviewStatus: decision.reviewStatus,
+          decidedAt: decision.decidedAt,
+          rejectionReason: decision.rejectionReason,
+          commitEligible: true,
+          approvedSnapshotMatchesCurrent: true,
+        } : null)
+      }
     } catch (err) {
       setDecisionError(err instanceof Error ? err.message : "Failed to approve review.")
     } finally {
@@ -293,14 +300,19 @@ export function CodeReview() {
     try {
       const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
       const res = await commitExecution(id, wsId)
-      setReview((prev) => prev ? {
-        ...prev,
-        commitStatus: res.commitStatus,
-        commitSha: res.commitSha,
-        committedAt: res.committedAt,
-        commitEligible: false,
-        canRequestPush: true,
-      } : null)
+      try {
+        const fresh = await getExecutionReview(id, wsId)
+        setReview(fresh)
+      } catch {
+        setReview((prev) => prev ? {
+          ...prev,
+          commitStatus: res.commitStatus,
+          commitSha: res.commitSha,
+          committedAt: res.committedAt,
+          commitEligible: false,
+          canRequestPush: true,
+        } : null)
+      }
     } catch (err) {
       setDecisionError(err instanceof Error ? err.message : "Failed to commit changes.")
     } finally {
@@ -316,14 +328,20 @@ export function CodeReview() {
     try {
       const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
       const res = await pushExecution(id, wsId)
-      setReview((prev) => prev ? {
-        ...prev,
-        pushStatus: res.pushStatus,
-        remoteBranchName: res.branchName,
-        remoteCommitSha: res.remoteCommitSha,
-        pushedAt: res.pushedAt,
-        canRequestPush: false,
-      } : null)
+      try {
+        const fresh = await getExecutionReview(id, wsId)
+        setReview(fresh)
+      } catch {
+        setReview((prev) => prev ? {
+          ...prev,
+          pushStatus: res.pushStatus,
+          remoteBranchName: res.branchName,
+          remoteCommitSha: res.remoteCommitSha,
+          pushedAt: res.pushedAt,
+          canRequestPush: false,
+          canRequestPullRequest: true,
+        } : null)
+      }
     } catch (err) {
       setDecisionError(err instanceof Error ? err.message : "Failed to push execution branch.")
     } finally {
@@ -347,15 +365,20 @@ export function CodeReview() {
     try {
       const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
       const res = await mergeExecution(id, wsId)
-      setReview((prev) => prev ? {
-        ...prev,
-        mergeStatus: res.mergeStatus,
-        mergeCommitSha: res.mergeCommitSha,
-        mergedAt: res.mergedAt,
-        canRequestMerge: false,
-        mergeBlockedReason: null,
-        pullRequestRemoteState: "Merged",
-      } : null)
+      try {
+        const fresh = await getExecutionReview(id, wsId)
+        setReview(fresh)
+      } catch {
+        setReview((prev) => prev ? {
+          ...prev,
+          mergeStatus: res.mergeStatus,
+          mergeCommitSha: res.mergeCommitSha,
+          mergedAt: res.mergedAt,
+          canRequestMerge: false,
+          mergeBlockedReason: null,
+          pullRequestRemoteState: "Merged",
+        } : null)
+      }
       setShowMergeConfirmModal(false)
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to merge pull request."
@@ -407,14 +430,19 @@ export function CodeReview() {
     try {
       const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
       const res = await createPullRequest(id, wsId)
-      setReview((prev) => prev ? {
-        ...prev,
-        pullRequestStatus: res.pullRequestStatus,
-        pullRequestNumber: res.pullRequestNumber,
-        pullRequestUrl: res.pullRequestUrl,
-        pullRequestCreatedAt: res.createdAt,
-        canRequestPullRequest: false,
-      } : null)
+      try {
+        const fresh = await getExecutionReview(id, wsId)
+        setReview(fresh)
+      } catch {
+        setReview((prev) => prev ? {
+          ...prev,
+          pullRequestStatus: res.pullRequestStatus,
+          pullRequestNumber: res.pullRequestNumber,
+          pullRequestUrl: res.pullRequestUrl,
+          pullRequestCreatedAt: res.createdAt,
+          canRequestPullRequest: false,
+        } : null)
+      }
     } catch (err) {
       setDecisionError(err instanceof Error ? err.message : "Failed to open pull request.")
     } finally {
@@ -439,12 +467,18 @@ export function CodeReview() {
     try {
       const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
       const decision = await rejectExecutionReview(id, rejectionReasonInput, wsId)
-      setReview((prev) => prev ? {
-        ...prev,
-        reviewStatus: decision.reviewStatus,
-        decidedAt: decision.decidedAt,
-        rejectionReason: decision.rejectionReason,
-      } : null)
+      try {
+        const fresh = await getExecutionReview(id, wsId)
+        setReview(fresh)
+      } catch {
+        setReview((prev) => prev ? {
+          ...prev,
+          reviewStatus: decision.reviewStatus,
+          decidedAt: decision.decidedAt,
+          rejectionReason: decision.rejectionReason,
+          commitEligible: false,
+        } : null)
+      }
       setShowRejectModal(false)
       setRejectionReasonInput("")
     } catch (err) {

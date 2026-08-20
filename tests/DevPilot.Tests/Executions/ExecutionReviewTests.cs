@@ -911,6 +911,238 @@ public class ExecutionReviewTests : IDisposable
         result.Review!.CanRequestPush.Should().Be(expectedCanRequestPush);
     }
 
+    [Fact]
+    public async Task GetExecutionReview_CommittedExecution_ReturnsRepositoryWorkspaceInfoAndMergeBlockedReason()
+    {
+        // Arrange
+        var fileRelPath = "src/Service.cs";
+        var fullPath = Path.Combine(_workspaceDir, fileRelPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, "public class Service {}");
+
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial base commit");
+        var baseCommitSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(fullPath, "public class Service { public void Run() {} }");
+        var executionId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+        var fpResult = await fingerprintCalc.ComputeFingerprintAsync(_workspaceDir);
+
+        RunGit(_workspaceDir, "add", ".");
+        var treeSha = RunGitOutput(_workspaceDir, "write-tree").Trim();
+        var commitMsg = $"Execute task changes\n\nDevPilot-Execution: {executionId}\n";
+        var commitSha = RunGitOutput(_workspaceDir, "commit-tree", treeSha, "-p", baseCommitSha, "-m", commitMsg).Trim();
+        RunGit(_workspaceDir, "update-ref", "refs/heads/main", commitSha);
+        RunGit(_workspaceDir, "reset", "--hard", commitSha);
+
+        var workspace = new RepositoryWorkspace
+        {
+            Id = workspaceId,
+            Owner = "enesscigdem",
+            Repository = "DevPilot",
+            Branch = "master",
+            LocalPath = _workspaceDir,
+            Status = RepositoryWorkspaceStatus.Completed
+        };
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = workspaceId,
+            RepositoryWorkspace = workspace,
+            Title = "Committed Delivery Task"
+        };
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = task.Id,
+            DevelopmentTask = task,
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            CommitStatus = ExecutionCommitStatus.Committed,
+            BaseCommitSha = baseCommitSha,
+            CommitSha = commitSha,
+            ApprovedChangeFingerprint = fpResult.Fingerprint,
+            ReviewStatus = ExecutionReviewStatus.Approved,
+            PushStatus = ExecutionPushStatus.None
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId, workspaceId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.RepositoryWorkspaceId.Should().Be(workspaceId);
+        result.Review.RepositoryOwner.Should().Be("enesscigdem");
+        result.Review.RepositoryName.Should().Be("DevPilot");
+        result.Review.CommitStatus.Should().Be("Committed");
+        result.Review.CanRequestPush.Should().BeTrue();
+        result.Review.CanRequestPullRequest.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_ApprovedUncommitted_ReturnsCommitEligibleTrue()
+    {
+        // Arrange
+        var fileRelPath = "src/App.cs";
+        var fullPath = Path.Combine(_workspaceDir, fileRelPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, "public class App {}");
+
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial commit");
+
+        File.WriteAllText(fullPath, "public class App { public void Start() {} }");
+
+        var executionId = Guid.NewGuid();
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+        var fpResult = await fingerprintCalc.ComputeFingerprintAsync(_workspaceDir);
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Approve Test" },
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            ReviewStatus = ExecutionReviewStatus.Approved,
+            ApprovedChangeFingerprint = fpResult.Fingerprint,
+            CommitStatus = ExecutionCommitStatus.None
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.ReviewStatus.Should().Be("Approved");
+        result.Review.CommitEligible.Should().BeTrue();
+        result.Review.ApprovedSnapshotMatchesCurrent.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_PendingReview_ReturnsCommitEligibleFalse()
+    {
+        // Arrange
+        var fileRelPath = "src/App.cs";
+        var fullPath = Path.Combine(_workspaceDir, fileRelPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, "public class App {}");
+
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial commit");
+
+        File.WriteAllText(fullPath, "public class App { public void Start() {} }");
+
+        var executionId = Guid.NewGuid();
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Pending Review Test" },
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            CommitStatus = ExecutionCommitStatus.None
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.ReviewStatus.Should().Be("Pending");
+        result.Review.CommitEligible.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_CommittedAndPushedExecution_ReturnsCanRequestPullRequestTrueAndCanRequestPushFalse()
+    {
+        // Arrange
+        var fileRelPath = "src/Feature.cs";
+        var fullPath = Path.Combine(_workspaceDir, fileRelPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, "public class Feature {}");
+
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial base commit");
+        var baseCommitSha = RunGitOutput(_workspaceDir, "rev-parse", "HEAD").Trim();
+
+        File.WriteAllText(fullPath, "public class Feature { public void Exec() {} }");
+        var executionId = Guid.NewGuid();
+
+        var fingerprintCalc = new GitExecutionChangeFingerprintCalculator(NullLogger<GitExecutionChangeFingerprintCalculator>.Instance);
+        var fpResult = await fingerprintCalc.ComputeFingerprintAsync(_workspaceDir);
+
+        RunGit(_workspaceDir, "add", ".");
+        var treeSha = RunGitOutput(_workspaceDir, "write-tree").Trim();
+        var commitMsg = $"Execute task changes\n\nDevPilot-Execution: {executionId}\n";
+        var commitSha = RunGitOutput(_workspaceDir, "commit-tree", treeSha, "-p", baseCommitSha, "-m", commitMsg).Trim();
+        RunGit(_workspaceDir, "update-ref", "refs/heads/main", commitSha);
+        RunGit(_workspaceDir, "reset", "--hard", commitSha);
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Pushed PR Test" },
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main",
+            ReviewStatus = ExecutionReviewStatus.Approved,
+            CommitStatus = ExecutionCommitStatus.Committed,
+            BaseCommitSha = baseCommitSha,
+            CommitSha = commitSha,
+            ApprovedChangeFingerprint = fpResult.Fingerprint,
+            PushStatus = ExecutionPushStatus.Pushed,
+            RemoteBranchName = "main",
+            RemoteCommitSha = commitSha,
+            PushedAt = DateTime.UtcNow,
+            PullRequestStatus = ExecutionPullRequestStatus.None
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalc, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.PushStatus.Should().Be("Pushed");
+        result.Review.CanRequestPush.Should().BeFalse();
+        result.Review.CanRequestPullRequest.Should().BeTrue();
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");
