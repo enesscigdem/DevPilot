@@ -27,6 +27,7 @@ using DevPilot.Application.Executions.Commands.ProcessExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
 using DevPilot.Application.Executions.Commands.RunDeveloperAgent;
 using DevPilot.Application.Executions.Commands.StartExecution;
+using DevPilot.Application.Executions.Commands.RetryExecution;
 using DevPilot.Application.Executions.Commands.MergeExecution;
 using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
@@ -117,6 +118,7 @@ public static class DependencyInjection
         services.AddScoped<IProcessRunner, DotnetProcessRunner>();
         services.AddScoped<IExecutionValidationRunner, DotnetExecutionValidationRunner>();
         services.AddScoped<IStartExecutionCommandHandler, StartExecutionCommandHandler>();
+        services.AddScoped<IRetryExecutionCommandHandler, RetryExecutionCommandHandler>();
         services.AddScoped<IProcessExecutionCommandHandler, ProcessExecutionCommandHandler>();
         services.AddScoped<ExecutionWorkerJob>();
         services.AddScoped<IGetExecutionByIdQueryHandler, GetExecutionByIdQueryHandler>();
@@ -136,6 +138,10 @@ public static class DependencyInjection
         services.AddScoped<IExecutionGitHubSyncService, ExecutionGitHubSyncService>();
         services.AddScoped<ICreatePullRequestCommandHandler, CreatePullRequestCommandHandler>();
         services.AddScoped<ISyncPullRequestCommandHandler, SyncPullRequestCommandHandler>();
+        services.AddSingleton<IExecutionCancellationRegistry, ExecutionCancellationRegistry>();
+        services.AddSingleton<IExecutionHeartbeatService, ExecutionHeartbeatService>();
+        services.AddHostedService<ExecutionStartupReconciler>();
+        services.AddScoped<DevPilot.Application.Executions.Commands.CancelExecution.ICancelExecutionCommandHandler, DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionCommandHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();
         services.AddScoped<IRejectExecutionReviewCommandHandler, RejectExecutionReviewCommandHandler>();
         services.AddScoped<IMergeExecutionCommandHandler, MergeExecutionCommandHandler>();

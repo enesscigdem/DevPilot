@@ -12,19 +12,27 @@ public sealed record DeveloperAgentRequest(
     string ProposedPlan,
     IReadOnlyList<string> ImpactedFilePaths,
     string WorkspacePath,
-    string BranchName);
+    string BranchName,
+    IReadOnlyList<ImpactedFileDetail>? ImpactedFiles = null,
+    string? Model = null);
+
+public sealed record ImpactedFileDetail(
+    string FilePath,
+    string? ChangeType = null,
+    string? Reason = null);
 
 public sealed record DeveloperAgentResult(
     bool Success,
     string? ErrorMessage,
     IReadOnlyList<string>? ModifiedFiles = null,
-    string? RawAiResponse = null)
+    string? RawAiResponse = null,
+    string? Model = null)
 {
-    public static DeveloperAgentResult Fail(string message) =>
-        new(Success: false, ErrorMessage: message);
+    public static DeveloperAgentResult Fail(string message, string? model = null) =>
+        new(Success: false, ErrorMessage: message, Model: model);
 
-    public static DeveloperAgentResult Ok(IReadOnlyList<string> modifiedFiles, string? rawAiResponse = null) =>
-        new(Success: true, ErrorMessage: null, ModifiedFiles: modifiedFiles, RawAiResponse: rawAiResponse);
+    public static DeveloperAgentResult Ok(IReadOnlyList<string> modifiedFiles, string? rawAiResponse = null, string? model = null) =>
+        new(Success: true, ErrorMessage: null, ModifiedFiles: modifiedFiles, RawAiResponse: rawAiResponse, Model: model);
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -34,6 +42,15 @@ public enum FileEditAction
     Modify
 }
 
+public sealed record EditManifest(
+    [property: JsonPropertyName("files")] IReadOnlyList<ManifestFileEntry> Files);
+
+public sealed record ManifestFileEntry(
+    [property: JsonPropertyName("filePath")] string FilePath,
+    [property: JsonPropertyName("action")] FileEditAction Action,
+    [property: JsonPropertyName("purpose")] string? Purpose = null,
+    [property: JsonPropertyName("dependencies")] IReadOnlyList<string>? Dependencies = null);
+
 public sealed record StructuredEditPlan(
     [property: JsonPropertyName("files")] IReadOnlyList<FileEditSpec> Files);
 
@@ -41,7 +58,8 @@ public sealed record FileEditSpec(
     [property: JsonPropertyName("filePath")] string FilePath,
     [property: JsonPropertyName("action")] FileEditAction Action,
     [property: JsonPropertyName("newContent")] string? NewContent = null,
-    [property: JsonPropertyName("searchReplaceEdits")] IReadOnlyList<SearchReplaceEdit>? SearchReplaceEdits = null);
+    [property: JsonPropertyName("searchReplaceEdits")] IReadOnlyList<SearchReplaceEdit>? SearchReplaceEdits = null,
+    [property: JsonPropertyName("targetContentHash")] string? TargetContentHash = null);
 
 public sealed record SearchReplaceEdit(
     [property: JsonPropertyName("search")] string Search,
@@ -53,4 +71,29 @@ public sealed record ContextLimits(
     long MaxTotalContentSizeBytes = 500 * 1024) // 500 KB
 {
     public static ContextLimits Default { get; } = new();
+}
+
+public sealed record EditApplicabilityResult(
+    bool Success,
+    string? ErrorMessage,
+    string? ModifiedContent,
+    int FailedEditIndex = -1,
+    int TotalEdits = 0,
+    string? FailedSearch = null,
+    string? FailedReplace = null,
+    int MatchCount = 0,
+    string? SurroundingContext = null)
+{
+    public static EditApplicabilityResult Ok(string modifiedContent, int totalEdits) =>
+        new(true, null, modifiedContent, -1, totalEdits);
+
+    public static EditApplicabilityResult Fail(
+        string errorMessage,
+        int failedEditIndex,
+        int totalEdits,
+        string? failedSearch = null,
+        string? failedReplace = null,
+        int matchCount = 0,
+        string? surroundingContext = null) =>
+        new(false, errorMessage, null, failedEditIndex, totalEdits, failedSearch, failedReplace, matchCount, surroundingContext);
 }

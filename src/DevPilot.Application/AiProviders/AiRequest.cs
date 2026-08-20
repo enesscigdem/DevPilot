@@ -7,4 +7,8 @@ public sealed class AiRequest
     public string? SystemPrompt { get; set; }
 
     public string UserPrompt { get; set; } = string.Empty;
+
+    public int? MaxTokens { get; set; }
+
+    public string? ReasoningEffort { get; set; }
 }

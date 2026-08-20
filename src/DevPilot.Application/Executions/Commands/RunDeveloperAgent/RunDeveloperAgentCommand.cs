@@ -154,6 +154,14 @@ public sealed class RunDeveloperAgentCommandHandler : IRunDeveloperAgentCommandH
             .Where(p => !string.IsNullOrWhiteSpace(p))
             .ToList() ?? new List<string>();
 
+        var impactedFileDetails = analysis.StructuredResult?.ImpactedFiles?
+            .Where(f => !string.IsNullOrWhiteSpace(f.FilePath))
+            .Select(f => new ImpactedFileDetail(
+                FilePath: f.FilePath,
+                ChangeType: f.ChangeType.ToString(),
+                Reason: f.Reason))
+            .ToList() ?? new List<ImpactedFileDetail>();
+
         var agentRequest = new DeveloperAgentRequest(
             TaskId: task.Id,
             ExecutionId: execution.Id,
@@ -164,7 +172,8 @@ public sealed class RunDeveloperAgentCommandHandler : IRunDeveloperAgentCommandH
             ProposedPlan: proposedPlanText,
             ImpactedFilePaths: impactedFiles,
             WorkspacePath: execution.WorkspacePath,
-            BranchName: execution.BranchName);
+            BranchName: execution.BranchName,
+            ImpactedFiles: impactedFileDetails);
 
         _logger.LogInformation(
             "RunDeveloperAgent: invoking DeveloperAgent for execution {ExecutionId} (Task {TaskId}).",

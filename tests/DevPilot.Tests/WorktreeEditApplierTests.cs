@@ -611,6 +611,106 @@ public class WorktreeEditApplierTests : IDisposable
         act.Should().Throw<InvalidOperationException>().WithMessage("*Absolute paths are rejected*");
     }
 
+    [Fact]
+    public async Task ApplyEdits_CrLfTarget_LfSearch_SucceedsAndPreservesCrLf()
+    {
+        var relative = "crlf_file.cs";
+        var fullPath = Path.Combine(_worktreeDir, relative);
+        await File.WriteAllTextAsync(fullPath, "public class Sample\r\n{\r\n    public int Value = 1;\r\n}\r\n");
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(relative, Action: FileEditAction.Modify, SearchReplaceEdits: new[]
+            {
+                new SearchReplaceEdit("{\n    public int Value = 1;\n}", "{\n    public int Value = 42;\n}")
+            })
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeTrue();
+        var written = await File.ReadAllTextAsync(fullPath);
+        written.Should().Contain("\r\n");
+        written.Should().Be("public class Sample\r\n{\r\n    public int Value = 42;\r\n}\r\n");
+    }
+
+    [Fact]
+    public async Task ApplyEdits_LfTarget_CrLfSearch_SucceedsAndPreservesLf()
+    {
+        var relative = "lf_file.cs";
+        var fullPath = Path.Combine(_worktreeDir, relative);
+        await File.WriteAllTextAsync(fullPath, "public class Sample\n{\n    public int Value = 1;\n}\n");
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(relative, Action: FileEditAction.Modify, SearchReplaceEdits: new[]
+            {
+                new SearchReplaceEdit("{\r\n    public int Value = 1;\r\n}", "{\r\n    public int Value = 42;\r\n}")
+            })
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeTrue();
+        var written = await File.ReadAllTextAsync(fullPath);
+        written.Should().NotContain("\r\n");
+        written.Should().Be("public class Sample\n{\n    public int Value = 42;\n}\n");
+    }
+
+    [Fact]
+    public async Task ApplyEdits_StaleTargetContentHashMismatch_FailsAndDoesNotModifyFile()
+    {
+        var relative = "stale_check.cs";
+        var fullPath = Path.Combine(_worktreeDir, relative);
+        var initialContent = "public class StaleCheck { public int V = 1; }";
+        await File.WriteAllTextAsync(fullPath, initialContent);
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(
+                relative,
+                Action: FileEditAction.Modify,
+                SearchReplaceEdits: new[]
+                {
+                    new SearchReplaceEdit("int V = 1;", "int V = 2;")
+                },
+                TargetContentHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("stale target snapshot hash mismatch");
+        (await File.ReadAllTextAsync(fullPath)).Should().Be(initialContent);
+    }
+
+    [Fact]
+    public async Task ApplyEdits_FuzzyOrNonExactAnchor_FailsAndRejectsModification()
+    {
+        var relative = "fuzzy_check.cs";
+        var fullPath = Path.Combine(_worktreeDir, relative);
+        var initialContent = "public class StrictCheck { public int total = 10; }";
+        await File.WriteAllTextAsync(fullPath, initialContent);
+
+        // Subtly different indentation/whitespace or variable name
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(
+                relative,
+                Action: FileEditAction.Modify,
+                SearchReplaceEdits: new[]
+                {
+                    new SearchReplaceEdit("public   int   total = 10;", "public int total = 20;")
+                })
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("Missing search match in 'fuzzy_check.cs'");
+        (await File.ReadAllTextAsync(fullPath)).Should().Be(initialContent);
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");

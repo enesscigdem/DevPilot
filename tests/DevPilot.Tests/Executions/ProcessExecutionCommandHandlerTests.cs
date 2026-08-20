@@ -31,7 +31,9 @@ public class ProcessExecutionCommandHandlerTests
         var processor = new TestExecutionProcessor();
         var recorder = new TestActivityRecorder();
 
-        var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, NullLogger<ProcessExecutionCommandHandler>.Instance);
+        var heartbeatService = new TestHeartbeatService();
+        var cancellationRegistry = new TestCancellationRegistry();
+        var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, heartbeatService, cancellationRegistry, NullLogger<ProcessExecutionCommandHandler>.Instance);
 
         var result = await handler.HandleAsync(new ProcessExecutionCommand(executionId));
 
@@ -84,7 +86,9 @@ public class ProcessExecutionCommandHandlerTests
             var processor = new TestExecutionProcessor();
             var recorder = new TestActivityRecorder();
 
-            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, NullLogger<ProcessExecutionCommandHandler>.Instance);
+            var heartbeatService = new TestHeartbeatService();
+            var cancellationRegistry = new TestCancellationRegistry();
+            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, heartbeatService, cancellationRegistry, NullLogger<ProcessExecutionCommandHandler>.Instance);
 
             var result = await handler.HandleAsync(new ProcessExecutionCommand(executionId));
 
@@ -152,7 +156,9 @@ public class ProcessExecutionCommandHandlerTests
             var processor = new TestExecutionProcessor { ExceptionToThrow = new InvalidOperationException(rawErrorMessage) };
             var recorder = new TestActivityRecorder();
 
-            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, NullLogger<ProcessExecutionCommandHandler>.Instance);
+            var heartbeatService = new TestHeartbeatService();
+            var cancellationRegistry = new TestCancellationRegistry();
+            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, recorder, heartbeatService, cancellationRegistry, NullLogger<ProcessExecutionCommandHandler>.Instance);
 
             var result = await handler.HandleAsync(new ProcessExecutionCommand(executionId));
 
@@ -219,7 +225,9 @@ public class ProcessExecutionCommandHandlerTests
             var processor = new TestExecutionProcessor();
             var brokenRecorder = new BrokenActivityRecorder();
 
-            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, brokenRecorder, NullLogger<ProcessExecutionCommandHandler>.Instance);
+            var heartbeatService = new TestHeartbeatService();
+            var cancellationRegistry = new TestCancellationRegistry();
+            var handler = new ProcessExecutionCommandHandler(repo, impactRepo, processor, brokenRecorder, heartbeatService, cancellationRegistry, NullLogger<ProcessExecutionCommandHandler>.Instance);
 
             var result = await handler.HandleAsync(new ProcessExecutionCommand(executionId));
 
@@ -257,6 +265,7 @@ public class ProcessExecutionCommandHandlerTests
         public Task<TaskExecution?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) => Task.FromResult(ExecutionToReturn);
         public Task<IReadOnlyList<TaskExecution>> GetAllAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<TaskExecution>>(Array.Empty<TaskExecution>());
         public Task<bool> HasActiveExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> HasFailedExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> StartExecutionAtomicAsync(TaskExecution execution, DevelopmentTask task, CancellationToken cancellationToken = default) => Task.FromResult(true);
 
         public Task<bool> ClaimAsRunningAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(ClaimResult);
@@ -275,6 +284,7 @@ public class ProcessExecutionCommandHandlerTests
         }
 
         public Task UpdateWorkspaceDetailsAsync(Guid executionId, string workspacePath, string branchName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task SetModelAsync(Guid executionId, string model, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<bool> TrySetReviewDecisionAsync(Guid executionId, DevPilot.Domain.Enums.ExecutionReviewStatus expectedStatus, DevPilot.Domain.Enums.ExecutionReviewStatus newStatus, DateTime decidedAt, string? rejectionReason, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> TrySetReviewDecisionWithFingerprintAsync(Guid executionId, DevPilot.Domain.Enums.ExecutionReviewStatus expectedStatus, DevPilot.Domain.Enums.ExecutionReviewStatus newStatus, DateTime decidedAt, string fingerprint, string? rejectionReason, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task<bool> TryClaimNewCommitLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, string baseCommitSha, CancellationToken cancellationToken = default) => Task.FromResult(true);
@@ -297,6 +307,24 @@ public class ProcessExecutionCommandHandlerTests
         public Task<bool> TryReclaimStaleMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan mergeLeaseTimeout, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task SetExecutionMergedAsync(Guid executionId, Guid attemptId, string mergeCommitSha, DateTime mergedAt, string mergeMethod, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SetMergeFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<bool> ClaimAsRunningAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(ClaimResult);
+        public Task<bool> RenewHeartbeatAsync(Guid executionId, Guid leaseToken, TimeSpan leaseDuration, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> CompleteWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default)
+        {
+            CompletedExecutionId = executionId;
+            return Task.FromResult(true);
+        }
+        public Task<bool> FailWithLeaseAsync(Guid executionId, Guid leaseToken, string errorMessage, CancellationToken cancellationToken = default)
+        {
+            FailedExecutionId = executionId;
+            FailedErrorMessage = errorMessage;
+            return Task.FromResult(true);
+        }
+        public Task<bool> RequestCancellationAsync(Guid executionId, string? reason, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> AcknowledgeCancellationWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> IsCancellationRequestedAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<int> ReconcileStaleRunningExecutionsAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
     }
 
     private class TestImpactAnalysisRepository : IImpactAnalysisRepository
@@ -354,5 +382,30 @@ public class ProcessExecutionCommandHandlerTests
         {
             throw new InvalidOperationException("DB disk space full - telemetry fail");
         }
+    }
+
+    private class TestHeartbeatService : IExecutionHeartbeatService
+    {
+        public IAsyncDisposable StartHeartbeat(
+            Guid executionId,
+            Guid leaseToken,
+            TimeSpan interval,
+            TimeSpan leaseDuration,
+            CancellationTokenSource linkedCts)
+        {
+            return new DummyAsyncDisposable();
+        }
+
+        private sealed class DummyAsyncDisposable : IAsyncDisposable
+        {
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    private class TestCancellationRegistry : IExecutionCancellationRegistry
+    {
+        public CancellationToken Register(Guid executionId, CancellationToken parentToken = default) => parentToken;
+        public bool TryCancel(Guid executionId) => true;
+        public void Unregister(Guid executionId) { }
     }
 }

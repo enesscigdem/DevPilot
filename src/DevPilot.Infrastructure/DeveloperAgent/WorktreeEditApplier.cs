@@ -46,12 +46,12 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         _logger = logger;
     }
 
-    private static bool HasUtf8Bom(byte[] bytes)
+    public static bool HasUtf8Bom(byte[] bytes)
     {
         return bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
     }
 
-    private static string DecodeUtf8Text(byte[] bytes, out bool hasBom)
+    public static string DecodeUtf8Text(byte[] bytes, out bool hasBom)
     {
         hasBom = HasUtf8Bom(bytes);
         int offset = hasBom ? 3 : 0;
@@ -109,6 +109,10 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             try
             {
                 bytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -240,36 +244,25 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                             $"Target file '{spec.FilePath}' is a binary file and cannot be modified.");
                     }
 
-                    var evolvingContent = DecodeUtf8Text(originalBytes, out var hasBom);
-                    var originalContent = evolvingContent;
+                    var originalContent = DecodeUtf8Text(originalBytes, out var hasBom);
 
-                    // Apply search/replace edits sequentially in memory
-                    foreach (var edit in spec.SearchReplaceEdits)
+                    if (!string.IsNullOrEmpty(spec.TargetContentHash))
                     {
-                        if (edit.Search == null)
+                        var currentDiskHash = ComputeContentHash(originalContent);
+                        if (!string.Equals(spec.TargetContentHash, currentDiskHash, StringComparison.Ordinal))
                         {
                             return DeveloperAgentResult.Fail(
-                                $"Search/replace edit for '{spec.FilePath}' has null search string.");
+                                $"Target file '{spec.FilePath}' has changed since edit generation (stale target snapshot hash mismatch).");
                         }
-
-                        var matchCount = CountOccurrences(evolvingContent, edit.Search);
-                        if (matchCount == 0)
-                        {
-                            return DeveloperAgentResult.Fail(
-                                $"Missing search match in '{spec.FilePath}'. Search text was not found.");
-                        }
-
-                        if (matchCount > 1)
-                        {
-                            return DeveloperAgentResult.Fail(
-                                $"Ambiguous multiple search matches ({matchCount}) in '{spec.FilePath}'. Search text must match exactly once.");
-                        }
-
-                        // Exact single match found - perform replacement
-                        evolvingContent = ReplaceFirstOccurrence(evolvingContent, edit.Search, edit.Replace ?? string.Empty);
                     }
 
-                    preparedModifies.Add((resolvedPath, spec.FilePath, evolvingContent, originalContent, hasBom));
+                    var appResult = ValidateAndApplySearchReplaceEdits(originalContent, spec.SearchReplaceEdits, spec.FilePath);
+                    if (!appResult.Success)
+                    {
+                        return DeveloperAgentResult.Fail(appResult.ErrorMessage!);
+                    }
+
+                    preparedModifies.Add((resolvedPath, spec.FilePath, appResult.ModifiedContent!, originalContent, hasBom));
                     modifiedRelativePaths.Add(spec.FilePath);
                     break;
 
@@ -562,7 +555,7 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         return normCand.StartsWith(baseWithSep, comparison);
     }
 
-    private static bool IsBinaryContent(byte[] bytes)
+    public static bool IsBinaryContent(byte[] bytes)
     {
         // Check for null byte \0 in first 8KB of content
         var inspectLength = Math.Min(bytes.Length, 8192);
@@ -574,6 +567,179 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             }
         }
         return false;
+    }
+
+    public static string NormalizeLineEndings(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return text ?? string.Empty;
+        return text.Replace("\r\n", "\n").Replace('\r', '\n');
+    }
+
+    public static string ComputeContentHash(string? content)
+    {
+        if (content == null) return string.Empty;
+        var normalized = NormalizeLineEndings(content);
+        var bytes = Encoding.UTF8.GetBytes(normalized);
+        var hashBytes = System.Security.Cryptography.SHA256.HashData(bytes);
+        return Convert.ToHexString(hashBytes).ToLowerInvariant();
+    }
+
+    public static string FormatSearchPreview(string? search, int maxLength = 120)
+    {
+        if (string.IsNullOrEmpty(search)) return "(empty)";
+        var singleLine = search.Replace("\r", " ").Replace("\n", " ");
+        while (singleLine.Contains("  "))
+        {
+            singleLine = singleLine.Replace("  ", " ");
+        }
+        singleLine = singleLine.Trim();
+        if (singleLine.Length > maxLength)
+        {
+            return $"\"{singleLine.Substring(0, maxLength)}...\"";
+        }
+        return $"\"{singleLine}\"";
+    }
+
+    public static string? ExtractSurroundingContext(string content, string search, int maxContextLines = 10)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return null;
+        var contentLines = content.Split('\n');
+        if (contentLines.Length <= maxContextLines)
+        {
+            return content.Trim();
+        }
+
+        var searchLines = search.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        int matchedLineIndex = -1;
+        foreach (var sLine in searchLines)
+        {
+            if (sLine.Length < 4) continue;
+            for (int i = 0; i < contentLines.Length; i++)
+            {
+                if (contentLines[i].Contains(sLine, StringComparison.Ordinal))
+                {
+                    matchedLineIndex = i;
+                    break;
+                }
+            }
+            if (matchedLineIndex != -1) break;
+        }
+
+        int startLine = 0;
+        if (matchedLineIndex != -1)
+        {
+            startLine = Math.Max(0, matchedLineIndex - maxContextLines / 2);
+        }
+
+        int endLine = Math.Min(contentLines.Length, startLine + maxContextLines);
+        var excerpt = string.Join('\n', contentLines.Skip(startLine).Take(endLine - startLine));
+        return excerpt.Trim();
+    }
+
+    public static EditApplicabilityResult ValidateAndApplySearchReplaceEdits(
+        string originalContent,
+        IReadOnlyList<SearchReplaceEdit>? edits,
+        string filePath)
+    {
+        if (edits == null || edits.Count == 0)
+        {
+            return EditApplicabilityResult.Fail(
+                $"Strict Modify action failed: searchReplaceEdits list was empty for '{filePath}'.",
+                failedEditIndex: 0,
+                totalEdits: 0);
+        }
+
+        bool hadCrLf = originalContent.Contains("\r\n");
+        var evolvingContent = NormalizeLineEndings(originalContent);
+        int totalEdits = edits.Count;
+
+        for (int i = 0; i < edits.Count; i++)
+        {
+            var edit = edits[i];
+            int blockIndex = i + 1;
+
+            if (edit == null || edit.Search == null)
+            {
+                return EditApplicabilityResult.Fail(
+                    $"Search/replace edit for '{filePath}' (block {blockIndex}/{totalEdits}) has null search string.",
+                    failedEditIndex: blockIndex,
+                    totalEdits: totalEdits);
+            }
+
+            if (string.IsNullOrEmpty(edit.Search))
+            {
+                return EditApplicabilityResult.Fail(
+                    $"Modify action for '{filePath}' (block {blockIndex}/{totalEdits}) contains empty search string.",
+                    failedEditIndex: blockIndex,
+                    totalEdits: totalEdits);
+            }
+
+            if (edit.Replace == null)
+            {
+                return EditApplicabilityResult.Fail(
+                    $"Modify action for '{filePath}' (block {blockIndex}/{totalEdits}) contains null replace string.",
+                    failedEditIndex: blockIndex,
+                    totalEdits: totalEdits,
+                    failedSearch: edit.Search);
+            }
+
+            var normalizedSearch = NormalizeLineEndings(edit.Search);
+            var normalizedReplace = NormalizeLineEndings(edit.Replace);
+
+            var matchCount = CountOccurrences(evolvingContent, normalizedSearch);
+            if (matchCount == 0)
+            {
+                var preview = FormatSearchPreview(normalizedSearch);
+                var surrounding = ExtractSurroundingContext(evolvingContent, normalizedSearch);
+                var errorMsg = $"Missing search match in '{filePath}':\n" +
+                    $"- Edit block: {blockIndex}/{totalEdits}\n" +
+                    $"- Reason: search matched 0 times (zero matches)\n" +
+                    $"- Failed SEARCH preview: {preview}";
+
+                return EditApplicabilityResult.Fail(
+                    errorMsg,
+                    failedEditIndex: blockIndex,
+                    totalEdits: totalEdits,
+                    failedSearch: edit.Search,
+                    failedReplace: edit.Replace,
+                    matchCount: 0,
+                    surroundingContext: surrounding);
+            }
+
+            if (matchCount > 1)
+            {
+                var preview = FormatSearchPreview(normalizedSearch);
+                var errorMsg = $"Ambiguous multiple search matches ({matchCount}) in '{filePath}':\n" +
+                    $"- Edit block: {blockIndex}/{totalEdits}\n" +
+                    $"- Reason: search matched {matchCount} times (multiple matches)\n" +
+                    $"- Failed SEARCH preview: {preview}";
+
+                return EditApplicabilityResult.Fail(
+                    errorMsg,
+                    failedEditIndex: blockIndex,
+                    totalEdits: totalEdits,
+                    failedSearch: edit.Search,
+                    failedReplace: edit.Replace,
+                    matchCount: matchCount);
+            }
+
+            evolvingContent = ReplaceFirstOccurrence(evolvingContent, normalizedSearch, normalizedReplace);
+        }
+
+        var finalContent = hadCrLf
+            ? evolvingContent.Replace("\n", "\r\n")
+            : evolvingContent;
+
+        return EditApplicabilityResult.Ok(finalContent, totalEdits);
+    }
+
+    public static (bool Success, string? ErrorMessage, string? ModifiedContent) TryApplySearchReplaceEdits(
+        string originalContent,
+        IReadOnlyList<SearchReplaceEdit>? edits,
+        string filePath)
+    {
+        var result = ValidateAndApplySearchReplaceEdits(originalContent, edits, filePath);
+        return (result.Success, result.ErrorMessage, result.ModifiedContent);
     }
 
     private static int CountOccurrences(string source, string search)
@@ -701,148 +867,33 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         return results;
     }
 
-    public static List<string> DiscoverProjectRoots(string workspacePath)
-    {
-        var canonicalWorkspace = GetCanonicalRealPath(workspacePath);
-        var csprojFiles = SafeFindFiles(canonicalWorkspace, "*.csproj");
-        var projectRoots = new List<string>();
+    public static List<string> DiscoverProjectRoots(string workspacePath) =>
+        ProjectGraphHelper.DiscoverProjectRoots(workspacePath);
 
-        foreach (var file in csprojFiles)
-        {
-            var dir = Path.GetDirectoryName(file);
-            if (string.IsNullOrEmpty(dir)) continue;
+    public static bool IsCsFileInProjectRoot(string relativeFilePath, IReadOnlyList<string> projectRoots) =>
+        ProjectGraphHelper.IsCsFileInProjectRoot(relativeFilePath, projectRoots);
 
-            var relativeDir = Path.GetRelativePath(canonicalWorkspace, dir).Replace('\\', '/');
-            if (relativeDir == ".") relativeDir = string.Empty;
+    public static bool IsTestFileCandidate(string relativeFilePath) =>
+        ProjectGraphHelper.IsTestFileCandidate(relativeFilePath);
 
-            if (!projectRoots.Contains(relativeDir, StringComparer.OrdinalIgnoreCase))
-            {
-                projectRoots.Add(relativeDir);
-            }
-        }
+    public static bool TryRemapTestFileToSingleTestProject(
+        string relativeFilePath,
+        IReadOnlyList<DiscoveredProjectNode> projectGraph,
+        out string remappedPath,
+        out string? failureReason) =>
+        ProjectGraphHelper.TryRemapTestFileToSingleTestProject(relativeFilePath, projectGraph, out remappedPath, out failureReason);
 
-        return projectRoots;
-    }
+    public static bool TryResolveModifyTarget(
+        string relativeFilePath,
+        string workspacePath,
+        IReadOnlyList<DiscoveredProjectNode>? projectGraph,
+        IReadOnlyList<string>? projectRoots,
+        out string resolvedRelativePath,
+        out string? failureReason) =>
+        ProjectGraphHelper.TryResolveModifyTarget(relativeFilePath, workspacePath, projectGraph, projectRoots, out resolvedRelativePath, out failureReason);
 
-    public static bool IsCsFileInProjectRoot(string relativeFilePath, IReadOnlyList<string> projectRoots)
-    {
-        if (projectRoots == null || projectRoots.Count == 0)
-        {
-            return true;
-        }
-
-        var normalizedPath = relativeFilePath.Replace('\\', '/').TrimStart('/');
-
-        foreach (var projRoot in projectRoots)
-        {
-            if (string.IsNullOrEmpty(projRoot))
-            {
-                return true;
-            }
-
-            var projPrefix = projRoot.TrimEnd('/') + "/";
-            if (normalizedPath.StartsWith(projPrefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    public static List<DiscoveredProjectNode> DiscoverProjectGraph(string workspacePath)
-    {
-        var canonicalWorkspace = GetCanonicalRealPath(workspacePath);
-        var csprojFiles = SafeFindFiles(canonicalWorkspace, "*.csproj");
-        var nodes = new List<DiscoveredProjectNode>();
-
-        foreach (var fullPath in csprojFiles)
-        {
-            var relativeProjPath = Path.GetRelativePath(canonicalWorkspace, fullPath).Replace('\\', '/');
-            var projDir = Path.GetDirectoryName(fullPath) ?? canonicalWorkspace;
-            var relativeProjDir = Path.GetRelativePath(canonicalWorkspace, projDir).Replace('\\', '/');
-            if (string.IsNullOrEmpty(relativeProjDir) || relativeProjDir == ".")
-            {
-                relativeProjDir = ".";
-            }
-
-            var projectName = Path.GetFileNameWithoutExtension(fullPath);
-            bool isTest = false;
-            var references = new List<string>();
-
-            if (projectName.Contains("Test", StringComparison.OrdinalIgnoreCase))
-            {
-                isTest = true;
-            }
-
-            try
-            {
-                var content = File.ReadAllText(fullPath);
-                var doc = XDocument.Parse(content);
-
-                var isTestElem = doc.Descendants()
-                    .FirstOrDefault(e => e.Name.LocalName.Equals("IsTestProject", StringComparison.OrdinalIgnoreCase));
-                if (isTestElem != null && bool.TryParse(isTestElem.Value.Trim(), out var parsedIsTest))
-                {
-                    isTest = parsedIsTest;
-                }
-
-                var pkgRefs = doc.Descendants()
-                    .Where(e => e.Name.LocalName.Equals("PackageReference", StringComparison.OrdinalIgnoreCase));
-                foreach (var pkg in pkgRefs)
-                {
-                    var pkgInclude = (string?)pkg.Attribute("Include") ?? (string?)pkg.Attribute("include");
-                    if (!string.IsNullOrEmpty(pkgInclude))
-                    {
-                        if (pkgInclude.Contains("xunit", StringComparison.OrdinalIgnoreCase) ||
-                            pkgInclude.Contains("nunit", StringComparison.OrdinalIgnoreCase) ||
-                            pkgInclude.Contains("mstest", StringComparison.OrdinalIgnoreCase) ||
-                            pkgInclude.Contains("Microsoft.NET.Test.Sdk", StringComparison.OrdinalIgnoreCase))
-                        {
-                            isTest = true;
-                        }
-                    }
-                }
-
-                var projRefs = doc.Descendants()
-                    .Where(e => e.Name.LocalName.Equals("ProjectReference", StringComparison.OrdinalIgnoreCase));
-                foreach (var pref in projRefs)
-                {
-                    var include = (string?)pref.Attribute("Include") ?? (string?)pref.Attribute("include");
-                    if (!string.IsNullOrWhiteSpace(include))
-                    {
-                        var normalizedInclude = include.Trim().Replace('\\', '/');
-                        var hostInclude = normalizedInclude.Replace('/', Path.DirectorySeparatorChar);
-                        var resolvedFull = Path.GetFullPath(Path.Combine(projDir, hostInclude));
-                        var canonicalRef = GetCanonicalRealPath(resolvedFull);
-                        if (IsSubPath(canonicalWorkspace, canonicalRef))
-                        {
-                            var relRef = Path.GetRelativePath(canonicalWorkspace, canonicalRef).Replace('\\', '/');
-                            if (!references.Contains(relRef, StringComparer.OrdinalIgnoreCase))
-                            {
-                                references.Add(relRef);
-                            }
-                        }
-                    }
-                }
-            }
-            catch
-            {
-                // Graceful fallback if XML parsing fails
-            }
-
-            nodes.Add(new DiscoveredProjectNode
-            {
-                ProjectPath = relativeProjPath,
-                ProjectName = projectName,
-                ProjectDirectory = relativeProjDir,
-                IsTestProject = isTest,
-                ProjectReferences = references
-            });
-        }
-
-        return nodes.OrderBy(n => n.ProjectPath, StringComparer.OrdinalIgnoreCase).ToList();
-    }
+    public static List<DiscoveredProjectNode> DiscoverProjectGraph(string workspacePath) =>
+        ProjectGraphHelper.DiscoverProjectGraph(workspacePath);
 
     private static void CleanupDirectory(string path)
     {
@@ -858,13 +909,4 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             // Best effort cleanup
         }
     }
-}
-
-public sealed class DiscoveredProjectNode
-{
-    public string ProjectPath { get; set; } = string.Empty;
-    public string ProjectName { get; set; } = string.Empty;
-    public string ProjectDirectory { get; set; } = string.Empty;
-    public bool IsTestProject { get; set; }
-    public List<string> ProjectReferences { get; set; } = new();
 }

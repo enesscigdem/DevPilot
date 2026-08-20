@@ -189,33 +189,75 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
             return false;
         }
 
+        var nowUtc = DateTime.UtcNow;
+        bool HasValidRunningLease(TaskExecution e)
+        {
+            if (e.Status != TaskExecutionStatus.Running) return false;
+            if (e.LeaseExpiresAt.HasValue) return e.LeaseExpiresAt.Value > nowUtc;
+            return true;
+        }
+
         var nonTerminalExecutions = executions.Where(e => !IsTerminal(e)).ToList();
 
-        var activeExecution = nonTerminalExecutions
-            .Where(e => e.Status == TaskExecutionStatus.Running)
+        var activeWorkflow = nonTerminalExecutions
+            .Where(e => HasValidRunningLease(e))
             .OrderByDescending(e => e.StartedAt ?? e.CreatedAt)
+            .ThenByDescending(e => e.CreatedAt)
+            .ThenByDescending(e => e.Id)
             .FirstOrDefault()
             ?? nonTerminalExecutions
                 .Where(e => e.Status == TaskExecutionStatus.Pending)
                 .OrderByDescending(e => e.CreatedAt)
+                .ThenByDescending(e => e.Id)
                 .FirstOrDefault()
             ?? nonTerminalExecutions
                 .Where(e => e.Status == TaskExecutionStatus.Completed && e.ReviewStatus == ExecutionReviewStatus.Pending)
                 .OrderByDescending(e => e.CompletedAt ?? e.CreatedAt)
+                .ThenByDescending(e => e.Id)
                 .FirstOrDefault()
             ?? nonTerminalExecutions
                 .Where(e => e.Status == TaskExecutionStatus.Completed && e.ReviewStatus == ExecutionReviewStatus.Approved)
                 .OrderByDescending(e => e.ReviewDecidedAt ?? e.CompletedAt ?? e.CreatedAt)
+                .ThenByDescending(e => e.Id)
                 .FirstOrDefault();
 
-        WorkspaceActiveExecutionDto? activeExecutionDto = null;
-        if (activeExecution is not null && taskMap.TryGetValue(activeExecution.DevelopmentTaskId, out var activeTask))
+        var activeAgentExecution = nonTerminalExecutions
+            .Where(e => HasValidRunningLease(e))
+            .OrderByDescending(e => e.StartedAt ?? e.CreatedAt)
+            .ThenByDescending(e => e.CreatedAt)
+            .ThenByDescending(e => e.Id)
+            .FirstOrDefault()
+            ?? nonTerminalExecutions
+                .Where(e => e.Status == TaskExecutionStatus.Pending)
+                .OrderByDescending(e => e.CreatedAt)
+                .ThenByDescending(e => e.Id)
+                .FirstOrDefault();
+
+        WorkspaceActiveExecutionDto? activeWorkflowDto = null;
+        if (activeWorkflow is not null && taskMap.TryGetValue(activeWorkflow.DevelopmentTaskId, out var activeWorkflowTask))
         {
-            analysesByTaskId.TryGetValue(activeTask.Id, out var activeAnalysis);
-            activitiesByExecutionId.TryGetValue(activeExecution.Id, out var execActivities);
+            analysesByTaskId.TryGetValue(activeWorkflowTask.Id, out var activeAnalysis);
+            activitiesByExecutionId.TryGetValue(activeWorkflow.Id, out var execActivities);
             execActivities ??= new List<ExecutionActivity>();
 
-            activeExecutionDto = BuildActiveExecutionDto(activeExecution, activeTask, activeAnalysis, execActivities);
+            activeWorkflowDto = BuildActiveExecutionDto(activeWorkflow, activeWorkflowTask, activeAnalysis, execActivities);
+        }
+
+        WorkspaceActiveExecutionDto? activeAgentDto = null;
+        if (activeAgentExecution is not null && taskMap.TryGetValue(activeAgentExecution.DevelopmentTaskId, out var activeAgentTask))
+        {
+            if (activeAgentExecution.Id == activeWorkflow?.Id)
+            {
+                activeAgentDto = activeWorkflowDto;
+            }
+            else
+            {
+                analysesByTaskId.TryGetValue(activeAgentTask.Id, out var activeAgentAnalysis);
+                activitiesByExecutionId.TryGetValue(activeAgentExecution.Id, out var execActivities);
+                execActivities ??= new List<ExecutionActivity>();
+
+                activeAgentDto = BuildActiveExecutionDto(activeAgentExecution, activeAgentTask, activeAgentAnalysis, execActivities);
+            }
         }
 
         // 5. Needs Your Attention (Max 3, prioritized)
@@ -237,7 +279,8 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
         {
             Header = header,
             NeedsAttention = needsAttention,
-            ActiveExecution = activeExecutionDto,
+            ActiveExecution = activeWorkflowDto,
+            ActiveAgentExecution = activeAgentDto,
             AwaitingApproval = awaitingApproval,
             FailedOrBlocked = failedOrBlocked,
             RecentActivity = recentActivity,

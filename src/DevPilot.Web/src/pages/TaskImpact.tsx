@@ -17,17 +17,22 @@ import {
   Loader2,
   AlertCircle,
   BrainCircuit,
+  RotateCcw,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Panel, Badge, Meter, StatusDot, IconChip } from "@/components/ui/primitives"
-import { getTask, getTaskImpactAnalysis, analyzeTaskImpact, approveTask, rejectTask, startExecution } from "@/api"
+import { getTask, getTaskImpactAnalysis, analyzeTaskImpact, approveTask, rejectTask, startExecution, retryExecution, getExecutions } from "@/api"
+import { useWorkspace } from "@/lib/workspace"
+import { deriveTaskImpactActionState } from "@/lib/taskImpactState"
 import {
   TaskStatus,
   TaskPriority,
   ImpactAnalysisStatus,
+  TaskExecutionStatus,
   type Task,
   type ImpactAnalysis,
   type ImpactedFile,
+  type ExecutionListItem,
 } from "@/types"
 import { activeTask, affectedFiles as mockAffectedFiles, impactSummary as mockImpactSummary, statusMeta, riskMeta, type Tone } from "@/data/mock"
 
@@ -87,9 +92,11 @@ function getImpactLevelTone(level: string): Tone {
 export function TaskImpact() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const { activeWorkspaceId, refreshOverview } = useWorkspace()
 
   const [task, setTask] = useState<Task | null>(null)
   const [analysis, setAnalysis] = useState<ImpactAnalysis | null>(null)
+  const [activeExecution, setActiveExecution] = useState<ExecutionListItem | null>(null)
 
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -107,6 +114,9 @@ export function TaskImpact() {
   const [isStartingExecution, setIsStartingExecution] = useState(false)
   const [startExecutionError, setStartExecutionError] = useState<string | null>(null)
 
+  const [isRetryingExecution, setIsRetryingExecution] = useState(false)
+  const [retryExecutionError, setRetryExecutionError] = useState<string | null>(null)
+
   const handleStartExecution = async () => {
     if (!id || isStartingExecution) return
     setIsStartingExecution(true)
@@ -114,11 +124,60 @@ export function TaskImpact() {
 
     try {
       const execution = await startExecution(id)
+      refreshOverview(true)
       navigate(`/executions/${execution.id}`)
     } catch (err) {
       setStartExecutionError(err instanceof Error ? err.message : "Failed to start execution.")
+      // Refetch task and executions from server to surface any existing active execution
+      try {
+        const [updatedTask, execs] = await Promise.all([
+          getTask(id),
+          getExecutions(activeWorkspaceId).catch(() => []),
+        ])
+        setTask(updatedTask)
+        const active = execs.find(
+          (e) =>
+            e.developmentTaskId === id &&
+            (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running),
+        )
+        setActiveExecution(active ?? null)
+      } catch {
+        // ignore
+      }
     } finally {
       setIsStartingExecution(false)
+    }
+  }
+
+  const handleRetryExecution = async () => {
+    if (!id || isRetryingExecution) return
+    setIsRetryingExecution(true)
+    setRetryExecutionError(null)
+
+    try {
+      const execution = await retryExecution(id)
+      refreshOverview(true)
+      navigate(`/executions/${execution.id}`)
+    } catch (err) {
+      setRetryExecutionError(err instanceof Error ? err.message : "Failed to retry execution.")
+      // Refetch task and executions from server to surface any existing active execution
+      try {
+        const [updatedTask, execs] = await Promise.all([
+          getTask(id),
+          getExecutions(activeWorkspaceId).catch(() => []),
+        ])
+        setTask(updatedTask)
+        const active = execs.find(
+          (e) =>
+            e.developmentTaskId === id &&
+            (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running),
+        )
+        setActiveExecution(active ?? null)
+      } catch {
+        // ignore
+      }
+    } finally {
+      setIsRetryingExecution(false)
     }
   }
 
@@ -131,13 +190,25 @@ export function TaskImpact() {
       if (id === activeTask.id || id === "TASK-142") {
         setTask(null)
         setAnalysis(null)
+        setActiveExecution(null)
         setIsLoading(false)
         return
       }
 
-      // 1. Fetch task details
-      const loadedTask = await getTask(id)
+      // 1. Fetch task details & executions in parallel
+      const [loadedTask, execs] = await Promise.all([
+        getTask(id),
+        getExecutions(activeWorkspaceId).catch(() => []),
+      ])
       setTask(loadedTask)
+
+      // Find active execution for this task (Pending or Running)
+      const active = execs.find(
+        (e) =>
+          e.developmentTaskId === id &&
+          (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running),
+      )
+      setActiveExecution(active ?? null)
 
       // 2. Fetch impact analysis (404 means no analysis yet)
       try {
@@ -151,11 +222,39 @@ export function TaskImpact() {
     } finally {
       setIsLoading(false)
     }
-  }, [id])
+  }, [id, activeWorkspaceId])
 
   useEffect(() => {
     loadData()
   }, [loadData])
+
+  // Scoped polling while task has an actual active execution OR task.status claims Executing
+  useEffect(() => {
+    const isExecutingOrSyncing =
+      activeExecution != null || task?.status === TaskStatus.Executing
+
+    if (!isExecutingOrSyncing || !id) return
+
+    const interval = setInterval(async () => {
+      try {
+        const [updatedTask, execs] = await Promise.all([
+          getTask(id),
+          getExecutions(activeWorkspaceId).catch(() => []),
+        ])
+        setTask(updatedTask)
+        const active = execs.find(
+          (e) =>
+            e.developmentTaskId === id &&
+            (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running),
+        )
+        setActiveExecution(active ?? null)
+      } catch {
+        // ignore polling failures
+      }
+    }, 3500)
+
+    return () => clearInterval(interval)
+  }, [id, activeWorkspaceId, activeExecution, task?.status])
 
   const handleStartAnalysis = async () => {
     if (!id || isAnalyzing) return
@@ -277,17 +376,12 @@ export function TaskImpact() {
       ? `${task.repositoryOwner}/${task.repositoryName}`
       : "master"
 
-  const isAwaitingApproval = isMockView
-    ? mockStatus === "awaiting-approval"
-    : task?.status === TaskStatus.AwaitingApproval
-
-  const isApproved = isMockView
-    ? mockStatus === "approved"
-    : task?.status === TaskStatus.Approved
-
-  const isRejected = isMockView
-    ? mockStatus === "rejected"
-    : task?.status === TaskStatus.Rejected
+  const actionState = deriveTaskImpactActionState(
+    task?.status,
+    activeExecution,
+    isMockView,
+    mockStatus,
+  )
 
   const statusInfo = isMockView
     ? (mockStatus === "approved"
@@ -701,7 +795,47 @@ export function TaskImpact() {
 
           {hasCompletedAnalysis && (
             <div className="mt-6 rounded-[var(--radius-lg)] border border-primary-ring/50 bg-primary-soft/50 p-4 min-w-0">
-              {isAwaitingApproval ? (
+              {actionState.kind === "active-execution" ? (
+                <div className="space-y-3 min-w-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <IconChip tone="blue" className="shrink-0">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    </IconChip>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-semibold text-foreground">Execution in progress</div>
+                      <div className="text-[12px] text-muted-foreground">
+                        {actionState.message}
+                      </div>
+                    </div>
+                  </div>
+
+                  {actionState.activeExecutionId && (
+                    <Button
+                      variant="primary"
+                      size="lg"
+                      className="w-full gap-2"
+                      onClick={() => navigate(`/executions/${actionState.activeExecutionId}`)}
+                    >
+                      <Play className="h-4 w-4" />
+                      View live execution
+                    </Button>
+                  )}
+                </div>
+              ) : actionState.kind === "syncing-execution" ? (
+                <div className="space-y-3 min-w-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <IconChip tone="blue" className="shrink-0">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    </IconChip>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-semibold text-foreground">Execution state is syncing…</div>
+                      <div className="text-[12px] text-muted-foreground">
+                        {actionState.message}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : actionState.kind === "awaiting-approval" ? (
                 <>
                   <div className="flex items-center gap-2 min-w-0">
                     <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
@@ -769,7 +903,7 @@ export function TaskImpact() {
                     </div>
                   </div>
                 </>
-              ) : isApproved ? (
+              ) : actionState.kind === "approved" ? (
                 <div className="space-y-3 min-w-0">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <IconChip tone="blue" className="shrink-0">
@@ -808,7 +942,7 @@ export function TaskImpact() {
                     )}
                   </Button>
                 </div>
-              ) : isRejected ? (
+              ) : actionState.kind === "rejected" ? (
                 <div className="flex items-center gap-2.5 min-w-0">
                   <IconChip tone="red" className="shrink-0">
                     <AlertCircle className="h-4 w-4 text-danger" />
@@ -817,6 +951,45 @@ export function TaskImpact() {
                     <div className="text-[13px] font-semibold text-foreground">Plan rejected</div>
                     <div className="text-[12px] text-muted-foreground">This task plan was rejected.</div>
                   </div>
+                </div>
+              ) : actionState.kind === "failed" ? (
+                <div className="space-y-3 min-w-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <IconChip tone="red" className="shrink-0">
+                      <AlertCircle className="h-4 w-4 text-danger" />
+                    </IconChip>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-semibold text-foreground">Execution failed</div>
+                      <div className="text-[12px] text-muted-foreground">The previous execution attempt failed. You can retry execution with the approved plan.</div>
+                    </div>
+                  </div>
+
+                  {retryExecutionError && (
+                    <div className="flex items-center gap-1.5 text-[12px] font-medium text-danger">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span className="break-words">{retryExecutionError}</span>
+                    </div>
+                  )}
+
+                  <Button
+                    variant="primary"
+                    size="lg"
+                    className="w-full"
+                    disabled={isRetryingExecution}
+                    onClick={handleRetryExecution}
+                  >
+                    {isRetryingExecution ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Retrying execution…
+                      </>
+                    ) : (
+                      <>
+                        <RotateCcw className="h-4 w-4" />
+                        Retry execution
+                      </>
+                    )}
+                  </Button>
                 </div>
               ) : null}
             </div>

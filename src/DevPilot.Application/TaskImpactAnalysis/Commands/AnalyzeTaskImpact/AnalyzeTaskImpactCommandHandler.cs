@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
+using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.ProjectBrain.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Dtos;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
@@ -205,11 +206,14 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         try
         {
+            var projectGraph = ProjectGraphHelper.DiscoverProjectGraph(workspace.LocalPath);
+            var projectRoots = ProjectGraphHelper.DiscoverProjectRoots(workspace.LocalPath);
+
             var context = await BuildContextAsync(task, workspace, cancellationToken).ConfigureAwait(false);
             var aiRequest = new AiRequest
             {
                 SystemPrompt = SystemPrompt,
-                UserPrompt = BuildUserPrompt(task, workspace, context),
+                UserPrompt = BuildUserPrompt(task, workspace, context, projectGraph, projectRoots),
             };
 
             var stopwatch = Stopwatch.StartNew();
@@ -235,7 +239,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     cancellationToken).ConfigureAwait(false);
             }
 
-            var parseResult = TryParseStructuredResult(rawResponse);
+            var parseResult = TryParseStructuredResult(rawResponse, projectGraph, projectRoots, workspace.LocalPath);
             if (!parseResult.Success)
             {
                 return await FailAnalysisAsync(
@@ -527,7 +531,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private static string BuildUserPrompt(
         DevelopmentTask task,
         RepositoryWorkspace workspace,
-        string context)
+        string context,
+        IReadOnlyList<DiscoveredProjectNode> projectGraph,
+        IReadOnlyList<string> projectRoots)
     {
         var builder = new StringBuilder();
 
@@ -548,6 +554,24 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             $"{workspace.Owner}/{workspace.Repository} (branch: {workspace.Branch}, commit: {workspace.CommitSha})");
         builder.AppendLine();
 
+        builder.AppendLine("# Discovered .NET Project Graph");
+        if (projectGraph != null && projectGraph.Count > 0)
+        {
+            foreach (var proj in projectGraph)
+            {
+                var pkgList = proj.PackageReferences.Count > 0 ? string.Join(", ", proj.PackageReferences) : "none";
+                var projRefList = proj.ProjectReferences.Count > 0 ? string.Join(", ", proj.ProjectReferences) : "none";
+                builder.AppendLine($"- Project: {proj.ProjectPath} (Name: {proj.ProjectName}, Directory: {proj.ProjectDirectory}, TestProject: {proj.IsTestProject})");
+                builder.AppendLine($"  PackageReferences: [{pkgList}]");
+                builder.AppendLine($"  ProjectReferences: [{projRefList}]");
+            }
+        }
+        else
+        {
+            builder.AppendLine("- No projects were discovered in the workspace.");
+        }
+        builder.AppendLine();
+
         builder.AppendLine("# Context");
         builder.AppendLine(context);
         builder.AppendLine();
@@ -556,13 +580,23 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         builder.AppendLine(
             "Analyze the impact of implementing this task on the repository. " +
             "Respond with a single JSON object only, no markdown fences, no extra commentary. " +
+            "CRITICAL PROJECT RULES:\n" +
+            "1. All proposed C# (*.cs) file paths MUST be located within one of the discovered .NET project directories listed above.\n" +
+            "2. Do NOT invent new or nonexistent project directories (e.g. if the test project is 'tests/DevPilot.Tests', do NOT invent 'tests/DevPilot.Api.Tests').\n" +
+            "3. Unit and integration test files MUST be placed in an existing discovered test project.\n" +
+            "4. STRICT ARCHITECTURAL GROUNDING: You MUST strictly adhere to the existing architectural patterns, interfaces, abstractions, and libraries referenced in the project graph.\n" +
+            "5. DO NOT INVENT FRAMEWORKS OR PATTERNS: Do NOT introduce or propose third-party packages, libraries, or architectural patterns (such as MediatR, direct Entity Framework Core access in Application layer, or nonexistent DbContext interfaces) that are not referenced in the target project.\n" +
             "Confidence must be an integer 0-100. Use the following schema:");
         builder.AppendLine(JsonSchema);
 
         return builder.ToString();
     }
 
-    private static ParseResult TryParseStructuredResult(string rawResponse)
+    private static ParseResult TryParseStructuredResult(
+        string rawResponse,
+        IReadOnlyList<DiscoveredProjectNode> projectGraph,
+        IReadOnlyList<string> projectRoots,
+        string workspaceLocalPath)
     {
         var json = ExtractJson(rawResponse);
 
@@ -586,7 +620,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             return ParseResult.Failure("The AI response deserialized to null.");
         }
 
-        return MapToResultData(response);
+        return MapToResultData(response, projectGraph, projectRoots, workspaceLocalPath);
     }
 
     private static string ExtractJson(string content)
@@ -603,11 +637,32 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         return trimmed[start..(end + 1)];
     }
 
-    private static ParseResult MapToResultData(ImpactAnalysisResponse response)
+    private static ParseResult MapToResultData(
+        ImpactAnalysisResponse response,
+        IReadOnlyList<DiscoveredProjectNode> projectGraph,
+        IReadOnlyList<string> projectRoots,
+        string workspaceLocalPath)
     {
         if (string.IsNullOrWhiteSpace(response.Summary))
         {
             return ParseResult.Failure("The AI response is missing a summary.");
+        }
+
+        var effectiveGraph = projectGraph ?? Array.Empty<DiscoveredProjectNode>();
+        var effectiveRoots = projectRoots ?? Array.Empty<string>();
+
+        // Check for unsupported framework hallucination in plan/summary
+        var allPackageRefs = effectiveGraph
+            .SelectMany(p => p.PackageReferences)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var combinedPlanText = $"{response.Summary}\n{string.Join("\n", response.ProposedPlan?.Select(p => $"{p?.Title} {p?.Description}") ?? Array.Empty<string>())}";
+        if ((combinedPlanText.Contains("MediatR", StringComparison.OrdinalIgnoreCase) ||
+             combinedPlanText.Contains("IRequest<", StringComparison.OrdinalIgnoreCase) ||
+             combinedPlanText.Contains("IRequestHandler<", StringComparison.OrdinalIgnoreCase)) &&
+            !allPackageRefs.Contains("MediatR"))
+        {
+            return ParseResult.Failure("The proposed impact analysis references unsupported framework 'MediatR' which is not referenced by the repository. Implement standard DevPilot queries/handlers without MediatR.");
         }
 
         var resultData = new ImpactAnalysisResultData
@@ -619,35 +674,128 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         if (response.ImpactedFiles is not null)
         {
-            resultData.ImpactedFiles = response.ImpactedFiles
-                .Where(f => f is not null && !string.IsNullOrWhiteSpace(f.FilePath))
-                .Select(f => new ImpactedFile
+            var impactedFiles = new List<ImpactedFile>();
+            foreach (var f in response.ImpactedFiles)
+            {
+                if (f is null || string.IsNullOrWhiteSpace(f.FilePath)) continue;
+
+                var rawPath = f.FilePath.Trim();
+                string normalizedPath;
+                try
                 {
-                    FilePath = f!.FilePath!.Trim(),
-                    ChangeType = ParseChangeType(f.ChangeType),
+                    normalizedPath = ProjectGraphHelper.NormalizeAndValidateRelativePath(rawPath);
+                }
+                catch (Exception ex)
+                {
+                    return ParseResult.Failure($"Impacted file path '{rawPath}' is invalid: {ex.Message}");
+                }
+
+                var changeType = ParseChangeType(f.ChangeType);
+
+                if (normalizedPath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!ProjectGraphHelper.IsCsFileInProjectRoot(normalizedPath, effectiveRoots))
+                    {
+                        if (ProjectGraphHelper.IsTestFileCandidate(normalizedPath))
+                        {
+                            if (ProjectGraphHelper.TryRemapTestFileToSingleTestProject(normalizedPath, effectiveGraph, out var remappedPath, out var err))
+                            {
+                                normalizedPath = remappedPath;
+                            }
+                            else
+                            {
+                                return ParseResult.Failure(err ?? $"Impacted C# test file '{rawPath}' is outside all discovered .NET project roots.");
+                            }
+                        }
+                        else
+                        {
+                            return ParseResult.Failure($"Impacted C# file '{rawPath}' is outside all discovered .NET project roots.");
+                        }
+                    }
+                }
+
+                // Deterministic Modify/Refactor/Delete Grounding Check
+                if (changeType is ImpactFileChangeType.Modify or ImpactFileChangeType.Refactor or ImpactFileChangeType.Delete)
+                {
+                    if (!ProjectGraphHelper.TryResolveModifyTarget(
+                        normalizedPath,
+                        workspaceLocalPath,
+                        effectiveGraph,
+                        effectiveRoots,
+                        out var resolvedModifyPath,
+                        out var modifyErr))
+                    {
+                        return ParseResult.Failure(modifyErr ?? $"Impacted file path '{rawPath}' with action '{changeType}' does not exist in the repository and cannot be deterministically resolved.");
+                    }
+                    normalizedPath = resolvedModifyPath;
+                }
+
+                impactedFiles.Add(new ImpactedFile
+                {
+                    FilePath = normalizedPath,
+                    ChangeType = changeType,
                     Reason = f.Reason?.Trim() ?? string.Empty,
                     Confidence = NormalizeConfidence(f.Confidence),
-                })
-                .ToList();
+                });
+            }
+
+            resultData.ImpactedFiles = impactedFiles;
         }
 
         if (response.ProposedPlan is not null)
         {
             var order = 1;
-            resultData.ProposedPlan = response.ProposedPlan
-                .Where(s => s is not null && !string.IsNullOrWhiteSpace(s.Title))
-                .Select(s => new ProposedPlanStep
-{
-                    Order = s!.Order is > 0 ? s.Order.Value : order++,
-                    Title = s.Title!.Trim(),
+            var planSteps = new List<ProposedPlanStep>();
+            foreach (var s in response.ProposedPlan)
+            {
+                if (s is null || string.IsNullOrWhiteSpace(s.Title)) continue;
+
+                var related = new List<string>();
+                if (s.RelatedFiles != null)
+                {
+                    foreach (var rf in s.RelatedFiles)
+                    {
+                        if (string.IsNullOrWhiteSpace(rf)) continue;
+                        var raw = rf.Trim();
+                        string norm;
+                        try
+                        {
+                            norm = ProjectGraphHelper.NormalizeAndValidateRelativePath(raw);
+                        }
+                        catch
+                        {
+                            norm = raw.Replace('\\', '/').TrimStart('/');
+                        }
+
+                        if (norm.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) &&
+                            !ProjectGraphHelper.IsCsFileInProjectRoot(norm, effectiveRoots) &&
+                            ProjectGraphHelper.IsTestFileCandidate(norm) &&
+                            ProjectGraphHelper.TryRemapTestFileToSingleTestProject(norm, effectiveGraph, out var remapped, out _))
+                        {
+                            norm = remapped;
+                        }
+
+                        if (ProjectGraphHelper.TryResolveModifyTarget(norm, workspaceLocalPath, effectiveGraph, effectiveRoots, out var resolvedRel, out _))
+                        {
+                            norm = resolvedRel;
+                        }
+
+                        if (!related.Contains(norm, StringComparer.OrdinalIgnoreCase))
+                        {
+                            related.Add(norm);
+                        }
+                    }
+                }
+
+                planSteps.Add(new ProposedPlanStep
+                {
+                    Order = s.Order is > 0 ? s.Order.Value : order++,
+                    Title = s.Title.Trim(),
                     Description = s.Description?.Trim() ?? string.Empty,
-                    RelatedFiles = s.RelatedFiles
-                        ?.Where(p => !string.IsNullOrWhiteSpace(p))
-                        .Select(p => p.Trim())
-                        .Distinct()
-                        .ToList() ?? new List<string>(),
-                })
-                .ToList();
+                    RelatedFiles = related,
+                });
+            }
+            resultData.ProposedPlan = planSteps;
         }
 
         if (response.SystemImpacts is not null)

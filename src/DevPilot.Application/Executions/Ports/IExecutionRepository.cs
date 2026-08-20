@@ -31,12 +31,33 @@ public interface IExecutionRepository
     Task<bool> HasActiveExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Returns <c>true</c> when at least one <c>Failed</c> execution exists for <paramref name="taskId"/>.
+    /// </summary>
+    Task<bool> HasFailedExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Atomically transitions a <c>Pending</c> execution to <c>Running</c> and returns
-    /// <c>true</c>.  Returns <c>false</c> if the execution is not in <c>Pending</c> status
-    /// (idempotency guard — safe to call from a re-queued Hangfire job).
-    /// Sets <see cref="TaskExecution.StartedAt"/> to UTC now.
+    /// <c>true</c>. Sets <see cref="TaskExecution.StartedAt"/> to UTC now.
     /// </summary>
     Task<bool> ClaimAsRunningAsync(Guid executionId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically transitions a <c>Pending</c> execution to <c>Running</c> with the specified
+    /// <paramref name="leaseToken"/> and lease expiration time.
+    /// </summary>
+    Task<bool> ClaimAsRunningAsync(
+        Guid executionId,
+        Guid leaseToken,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Renews the execution lease heartbeat if the execution is still Running and the lease token matches.
+    /// </summary>
+    Task<bool> RenewHeartbeatAsync(
+        Guid executionId,
+        Guid leaseToken,
+        TimeSpan leaseDuration,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Transitions a <c>Running</c> execution to <c>Completed</c>.
@@ -44,6 +65,14 @@ public interface IExecutionRepository
     /// <see cref="DevelopmentTask"/> status to <c>Completed</c>.
     /// </summary>
     Task CompleteAsync(Guid executionId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Transitions a <c>Running</c> execution with matching <paramref name="leaseToken"/> to <c>Completed</c>.
+    /// </summary>
+    Task<bool> CompleteWithLeaseAsync(
+        Guid executionId,
+        Guid leaseToken,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Transitions a <c>Running</c> execution to <c>Failed</c>.
@@ -57,12 +86,60 @@ public interface IExecutionRepository
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Transitions a <c>Running</c> execution with matching <paramref name="leaseToken"/> to <c>Failed</c>.
+    /// </summary>
+    Task<bool> FailWithLeaseAsync(
+        Guid executionId,
+        Guid leaseToken,
+        string errorMessage,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Persists a cancellation request for a non-terminal execution.
+    /// </summary>
+    Task<bool> RequestCancellationAsync(
+        Guid executionId,
+        string? reason,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Acknowledges cancellation by the owning worker with matching <paramref name="leaseToken"/>,
+    /// transitioning execution to <c>Cancelled</c> and returning the task to <c>Approved</c>.
+    /// </summary>
+    Task<bool> AcknowledgeCancellationWithLeaseAsync(
+        Guid executionId,
+        Guid leaseToken,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Checks whether cancellation has been requested for the execution.
+    /// </summary>
+    Task<bool> IsCancellationRequestedAsync(
+        Guid executionId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reconciles stale Running executions whose lease has expired or legacy Running executions before cutoff.
+    /// </summary>
+    Task<int> ReconcileStaleRunningExecutionsAsync(
+        DateTime cutoffUtc,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Persists the isolated workspace local path and dedicated branch name for an execution.
     /// </summary>
     Task UpdateWorkspaceDetailsAsync(
         Guid executionId,
         string workspacePath,
         string branchName,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Persists the AI model name used for an execution.
+    /// </summary>
+    Task SetModelAsync(
+        Guid executionId,
+        string model,
         CancellationToken cancellationToken = default);
 
     /// <summary>

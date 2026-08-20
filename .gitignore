@@ -45,3 +45,5 @@ Thumbs.db
 **/coverage/
 # Local agent/.NET scratch
 /scratch/
+
+tests/fixtures/DevPilot.E2EFixture/

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
 import {
   ArrowRight,
@@ -15,11 +15,9 @@ import {
 } from "lucide-react"
 import { PageContainer, SectionHead } from "@/components/shared"
 import { Badge, Button, Meter, Panel, StatusDot } from "@/components/ui/primitives"
-import { getWorkspaceOverview } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import { cn } from "@/lib/utils"
 import type {
-  WorkspaceOverview,
   WorkspaceAttentionItem,
   WorkspaceActivityItem,
   WorkspaceActivityActor,
@@ -55,17 +53,54 @@ function formatRelativeTime(dateStr?: string | null): string {
   }
 }
 
-function formatElapsed(elapsedSeconds?: number | null, startedAt?: string | null): string {
+function formatElapsed(elapsedSeconds?: number | null, startedAt?: string | null, completedAt?: string | null): string {
+  if (completedAt && startedAt) {
+    const start = new Date(startedAt).getTime()
+    const end = new Date(completedAt).getTime()
+    if (!isNaN(start) && !isNaN(end) && end >= start) {
+      const diffSec = Math.floor((end - start) / 1000)
+      const mins = Math.floor(diffSec / 60)
+      const secs = diffSec % 60
+      if (mins >= 60) {
+        const hrs = Math.floor(mins / 60)
+        const remMins = mins % 60
+        return `${String(hrs).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+      }
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
+  }
+  if (completedAt && elapsedSeconds != null) {
+    const mins = Math.floor(elapsedSeconds / 60)
+    const secs = elapsedSeconds % 60
+    if (mins >= 60) {
+      const hrs = Math.floor(mins / 60)
+      const remMins = mins % 60
+      return `${String(hrs).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+  }
+  if (startedAt && !completedAt) {
+    const start = new Date(startedAt).getTime()
+    if (!isNaN(start)) {
+      const diffSec = Math.max(0, Math.floor((Date.now() - start) / 1000))
+      const mins = Math.floor(diffSec / 60)
+      const secs = diffSec % 60
+      if (mins >= 60) {
+        const hrs = Math.floor(mins / 60)
+        const remMins = mins % 60
+        return `${String(hrs).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+      }
+      return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
+  }
   if (elapsedSeconds != null) {
     const mins = Math.floor(elapsedSeconds / 60)
     const secs = elapsedSeconds % 60
-    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
-  }
-  if (startedAt) {
-    const start = new Date(startedAt).getTime()
-    const diffSec = Math.max(0, Math.floor((Date.now() - start) / 1000))
-    const mins = Math.floor(diffSec / 60)
-    const secs = diffSec % 60
+    if (mins >= 60) {
+      const hrs = Math.floor(mins / 60)
+      const remMins = mins % 60
+      return `${String(hrs).padStart(2, "0")}:${String(remMins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    }
     return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
   }
   return "—"
@@ -182,53 +217,26 @@ function mapFailureBadge(kindVal: string | number): string {
 }
 
 export function Workspace() {
-  const { activeWorkspace, activeWorkspaceId } = useWorkspace()
-  const [overview, setOverview] = useState<WorkspaceOverview | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const {
+    activeWorkspace,
+    overview,
+    isLoadingOverview: isLoading,
+    overviewError: error,
+    refreshOverview: fetchOverview,
+  } = useWorkspace()
+  const [, setTimerTick] = useState(0)
 
-  const activeReqWorkspaceIdRef = useRef<string | null>(null)
-
-  const fetchOverview = useCallback(async () => {
-    if (!activeWorkspaceId) {
-      setOverview(null)
-      setIsLoading(false)
-      setError(null)
-      return
-    }
-
-    activeReqWorkspaceIdRef.current = activeWorkspaceId
-    setIsLoading(true)
-    setError(null)
-
-    const controller = new AbortController()
-
-    try {
-      const data = await getWorkspaceOverview(activeWorkspaceId, { signal: controller.signal })
-      if (activeReqWorkspaceIdRef.current === activeWorkspaceId) {
-        setOverview(data)
-      }
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        return
-      }
-      if (activeReqWorkspaceIdRef.current === activeWorkspaceId) {
-        setError(err instanceof Error ? err.message : "Failed to load workspace overview.")
-      }
-    } finally {
-      if (activeReqWorkspaceIdRef.current === activeWorkspaceId) {
-        setIsLoading(false)
-      }
-    }
-
-    return () => {
-      controller.abort()
-    }
-  }, [activeWorkspaceId])
-
+  // 1-second client timer for live active execution elapsed duration
+  const isExecutionRunning = Boolean(
+    overview?.activeAgentExecution && !overview.activeAgentExecution.completedAt,
+  )
   useEffect(() => {
-    fetchOverview()
-  }, [fetchOverview])
+    if (!isExecutionRunning) return
+    const interval = setInterval(() => {
+      setTimerTick((t) => t + 1)
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [isExecutionRunning])
 
   const now = new Date()
   const dayName = now.toLocaleDateString(undefined, { weekday: "long" })
@@ -244,7 +252,7 @@ export function Workspace() {
     : "never"
 
   const attention = overview?.needsAttention ?? []
-  const activeExecution = overview?.activeExecution ?? null
+  const activeAgentExecution = overview?.activeAgentExecution ?? null
   const awaiting = overview?.awaitingApproval ?? []
   const trouble = overview?.failedOrBlocked ?? []
   const recentActivity = overview?.recentActivity ?? []
@@ -281,32 +289,32 @@ export function Workspace() {
 
   return (
     <PageContainer>
-      {/* Greeting */}
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <div className="tech-label mb-1.5">{dayName} · {timeStr} · {branchName}</div>
-          <h1 className="text-[24px] font-semibold tracking-tight text-foreground">
-            What should you work on right now?
-          </h1>
-          <p className="mt-1.5 flex items-center gap-2 font-mono text-[12px] text-muted-foreground">
-            <GitBranch className="h-3.5 w-3.5" />
-            {repoFullName}
-            <span className="text-border-strong">·</span>
-            {fileCountDisplay} files
-            <span className="text-border-strong">·</span>
-            indexed {lastIndexedRelative}
-          </p>
+      {/* Top dashboard identity bar */}
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-4 border-b border-border pb-5">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-lg)] border border-primary-ring/40 bg-primary-soft text-primary">
+            <Boxes className="h-5 w-5" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h1 className="truncate text-[18px] font-semibold tracking-tight text-foreground">{repoFullName}</h1>
+              <Badge tone="neutral" mono>
+                <GitBranch className="h-3 w-3" />
+                {branchName}
+              </Badge>
+            </div>
+            <div className="mt-0.5 flex items-center gap-2 font-mono text-[11.5px] text-subtle-foreground">
+              <span>{fileCountDisplay} files</span>
+              <span>·</span>
+              <span>indexed {lastIndexedRelative}</span>
+              <span>·</span>
+              <span>{dayName} {timeStr}</span>
+            </div>
+          </div>
         </div>
-        <Link to="/tasks">
-          <Button variant="primary" size="lg" className="gap-2">
-            New task
-            <ArrowRight className="h-4 w-4" />
-          </Button>
-        </Link>
       </div>
 
-      {/* Needs your attention */}
-      <SectionHead title="Needs your attention" count={attention.length} />
+      {/* Needs Attention */}
       <div className="mb-8 grid grid-cols-1 gap-3 md:grid-cols-3">
         {attention.map((item) => {
           const { tone, cta, href } = mapAttentionPresentation(item)
@@ -314,11 +322,11 @@ export function Workspace() {
             <Link
               key={item.id}
               to={href}
-              className="group relative overflow-hidden rounded-[var(--radius-lg)] border border-border bg-surface p-4 shadow-[var(--shadow-sm)] transition-all hover:shadow-[var(--shadow-md)]"
+              className="group relative overflow-hidden rounded-[var(--radius-lg)] border border-border bg-surface p-4 transition-all hover:border-border-strong hover:bg-surface-2"
             >
-              <span
+              <div
                 className={cn(
-                  "absolute inset-x-0 top-0 h-[3px]",
+                  "absolute inset-x-0 top-0 h-[2px]",
                   tone === "red" && "bg-danger",
                   tone === "amber" && "bg-accent",
                   tone === "blue" && "bg-primary",
@@ -346,8 +354,8 @@ export function Workspace() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
-        <div className="flex flex-col gap-8">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="flex min-w-0 flex-col gap-8">
           {/* Active execution */}
           <section>
             <SectionHead
@@ -358,18 +366,18 @@ export function Workspace() {
                 </Link>
               }
             />
-            {activeExecution ? (
+            {activeAgentExecution ? (
               <Panel className="overflow-hidden">
-                <div className="flex items-center justify-between border-b border-border bg-surface-2 px-4 py-3">
-                  <div className="flex items-center gap-2.5">
-                    <StatusDot tone="blue" pulse />
-                    <span className="font-mono text-[12px] font-medium text-foreground">{activeExecution.taskDisplayId}</span>
-                    <span className="text-[13px] text-foreground">{activeExecution.taskTitle}</span>
+                <div className="flex items-center justify-between gap-3 border-b border-border bg-surface-2 px-4 py-3">
+                  <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                    <StatusDot tone="blue" pulse className="shrink-0" />
+                    <span className="shrink-0 font-mono text-[12px] font-medium text-foreground">{activeAgentExecution.taskDisplayId}</span>
+                    <span className="truncate text-[13px] text-foreground" title={activeAgentExecution.taskTitle}>{activeAgentExecution.taskTitle}</span>
                   </div>
                   <Button
                     variant="danger"
                     size="sm"
-                    className="gap-1.5 opacity-60 cursor-not-allowed"
+                    className="shrink-0 gap-1.5 opacity-60 cursor-not-allowed"
                     disabled
                     title="Active execution cancellation is currently unavailable"
                   >
@@ -379,81 +387,83 @@ export function Workspace() {
                 </div>
 
                 {/* stage rail */}
-                <div className="flex items-center gap-1 px-4 py-4">
-                  {stageDefinitions.map((stageDef, i) => {
-                    const foundStep = activeExecution.stages.find((s) => s.stageKey === stageDef.key)
-                    const stateStr = foundStep ? String(foundStep.state).toLowerCase() : "todo"
-                    const state = stateStr === "done" || stateStr === "2"
-                      ? "done"
-                      : stateStr === "active" || stateStr === "1"
-                        ? "active"
-                        : stateStr === "failed" || stateStr === "3"
-                          ? "failed"
-                          : stateStr === "blocked" || stateStr === "4"
-                            ? "blocked"
-                            : "todo"
+                <div className="overflow-x-auto px-4 py-4 scrollbar-none">
+                  <div className="flex min-w-0 items-center gap-1">
+                    {stageDefinitions.map((stageDef, i) => {
+                      const foundStep = activeAgentExecution.stages?.find((s) => s.stageKey === stageDef.key)
+                      const stateStr = foundStep ? String(foundStep.state).toLowerCase() : "todo"
+                      const state = stateStr === "done" || stateStr === "2"
+                        ? "done"
+                        : stateStr === "active" || stateStr === "1"
+                          ? "active"
+                          : stateStr === "failed" || stateStr === "3"
+                            ? "failed"
+                            : stateStr === "blocked" || stateStr === "4"
+                              ? "blocked"
+                              : "todo"
 
-                    return (
-                      <div key={stageDef.key} className="flex flex-1 items-center gap-1">
-                        <div className="flex flex-col items-center gap-1.5">
-                          <div
-                            className={cn(
-                              "flex h-6 w-6 items-center justify-center rounded-full border text-[10px] font-semibold transition-colors",
-                              state === "done" && "border-success bg-success-soft text-success",
-                              state === "active" && "border-primary bg-primary text-primary-foreground",
-                              state === "failed" && "border-danger bg-danger text-primary-foreground",
-                              state === "blocked" && "border-accent bg-accent text-primary-foreground",
-                              state === "todo" && "border-border bg-surface text-subtle-foreground",
-                            )}
-                          >
-                            {state === "active" ? (
-                              <span className="h-1.5 w-1.5 rounded-full bg-primary-foreground animate-pulse-dot" />
-                            ) : (
-                              i + 1
-                            )}
+                      return (
+                        <div key={stageDef.key} className="flex min-w-0 flex-1 items-center gap-1">
+                          <div className="flex shrink-0 flex-col items-center gap-1.5">
+                            <div
+                              className={cn(
+                                "flex h-6 w-6 items-center justify-center rounded-full border text-[10px] font-semibold transition-colors",
+                                state === "done" && "border-success bg-success-soft text-success",
+                                state === "active" && "border-primary bg-primary text-primary-foreground",
+                                state === "failed" && "border-danger bg-danger text-primary-foreground",
+                                state === "blocked" && "border-accent bg-accent text-primary-foreground",
+                                state === "todo" && "border-border bg-surface text-subtle-foreground",
+                              )}
+                            >
+                              {state === "active" ? (
+                                <span className="h-1.5 w-1.5 rounded-full bg-primary-foreground animate-pulse-dot" />
+                              ) : (
+                                i + 1
+                              )}
+                            </div>
+                            <span
+                              className={cn(
+                                "whitespace-nowrap text-[10.5px] font-medium",
+                                state === "active" ? "text-foreground" : "text-subtle-foreground",
+                              )}
+                            >
+                              {stageDef.label}
+                            </span>
                           </div>
-                          <span
-                            className={cn(
-                              "whitespace-nowrap text-[10.5px] font-medium",
-                              state === "active" ? "text-foreground" : "text-subtle-foreground",
-                            )}
-                          >
-                            {stageDef.label}
-                          </span>
+                          {i < stageDefinitions.length - 1 && (
+                            <div
+                              className={cn(
+                                "mb-4 h-[2px] min-w-[8px] flex-1 rounded-full",
+                                state === "done" ? "bg-success" : "bg-border",
+                              )}
+                            />
+                          )}
                         </div>
-                        {i < stageDefinitions.length - 1 && (
-                          <div
-                            className={cn(
-                              "mb-4 h-[2px] flex-1 rounded-full",
-                              state === "done" ? "bg-success" : "bg-border",
-                            )}
-                          />
-                        )}
-                      </div>
-                    )
-                  })}
+                      )
+                    })}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-px border-t border-border bg-border sm:grid-cols-4">
                   <Metric
                     icon={<Clock className="h-3.5 w-3.5" />}
                     label="Elapsed"
-                    value={formatElapsed(activeExecution.elapsedSeconds, activeExecution.startedAt)}
+                    value={formatElapsed(activeAgentExecution.elapsedSeconds, activeAgentExecution.startedAt, activeAgentExecution.completedAt)}
                   />
                   <Metric
                     icon={<Cpu className="h-3.5 w-3.5" />}
                     label="Tokens"
-                    value={activeExecution.tokensUsed != null ? `${(activeExecution.tokensUsed / 1000).toFixed(0)}K` : "—"}
+                    value={activeAgentExecution.tokensUsed != null ? `${(activeAgentExecution.tokensUsed / 1000).toFixed(0)}K` : "—"}
                   />
                   <Metric
                     icon={<Coins className="h-3.5 w-3.5" />}
                     label="Est. cost"
-                    value={activeExecution.estimatedCost != null ? `$${activeExecution.estimatedCost.toFixed(2)}` : "—"}
+                    value={activeAgentExecution.estimatedCost != null ? `$${activeAgentExecution.estimatedCost.toFixed(2)}` : "—"}
                   />
                   <Metric
                     icon={<FileCode2 className="h-3.5 w-3.5" />}
                     label="Files"
-                    value={activeExecution.modifiedFileCount != null ? String(activeExecution.modifiedFileCount) : "—"}
+                    value={activeAgentExecution.modifiedFileCount != null ? String(activeAgentExecution.modifiedFileCount) : "—"}
                   />
                 </div>
               </Panel>
@@ -493,15 +503,15 @@ export function Workspace() {
                   to={item.executionId ? `/executions/${item.executionId}` : `/tasks/${item.taskId}`}
                   className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-2"
                 >
-                  <StatusDot tone="red" pulse />
+                  <StatusDot tone="red" pulse className="shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-[11px] text-subtle-foreground">{item.taskDisplayId}</span>
-                      <span className="truncate text-[13px] font-medium text-foreground">{item.title}</span>
+                      <span className="shrink-0 font-mono text-[11px] text-subtle-foreground">{item.taskDisplayId}</span>
+                      <span className="truncate text-[13px] font-medium text-foreground" title={item.title}>{item.title}</span>
                     </div>
                     <p className="mt-0.5 truncate text-[12px] text-muted-foreground">{item.summary}</p>
                   </div>
-                  <Badge tone="red">{mapFailureBadge(item.kind)}</Badge>
+                  <Badge tone="red" className="shrink-0">{mapFailureBadge(item.kind)}</Badge>
                 </Link>
               ))}
               {trouble.length === 0 && <Empty text="No failed or blocked tasks." />}
@@ -510,7 +520,7 @@ export function Workspace() {
         </div>
 
         {/* Right rail */}
-        <div className="flex flex-col gap-8">
+        <div className="flex min-w-0 flex-col gap-8">
           <section>
             <SectionHead title="Recent engineering activity" />
             <Panel className="p-4">
@@ -622,12 +632,12 @@ export function Workspace() {
 
 function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
-    <div className="bg-surface px-4 py-3">
+    <div className="min-w-0 bg-surface px-4 py-3">
       <div className="flex items-center gap-1.5 text-subtle-foreground">
-        {icon}
-        <span className="tech-label">{label}</span>
+        <span className="shrink-0">{icon}</span>
+        <span className="tech-label truncate">{label}</span>
       </div>
-      <div className="mt-1 font-mono text-[15px] font-semibold text-foreground">{value}</div>
+      <div className="mt-1 truncate font-mono text-[15px] font-semibold text-foreground">{value}</div>
     </div>
   )
 }
@@ -648,18 +658,20 @@ function ApprovalRow({
   actionLabel: string
 }) {
   return (
-    <div className="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0">
-      <StatusDot tone="amber" />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-[11px] text-subtle-foreground">{id}</span>
-          <span className="truncate text-[13px] font-medium text-foreground">{title}</span>
-        </div>
-        <div className="font-mono text-[11px] text-subtle-foreground">
-          {branch} · {files != null ? `${files} files` : "— files"}
+    <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 last:border-b-0">
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        <StatusDot tone="amber" className="shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 font-mono text-[11px] text-subtle-foreground">{id}</span>
+            <span className="truncate text-[13px] font-medium text-foreground" title={title}>{title}</span>
+          </div>
+          <div className="truncate font-mono text-[11px] text-subtle-foreground">
+            {branch} · {files != null ? `${files} files` : "— files"}
+          </div>
         </div>
       </div>
-      <Link to={href}>
+      <Link to={href} className="shrink-0">
         <Button variant="default" size="sm" className="gap-1.5">
           {actionLabel}
           <ArrowRight className="h-3.5 w-3.5" />

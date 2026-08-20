@@ -752,4 +752,409 @@ public class GetWorkspaceOverviewQueryHandlerTests : IDisposable
         active.Stages[6].State.Should().Be(WorkspaceStageState.Done, "Pull Request creation is done");
         active.CurrentStageKey.Should().Be("pr");
     }
+
+    [Fact]
+    public async Task HandleAsync_ActiveAgentExecution_RunningExecution_ReturnsActiveAgentExecution()
+    {
+        var ws = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Owner = "owner",
+            Repository = "repo",
+            Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        _db.RepositoryWorkspaces.Add(ws);
+
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Active Developer Task",
+            Status = DevelopmentTaskStatus.Executing,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        var exec = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task.Id,
+            Status = TaskExecutionStatus.Running,
+            StartedAt = DateTime.UtcNow.AddMinutes(-2),
+            CreatedAt = DateTime.UtcNow.AddMinutes(-2),
+        };
+        _db.DevelopmentTasks.Add(task);
+        _db.TaskExecutions.Add(exec);
+        await _db.SaveChangesAsync();
+
+        var result = await _handler.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+        result.Success.Should().BeTrue();
+
+        result.Overview!.ActiveAgentExecution.Should().NotBeNull();
+        result.Overview.ActiveAgentExecution!.TaskId.Should().Be(task.Id);
+        result.Overview.ActiveAgentExecution.TaskTitle.Should().Be("Active Developer Task");
+        result.Overview.ActiveExecution.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task HandleAsync_ActiveAgentExecution_FailedExecution_BecomesNullAgentIdle()
+    {
+        var ws = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Owner = "owner",
+            Repository = "repo",
+            Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        _db.RepositoryWorkspaces.Add(ws);
+
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Failed Task",
+            Status = DevelopmentTaskStatus.Failed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        var exec = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task.Id,
+            Status = TaskExecutionStatus.Failed,
+            ErrorMessage = "Kimi API returned status code 503.",
+            StartedAt = DateTime.UtcNow.AddMinutes(-6),
+            CompletedAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-6),
+        };
+        _db.DevelopmentTasks.Add(task);
+        _db.TaskExecutions.Add(exec);
+        await _db.SaveChangesAsync();
+
+        var result = await _handler.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+        result.Success.Should().BeTrue();
+
+        result.Overview!.ActiveAgentExecution.Should().BeNull("Failed executions must not appear as ActiveAgentExecution");
+        result.Overview.ActiveExecution.Should().BeNull();
+        result.Overview.FailedOrBlocked.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task HandleAsync_ActiveAgentExecution_OldPrOpenWithNoPendingRunning_ReturnsNullAgentIdleWhileWorkflowIsActive()
+    {
+        var ws = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Owner = "owner",
+            Repository = "repo",
+            Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        _db.RepositoryWorkspaces.Add(ws);
+
+        var oldTask = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Old Delivery Feature",
+            Status = DevelopmentTaskStatus.Approved,
+            CreatedAt = DateTime.UtcNow.AddHours(-22),
+            UpdatedAt = DateTime.UtcNow.AddHours(-22),
+        };
+        var oldExec = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = oldTask.Id,
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Approved,
+            PullRequestStatus = ExecutionPullRequestStatus.Open,
+            PullRequestNumber = 99,
+            CreatedAt = DateTime.UtcNow.AddHours(-22),
+            CompletedAt = DateTime.UtcNow.AddHours(-21),
+            ReviewDecidedAt = DateTime.UtcNow.AddHours(-20),
+        };
+        _db.DevelopmentTasks.Add(oldTask);
+        _db.TaskExecutions.Add(oldExec);
+        await _db.SaveChangesAsync();
+
+        var result = await _handler.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+        result.Success.Should().BeTrue();
+
+        result.Overview!.ActiveAgentExecution.Should().BeNull("Old PR Open has no running agent, so ActiveAgentExecution must be null (Agent idle)");
+        result.Overview.ActiveExecution.Should().NotBeNull("Workspace overview dashboard still retains active workflow until PR is merged");
+        result.Overview.ActiveExecution!.TaskTitle.Should().Be("Old Delivery Feature");
+        result.Overview.ActiveExecution.CurrentStageKey.Should().Be("pr");
+    }
+
+    [Fact]
+    public async Task HandleAsync_ActiveAgentExecution_OldPrOpenPlusNewerRunning_PrefersNewerRunningExecution()
+    {
+        var ws = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Owner = "owner",
+            Repository = "repo",
+            Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        _db.RepositoryWorkspaces.Add(ws);
+
+        var oldTask = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Old PR Task",
+            Status = DevelopmentTaskStatus.Approved,
+            CreatedAt = DateTime.UtcNow.AddHours(-22),
+            UpdatedAt = DateTime.UtcNow.AddHours(-22),
+        };
+        var oldExec = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = oldTask.Id,
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Approved,
+            PullRequestStatus = ExecutionPullRequestStatus.Open,
+            PullRequestNumber = 99,
+            CreatedAt = DateTime.UtcNow.AddHours(-22),
+            CompletedAt = DateTime.UtcNow.AddHours(-21),
+        };
+
+        var newTask = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "New Running Task",
+            Status = DevelopmentTaskStatus.Executing,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-5),
+            UpdatedAt = DateTime.UtcNow,
+        };
+        var newExec = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = newTask.Id,
+            Status = TaskExecutionStatus.Running,
+            StartedAt = DateTime.UtcNow.AddMinutes(-2),
+            CreatedAt = DateTime.UtcNow.AddMinutes(-5),
+        };
+
+        _db.DevelopmentTasks.AddRange(oldTask, newTask);
+        _db.TaskExecutions.AddRange(oldExec, newExec);
+        await _db.SaveChangesAsync();
+
+        var result = await _handler.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+        result.Success.Should().BeTrue();
+
+        result.Overview!.ActiveAgentExecution.Should().NotBeNull();
+        result.Overview.ActiveAgentExecution!.TaskId.Should().Be(newTask.Id);
+        result.Overview.ActiveAgentExecution.TaskTitle.Should().Be("New Running Task");
+        result.Overview.ActiveExecution!.TaskId.Should().Be(newTask.Id);
+    }
+
+    [Fact]
+    public async Task HandleAsync_ActiveAgentExecution_NeverSelectsCompletedOrFailedOrCancelled()
+    {
+        var ws = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Owner = "owner",
+            Repository = "repo",
+            Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        _db.RepositoryWorkspaces.Add(ws);
+
+        var task1 = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Completed Task",
+            Status = DevelopmentTaskStatus.Completed,
+            CreatedAt = DateTime.UtcNow.AddHours(-10),
+            UpdatedAt = DateTime.UtcNow.AddHours(-9),
+        };
+        var exec1 = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task1.Id,
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Approved,
+            PullRequestStatus = ExecutionPullRequestStatus.Open,
+            CreatedAt = DateTime.UtcNow.AddHours(-10),
+            StartedAt = DateTime.UtcNow.AddHours(-10),
+            CompletedAt = DateTime.UtcNow.AddHours(-9),
+        };
+
+        var task2 = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Failed Task",
+            Status = DevelopmentTaskStatus.Failed,
+            CreatedAt = DateTime.UtcNow.AddHours(-5),
+            UpdatedAt = DateTime.UtcNow.AddHours(-4),
+        };
+        var exec2 = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task2.Id,
+            Status = TaskExecutionStatus.Failed,
+            CreatedAt = DateTime.UtcNow.AddHours(-5),
+            StartedAt = DateTime.UtcNow.AddHours(-5),
+            CompletedAt = DateTime.UtcNow.AddHours(-4),
+        };
+
+        var task3 = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Cancelled Task",
+            Status = DevelopmentTaskStatus.Approved,
+            CreatedAt = DateTime.UtcNow.AddHours(-2),
+            UpdatedAt = DateTime.UtcNow.AddHours(-1),
+        };
+        var exec3 = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task3.Id,
+            Status = TaskExecutionStatus.Cancelled,
+            CreatedAt = DateTime.UtcNow.AddHours(-2),
+            StartedAt = DateTime.UtcNow.AddHours(-2),
+            CompletedAt = DateTime.UtcNow.AddHours(-1),
+        };
+
+        _db.DevelopmentTasks.AddRange(task1, task2, task3);
+        _db.TaskExecutions.AddRange(exec1, exec2, exec3);
+        await _db.SaveChangesAsync();
+
+        var result = await _handler.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+        result.Success.Should().BeTrue();
+        result.Overview!.ActiveAgentExecution.Should().BeNull("All executions are terminal (completed, failed, cancelled)");
+    }
+
+    [Fact]
+    public async Task HandleAsync_CompletedExecutionAwaitingReview_AppearsInAwaitingApproval_AndActiveAgentExecutionIsNull()
+    {
+        var ws = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Owner = "owner",
+            Repository = "repo",
+            Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        _db.RepositoryWorkspaces.Add(ws);
+
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Awaiting Code Review Task",
+            Status = DevelopmentTaskStatus.Executing,
+            CreatedAt = DateTime.UtcNow.AddHours(-67),
+            UpdatedAt = DateTime.UtcNow.AddHours(-66),
+        };
+        var exec = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task.Id,
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            CreatedAt = DateTime.UtcNow.AddHours(-67),
+            StartedAt = DateTime.UtcNow.AddHours(-67),
+            CompletedAt = DateTime.UtcNow.AddHours(-66),
+        };
+
+        _db.DevelopmentTasks.Add(task);
+        _db.TaskExecutions.Add(exec);
+        await _db.SaveChangesAsync();
+
+        var result = await _handler.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+        result.Success.Should().BeTrue();
+
+        // ActiveAgentExecution must be null because no agent is currently running
+        result.Overview!.ActiveAgentExecution.Should().BeNull();
+
+        // ActiveExecution (workflow) contains the completed execution
+        result.Overview.ActiveExecution.Should().NotBeNull();
+        result.Overview.ActiveExecution!.ElapsedSeconds.Should().Be((int)TimeSpan.FromHours(1).TotalSeconds);
+
+        // AwaitingApproval must contain the code review item
+        result.Overview.AwaitingApproval.Should().ContainSingle(a => a.ExecutionId == exec.Id && a.Kind == WorkspaceApprovalKind.CodeReviewApproval);
+    }
+
+    [Fact]
+    public async Task HandleAsync_ActiveAgentExecution_OrdersMultipleRunningTasksDeterministically()
+    {
+        var ws = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Owner = "owner",
+            Repository = "repo",
+            Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        _db.RepositoryWorkspaces.Add(ws);
+
+        var task1 = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Running Task 1 (Started Earlier)",
+            Status = DevelopmentTaskStatus.Executing,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-20),
+            UpdatedAt = DateTime.UtcNow.AddMinutes(-20),
+        };
+        var exec1 = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task1.Id,
+            Status = TaskExecutionStatus.Running,
+            StartedAt = DateTime.UtcNow.AddMinutes(-18),
+            CreatedAt = DateTime.UtcNow.AddMinutes(-20),
+        };
+
+        var task2 = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = ws.Id,
+            Title = "Running Task 2 (Started Later)",
+            Status = DevelopmentTaskStatus.Executing,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            UpdatedAt = DateTime.UtcNow.AddMinutes(-10),
+        };
+        var exec2 = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task2.Id,
+            Status = TaskExecutionStatus.Running,
+            StartedAt = DateTime.UtcNow.AddMinutes(-8),
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+        };
+
+        _db.DevelopmentTasks.AddRange(task1, task2);
+        _db.TaskExecutions.AddRange(exec1, exec2);
+        await _db.SaveChangesAsync();
+
+        var result = await _handler.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+        result.Success.Should().BeTrue();
+
+        result.Overview!.ActiveAgentExecution.Should().NotBeNull();
+        result.Overview.ActiveAgentExecution!.TaskId.Should().Be(task2.Id, "Latest StartedAt takes precedence deterministically");
+    }
 }

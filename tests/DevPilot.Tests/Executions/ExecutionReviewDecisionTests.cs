@@ -20,6 +20,7 @@ public class ExecutionReviewDecisionTests : IDisposable
     private readonly FakeExecutionRepository _executionRepository;
     private readonly StubWorkspaceManager _workspaceManager;
     private readonly StubActivityRecorder _activityRecorder;
+    private readonly FakeActivityRepository _activityRepository;
     private readonly string _tempDir;
     private readonly string _workspaceDir;
 
@@ -28,6 +29,7 @@ public class ExecutionReviewDecisionTests : IDisposable
         _executionRepository = new FakeExecutionRepository();
         _workspaceManager = new StubWorkspaceManager();
         _activityRecorder = new StubActivityRecorder();
+        _activityRepository = new FakeActivityRepository();
 
         _tempDir = Path.Combine(Path.GetTempPath(), "DevPilot_ReviewDecision_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_tempDir);
@@ -103,6 +105,7 @@ public class ExecutionReviewDecisionTests : IDisposable
         var fingerprintCalculator = new StubFingerprintCalculator();
         var handler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
+            _activityRepository,
             _workspaceManager,
             fingerprintCalculator,
             _activityRecorder,
@@ -191,6 +194,7 @@ public class ExecutionReviewDecisionTests : IDisposable
         var fingerprintCalculator = new StubFingerprintCalculator();
         var approveHandler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
+            _activityRepository,
             _workspaceManager,
             fingerprintCalculator,
             _activityRecorder,
@@ -241,6 +245,7 @@ public class ExecutionReviewDecisionTests : IDisposable
 
         var approveHandler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
+            _activityRepository,
             _workspaceManager,
             fingerprintCalculator,
             _activityRecorder,
@@ -271,6 +276,7 @@ public class ExecutionReviewDecisionTests : IDisposable
 
         var handler = new ApproveExecutionReviewCommandHandler(
             _executionRepository,
+            _activityRepository,
             _workspaceManager,
             fingerprintCalculator,
             failingActivityRecorder,
@@ -301,6 +307,42 @@ public class ExecutionReviewDecisionTests : IDisposable
         result.Found.Should().BeTrue();
         result.Execution.Should().NotBeNull();
         result.Execution!.ReviewStatus.Should().Be("Approved");
+    }
+
+    [Fact]
+    public async Task GetExecutionById_HistoricalExecutionWithNullModel_RemainsNullWithoutFabrication()
+    {
+        // Arrange
+        var execution = SeedCompletedExecution();
+        execution.Model = null;
+
+        var handler = new GetExecutionByIdQueryHandler(_executionRepository, new FakeActivityRepository(), new FakeImpactAnalysisRepository(), Options.Create(new DevPilot.Application.Executions.Options.MergePolicyOptions()));
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionByIdQuery(execution.Id));
+
+        // Assert - historical null model is truthfully exposed as null, never fabricated
+        result.Found.Should().BeTrue();
+        result.Execution.Should().NotBeNull();
+        result.Execution!.Model.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task GetExecutionById_NewExecutionWithPersistedModel_ExposesPersistedModel()
+    {
+        // Arrange
+        var execution = SeedCompletedExecution();
+        execution.Model = "kimi-k2.7-code";
+
+        var handler = new GetExecutionByIdQueryHandler(_executionRepository, new FakeActivityRepository(), new FakeImpactAnalysisRepository(), Options.Create(new DevPilot.Application.Executions.Options.MergePolicyOptions()));
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionByIdQuery(execution.Id));
+
+        // Assert - actual persisted model is exposed
+        result.Found.Should().BeTrue();
+        result.Execution.Should().NotBeNull();
+        result.Execution!.Model.Should().Be("kimi-k2.7-code");
     }
 
     private sealed class FakeExecutionRepository : IExecutionRepository
@@ -380,10 +422,19 @@ public class ExecutionReviewDecisionTests : IDisposable
         public Task<bool> StartExecutionAtomicAsync(TaskExecution execution, DevelopmentTask task, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task<IReadOnlyList<TaskExecution>> GetAllAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<TaskExecution>>(_executions.Values.ToList());
         public Task<bool> HasActiveExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> HasFailedExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> ClaimAsRunningAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task CompleteAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task FailAsync(Guid executionId, string errorMessage, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task UpdateWorkspaceDetailsAsync(Guid executionId, string workspacePath, string branchName, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task SetModelAsync(Guid executionId, string model, CancellationToken cancellationToken = default)
+        {
+            if (_executions.TryGetValue(executionId, out var execution))
+            {
+                execution.Model = model;
+            }
+            return Task.CompletedTask;
+        }
         public Task<bool> TryClaimNewPushLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task<bool> TryReclaimStalePushLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task SetPushCompletedAsync(Guid executionId, Guid attemptId, string remoteBranchName, string remoteCommitSha, DateTime pushedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
@@ -400,6 +451,15 @@ public class ExecutionReviewDecisionTests : IDisposable
         public Task<bool> TryReclaimStaleMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan mergeLeaseTimeout, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task SetExecutionMergedAsync(Guid executionId, Guid attemptId, string mergeCommitSha, DateTime mergedAt, string mergeMethod, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SetMergeFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<bool> ClaimAsRunningAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> RenewHeartbeatAsync(Guid executionId, Guid leaseToken, TimeSpan leaseDuration, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> CompleteWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> FailWithLeaseAsync(Guid executionId, Guid leaseToken, string errorMessage, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> RequestCancellationAsync(Guid executionId, string? reason, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> AcknowledgeCancellationWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> IsCancellationRequestedAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<int> ReconcileStaleRunningExecutionsAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
     }
 
     private sealed class StubWorkspaceManager : IExecutionWorkspaceManager
@@ -475,8 +535,21 @@ public class ExecutionReviewDecisionTests : IDisposable
 
     private sealed class FakeActivityRepository : IExecutionActivityRepository
     {
+        public List<ExecutionActivity> Activities { get; } = new();
+
         public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(Guid executionId, CancellationToken cancellationToken = default)
-            => Task.FromResult<IReadOnlyList<ExecutionActivity>>(Array.Empty<ExecutionActivity>());
+        {
+            if (Activities.Count > 0)
+            {
+                return Task.FromResult<IReadOnlyList<ExecutionActivity>>(Activities);
+            }
+
+            return Task.FromResult<IReadOnlyList<ExecutionActivity>>(new List<ExecutionActivity>
+            {
+                new ExecutionActivity { ExecutionId = executionId, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, Message = "Build passed" },
+                new ExecutionActivity { ExecutionId = executionId, Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, Message = "Test passed" }
+            });
+        }
     }
 
     private sealed class FakeImpactAnalysisRepository : DevPilot.Application.TaskImpactAnalysis.Ports.IImpactAnalysisRepository

@@ -265,4 +265,43 @@ public sealed class AskBrainCommandHandlerTests
         result.Success.Should().BeFalse();
         result.ErrorMessage.Should().Contain("Rate limit exceeded");
     }
+
+    [Fact]
+    public async Task HandleAsync_AiRequest_DoesNotSetDeveloperAgentMaxTokensOverride()
+    {
+        var workspace = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(),
+            Owner = "testowner",
+            Repository = "testrepo",
+            Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = "C:/fake/path",
+        };
+        _dbContext.RepositoryWorkspaces.Add(workspace);
+
+        var chunk = new CodeChunk
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = workspace.Id,
+            WorkspacePath = workspace.LocalPath,
+            RelativePath = "src/Test.cs",
+            Language = "csharp",
+            SymbolName = "TestClass",
+            StartLine = 1,
+            EndLine = 10,
+            Content = "class TestClass {}",
+            ContentHash = "hash",
+        };
+        _dbContext.CodeChunks.Add(chunk);
+        await _dbContext.SaveChangesAsync();
+
+        _aiProvider.ResponseToReturn = "Response text\n\nSOURCES: [Source 1]";
+
+        var result = await _handler.HandleAsync(new AskBrainCommand(workspace.Id, "Test query"));
+
+        result.Success.Should().BeTrue();
+        _aiProvider.ReceivedRequests.Should().HaveCount(1);
+        _aiProvider.ReceivedRequests[0].MaxTokens.Should().BeNull("Project Brain requests must not have the Developer Agent 16384 token limit applied");
+    }
 }

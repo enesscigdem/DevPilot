@@ -167,10 +167,20 @@ public class DevPilotDbContext : DbContext
                 .IsUnique()
                 .HasDatabaseName("IX_TaskExecutions_ActivePerTask");
 
+            entity.HasIndex(e => new { e.Status, e.LeaseExpiresAt })
+                .HasDatabaseName("IX_TaskExecutions_Status_LeaseExpiresAt");
+
             entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.ErrorMessage).HasMaxLength(4000);
             entity.Property(e => e.WorkspacePath).HasMaxLength(500);
             entity.Property(e => e.BranchName).HasMaxLength(200);
+            entity.Property(e => e.Model).HasMaxLength(100);
+            entity.Property(e => e.LeaseToken).HasColumnType("uuid");
+            entity.Property(e => e.HeartbeatAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.LeaseExpiresAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CancellationRequestedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CancelledAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CancellationReason).HasMaxLength(500);
             entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.StartedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CompletedAt).HasColumnType("timestamp with time zone");

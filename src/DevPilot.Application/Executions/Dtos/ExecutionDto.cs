@@ -75,6 +75,8 @@ public sealed class ExecutionDto
 
     public int ProgressPercentage { get; set; }
 
+    public string? Model { get; set; }
+
     public IReadOnlyList<ExecutionStageStepDto> Stages { get; set; } = Array.Empty<ExecutionStageStepDto>();
 }
 
@@ -113,6 +115,8 @@ public sealed class ExecutionListItemDto
     public string? ErrorMessage { get; set; }
 
     public int ProgressPercentage { get; set; }
+
+    public string? Model { get; set; }
 
     public IReadOnlyList<ExecutionStageStepDto> Stages { get; set; } = Array.Empty<ExecutionStageStepDto>();
 }

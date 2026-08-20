@@ -146,6 +146,60 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
+    public async Task ProcessAsync_DeveloperAgentFailsWithKimiClassification_PersistsClassifiedDiagnosticAndModelTelemetry()
+    {
+        var executionId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+
+        var workspaceManager = new TestWorkspaceManager();
+        var executionRepo = new TestExecutionRepository();
+        var impactRepo = new TestImpactAnalysisRepository
+        {
+            AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed, Model = "kimi-k2.7-code" }
+        };
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Fail("Kimi HTTP 503 after 4 attempts while generating 'WorkspaceTaskActivityItemDto.cs'.")
+        };
+        var validationRunner = new TestExecutionValidationRunner();
+        var recorder = new TestActivityRecorder();
+
+        var processor = new GitWorkspaceExecutionProcessor(
+            workspaceManager,
+            executionRepo,
+            impactRepo,
+            agent,
+            validationRunner,
+            recorder,
+            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
+
+        var context = new ExecutionProcessingContext(
+            ExecutionId: executionId,
+            TaskId: taskId,
+            TaskTitle: "Title",
+            TaskDescription: "Desc",
+            AcceptanceCriteria: null,
+            WorkspaceId: Guid.NewGuid(),
+            WorkspaceLocalPath: "/source",
+            ImpactAnalysisSummary: "Summary");
+
+        var act = async () => await processor.ProcessAsync(context);
+
+        var ex = await act.Should().ThrowAsync<InvalidOperationException>();
+        ex.WithMessage("Developer Agent failed: Kimi HTTP 503 after 4 attempts while generating 'WorkspaceTaskActivityItemDto.cs'.");
+
+        executionRepo.SetModel.Should().Be("kimi-k2.7-code");
+
+        var failedActivity = recorder.RecordedActivities.Should()
+            .ContainSingle(a => a.stage == ExecutionStage.DeveloperAgent && a.status == ExecutionActivityStatus.Failed)
+            .Subject;
+
+        failedActivity.message.Should().Be("Developer Agent failed: Kimi HTTP 503 after 4 attempts while generating 'WorkspaceTaskActivityItemDto.cs'.");
+        failedActivity.metadata.Should().NotBeNull();
+        failedActivity.metadata!.Model.Should().Be("kimi-k2.7-code");
+    }
+
+    [Fact]
     public async Task ProcessAsync_BuildFails_RecordsBuildFailed_DoesNotRecordTestStage()
     {
         var executionId = Guid.NewGuid();
@@ -278,6 +332,7 @@ public class GitWorkspaceExecutionProcessorTests
     {
         public string? UpdatedWorkspacePath { get; private set; }
         public string? UpdatedBranchName { get; private set; }
+        public string? SetModel { get; private set; }
 
         public Task UpdateWorkspaceDetailsAsync(Guid executionId, string workspacePath, string branchName, CancellationToken cancellationToken = default)
         {
@@ -286,9 +341,16 @@ public class GitWorkspaceExecutionProcessorTests
             return Task.CompletedTask;
         }
 
+        public Task SetModelAsync(Guid executionId, string model, CancellationToken cancellationToken = default)
+        {
+            SetModel = model;
+            return Task.CompletedTask;
+        }
+
         public Task<TaskExecution?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) => Task.FromResult<TaskExecution?>(null);
         public Task<IReadOnlyList<TaskExecution>> GetAllAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<TaskExecution>>(Array.Empty<TaskExecution>());
         public Task<bool> HasActiveExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> HasFailedExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> StartExecutionAtomicAsync(TaskExecution execution, DevelopmentTask task, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task<bool> ClaimAsRunningAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task CompleteAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.CompletedTask;
@@ -315,6 +377,188 @@ public class GitWorkspaceExecutionProcessorTests
         public Task<bool> TryReclaimStaleMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan mergeLeaseTimeout, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task SetExecutionMergedAsync(Guid executionId, Guid attemptId, string mergeCommitSha, DateTime mergedAt, string mergeMethod, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task SetMergeFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task<bool> ClaimAsRunningAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> RenewHeartbeatAsync(Guid executionId, Guid leaseToken, TimeSpan leaseDuration, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> CompleteWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> FailWithLeaseAsync(Guid executionId, Guid leaseToken, string errorMessage, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> RequestCancellationAsync(Guid executionId, string? reason, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> AcknowledgeCancellationWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
+        public Task<bool> IsCancellationRequestedAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<int> ReconcileStaleRunningExecutionsAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_BuildFailsWithCompilerErrorsInStdOut_InvokesCompileRepairAndSucceedsOnRebuild()
+    {
+        var executionId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+
+        var workspaceManager = new TestWorkspaceManager();
+        var executionRepo = new TestExecutionRepository();
+        var impactRepo = new TestImpactAnalysisRepository
+        {
+            AnalysisToReturn = new TaskImpactAnalysis
+            {
+                Id = Guid.NewGuid(),
+                DevelopmentTaskId = taskId,
+                Status = ImpactAnalysisStatus.Completed,
+                Summary = "Impact summary"
+            }
+        };
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs" })
+        };
+
+        var initialBuildFailed = new BuildValidationResult
+        {
+            Success = false,
+            ExitCode = 1,
+            ErrorMessage = "dotnet build failed with exit code 1.",
+            StdOut = "src/App.cs(12,15): error CS0246: The type or namespace name 'IMediator' could not be found\n"
+        };
+        var rebuildSucceeded = new BuildValidationResult { Success = true };
+
+        var buildResults = new Queue<BuildValidationResult>(new[] { initialBuildFailed, rebuildSucceeded });
+        var validationRunner = new QueuedValidationRunner(buildResults);
+        var recorder = new TestActivityRecorder();
+
+        var processor = new GitWorkspaceExecutionProcessor(
+            workspaceManager,
+            executionRepo,
+            impactRepo,
+            agent,
+            validationRunner,
+            recorder,
+            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
+
+        var context = new ExecutionProcessingContext(
+            ExecutionId: executionId,
+            TaskId: taskId,
+            TaskTitle: "Feature with build error",
+            TaskDescription: "Add feature",
+            AcceptanceCriteria: "Must work",
+            WorkspaceId: workspaceId,
+            WorkspaceLocalPath: "/path/to/source",
+            ImpactAnalysisSummary: "Impact summary");
+
+        await processor.ProcessAsync(context);
+
+        // Developer Agent called twice: initial generation + compile repair
+        agent.CallCount.Should().Be(2);
+        validationRunner.BuildCallCount.Should().Be(2);
+        validationRunner.TestCallCount.Should().Be(1);
+
+        // Verify explicit compile repair activities recorded
+        var messages = recorder.RecordedActivities.Select(a => a.message).ToList();
+        messages.Should().Contain("Compile repair started.");
+        messages.Should().Contain("Compile repair completed.");
+        messages.Should().Contain("Build retry started.");
+        messages.Should().Contain("Build retry passed.");
+    }
+
+    [Fact]
+    public async Task CompileRepair_WhenSecondBuildFails_TerminatesWithTerminalFailedExecution()
+    {
+        var workspaceId = Guid.NewGuid();
+        var executionId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        var executionRepo = new TestExecutionRepository();
+        var impactRepo = new TestImpactAnalysisRepository
+        {
+            AnalysisToReturn = new TaskImpactAnalysis
+            {
+                Id = Guid.NewGuid(),
+                DevelopmentTaskId = taskId,
+                Status = ImpactAnalysisStatus.Completed,
+                Summary = "Impact summary"
+            }
+        };
+        var workspaceManager = new TestWorkspaceManager();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs" })
+        };
+
+        // First build fails with compiler error, second build (retry) also fails
+        var initialBuildFailed = new BuildValidationResult
+        {
+            Success = false,
+            ExitCode = 1,
+            ErrorMessage = "dotnet build failed with exit code 1.",
+            StdOut = "src/App.cs(12,15): error CS0246: The type or namespace name 'IMediator' could not be found\n"
+        };
+        var rebuildFailed = new BuildValidationResult
+        {
+            Success = false,
+            ExitCode = 1,
+            ErrorMessage = "dotnet build failed with exit code 1.",
+            StdOut = "src/App.cs(12,15): error CS0246: The type or namespace name 'IMediator' could not be found\n"
+        };
+
+        var buildResults = new Queue<BuildValidationResult>(new[] { initialBuildFailed, rebuildFailed });
+        var validationRunner = new QueuedValidationRunner(buildResults);
+        var recorder = new TestActivityRecorder();
+
+        var processor = new GitWorkspaceExecutionProcessor(
+            workspaceManager,
+            executionRepo,
+            impactRepo,
+            agent,
+            validationRunner,
+            recorder,
+            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
+
+        var context = new ExecutionProcessingContext(
+            ExecutionId: executionId,
+            TaskId: taskId,
+            TaskTitle: "Feature with unresolvable build error",
+            TaskDescription: "Add feature",
+            AcceptanceCriteria: "Must work",
+            WorkspaceId: workspaceId,
+            WorkspaceLocalPath: "/path/to/source",
+            ImpactAnalysisSummary: "Impact summary");
+
+        var act = () => processor.ProcessAsync(context);
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+
+        // Verify Developer Agent called twice: initial generation + compile repair
+        agent.CallCount.Should().Be(2);
+        validationRunner.BuildCallCount.Should().Be(2);
+
+        // Verify explicit compile repair activities recorded
+        var messages = recorder.RecordedActivities.Select(a => a.message).ToList();
+        messages.Should().Contain("Compile repair started.");
+        messages.Should().Contain("Compile repair completed.");
+        messages.Should().Contain("Build retry started.");
+        messages.Should().Contain("Build retry failed.");
+        messages.Should().Contain(m => m.Contains("Build validation failed:"));
+    }
+
+    private class QueuedValidationRunner : IExecutionValidationRunner
+    {
+        private readonly Queue<BuildValidationResult> _buildResults;
+        public int BuildCallCount { get; private set; }
+        public int TestCallCount { get; private set; }
+
+        public QueuedValidationRunner(Queue<BuildValidationResult> buildResults)
+        {
+            _buildResults = buildResults;
+        }
+
+        public Task<BuildValidationResult> ValidateBuildAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
+        {
+            BuildCallCount++;
+            return Task.FromResult(_buildResults.Count > 0 ? _buildResults.Dequeue() : new BuildValidationResult { Success = true });
+        }
+
+        public Task<TestValidationResult> ValidateTestAsync(ExecutionValidationRequest request, CancellationToken cancellationToken = default)
+        {
+            TestCallCount++;
+            return Task.FromResult(new TestValidationResult { Success = true });
+        }
     }
 
     private class TestImpactAnalysisRepository : IImpactAnalysisRepository

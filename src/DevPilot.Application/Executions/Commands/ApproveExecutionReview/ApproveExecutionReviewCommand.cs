@@ -42,6 +42,7 @@ public interface IApproveExecutionReviewCommandHandler
 public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionReviewCommandHandler
 {
     private readonly IExecutionRepository _executionRepository;
+    private readonly IExecutionActivityRepository _activityRepository;
     private readonly IExecutionWorkspaceManager _workspaceManager;
     private readonly IExecutionChangeFingerprintCalculator _fingerprintCalculator;
     private readonly IExecutionActivityRecorder _activityRecorder;
@@ -49,12 +50,14 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
 
     public ApproveExecutionReviewCommandHandler(
         IExecutionRepository executionRepository,
+        IExecutionActivityRepository activityRepository,
         IExecutionWorkspaceManager workspaceManager,
         IExecutionChangeFingerprintCalculator fingerprintCalculator,
         IExecutionActivityRecorder activityRecorder,
         ILogger<ApproveExecutionReviewCommandHandler> logger)
     {
         _executionRepository = executionRepository;
+        _activityRepository = activityRepository;
         _workspaceManager = workspaceManager;
         _fingerprintCalculator = fingerprintCalculator;
         _activityRecorder = activityRecorder;
@@ -90,6 +93,26 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
         {
             return ApproveExecutionReviewResult.Conflict(
                 $"Review has already been decided as '{execution.ReviewStatus}'.");
+        }
+
+        // Verify Build & Test Passed
+        var activities = await _activityRepository
+            .GetByExecutionIdAsync(execution.Id, cancellationToken)
+            .ConfigureAwait(false);
+
+        bool buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
+        bool buildFailed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Failed);
+        bool testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
+        bool testFailed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Failed);
+
+        if (!buildPassed || buildFailed)
+        {
+            return ApproveExecutionReviewResult.Conflict("Execution cannot be approved because Build validation did not pass.");
+        }
+
+        if (!testPassed || testFailed)
+        {
+            return ApproveExecutionReviewResult.Conflict("Execution cannot be approved because Test validation did not pass.");
         }
 
         if (string.IsNullOrWhiteSpace(execution.WorkspacePath) || string.IsNullOrWhiteSpace(execution.BranchName))

@@ -264,4 +264,24 @@ public class ExecutionsController : ControllerBase
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }
+
+    [HttpPost("{id:guid}/cancel", Name = nameof(CancelExecution))]
+    public async Task<IActionResult> CancelExecution(
+        [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
+        [FromServices] DevPilot.Application.Executions.Commands.CancelExecution.ICancelExecutionCommandHandler cancelHandler,
+        CancellationToken cancellationToken)
+    {
+        var result = await cancelHandler
+            .HandleAsync(new DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionCommand(id, repositoryWorkspaceId), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be cancelled." }),
+            DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionResultStatus.Success => Ok(new { message = "Cancellation requested successfully." }),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
 }

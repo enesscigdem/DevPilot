@@ -24,6 +24,20 @@ public class TaskExecution
 
     public string? BranchName { get; set; }
 
+    public string? Model { get; set; }
+
+    public Guid? LeaseToken { get; set; }
+
+    public DateTime? HeartbeatAt { get; set; }
+
+    public DateTime? LeaseExpiresAt { get; set; }
+
+    public DateTime? CancellationRequestedAt { get; set; }
+
+    public DateTime? CancelledAt { get; set; }
+
+    public string? CancellationReason { get; set; }
+
     public ExecutionReviewStatus ReviewStatus { get; set; } = ExecutionReviewStatus.Pending;
 
     public DateTime? ReviewDecidedAt { get; set; }

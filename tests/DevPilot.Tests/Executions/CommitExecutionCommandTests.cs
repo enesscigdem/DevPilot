@@ -18,6 +18,7 @@ public sealed class CommitExecutionCommandTests : IDisposable
     private readonly StubGitCommitService _commitService = new();
     private readonly StubActivityRecorder _activityRecorder = new();
     private readonly StubFingerprintCalculator _fingerprintCalculator = new();
+    private readonly StubActivityRepository _activityRepository = new();
 
     [Fact]
     public async Task ApproveReview_WithStaleFingerprint_ReturnsConflict()
@@ -28,6 +29,7 @@ public sealed class CommitExecutionCommandTests : IDisposable
 
         var handler = new ApproveExecutionReviewCommandHandler(
             _repository,
+            _activityRepository,
             _workspaceManager,
             _fingerprintCalculator,
             _activityRecorder,
@@ -133,6 +135,7 @@ public sealed class CommitExecutionCommandTests : IDisposable
         RunGit(tempDir, "commit -m \"Initial commit\"");
 
         var taskId = Guid.NewGuid();
+
         var task = new DevelopmentTask
         {
             Id = taskId,
@@ -174,132 +177,15 @@ public sealed class CommitExecutionCommandTests : IDisposable
             UseShellExecute = false,
             CreateNoWindow = true
         };
-
         using var process = System.Diagnostics.Process.Start(psi)!;
         var stdout = process.StandardOutput.ReadToEnd();
         process.WaitForExit();
         return stdout;
     }
 
-    private sealed class StubExecutionRepository : IExecutionRepository
+    private sealed class StubExecutionRepository : InMemoryExecutionRepository
     {
-        private readonly Dictionary<Guid, TaskExecution> _executions = new();
-
-        public void Add(TaskExecution execution) => _executions[execution.Id] = execution;
-
-        public Task<TaskExecution?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
-        {
-            _executions.TryGetValue(id, out var e);
-            return Task.FromResult(e);
-        }
-
-        public Task<bool> TrySetReviewDecisionAsync(
-            Guid executionId,
-            ExecutionReviewStatus expectedStatus,
-            ExecutionReviewStatus newStatus,
-            DateTime decidedAt,
-            string? rejectionReason,
-            CancellationToken cancellationToken = default)
-        {
-            if (_executions.TryGetValue(executionId, out var e) && e.ReviewStatus == expectedStatus)
-            {
-                e.ReviewStatus = newStatus;
-                e.ReviewDecidedAt = decidedAt;
-                e.ReviewRejectionReason = rejectionReason;
-                return Task.FromResult(true);
-            }
-            return Task.FromResult(false);
-        }
-
-        public Task<bool> TrySetReviewDecisionWithFingerprintAsync(
-            Guid executionId,
-            ExecutionReviewStatus expectedStatus,
-            ExecutionReviewStatus newStatus,
-            DateTime decidedAt,
-            string fingerprint,
-            string? rejectionReason,
-            CancellationToken cancellationToken = default)
-        {
-            if (_executions.TryGetValue(executionId, out var e) && e.ReviewStatus == expectedStatus)
-            {
-                e.ReviewStatus = newStatus;
-                e.ReviewDecidedAt = decidedAt;
-                e.ApprovedChangeFingerprint = fingerprint;
-                e.ReviewRejectionReason = rejectionReason;
-                return Task.FromResult(true);
-            }
-            return Task.FromResult(false);
-        }
-
-        public Task<bool> TryClaimNewCommitLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, string baseCommitSha, CancellationToken cancellationToken = default)
-        {
-            if (_executions.TryGetValue(executionId, out var e))
-            {
-                e.CommitStatus = ExecutionCommitStatus.InProgress;
-                e.CommitAttemptId = attemptId;
-                e.CommitClaimedAt = claimedAt;
-                e.BaseCommitSha = baseCommitSha;
-                return Task.FromResult(true);
-            }
-            return Task.FromResult(false);
-        }
-
-        public Task<bool> TryReclaimStaleCommitLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default)
-        {
-            if (_executions.TryGetValue(executionId, out var e))
-            {
-                e.CommitStatus = ExecutionCommitStatus.InProgress;
-                e.CommitAttemptId = attemptId;
-                e.CommitClaimedAt = claimedAt;
-                return Task.FromResult(true);
-            }
-            return Task.FromResult(false);
-        }
-
-        public Task SetCommitCompletedAsync(Guid executionId, Guid attemptId, string commitSha, DateTime committedAt, CancellationToken cancellationToken = default)
-        {
-            if (_executions.TryGetValue(executionId, out var e))
-            {
-                e.CommitStatus = ExecutionCommitStatus.Committed;
-                e.CommitSha = commitSha;
-                e.CommittedAt = committedAt;
-            }
-            return Task.CompletedTask;
-        }
-
-        public Task SetCommitFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default)
-        {
-            if (_executions.TryGetValue(executionId, out var e))
-            {
-                e.CommitStatus = ExecutionCommitStatus.Failed;
-            }
-            return Task.CompletedTask;
-        }
-
-        public Task<bool> StartExecutionAtomicAsync(TaskExecution execution, DevelopmentTask task, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task<IReadOnlyList<TaskExecution>> GetAllAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<TaskExecution>>(_executions.Values.ToList());
-        public Task<bool> HasActiveExecutionForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) => Task.FromResult(false);
-        public Task<bool> ClaimAsRunningAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task CompleteAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task FailAsync(Guid executionId, string errorMessage, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task UpdateWorkspaceDetailsAsync(Guid executionId, string workspacePath, string branchName, CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-        public Task<bool> TryClaimNewPushLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task<bool> TryReclaimStalePushLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task SetPushCompletedAsync(Guid executionId, Guid attemptId, string remoteBranchName, string remoteCommitSha, DateTime pushedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task SetPushFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task<bool> TryClaimNewPullRequestLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task<bool> TryReclaimStalePullRequestLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task SetPullRequestOpenedAsync(Guid executionId, Guid attemptId, int pullRequestNumber, string pullRequestUrl, string baseBranch, DateTime createdAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task SetPullRequestFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task<bool> TryClaimPullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task<bool> TryReclaimStalePullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan leaseTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task ReleasePullRequestSyncLeaseAsync(Guid executionId, Guid attemptId, DateTime releasedAt, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task<bool> ReplacePullRequestTrackingSnapshotAsync(Guid executionId, Guid attemptId, ExecutionPullRequestRemoteState remoteState, ExecutionPullRequestIntegrityStatus integrityStatus, DateTime? closedAt, DateTime? mergedAt, ExecutionCiStatus ciStatus, IReadOnlyList<ExecutionCiCheck> checks, DateTime syncedAt, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task<bool> TryClaimMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task<bool> TryReclaimStaleMergeLeaseAsync(Guid executionId, Guid attemptId, DateTime claimedAt, TimeSpan mergeLeaseTimeout, TimeSpan syncTimeout, CancellationToken cancellationToken = default) => Task.FromResult(true);
-        public Task SetExecutionMergedAsync(Guid executionId, Guid attemptId, string mergeCommitSha, DateTime mergedAt, string mergeMethod, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task SetMergeFailedAsync(Guid executionId, Guid attemptId, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public void Add(TaskExecution execution) => Executions[execution.Id] = execution;
     }
 
     private sealed class StubWorkspaceManager : IExecutionWorkspaceManager
@@ -357,6 +243,18 @@ public sealed class CommitExecutionCommandTests : IDisposable
                 BaseHeadSha: baseHeadSha,
                 HasSensitiveFiles: false,
                 ChangedFileCount: 1));
+        }
+    }
+
+    private sealed class StubActivityRepository : IExecutionActivityRepository
+    {
+        public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(Guid executionId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<ExecutionActivity>>(new List<ExecutionActivity>
+            {
+                new ExecutionActivity { ExecutionId = executionId, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, Message = "Build passed" },
+                new ExecutionActivity { ExecutionId = executionId, Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, Message = "Test passed" }
+            });
         }
     }
 }
