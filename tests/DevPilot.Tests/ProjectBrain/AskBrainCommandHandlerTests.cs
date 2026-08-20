@@ -51,6 +51,7 @@ public sealed class AskBrainCommandHandlerTests
             _jobRepository,
             _searchHandler,
             _aiProvider,
+            new EfProjectBrainConversationRepository(_dbContext),
             NullLogger<AskBrainCommandHandler>.Instance);
     }
 

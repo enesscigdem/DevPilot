@@ -2,18 +2,20 @@ using System.Text;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure.DeveloperAgent;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Infrastructure.Executions;
 
 /// <summary>
 /// Execution processor that orchestrates the real Developer Agent execution pipeline:
-/// Prepare Workspace → Verify Clean → Run Developer Agent → Build Validation → Test Validation.
+/// Prepare Workspace → Verify Clean → Run Developer Agent → Build Validation (with Compile Repair Loop) → Test Validation (with Test Repair Loop).
 /// </summary>
 public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 {
@@ -24,6 +26,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IExecutionValidationRunner _validationRunner;
     private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
+    private readonly int _maxCompileRepairRounds;
+    private readonly int _maxTestRepairRounds;
 
     public GitWorkspaceExecutionProcessor(
         IExecutionWorkspaceManager workspaceManager,
@@ -32,7 +36,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IDeveloperAgent developerAgent,
         IExecutionValidationRunner validationRunner,
         IExecutionActivityRecorder activityRecorder,
-        ILogger<GitWorkspaceExecutionProcessor> logger)
+        ILogger<GitWorkspaceExecutionProcessor> logger,
+        IConfiguration? configuration = null)
     {
         _workspaceManager = workspaceManager;
         _executionRepository = executionRepository;
@@ -41,6 +46,28 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         _validationRunner = validationRunner;
         _activityRecorder = activityRecorder;
         _logger = logger;
+
+        if (configuration != null &&
+            int.TryParse(configuration["ExecutionReliability:MaxCompileRepairRounds"] ?? configuration["DeveloperAgent:MaxCompileRepairRounds"], out var compileRounds) &&
+            compileRounds >= 0)
+        {
+            _maxCompileRepairRounds = compileRounds;
+        }
+        else
+        {
+            _maxCompileRepairRounds = 3;
+        }
+
+        if (configuration != null &&
+            int.TryParse(configuration["ExecutionReliability:MaxTestRepairRounds"] ?? configuration["DeveloperAgent:MaxTestRepairRounds"], out var testRounds) &&
+            testRounds >= 0)
+        {
+            _maxTestRepairRounds = testRounds;
+        }
+        else
+        {
+            _maxTestRepairRounds = 2;
+        }
     }
 
     public async Task ProcessAsync(
@@ -264,7 +291,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             new ExecutionActivityMetadata(ModifiedFileCount: agentResult.ModifiedFiles.Count, Model: actualModel),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        // ── Stage 6. Validate Build ───────────────────────────────────────────────
+        // ── Stage 6. Validate Build (with multi-round Compiler-Diagnostic Repair Loop) ──
         var validationRequest = new ExecutionValidationRequest(
             WorkspacePath: prepResult.WorkspacePath,
             BranchName: prepResult.BranchName,
@@ -285,12 +312,18 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             .ValidateBuildAsync(validationRequest, cancellationToken)
             .ConfigureAwait(false);
 
-        if (!buildResult.Success)
+        int compileRepairRound = 0;
+        var modifiedFiles = new HashSet<string>(agentResult.ModifiedFiles, StringComparer.OrdinalIgnoreCase);
+
+        while (!buildResult.Success && compileRepairRound < _maxCompileRepairRounds)
         {
+            compileRepairRound++;
             var fullDiagnosticOutput = $"{buildResult.StdOut}\n{buildResult.StdErr}\n{buildResult.ErrorMessage}";
             var rawBuildError = buildResult.ErrorMessage ?? "dotnet build failed.";
             _logger.LogWarning(
-                "GitWorkspaceExecutionProcessor: initial build validation failed for execution {ExecutionId}. Error: {Error}. Checking for repairable compiler diagnostics.",
+                "GitWorkspaceExecutionProcessor: build validation failed (round {Round}/{MaxRounds}) for execution {ExecutionId}. Error: {Error}. Checking for repairable compiler diagnostics.",
+                compileRepairRound,
+                _maxCompileRepairRounds,
                 context.ExecutionId,
                 rawBuildError);
 
@@ -300,85 +333,122 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 .Distinct()
                 .ToList();
 
-            var correlatedFiles = agentResult.ModifiedFiles
+            var correlatedFiles = modifiedFiles
                 .Where(f => compilerErrors.Any(err => err.Contains(Path.GetFileName(f), StringComparison.OrdinalIgnoreCase) || err.Contains(f.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)))
                 .ToList();
 
-            if (correlatedFiles.Count > 0 && compilerErrors.Count > 0)
+            if (correlatedFiles.Count == 0 && compilerErrors.Count > 0)
             {
-                await SafeRecordActivityAsync(
-                    context.ExecutionId,
-                    ExecutionStage.Build,
-                    ExecutionActivityStatus.Started,
-                    "Compile repair started.",
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                correlatedFiles = modifiedFiles.ToList();
+            }
 
-                var availablePorts = RoslynContractExtractor.GetAvailablePortDescriptions(prepResult.WorkspacePath, correlatedFiles);
-                var repairPromptDesc = $"Fix the following compilation error(s) in generated files:\n{string.Join("\n", compilerErrors.Take(10))}";
-                if (!string.IsNullOrWhiteSpace(availablePorts))
+            if (correlatedFiles.Count == 0)
+            {
+                _logger.LogWarning("GitWorkspaceExecutionProcessor: no modified files could be correlated to build error for execution {ExecutionId}.", context.ExecutionId);
+                break;
+            }
+
+            var formattedErrors = compilerErrors.Take(5).Select(e =>
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(e, @"(CS\d{4}:\s*[^\[\r\n]+)");
+                return match.Success ? match.Groups[1].Value.Trim() : e.Trim();
+            }).ToList();
+
+            var repairSummary = new System.Text.StringBuilder();
+            repairSummary.AppendLine($"Build failed — {compilerErrors.Count} compiler error(s)");
+            foreach (var err in formattedErrors)
+            {
+                repairSummary.AppendLine(err);
+            }
+            repairSummary.AppendLine($"Repair round {compileRepairRound}/{_maxCompileRepairRounds}");
+            repairSummary.AppendLine("Repairing:");
+            foreach (var file in correlatedFiles)
+            {
+                repairSummary.AppendLine($"- {Path.GetFileName(file)}");
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Started,
+                "Compile repair started.",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Started,
+                repairSummary.ToString().TrimEnd(),
+                new ExecutionActivityMetadata(ModifiedFileCount: correlatedFiles.Count),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            var availablePorts = RoslynContractExtractor.GetAvailablePortDescriptions(prepResult.WorkspacePath, correlatedFiles);
+            var repairPromptDesc = $"Fix the following compilation error(s) in generated files (repair round {compileRepairRound}/{_maxCompileRepairRounds}):\n{string.Join("\n", compilerErrors.Take(10))}";
+            if (!string.IsNullOrWhiteSpace(availablePorts))
+            {
+                repairPromptDesc += $"\n\n=== Available Repository / Port Abstractions in Codebase ===\n{availablePorts}\nCRITICAL DIRECTIVE:\nYou MUST use ONLY existing available abstractions or implement the query using existing ports. Do NOT invent non-existent types.";
+            }
+
+            var repairRequest = new DeveloperAgentRequest(
+                TaskId: context.TaskId,
+                ExecutionId: context.ExecutionId,
+                TaskTitle: $"Repair build errors for {context.TaskTitle} (round {compileRepairRound})",
+                TaskDescription: repairPromptDesc,
+                AcceptanceCriteria: "Resolve all compiler errors in the modified files without inventing non-existent abstractions.",
+                ImpactAnalysisSummary: analysis?.Summary ?? "Compile repair",
+                ProposedPlan: "Repair compilation errors",
+                ImpactedFilePaths: correlatedFiles,
+                WorkspacePath: prepResult.WorkspacePath,
+                BranchName: prepResult.BranchName,
+                ImpactedFiles: correlatedFiles.Select(f => new ImpactedFileDetail(f, "Modify", "Fix compilation error")).ToList(),
+                Model: actualModel);
+
+            try
+            {
+                var repairResult = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest, cancellationToken).ConfigureAwait(false);
+                if (repairResult.Success)
                 {
-                    repairPromptDesc += $"\n\n=== Available Repository / Port Abstractions in Codebase ===\n{availablePorts}\nCRITICAL DIRECTIVE:\nYou MUST use ONLY existing available abstractions or implement the query using existing ports. Do NOT invent non-existent types.";
-                }
+                    if (repairResult.ModifiedFiles != null)
+                    {
+                        foreach (var mf in repairResult.ModifiedFiles)
+                        {
+                            modifiedFiles.Add(mf);
+                        }
+                    }
 
-                var repairRequest = new DeveloperAgentRequest(
-                    TaskId: context.TaskId,
-                    ExecutionId: context.ExecutionId,
-                    TaskTitle: $"Repair build errors for {context.TaskTitle}",
-                    TaskDescription: repairPromptDesc,
-                    AcceptanceCriteria: "Resolve all compiler errors in the modified files without inventing non-existent abstractions.",
-                    ImpactAnalysisSummary: analysis?.Summary ?? "Compile repair",
-                    ProposedPlan: "Repair compilation errors",
-                    ImpactedFilePaths: correlatedFiles,
-                    WorkspacePath: prepResult.WorkspacePath,
-                    BranchName: prepResult.BranchName,
-                    ImpactedFiles: correlatedFiles.Select(f => new ImpactedFileDetail(f, "Modify", "Fix compilation error")).ToList(),
-                    Model: actualModel);
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.DeveloperAgent,
+                        ExecutionActivityStatus.Completed,
+                        compileRepairRound == 1 ? "Compile repair completed." : $"Compile repair completed (round {compileRepairRound}).",
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
 
-                try
-                {
-                    var repairResult = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest, cancellationToken).ConfigureAwait(false);
-                    if (repairResult.Success)
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Build,
+                        ExecutionActivityStatus.Started,
+                        compileRepairRound == 1 ? "Build retry started." : $"Build retry started (round {compileRepairRound}).",
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+
+                    _logger.LogInformation(
+                        "GitWorkspaceExecutionProcessor: compile repair round {Round} applied. Re-running build validation for execution {ExecutionId}.",
+                        compileRepairRound,
+                        context.ExecutionId);
+
+                    buildResult = await _validationRunner
+                        .ValidateBuildAsync(validationRequest, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (buildResult.Success)
                     {
                         await SafeRecordActivityAsync(
                             context.ExecutionId,
-                            ExecutionStage.DeveloperAgent,
-                            ExecutionActivityStatus.Completed,
-                            "Compile repair completed.",
-                            cancellationToken: cancellationToken).ConfigureAwait(false);
-
-                        await SafeRecordActivityAsync(
-                            context.ExecutionId,
                             ExecutionStage.Build,
-                            ExecutionActivityStatus.Started,
-                            "Build retry started.",
+                            ExecutionActivityStatus.Completed,
+                            "Build retry passed.",
+                            new ExecutionActivityMetadata(BuildPassed: true),
                             cancellationToken: cancellationToken).ConfigureAwait(false);
-
-                        _logger.LogInformation(
-                            "GitWorkspaceExecutionProcessor: compile repair applied. Re-running build validation for execution {ExecutionId}.",
-                            context.ExecutionId);
-
-                        buildResult = await _validationRunner
-                            .ValidateBuildAsync(validationRequest, cancellationToken)
-                            .ConfigureAwait(false);
-
-                        if (buildResult.Success)
-                        {
-                            await SafeRecordActivityAsync(
-                                context.ExecutionId,
-                                ExecutionStage.Build,
-                                ExecutionActivityStatus.Completed,
-                                "Build retry passed.",
-                                cancellationToken: cancellationToken).ConfigureAwait(false);
-                        }
-                        else
-                        {
-                            await SafeRecordActivityAsync(
-                                context.ExecutionId,
-                                ExecutionStage.Build,
-                                ExecutionActivityStatus.Failed,
-                                "Build retry failed.",
-                                cancellationToken: cancellationToken).ConfigureAwait(false);
-                        }
+                        break;
                     }
                     else
                     {
@@ -386,45 +456,56 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                             context.ExecutionId,
                             ExecutionStage.Build,
                             ExecutionActivityStatus.Failed,
-                            $"Compile repair failed: {repairResult.ErrorMessage}",
+                            compileRepairRound == 1 ? "Build retry failed." : $"Build retry failed (round {compileRepairRound}).",
                             cancellationToken: cancellationToken).ConfigureAwait(false);
                     }
                 }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                else
                 {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "GitWorkspaceExecutionProcessor: compile repair round threw an exception for execution {ExecutionId}.", context.ExecutionId);
                     await SafeRecordActivityAsync(
                         context.ExecutionId,
                         ExecutionStage.Build,
                         ExecutionActivityStatus.Failed,
-                        $"Compile repair failed with exception: {ex.Message}",
+                        $"Compile repair failed: {repairResult.ErrorMessage}",
                         cancellationToken: cancellationToken).ConfigureAwait(false);
+                    break;
                 }
             }
-
-            if (!buildResult.Success)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                var buildError = $"Build validation failed: {buildResult.ErrorMessage ?? "dotnet build failed."}";
-                _logger.LogError(
-                    "GitWorkspaceExecutionProcessor: build validation failed for execution {ExecutionId}. Error: {Error}",
-                    context.ExecutionId,
-                    buildError);
-
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GitWorkspaceExecutionProcessor: compile repair round threw an exception for execution {ExecutionId}.", context.ExecutionId);
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
                     ExecutionStage.Build,
                     ExecutionActivityStatus.Failed,
-                    buildError,
-                    new ExecutionActivityMetadata(BuildPassed: false),
+                    $"Compile repair failed with exception: {ex.Message}",
                     cancellationToken: cancellationToken).ConfigureAwait(false);
-
-                // Halt immediately: DO NOT run test validation if build fails
-                throw new InvalidOperationException(buildError);
+                break;
             }
+        }
+
+        if (!buildResult.Success)
+        {
+            var buildError = $"Build validation failed: {buildResult.ErrorMessage ?? "dotnet build failed."}";
+            _logger.LogError(
+                "GitWorkspaceExecutionProcessor: build validation failed for execution {ExecutionId}. Error: {Error}",
+                context.ExecutionId,
+                buildError);
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                buildError,
+                new ExecutionActivityMetadata(BuildPassed: false),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            // Halt immediately: DO NOT run test validation if build fails
+            throw new InvalidOperationException(buildError);
         }
 
         _logger.LogInformation(
@@ -439,7 +520,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             new ExecutionActivityMetadata(BuildPassed: true),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        // ── Stage 7. Validate Test ────────────────────────────────────────────────
+        // ── Stage 7. Validate Test (with multi-round Test-Diagnostic Repair Loop) ──
         _logger.LogInformation(
             "GitWorkspaceExecutionProcessor: starting test validation for execution {ExecutionId}.",
             context.ExecutionId);
@@ -454,6 +535,169 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         var testResult = await _validationRunner
             .ValidateTestAsync(validationRequest, cancellationToken)
             .ConfigureAwait(false);
+
+        int testRepairRound = 0;
+        while (!testResult.Success && testRepairRound < _maxTestRepairRounds)
+        {
+            testRepairRound++;
+            var fullTestOutput = $"{testResult.StdOut}\n{testResult.StdErr}\n{testResult.ErrorMessage}";
+            var rawTestError = testResult.ErrorMessage ?? "dotnet test failed.";
+            _logger.LogWarning(
+                "GitWorkspaceExecutionProcessor: test validation failed (round {Round}/{MaxRounds}) for execution {ExecutionId}. Error: {Error}. Attempting bounded test repair.",
+                testRepairRound,
+                _maxTestRepairRounds,
+                context.ExecutionId,
+                rawTestError);
+
+            var testFailures = fullTestOutput
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(l => l.Contains("Failed", StringComparison.OrdinalIgnoreCase) ||
+                            l.Contains("Error Message:", StringComparison.OrdinalIgnoreCase) ||
+                            l.Contains("Stack Trace:", StringComparison.OrdinalIgnoreCase) ||
+                            l.Contains("Expected", StringComparison.OrdinalIgnoreCase) ||
+                            l.Contains("Assert", StringComparison.OrdinalIgnoreCase))
+                .Distinct()
+                .Take(25)
+                .ToList();
+
+            var repairFiles = modifiedFiles.ToList();
+            if (repairFiles.Count == 0)
+            {
+                break;
+            }
+
+            var conciseFailures = testFailures.Take(5).Select(f => f.Trim()).ToList();
+            var testRepairSummary = new System.Text.StringBuilder();
+            testRepairSummary.AppendLine($"Tests failed — {testFailures.Count} failure(s)");
+            foreach (var f in conciseFailures)
+            {
+                testRepairSummary.AppendLine(f);
+            }
+            testRepairSummary.AppendLine($"Repair round {testRepairRound}/{_maxTestRepairRounds}");
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Started,
+                $"Test repair started (round {testRepairRound}/{_maxTestRepairRounds}).",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Started,
+                testRepairSummary.ToString().TrimEnd(),
+                new ExecutionActivityMetadata(ModifiedFileCount: repairFiles.Count),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            var testRepairPromptDesc = $"Fix the failing test(s) or implementation to satisfy requirements (test repair round {testRepairRound}/{_maxTestRepairRounds}):\n{string.Join("\n", testFailures)}\n\nCRITICAL DIRECTIVE:\nExisting repository tests are authoritative safety invariants. You MUST NOT delete, skip, comment out, or weaken existing tests. Fix the implementation or new test code to make all tests pass.";
+
+            var testRepairRequest = new DeveloperAgentRequest(
+                TaskId: context.TaskId,
+                ExecutionId: context.ExecutionId,
+                TaskTitle: $"Repair test failures for {context.TaskTitle} (round {testRepairRound})",
+                TaskDescription: testRepairPromptDesc,
+                AcceptanceCriteria: "Resolve all test failures so all tests pass cleanly without weakening existing test assertions.",
+                ImpactAnalysisSummary: analysis?.Summary ?? "Test repair",
+                ProposedPlan: "Repair test failures",
+                ImpactedFilePaths: repairFiles,
+                WorkspacePath: prepResult.WorkspacePath,
+                BranchName: prepResult.BranchName,
+                ImpactedFiles: repairFiles.Select(f => new ImpactedFileDetail(f, "Modify", "Fix test failure")).ToList(),
+                Model: actualModel);
+
+            try
+            {
+                var repairResult = await _developerAgent.GenerateAndApplyEditsAsync(testRepairRequest, cancellationToken).ConfigureAwait(false);
+                if (repairResult.Success)
+                {
+                    if (repairResult.ModifiedFiles != null)
+                    {
+                        foreach (var mf in repairResult.ModifiedFiles)
+                        {
+                            modifiedFiles.Add(mf);
+                        }
+                    }
+
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.DeveloperAgent,
+                        ExecutionActivityStatus.Completed,
+                        $"Test repair completed (round {testRepairRound}).",
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+
+                    // Must verify build passes first after test repair
+                    var postRepairBuild = await _validationRunner.ValidateBuildAsync(validationRequest, cancellationToken).ConfigureAwait(false);
+                    if (!postRepairBuild.Success)
+                    {
+                        _logger.LogWarning("GitWorkspaceExecutionProcessor: build failed after test repair round {Round}.", testRepairRound);
+                        continue;
+                    }
+
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Test,
+                        ExecutionActivityStatus.Started,
+                        $"Test retry started (round {testRepairRound}).",
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+
+                    _logger.LogInformation(
+                        "GitWorkspaceExecutionProcessor: test repair round {Round} applied. Re-running test validation for execution {ExecutionId}.",
+                        testRepairRound,
+                        context.ExecutionId);
+
+                    testResult = await _validationRunner
+                        .ValidateTestAsync(validationRequest, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (testResult.Success)
+                    {
+                        await SafeRecordActivityAsync(
+                            context.ExecutionId,
+                            ExecutionStage.Test,
+                            ExecutionActivityStatus.Completed,
+                            "Test retry passed.",
+                            new ExecutionActivityMetadata(TestPassed: true),
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
+                    else
+                    {
+                        await SafeRecordActivityAsync(
+                            context.ExecutionId,
+                            ExecutionStage.Test,
+                            ExecutionActivityStatus.Failed,
+                            $"Test retry failed (round {testRepairRound}).",
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                else
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Test,
+                        ExecutionActivityStatus.Failed,
+                        $"Test repair failed: {repairResult.ErrorMessage}",
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GitWorkspaceExecutionProcessor: test repair round threw an exception for execution {ExecutionId}.", context.ExecutionId);
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Test,
+                    ExecutionActivityStatus.Failed,
+                    $"Test repair failed with exception: {ex.Message}",
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                break;
+            }
+        }
 
         if (!testResult.Success)
         {

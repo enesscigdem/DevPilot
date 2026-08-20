@@ -452,7 +452,7 @@ public static class ProjectGraphHelper
         return nodes.OrderBy(n => n.ProjectPath, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private static List<string> SafeFindFiles(string rootPath, string searchPattern)
+    public static List<string> SafeFindFiles(string rootPath, string searchPattern)
     {
         var result = new List<string>();
         if (!Directory.Exists(rootPath)) return result;

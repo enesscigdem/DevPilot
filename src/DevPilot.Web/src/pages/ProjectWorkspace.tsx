@@ -67,10 +67,13 @@ function formatRelativeTime(dateStr?: string): string {
   }
 }
 
+import { getCachedWorkspaceAnalysis, setCachedWorkspaceAnalysis } from "@/lib/workspaceCache"
+
 export function ProjectWorkspace() {
   const { activeWorkspace, activeWorkspaceId } = useWorkspace()
-  const [analysis, setAnalysis] = useState<WorkspaceAnalysis | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
+  const cached = activeWorkspaceId ? getCachedWorkspaceAnalysis(activeWorkspaceId) : { data: null, isStale: true }
+  const [analysis, setAnalysis] = useState<WorkspaceAnalysis | null>(cached.data)
+  const [isLoading, setIsLoading] = useState(!cached.data && !!activeWorkspaceId)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -78,16 +81,23 @@ export function ProjectWorkspace() {
     if (isManual) {
       setIsRefreshing(true)
     } else {
-      setIsLoading(true)
+      const c = getCachedWorkspaceAnalysis(workspaceId)
+      if (c.data) {
+        setAnalysis(c.data)
+        setIsLoading(false)
+      } else {
+        setIsLoading(true)
+      }
     }
     setError(null)
     try {
       const data = await getRepositoryWorkspaceAnalysis(workspaceId)
       setAnalysis(data)
+      setCachedWorkspaceAnalysis(workspaceId, data)
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load workspace analysis."
       setError(msg)
-      setAnalysis(null)
+      setAnalysis((prev) => prev)
     } finally {
       setIsLoading(false)
       setIsRefreshing(false)

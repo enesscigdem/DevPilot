@@ -64,6 +64,37 @@ public interface IIndexJobRepository
         CancellationToken cancellationToken = default);
 }
 
+public interface IProjectBrainConversationRepository
+{
+    Task<IReadOnlyList<ProjectBrainConversation>> GetByWorkspaceIdAsync(
+        Guid repositoryWorkspaceId,
+        CancellationToken cancellationToken = default);
+
+    Task<ProjectBrainConversation?> GetByIdWithMessagesAsync(
+        Guid conversationId,
+        CancellationToken cancellationToken = default);
+
+    Task<ProjectBrainConversation?> GetByIdAsync(
+        Guid conversationId,
+        CancellationToken cancellationToken = default);
+
+    Task AddAsync(
+        ProjectBrainConversation conversation,
+        CancellationToken cancellationToken = default);
+
+    Task UpdateAsync(
+        ProjectBrainConversation conversation,
+        CancellationToken cancellationToken = default);
+
+    Task AddMessageAsync(
+        ProjectBrainMessage message,
+        CancellationToken cancellationToken = default);
+
+    Task DeleteAsync(
+        ProjectBrainConversation conversation,
+        CancellationToken cancellationToken = default);
+}
+
 public interface ISemanticSearchService
 {
     Task<SemanticSearchResult> SearchAsync(

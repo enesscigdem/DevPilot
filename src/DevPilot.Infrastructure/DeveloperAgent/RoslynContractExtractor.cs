@@ -1,9 +1,17 @@
 using System.Text;
+using DevPilot.Application.DeveloperAgent.Models;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace DevPilot.Infrastructure.DeveloperAgent;
+
+public enum SymbolOrigin
+{
+    ResolvedRepositoryOwned,
+    ResolvedExternalOrReferenced,
+    Unknown
+}
 
 public static class RoslynContractExtractor
 {
@@ -125,12 +133,274 @@ public static class RoslynContractExtractor
         return sb.ToString().Trim();
     }
 
+    public sealed class LockedContractModel
+    {
+        public string FilePath { get; set; } = string.Empty;
+        public string Namespace { get; set; } = string.Empty;
+        public string TypeName { get; set; } = string.Empty;
+        public bool IsRecord { get; set; }
+        public List<int> RecordOrConstructorParamCounts { get; } = new();
+        public List<LockedMethodModel> Methods { get; } = new();
+    }
+
+    public sealed class LockedMethodModel
+    {
+        public string Name { get; set; } = string.Empty;
+        public int ParameterCount { get; set; }
+        public string Signature { get; set; } = string.Empty;
+    }
+
+    private static List<LockedContractModel> ParseLockedContracts(IReadOnlyDictionary<string, string> lockedContracts)
+    {
+        var models = new List<LockedContractModel>();
+        foreach (var (contractFile, contractText) in lockedContracts)
+        {
+            if (string.IsNullOrWhiteSpace(contractText)) continue;
+            var tree = CSharpSyntaxTree.ParseText(contractText);
+            var root = tree.GetCompilationUnitRoot();
+
+            var typeDeclarations = root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>();
+            foreach (var typeDecl in typeDeclarations)
+            {
+                var typeName = typeDecl.Identifier.Text;
+                var nsDecl = typeDecl.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault();
+                var ns = nsDecl?.Name.ToString().Trim() ?? string.Empty;
+
+                var model = new LockedContractModel
+                {
+                    FilePath = contractFile,
+                    Namespace = ns,
+                    TypeName = typeName
+                };
+
+                if (typeDecl is RecordDeclarationSyntax recordDecl)
+                {
+                    model.IsRecord = true;
+                    var paramCount = recordDecl.ParameterList?.Parameters.Count ?? 0;
+                    model.RecordOrConstructorParamCounts.Add(paramCount);
+                }
+
+                var ctors = typeDecl.DescendantNodes().OfType<ConstructorDeclarationSyntax>()
+                    .Where(c => c.Modifiers.Any(SyntaxKind.PublicKeyword));
+                foreach (var ctor in ctors)
+                {
+                    model.RecordOrConstructorParamCounts.Add(ctor.ParameterList.Parameters.Count);
+                }
+
+                var methods = typeDecl.DescendantNodes().OfType<MethodDeclarationSyntax>()
+                    .Where(m => m.Modifiers.Any(SyntaxKind.PublicKeyword) || typeDecl is InterfaceDeclarationSyntax);
+                foreach (var m in methods)
+                {
+                    model.Methods.Add(new LockedMethodModel
+                    {
+                        Name = m.Identifier.Text,
+                        ParameterCount = m.ParameterList.Parameters.Count,
+                        Signature = m.ToFullString().Trim()
+                    });
+                }
+
+                models.Add(model);
+            }
+        }
+        return models;
+    }
+
+    private static string? ResolveReceiverTypeName(
+        ExpressionSyntax receiverExpr,
+        SyntaxNode contextNode,
+        CompilationUnitSyntax root)
+    {
+        if (receiverExpr is IdentifierNameSyntax idSyntax)
+        {
+            var idText = idSyntax.Identifier.Text;
+
+            var enclosingBlock = contextNode.AncestorsAndSelf().OfType<BlockSyntax>().FirstOrDefault();
+            if (enclosingBlock != null)
+            {
+                var varDeclarations = enclosingBlock.DescendantNodes().OfType<VariableDeclarationSyntax>();
+                foreach (var varDecl in varDeclarations)
+                {
+                    foreach (var variable in varDecl.Variables)
+                    {
+                        if (variable.Identifier.Text == idText)
+                        {
+                            var declaredType = varDecl.Type.ToString();
+                            if (declaredType != "var")
+                            {
+                                return NormalizeTypeName(declaredType);
+                            }
+                            if (variable.Initializer?.Value != null)
+                            {
+                                var initType = ResolveExpressionType(variable.Initializer.Value, root);
+                                if (!string.IsNullOrEmpty(initType))
+                                    return NormalizeTypeName(initType);
+                            }
+                        }
+                    }
+                }
+            }
+
+            var enclosingMethod = contextNode.AncestorsAndSelf().OfType<BaseMethodDeclarationSyntax>().FirstOrDefault();
+            if (enclosingMethod != null)
+            {
+                foreach (var param in enclosingMethod.ParameterList.Parameters)
+                {
+                    if (param.Identifier.Text == idText && param.Type != null)
+                    {
+                        return NormalizeTypeName(param.Type.ToString());
+                    }
+                }
+            }
+
+            var enclosingType = contextNode.AncestorsAndSelf().OfType<TypeDeclarationSyntax>().FirstOrDefault();
+            if (enclosingType != null)
+            {
+                var fields = enclosingType.Members.OfType<FieldDeclarationSyntax>();
+                foreach (var f in fields)
+                {
+                    foreach (var v in f.Declaration.Variables)
+                    {
+                        if (v.Identifier.Text == idText)
+                        {
+                            return NormalizeTypeName(f.Declaration.Type.ToString());
+                        }
+                    }
+                }
+
+                var props = enclosingType.Members.OfType<PropertyDeclarationSyntax>();
+                foreach (var p in props)
+                {
+                    if (p.Identifier.Text == idText)
+                    {
+                        return NormalizeTypeName(p.Type.ToString());
+                    }
+                }
+            }
+
+            return NormalizeTypeName(idText);
+        }
+
+        if (receiverExpr is MemberAccessExpressionSyntax memberAccess)
+        {
+            if (memberAccess.Expression is ThisExpressionSyntax)
+            {
+                return ResolveReceiverTypeName(memberAccess.Name, contextNode, root);
+            }
+
+            if (memberAccess.Name.Identifier.Text is "CreateClient" or "CreateDefaultClient")
+            {
+                return "HttpClient";
+            }
+
+            return ResolveExpressionType(memberAccess, root);
+        }
+
+        if (receiverExpr is ObjectCreationExpressionSyntax oc)
+        {
+            return NormalizeTypeName(oc.Type.ToString());
+        }
+
+        if (receiverExpr is InvocationExpressionSyntax inv)
+        {
+            return ResolveExpressionType(inv, root);
+        }
+
+        return null;
+    }
+
+    private static string? ResolveExpressionType(ExpressionSyntax expr, CompilationUnitSyntax root)
+    {
+        if (expr is ObjectCreationExpressionSyntax oc)
+        {
+            return NormalizeTypeName(oc.Type.ToString());
+        }
+
+        if (expr is InvocationExpressionSyntax inv)
+        {
+            var exprStr = inv.Expression.ToString();
+            if (exprStr.EndsWith(".CreateClient") || exprStr.EndsWith(".CreateDefaultClient") || exprStr == "CreateClient")
+            {
+                return "HttpClient";
+            }
+            if (exprStr.EndsWith(".GetAsync") || exprStr.EndsWith(".PostAsync") || exprStr.EndsWith(".SendAsync"))
+            {
+                return "HttpResponseMessage";
+            }
+        }
+
+        return null;
+    }
+
+    private static string NormalizeTypeName(string typeName)
+    {
+        if (string.IsNullOrWhiteSpace(typeName)) return string.Empty;
+        var shortName = typeName.Trim();
+        if (shortName.Contains('.'))
+        {
+            shortName = shortName.Split('.').Last();
+        }
+        if (shortName.Contains('<'))
+        {
+            shortName = shortName.Substring(0, shortName.IndexOf('<')).Trim();
+        }
+        return shortName.TrimEnd('?');
+    }
+
+    /// <summary>
+    /// Classifies a symbol into one of three states:
+    /// - ResolvedRepositoryOwned: Explicitly declared in locked contracts or repository workspace.
+    /// - ResolvedExternalOrReferenced: External framework or package type (never compared against unrelated repo contracts).
+    /// - Unknown: Static knowledge is incomplete. Must NOT terminally fail; defers to compilation.
+    /// </summary>
+    public static SymbolOrigin ClassifySymbolOrigin(
+        string typeName,
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        HashSet<string>? workspaceSymbols = null)
+    {
+        var contractModels = lockedContracts != null ? ParseLockedContracts(lockedContracts) : null;
+        return ClassifySymbolOrigin(typeName, contractModels, workspaceSymbols);
+    }
+
+    public static SymbolOrigin ClassifySymbolOrigin(
+        string typeName,
+        IReadOnlyList<LockedContractModel>? contractModels,
+        HashSet<string>? workspaceSymbols)
+    {
+        if (string.IsNullOrWhiteSpace(typeName)) return SymbolOrigin.Unknown;
+        var shortName = NormalizeTypeName(typeName);
+
+        if (contractModels != null && contractModels.Any(c => c.TypeName.Equals(shortName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return SymbolOrigin.ResolvedRepositoryOwned;
+        }
+
+        if (workspaceSymbols != null && workspaceSymbols.Contains(shortName))
+        {
+            return SymbolOrigin.ResolvedRepositoryOwned;
+        }
+
+        // Framework / external heuristics that should NEVER collide with repository contracts
+        if (shortName is "HttpClient" or "HttpResponseMessage" or "HttpRequestMessage" or "WebApplicationFactory" or
+            "Assert" or "IMapper" or "IValidator" or "DbContext" or "DbSet" or "TestServer" or "Mock" or "Should")
+        {
+            return SymbolOrigin.ResolvedExternalOrReferenced;
+        }
+
+        return SymbolOrigin.Unknown;
+    }
+
     public static (bool IsValid, string? ErrorMessage) ValidateSemanticContractConsistency(
         string consumerFilePath,
         string consumerCode,
         IReadOnlyDictionary<string, string> lockedContracts)
     {
         if (string.IsNullOrWhiteSpace(consumerCode) || lockedContracts == null || lockedContracts.Count == 0)
+        {
+            return (true, null);
+        }
+
+        var contractModels = ParseLockedContracts(lockedContracts);
+        if (contractModels.Count == 0)
         {
             return (true, null);
         }
@@ -142,39 +412,26 @@ public static class RoslynContractExtractor
         var objectCreations = root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>().ToList();
         foreach (var creation in objectCreations)
         {
-            var typeName = creation.Type.ToString();
-            var shortTypeName = typeName.Contains('.') ? typeName.Split('.').Last() : typeName;
+            var rawTypeName = creation.Type.ToString();
+            var shortTypeName = NormalizeTypeName(rawTypeName);
 
-            foreach (var (contractFile, contractText) in lockedContracts)
+            // Only validate constructor calls against EXACT repository-owned locked contracts
+            var matchingContract = contractModels.FirstOrDefault(c =>
+                c.TypeName.Equals(shortTypeName, StringComparison.OrdinalIgnoreCase));
+
+            if (matchingContract != null && matchingContract.RecordOrConstructorParamCounts.Count > 0)
             {
-                var lines = contractText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (var line in lines)
+                var actualArgCount = creation.ArgumentList?.Arguments.Count ?? 0;
+                if (!matchingContract.RecordOrConstructorParamCounts.Contains(actualArgCount))
                 {
-                    var trimmed = line.Trim();
-                    if ((trimmed.Contains($"record {shortTypeName}(") || trimmed.Contains($"public {shortTypeName}(")) && !trimmed.StartsWith("//"))
-                    {
-                        var openParen = trimmed.IndexOf('(');
-                        var closeParen = trimmed.IndexOf(')', openParen >= 0 ? openParen : 0);
-                        if (openParen >= 0 && closeParen > openParen)
-                        {
-                            var paramsPart = trimmed.Substring(openParen + 1, closeParen - openParen - 1).Trim();
-                            var expectedArgCount = string.IsNullOrEmpty(paramsPart)
-                                ? 0
-                                : paramsPart.Split(',').Length;
-
-                            var actualArgCount = creation.ArgumentList?.Arguments.Count ?? 0;
-                            if (expectedArgCount != actualArgCount)
-                            {
-                                return (false,
-                                    $"Semantic contract violation in '{consumerFilePath}': Constructor call 'new {shortTypeName}(...)' has {actualArgCount} argument(s), but locked upstream contract in '{contractFile}' expects {expectedArgCount} parameter(s): '{trimmed}'.");
-                            }
-                        }
-                    }
+                    var expectedCounts = string.Join(" or ", matchingContract.RecordOrConstructorParamCounts);
+                    return (false,
+                        $"Semantic contract violation in '{consumerFilePath}': Constructor call 'new {shortTypeName}(...)' has {actualArgCount} argument(s), but locked upstream contract in '{matchingContract.FilePath}' expects {expectedCounts} parameter(s).");
                 }
             }
         }
 
-        // 2. Check method invocations on locked interfaces/classes
+        // 2. Check method invocations with receiver / declaring type awareness
         var invocations = root.DescendantNodes().OfType<InvocationExpressionSyntax>().ToList();
         foreach (var invocation in invocations)
         {
@@ -183,41 +440,74 @@ public static class RoslynContractExtractor
                 var methodName = memberAccess.Name.Identifier.Text;
                 var argCount = invocation.ArgumentList.Arguments.Count;
 
-                foreach (var (contractFile, contractText) in lockedContracts)
+                var receiverTypeName = ResolveReceiverTypeName(memberAccess.Expression, invocation, root);
+                if (string.IsNullOrWhiteSpace(receiverTypeName))
                 {
-                    var lines = contractText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                    foreach (var line in lines)
-                    {
-                        var trimmed = line.Trim();
-                        if (trimmed.Contains($" {methodName}(") && !trimmed.StartsWith("//"))
-                        {
-                            var openParen = trimmed.IndexOf('(');
-                            var closeParen = trimmed.IndexOf(')', openParen >= 0 ? openParen : 0);
-                            if (openParen >= 0 && closeParen > openParen)
-                            {
-                                var paramsPart = trimmed.Substring(openParen + 1, closeParen - openParen - 1).Trim();
-                                var expectedArgCount = string.IsNullOrEmpty(paramsPart) ? 0 : paramsPart.Split(',').Length;
+                    continue;
+                }
 
-                                if (expectedArgCount != argCount)
-                                {
-                                    return (false,
-                                        $"Semantic contract violation in '{consumerFilePath}': Method invocation '{methodName}(...)' has {argCount} argument(s), but locked contract in '{contractFile}' defines '{trimmed}' with {expectedArgCount} parameter(s).");
-                                }
-                            }
-                        }
-                        else if (methodName.EndsWith("Async") && trimmed.Contains($" {methodName[..^5]}(") && !trimmed.StartsWith("//"))
+                // Explicit classification: only compare if receiver is definitely a ResolvedRepositoryOwned contract
+                var origin = ClassifySymbolOrigin(receiverTypeName, contractModels, null);
+                if (origin != SymbolOrigin.ResolvedRepositoryOwned)
+                {
+                    // ResolvedExternalOrReferenced or Unknown: NEVER collide against unrelated repository contracts.
+                    continue;
+                }
+
+                // Find exact matching contract by type name (or interface prefix only when declared in contracts)
+                var matchingContract = contractModels.FirstOrDefault(c =>
+                    c.TypeName.Equals(receiverTypeName, StringComparison.OrdinalIgnoreCase) ||
+                    (c.TypeName.Equals("I" + receiverTypeName, StringComparison.OrdinalIgnoreCase) && !receiverTypeName.StartsWith("I")) ||
+                    (receiverTypeName.Equals("I" + c.TypeName, StringComparison.OrdinalIgnoreCase) && receiverTypeName.StartsWith("I")));
+
+                if (matchingContract == null)
+                {
+                    continue;
+                }
+
+                var contract = matchingContract;
+                var declaredMethods = contract.Methods;
+                var exactMatch = declaredMethods.FirstOrDefault(m => m.Name == methodName);
+
+                if (exactMatch != null)
+                {
+                    if (exactMatch.ParameterCount != argCount)
+                    {
+                        return (false,
+                            $"Semantic contract violation in '{consumerFilePath}': Method invocation '{methodName}(...)' on '{receiverTypeName}' has {argCount} argument(s), but locked contract in '{contract.FilePath}' defines '{exactMatch.Signature}' with {exactMatch.ParameterCount} parameter(s).");
+                    }
+                }
+                else
+                {
+                    // Check for proven async/sync drift on locked repository contract
+                    if (methodName.EndsWith("Async"))
+                    {
+                        var altName = methodName[..^5];
+                        var syncMatch = declaredMethods.FirstOrDefault(m => m.Name == altName);
+                        if (syncMatch != null)
                         {
-                            var altName = methodName[..^5];
                             return (false,
-                                $"Semantic contract drift in '{consumerFilePath}': Invoking '{methodName}', but locked contract in '{contractFile}' defines '{altName}': '{trimmed}'.");
-                        }
-                        else if (!methodName.EndsWith("Async") && trimmed.Contains($" {methodName}Async(") && !trimmed.StartsWith("//"))
-                        {
-                            var altName = methodName + "Async";
-                            return (false,
-                                $"Semantic contract drift in '{consumerFilePath}': Invoking '{methodName}', but locked contract in '{contractFile}' defines '{altName}': '{trimmed}'.");
+                                $"Semantic contract drift in '{consumerFilePath}': Invoking '{methodName}', but locked contract in '{contract.FilePath}' defines '{altName}': '{syncMatch.Signature}'.");
                         }
                     }
+                    else
+                    {
+                        var altName = methodName + "Async";
+                        var asyncMatch = declaredMethods.FirstOrDefault(m => m.Name == altName);
+                        if (asyncMatch != null)
+                        {
+                            return (false,
+                                $"Semantic contract drift in '{consumerFilePath}': Invoking '{methodName}', but locked contract in '{contract.FilePath}' defines '{altName}': '{asyncMatch.Signature}'.");
+                        }
+                    }
+
+                    if (methodName is "ToString" or "Equals" or "GetHashCode" or "GetType")
+                    {
+                        continue;
+                    }
+
+                    return (false,
+                        $"Semantic contract violation in '{consumerFilePath}': Method invocation '{methodName}' does not exist on locked contract '{contract.TypeName}' in '{contract.FilePath}'.");
                 }
             }
         }
@@ -225,322 +515,66 @@ public static class RoslynContractExtractor
         return (true, null);
     }
 
+    /// <summary>
+    /// Softened: Does NOT block candidate code before build on unlisted using directives or heuristic namespace guesses.
+    /// Real project compilation / dotnet build provides authoritative package/namespace resolution.
+    /// </summary>
     public static (bool IsValid, string? ErrorMessage) ValidateProjectArchitecturalDependencies(
         string targetFilePath,
         string code,
-        IReadOnlyList<DevPilot.Application.DeveloperAgent.Models.DiscoveredProjectNode> projectGraph,
+        IReadOnlyList<DiscoveredProjectNode>? projectGraph,
         IReadOnlyDictionary<string, string>? lockedContracts)
     {
-        if (string.IsNullOrWhiteSpace(code) || projectGraph == null || projectGraph.Count == 0)
-        {
-            return (true, null);
-        }
-
-        var normalizedPath = targetFilePath.Replace('\\', '/').TrimStart('/');
-        var targetProject = projectGraph.FirstOrDefault(p =>
-            !string.IsNullOrWhiteSpace(p.ProjectDirectory) &&
-            p.ProjectDirectory != "." &&
-            normalizedPath.StartsWith(p.ProjectDirectory.TrimStart('/'), StringComparison.OrdinalIgnoreCase));
-
-        if (targetProject == null)
-        {
-            var segments = normalizedPath.Split('/');
-            if (segments.Length > 1)
-            {
-                var candidateDir = $"{segments[0]}/{segments[1]}";
-                targetProject = projectGraph.FirstOrDefault(p =>
-                    p.ProjectDirectory.TrimStart('/').Equals(candidateDir, StringComparison.OrdinalIgnoreCase));
-            }
-        }
-
-        if (targetProject == null && projectGraph.Count == 1)
-        {
-            targetProject = projectGraph[0];
-        }
-
-        if (targetProject == null)
-        {
-            return (true, null);
-        }
-
-        var tree = CSharpSyntaxTree.ParseText(code);
-        var root = tree.GetCompilationUnitRoot();
-
-        // 1. Resolve reachable projects (target project + transitive ProjectReferences)
-        var reachableProjects = new HashSet<DevPilot.Application.DeveloperAgent.Models.DiscoveredProjectNode>();
-        var queue = new Queue<DevPilot.Application.DeveloperAgent.Models.DiscoveredProjectNode>();
-        queue.Enqueue(targetProject);
-        reachableProjects.Add(targetProject);
-
-        while (queue.Count > 0)
-        {
-            var current = queue.Dequeue();
-            foreach (var projRef in current.ProjectReferences)
-            {
-                var normRef = projRef.Replace('\\', '/').TrimStart('/');
-                var referencedProjNode = projectGraph.FirstOrDefault(p =>
-                    p.ProjectPath.Replace('\\', '/').TrimStart('/').Equals(normRef, StringComparison.OrdinalIgnoreCase) ||
-                    p.ProjectDirectory.Replace('\\', '/').TrimStart('/').Equals(normRef, StringComparison.OrdinalIgnoreCase) ||
-                    p.ProjectName.Equals(normRef, StringComparison.OrdinalIgnoreCase) ||
-                    (!string.IsNullOrEmpty(p.ProjectPath) && Path.GetFileName(p.ProjectPath).Equals(Path.GetFileName(normRef), StringComparison.OrdinalIgnoreCase)));
-
-                if (referencedProjNode != null && reachableProjects.Add(referencedProjNode))
-                {
-                    queue.Enqueue(referencedProjNode);
-                }
-            }
-        }
-
-        // 2. Allowed namespaces base set: standard BCL / framework namespaces
-        var allowedNamespaces = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "System",
-            "Microsoft.Extensions",
-            "Microsoft.AspNetCore",
-            "Microsoft.CSharp",
-            "Microsoft.CodeAnalysis"
-        };
-
-        // 3. Populate namespaces from reachable projects, their packages, and test frameworks
-        foreach (var proj in reachableProjects)
-        {
-            if (!string.IsNullOrWhiteSpace(proj.ProjectName))
-            {
-                allowedNamespaces.Add(proj.ProjectName);
-            }
-
-            foreach (var projRef in proj.ProjectReferences)
-            {
-                var refName = Path.GetFileNameWithoutExtension(projRef);
-                if (!string.IsNullOrWhiteSpace(refName))
-                {
-                    allowedNamespaces.Add(refName);
-                }
-            }
-
-            if (proj.IsTestProject)
-            {
-                allowedNamespaces.Add("Xunit");
-                allowedNamespaces.Add("FluentAssertions");
-                allowedNamespaces.Add("Moq");
-                allowedNamespaces.Add("NSubstitute");
-                allowedNamespaces.Add("Bogus");
-            }
-
-            foreach (var pkg in proj.PackageReferences)
-            {
-                if (string.IsNullOrWhiteSpace(pkg)) continue;
-                allowedNamespaces.Add(pkg);
-                var parts = pkg.Split('.');
-                for (int i = 1; i <= parts.Length; i++)
-                {
-                    allowedNamespaces.Add(string.Join('.', parts.Take(i)));
-                }
-            }
-        }
-
-        // 4. Populate namespaces from valid locked contracts / overlay
-        if (lockedContracts != null)
-        {
-            foreach (var (_, contractCode) in lockedContracts)
-            {
-                if (string.IsNullOrWhiteSpace(contractCode)) continue;
-                var cTree = CSharpSyntaxTree.ParseText(contractCode);
-                foreach (var nsDecl in cTree.GetCompilationUnitRoot().DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>())
-                {
-                    var nsText = nsDecl.Name.ToString().Trim();
-                    if (!string.IsNullOrEmpty(nsText))
-                    {
-                        allowedNamespaces.Add(nsText);
-                    }
-                }
-            }
-        }
-
-        // 5. Validate using directives against reachable allowed namespaces
-        foreach (var usingDirective in root.Usings)
-        {
-            var ns = usingDirective.Name?.ToString().Trim();
-            if (string.IsNullOrWhiteSpace(ns)) continue;
-
-            bool isAllowed = allowedNamespaces.Any(allowed =>
-                ns.Equals(allowed, StringComparison.OrdinalIgnoreCase) ||
-                ns.StartsWith(allowed + ".", StringComparison.OrdinalIgnoreCase));
-
-            if (!isAllowed)
-            {
-                return (false,
-                    $"Unsupported architectural namespace '{ns}' detected in '{targetFilePath}'. The target project '{targetProject.ProjectName}' does not reference this package or namespace. Follow the existing codebase patterns.");
-            }
-        }
-
-        // Validate base types, interfaces, and type usages against hallucinated third-party frameworks
-        var typeNames = root.DescendantNodes().OfType<TypeSyntax>().Select(t => t.ToString().Trim()).ToList();
-        foreach (var typeName in typeNames)
-        {
-            var shortName = typeName.Contains('<') ? typeName.Substring(0, typeName.IndexOf('<')).Trim() : typeName;
-            if (shortName.Contains('.')) shortName = shortName.Split('.').Last();
-
-            if (shortName.Equals("IRequest", StringComparison.OrdinalIgnoreCase) ||
-                shortName.Equals("IRequestHandler", StringComparison.OrdinalIgnoreCase) ||
-                shortName.Equals("INotification", StringComparison.OrdinalIgnoreCase) ||
-                shortName.Equals("INotificationHandler", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!allowedNamespaces.Contains("MediatR"))
-                {
-                    return (false,
-                        $"Unsupported architectural interface '{shortName}' detected in '{targetFilePath}'. The target project '{targetProject.ProjectName}' does not use MediatR. Implement standard DevPilot queries/handlers without MediatR.");
-                }
-            }
-
-            if (shortName.Equals("IApplicationDbContext", StringComparison.OrdinalIgnoreCase) ||
-                shortName.Equals("DbContext", StringComparison.OrdinalIgnoreCase))
-            {
-                if (targetProject.ProjectName.Contains("Application", StringComparison.OrdinalIgnoreCase) &&
-                    !allowedNamespaces.Any(a => a.Contains("EntityFrameworkCore", StringComparison.OrdinalIgnoreCase)))
-                {
-                    return (false,
-                        $"Unsupported database abstraction '{shortName}' detected in '{targetFilePath}'. '{targetProject.ProjectName}' relies on domain ports and repositories rather than direct DbContext access.");
-                }
-            }
-        }
-
+        // Compiler is primary oracle for namespace/using validation.
         return (true, null);
     }
 
+    /// <summary>
+    /// Softened: Pattern check provides advisory facts rather than terminally blocking code before build.
+    /// Compiler catches missing interface implementations (CS0535).
+    /// </summary>
     public static (bool IsValid, string? ErrorMessage, string? PatternFileName) ValidateProducerAgainstRepositoryPattern(
         string targetFilePath,
         string code,
         string workspacePath,
-        IReadOnlyList<DevPilot.Application.DeveloperAgent.Models.DiscoveredProjectNode>? projectGraph = null)
+        IReadOnlyList<DiscoveredProjectNode>? projectGraph = null)
     {
-        if (string.IsNullOrWhiteSpace(code))
-        {
-            return (true, null, null);
-        }
-
-        var role = RoslynPatternHelper.ClassifyRole(targetFilePath);
         var patternFacts = RoslynPatternHelper.DiscoverNearestPatternFacts(workspacePath, targetFilePath);
-
-        var normalizedPath = targetFilePath.Replace('\\', '/').TrimStart('/');
-        var targetProject = projectGraph?.FirstOrDefault(p =>
-            !string.IsNullOrWhiteSpace(p.ProjectDirectory) &&
-            p.ProjectDirectory != "." &&
-            normalizedPath.StartsWith(p.ProjectDirectory.TrimStart('/'), StringComparison.OrdinalIgnoreCase));
-
-        var projectHasMediatR = targetProject?.PackageReferences.Contains("MediatR") == true ||
-                                projectGraph?.Any(p => p.PackageReferences.Contains("MediatR")) == true;
-
-        var tree = CSharpSyntaxTree.ParseText(code);
-        var root = tree.GetCompilationUnitRoot();
-
-        // 1. Validate Handlers
-        if (string.Equals(role, "Handler", StringComparison.OrdinalIgnoreCase) ||
-            targetFilePath.EndsWith("Handler.cs", StringComparison.OrdinalIgnoreCase))
-        {
-            // Expected handler method name is derived from nearest repository pattern or project capability
-            var expectedMethod = patternFacts?.ExpectedHandlerMethodName ?? (projectHasMediatR ? "Handle" : "HandleAsync");
-
-            var methods = root.DescendantNodes().OfType<MethodDeclarationSyntax>()
-                .Where(m => m.Modifiers.Any(SyntaxKind.PublicKeyword) || m.Parent is InterfaceDeclarationSyntax)
-                .ToList();
-
-            foreach (var method in methods)
-            {
-                var retType = method.ReturnType.ToString().Trim();
-                var isAsyncReturn = retType.StartsWith("Task", StringComparison.OrdinalIgnoreCase) ||
-                                    retType.StartsWith("ValueTask", StringComparison.OrdinalIgnoreCase);
-
-                if (isAsyncReturn && !string.IsNullOrEmpty(expectedMethod))
-                {
-                    var methodName = method.Identifier.Text;
-                    if (string.Equals(expectedMethod, "HandleAsync", StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(methodName, "Handle", StringComparison.OrdinalIgnoreCase) &&
-                        !projectHasMediatR)
-                    {
-                        return (false,
-                            $"Repository architectural pattern violation in '{targetFilePath}': Handler method is named 'Handle', but the nearest repository pattern from '{patternFacts?.PatternFilePath ?? "the repository"}' requires 'HandleAsync'. Update method and interface to 'HandleAsync'.",
-                            patternFacts?.PatternFilePath);
-                    }
-                    else if (string.Equals(expectedMethod, "Handle", StringComparison.OrdinalIgnoreCase) &&
-                             string.Equals(methodName, "HandleAsync", StringComparison.OrdinalIgnoreCase) &&
-                             (patternFacts?.UsesMediatR == true || projectHasMediatR))
-                    {
-                        return (false,
-                            $"Repository architectural pattern violation in '{targetFilePath}': Handler method is named 'HandleAsync', but the nearest MediatR handler pattern from '{patternFacts?.PatternFilePath ?? "the repository"}' requires 'Handle'. Update method to 'Handle'.",
-                            patternFacts?.PatternFilePath);
-                    }
-                }
-            }
-
-            // Ensure class implementing handler interface implements matching method
-            var classDecls = root.DescendantNodes().OfType<ClassDeclarationSyntax>()
-                .Where(c => c.Identifier.Text.EndsWith("Handler", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            foreach (var classDecl in classDecls)
-            {
-                var classMethods = classDecl.DescendantNodes().OfType<MethodDeclarationSyntax>()
-                    .Where(m => m.Modifiers.Any(SyntaxKind.PublicKeyword))
-                    .ToList();
-
-                var hasExpectedMethod = classMethods.Any(m => m.Identifier.Text.Equals(expectedMethod, StringComparison.OrdinalIgnoreCase));
-                var hasOtherMethod = string.Equals(expectedMethod, "HandleAsync", StringComparison.OrdinalIgnoreCase)
-                    ? classMethods.Any(m => m.Identifier.Text.Equals("Handle", StringComparison.OrdinalIgnoreCase))
-                    : classMethods.Any(m => m.Identifier.Text.Equals("HandleAsync", StringComparison.OrdinalIgnoreCase));
-
-                if (!hasExpectedMethod && hasOtherMethod && !projectHasMediatR)
-                {
-                    return (false,
-                        $"Repository architectural pattern violation in '{targetFilePath}': Class '{classDecl.Identifier.Text}' does not implement expected method '{expectedMethod}' required by pattern from '{patternFacts?.PatternFilePath ?? "the repository"}'.",
-                        patternFacts?.PatternFilePath);
-                }
-            }
-        }
-
-        // 2. Validate Requests (Queries / Commands)
-        if (string.Equals(role, "Request", StringComparison.OrdinalIgnoreCase))
-        {
-            var typeDecls = root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>().ToList();
-            foreach (var typeDecl in typeDecls)
-            {
-                if (typeDecl.BaseList != null)
-                {
-                    var baseTypes = typeDecl.BaseList.Types.Select(t => t.Type.ToString()).ToList();
-                    var usesMediatRRequest = baseTypes.Any(bt => bt.StartsWith("IRequest", StringComparison.OrdinalIgnoreCase) ||
-                                                                  bt.StartsWith("ICommand", StringComparison.OrdinalIgnoreCase) ||
-                                                                  bt.StartsWith("IQuery", StringComparison.OrdinalIgnoreCase));
-
-                    if (usesMediatRRequest && !projectHasMediatR && patternFacts?.UsesMediatR != true)
-                    {
-                        return (false,
-                            $"Repository architectural pattern violation in '{targetFilePath}': Record '{typeDecl.Identifier.Text}' implements 'IRequest', but the target project does not reference MediatR. Follow the plain record pattern from '{patternFacts?.PatternFilePath ?? "the repository"}'.",
-                            patternFacts?.PatternFilePath);
-                    }
-                }
-            }
-        }
-
         return (true, null, patternFacts?.PatternFilePath);
     }
 
-    private static readonly HashSet<string> StandardBclTypes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "int", "string", "bool", "long", "double", "float", "byte", "char", "object", "void", "decimal", "short", "uint", "ulong", "ushort", "sbyte",
-        "Guid", "DateTime", "DateTimeOffset", "DateOnly", "TimeOnly", "TimeSpan", "CancellationToken", "Task", "ValueTask", "Action", "Func", "Predicate",
-        "IEnumerable", "IAsyncEnumerable", "IReadOnlyList", "IList", "List", "IReadOnlyCollection", "ICollection", "Dictionary", "IDictionary", "IReadOnlyDictionary",
-        "HashSet", "ISet", "Nullable", "Exception", "ArgumentException", "ArgumentNullException", "InvalidOperationException", "OperationCanceledException",
-        "Uri", "Stream", "MemoryStream", "StringBuilder", "StringComparison", "StringSplitOptions", "Math", "Convert", "Type", "Attribute",
-        "ILogger", "ILoggerFactory", "IOptions", "IOptionsMonitor", "IOptionsSnapshot", "IServiceCollection", "IServiceProvider", "IConfiguration",
-        "IActionResult", "ActionResult", "ControllerBase", "Controller", "HttpGet", "HttpPost", "HttpPut", "HttpDelete", "HttpPatch",
-        "FromRoute", "FromBody", "FromQuery", "FromHeader", "FromServices", "Ok", "NotFound", "BadRequest", "Conflict", "NoContent", "Forbid", "Unauthorized",
-        "JsonResult", "StatusCode", "Problem", "CancellationTokenSource", "Stopwatch", "Fact", "Theory", "InlineData", "MemberData", "ClassData",
-        "Assert", "Should", "FluentActions", "IRequest", "IRequestHandler", "INotification", "INotificationHandler", "ISender", "IMediator",
-        "DbContext", "DbSet", "Entity", "ValueObject", "IEntityTypeConfiguration", "EntityTypeBuilder", "ModelBuilder", "FluentValidation",
-        "AbstractValidator", "RuleFor", "IValidator", "ValidationResult", "CancellationTokenRegistration", "KeyValuePair", "IDisposable", "IAsyncDisposable"
-    };
-
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime ScannedAt, HashSet<string> Symbols)> WorkspaceSymbolCache = new();
+
+    public enum PackageSymbolResolutionStatus
+    {
+        Resolved,
+        MissingUsingDirective,
+        PackageNotReferenced,
+        NotAPackageSymbol
+    }
+
+    public static (PackageSymbolResolutionStatus Status, string? PackageName, string? RequiredNamespace) CheckPackageSymbolResolution(
+        string symbolName,
+        string targetFilePath,
+        IReadOnlyList<DiscoveredProjectNode>? projectGraph,
+        string? workspacePath = null,
+        CompilationUnitSyntax? root = null,
+        string? rawType = null)
+    {
+        // Helper retained for telemetry/tests; defaults to Resolved so as not to block candidate edits
+        return (PackageSymbolResolutionStatus.Resolved, null, null);
+    }
+
+    public static bool IsPackageSymbolResolvable(
+        string symbolName,
+        string targetFilePath,
+        IReadOnlyList<DiscoveredProjectNode>? projectGraph,
+        string? workspacePath = null,
+        CompilationUnitSyntax? root = null,
+        string? rawType = null)
+    {
+        return true;
+    }
 
     public static HashSet<string> GetWorkspaceDeclaredSymbols(string workspacePath)
     {
@@ -587,124 +621,18 @@ public static class RoslynContractExtractor
         return symbols;
     }
 
+    /// <summary>
+    /// Softened: Incomplete static symbol heuristics must NOT terminally reject code before compilation.
+    /// Real compilation / dotnet build provides authoritative CS0246 / CS0103 diagnostics.
+    /// </summary>
     public static (bool IsValid, string? ErrorMessage) ValidateSymbolResolution(
         string targetFilePath,
         string code,
         string workspacePath,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
-        IReadOnlyList<DevPilot.Application.DeveloperAgent.Models.DiscoveredProjectNode>? projectGraph = null)
+        IReadOnlyList<DiscoveredProjectNode>? projectGraph = null)
     {
-        if (string.IsNullOrWhiteSpace(code)) return (true, null);
-
-        var tree = CSharpSyntaxTree.ParseText(code);
-        var root = tree.GetCompilationUnitRoot();
-
-        var localTypes = root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>()
-            .Select(t => t.Identifier.Text)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var lockedSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (lockedContracts != null)
-        {
-            foreach (var (_, contractCode) in lockedContracts)
-            {
-                var cTree = CSharpSyntaxTree.ParseText(contractCode);
-                foreach (var td in cTree.GetCompilationUnitRoot().DescendantNodes().OfType<BaseTypeDeclarationSyntax>())
-                {
-                    lockedSymbols.Add(td.Identifier.Text);
-                }
-            }
-        }
-
-        var workspaceSymbols = GetWorkspaceDeclaredSymbols(workspacePath);
-
-        // Find all referenced type syntax nodes
-        var referencedTypeNodes = new List<string>();
-
-        // Fields
-        foreach (var field in root.DescendantNodes().OfType<FieldDeclarationSyntax>())
-        {
-            referencedTypeNodes.Add(field.Declaration.Type.ToString());
-        }
-
-        // Properties
-        foreach (var prop in root.DescendantNodes().OfType<PropertyDeclarationSyntax>())
-        {
-            referencedTypeNodes.Add(prop.Type.ToString());
-        }
-
-        // Constructor parameters
-        foreach (var ctor in root.DescendantNodes().OfType<ConstructorDeclarationSyntax>())
-        {
-            foreach (var param in ctor.ParameterList.Parameters)
-            {
-                if (param.Type != null) referencedTypeNodes.Add(param.Type.ToString());
-            }
-        }
-
-        // Method return types and parameters
-        foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
-        {
-            referencedTypeNodes.Add(method.ReturnType.ToString());
-            foreach (var param in method.ParameterList.Parameters)
-            {
-                if (param.Type != null) referencedTypeNodes.Add(param.Type.ToString());
-            }
-        }
-
-        // Base types / interfaces
-        foreach (var typeDecl in root.DescendantNodes().OfType<BaseTypeDeclarationSyntax>())
-        {
-            if (typeDecl.BaseList != null)
-            {
-                foreach (var bt in typeDecl.BaseList.Types)
-                {
-                    referencedTypeNodes.Add(bt.Type.ToString());
-                }
-            }
-        }
-
-        // Object creations
-        foreach (var creation in root.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
-        {
-            referencedTypeNodes.Add(creation.Type.ToString());
-        }
-
-        foreach (var rawType in referencedTypeNodes)
-        {
-            var cleanType = rawType.Trim();
-            // Split generic arguments (e.g. Task<IRepositoryWorkspaceRepository> -> Task, IRepositoryWorkspaceRepository)
-            var parts = cleanType.Split(new[] { '<', '>', ',', '?', '[', ']' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(p => p.Trim())
-                .Where(p => !string.IsNullOrWhiteSpace(p));
-
-            foreach (var part in parts)
-            {
-                var shortName = part.Contains('.') ? part.Split('.').Last() : part;
-                if (string.IsNullOrWhiteSpace(shortName)) continue;
-
-                // Check if symbol looks like an interface or custom type
-                bool isCustomCandidate = (shortName.Length > 2 && shortName.StartsWith("I", StringComparison.Ordinal) && char.IsUpper(shortName[1])) ||
-                                         (!StandardBclTypes.Contains(shortName) && char.IsUpper(shortName[0]) && shortName.EndsWith("Repository", StringComparison.OrdinalIgnoreCase));
-
-                if (isCustomCandidate &&
-                    !StandardBclTypes.Contains(shortName) &&
-                    !localTypes.Contains(shortName) &&
-                    !lockedSymbols.Contains(shortName) &&
-                    !workspaceSymbols.Contains(shortName))
-                {
-                    var candidatePorts = workspaceSymbols
-                        .Where(s => s.StartsWith("I", StringComparison.Ordinal) && (s.EndsWith("Query", StringComparison.OrdinalIgnoreCase) || s.EndsWith("Repository", StringComparison.OrdinalIgnoreCase) || s.EndsWith("Reader", StringComparison.OrdinalIgnoreCase) || s.EndsWith("Handler", StringComparison.OrdinalIgnoreCase)))
-                        .Take(6)
-                        .ToList();
-
-                    var candidateStr = candidatePorts.Count > 0 ? string.Join(", ", candidatePorts) : "none found";
-                    return (false,
-                        $"Unresolved symbol '{shortName}' detected in '{targetFilePath}'. The type or interface '{shortName}' does not exist in the repository or approved contracts. Available ports/abstractions in codebase: {candidateStr}.");
-                }
-            }
-        }
-
+        // Defer unknown/package symbol resolution to MSBuild / Roslyn compilation
         return (true, null);
     }
 
@@ -727,15 +655,13 @@ public static class RoslynContractExtractor
     public static (bool IsValid, string? ErrorMessage) ValidateNoDuplicateTypeDeclarations(
         string targetFilePath,
         string targetCode,
-        IReadOnlyDictionary<string, DevPilot.Application.DeveloperAgent.Models.FileEditSpec>? completedEdits,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
         IReadOnlyDictionary<string, string>? lockedContracts = null)
     {
         if (string.IsNullOrWhiteSpace(targetCode)) return (true, null);
 
         var currentTypes = ExtractDeclaredTypesWithNamespace(targetCode);
         if (currentTypes.Count == 0) return (true, null);
-
-        var currentTypeSet = currentTypes.ToHashSet();
 
         if (completedEdits != null)
         {

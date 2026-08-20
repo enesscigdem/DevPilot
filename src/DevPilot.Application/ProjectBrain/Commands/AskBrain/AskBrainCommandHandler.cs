@@ -9,6 +9,9 @@ using DevPilot.Application.Tasks.Ports;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Logging;
 
+using System.Text.Json;
+using DevPilot.Domain.ProjectBrain.Entities;
+
 namespace DevPilot.Application.ProjectBrain.Commands.AskBrain;
 
 public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
@@ -21,6 +24,7 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
     private readonly IIndexJobRepository _jobRepository;
     private readonly ISemanticSearchQueryHandler _searchHandler;
     private readonly IAiProvider _aiProvider;
+    private readonly IProjectBrainConversationRepository _conversationRepository;
     private readonly ILogger<AskBrainCommandHandler> _logger;
 
     public AskBrainCommandHandler(
@@ -29,6 +33,7 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
         IIndexJobRepository jobRepository,
         ISemanticSearchQueryHandler searchHandler,
         IAiProvider aiProvider,
+        IProjectBrainConversationRepository conversationRepository,
         ILogger<AskBrainCommandHandler> logger)
     {
         _workspaceQuery = workspaceQuery;
@@ -36,6 +41,7 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
         _jobRepository = jobRepository;
         _searchHandler = searchHandler;
         _aiProvider = aiProvider;
+        _conversationRepository = conversationRepository;
         _logger = logger;
     }
 
@@ -110,6 +116,55 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
                       !string.IsNullOrEmpty(latestJob?.CommitSha) &&
                       !string.Equals(workspace.CommitSha, latestJob.CommitSha, StringComparison.OrdinalIgnoreCase);
 
+        // 1b. Resolve or create ProjectBrainConversation
+        ProjectBrainConversation? conversation = null;
+        if (command.ConversationId.HasValue && command.ConversationId.Value != Guid.Empty)
+        {
+            conversation = await _conversationRepository
+                .GetByIdAsync(command.ConversationId.Value, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (conversation != null && conversation.RepositoryWorkspaceId != workspace.Id)
+            {
+                conversation = null;
+            }
+        }
+
+        if (conversation is null)
+        {
+            var title = command.Question.Trim();
+            if (title.Length > 60)
+            {
+                title = title.Substring(0, 57) + "...";
+            }
+
+            conversation = new ProjectBrainConversation
+            {
+                Id = command.ConversationId ?? Guid.NewGuid(),
+                RepositoryWorkspaceId = workspace.Id,
+                Title = title,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,
+            };
+
+            await _conversationRepository
+                .AddAsync(conversation, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        // Persist user question message
+        var userMsg = new ProjectBrainMessage
+        {
+            Id = Guid.NewGuid(),
+            ConversationId = conversation.Id,
+            Role = "user",
+            Content = command.Question.Trim(),
+            CreatedAt = DateTime.UtcNow,
+        };
+        await _conversationRepository
+            .AddMessageAsync(userMsg, cancellationToken)
+            .ConfigureAwait(false);
+
         // 2. Retrieve relevant chunks
         var searchQuery = new SemanticSearchQuery
         {
@@ -126,13 +181,32 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
         if (!searchResult.Success || searchResult.Hits.Count == 0)
         {
             stopwatch.Stop();
+            var noChunkContent = "I could not find any relevant code snippets in the indexed workspace to answer your question. Please verify that the repository is indexed or try asking about specific classes, methods, or modules.";
+            var elapsedNoChunk = FormatDuration(stopwatch.Elapsed);
+
+            var assistantNoChunkMsg = new ProjectBrainMessage
+            {
+                Id = Guid.NewGuid(),
+                ConversationId = conversation.Id,
+                Role = "assistant",
+                Content = noChunkContent,
+                Confidence = 0,
+                Elapsed = elapsedNoChunk,
+                CreatedAt = DateTime.UtcNow,
+            };
+            await _conversationRepository.AddMessageAsync(assistantNoChunkMsg, cancellationToken).ConfigureAwait(false);
+
+            conversation.UpdatedAt = DateTime.UtcNow;
+            await _conversationRepository.UpdateAsync(conversation, cancellationToken).ConfigureAwait(false);
+
             return new BrainChatResult
             {
                 Success = true,
+                ConversationId = conversation.Id,
                 Role = "assistant",
-                Content = "I could not find any relevant code snippets in the indexed workspace to answer your question. Please verify that the repository is indexed or try asking about specific classes, methods, or modules.",
+                Content = noChunkContent,
                 Confidence = 0,
-                Elapsed = FormatDuration(stopwatch.Elapsed),
+                Elapsed = elapsedNoChunk,
                 RetrievalMode = searchResult.RetrievalMode,
                 IsStale = isStale,
             };
@@ -172,14 +246,31 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
             .ConfigureAwait(false);
 
         stopwatch.Stop();
+        var elapsed = FormatDuration(stopwatch.Elapsed);
 
         if (!aiResponse.IsSuccess)
         {
+            var errMsg = aiResponse.ErrorMessage ?? "AI provider failed to generate a response.";
+            var assistantErrMsg = new ProjectBrainMessage
+            {
+                Id = Guid.NewGuid(),
+                ConversationId = conversation.Id,
+                Role = "assistant",
+                Content = $"Error: {errMsg}",
+                Elapsed = elapsed,
+                CreatedAt = DateTime.UtcNow,
+            };
+            await _conversationRepository.AddMessageAsync(assistantErrMsg, cancellationToken).ConfigureAwait(false);
+
+            conversation.UpdatedAt = DateTime.UtcNow;
+            await _conversationRepository.UpdateAsync(conversation, cancellationToken).ConfigureAwait(false);
+
             return new BrainChatResult
             {
                 Success = false,
-                ErrorMessage = aiResponse.ErrorMessage ?? "AI provider failed to generate a response.",
-                Elapsed = FormatDuration(stopwatch.Elapsed),
+                ConversationId = conversation.Id,
+                ErrorMessage = errMsg,
+                Elapsed = elapsed,
             };
         }
 
@@ -282,13 +373,36 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
             groundingScore = 75;
         }
 
-        return new BrainChatResult
+        // 8. Persist assistant message with citations & context metadata
+        var assistantMsg = new ProjectBrainMessage
         {
-            Success = true,
+            Id = Guid.NewGuid(),
+            ConversationId = conversation.Id,
             Role = "assistant",
             Content = cleanContent,
             Confidence = groundingScore,
-            Elapsed = FormatDuration(stopwatch.Elapsed),
+            Elapsed = elapsed,
+            CitationsJson = citations.Count > 0 ? JsonSerializer.Serialize(citations) : null,
+            ContextFilesJson = contextFiles.Count > 0 ? JsonSerializer.Serialize(contextFiles) : null,
+            CreatedAt = DateTime.UtcNow,
+        };
+        await _conversationRepository
+            .AddMessageAsync(assistantMsg, cancellationToken)
+            .ConfigureAwait(false);
+
+        conversation.UpdatedAt = DateTime.UtcNow;
+        await _conversationRepository
+            .UpdateAsync(conversation, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new BrainChatResult
+        {
+            Success = true,
+            ConversationId = conversation.Id,
+            Role = "assistant",
+            Content = cleanContent,
+            Confidence = groundingScore,
+            Elapsed = elapsed,
             Citations = citations,
             ContextFiles = contextFiles,
             RetrievalMode = searchResult.RetrievalMode,

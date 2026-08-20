@@ -218,3 +218,100 @@ public sealed class EfIndexJobRepository : IIndexJobRepository
             .ConfigureAwait(false);
     }
 }
+
+public sealed class EfProjectBrainConversationRepository : IProjectBrainConversationRepository
+{
+    private readonly DevPilotDbContext _context;
+
+    public EfProjectBrainConversationRepository(DevPilotDbContext context)
+    {
+        _context = context;
+    }
+
+    public async Task<IReadOnlyList<ProjectBrainConversation>> GetByWorkspaceIdAsync(
+        Guid repositoryWorkspaceId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _context.ProjectBrainConversations
+            .AsNoTracking()
+            .Include(c => c.Messages)
+            .Where(c => c.RepositoryWorkspaceId == repositoryWorkspaceId)
+            .OrderByDescending(c => c.UpdatedAt)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<ProjectBrainConversation?> GetByIdWithMessagesAsync(
+        Guid conversationId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _context.ProjectBrainConversations
+            .AsNoTracking()
+            .Include(c => c.Messages.OrderBy(m => m.CreatedAt))
+            .FirstOrDefaultAsync(c => c.Id == conversationId, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<ProjectBrainConversation?> GetByIdAsync(
+        Guid conversationId,
+        CancellationToken cancellationToken = default)
+    {
+        return await _context.ProjectBrainConversations
+            .FirstOrDefaultAsync(c => c.Id == conversationId, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task AddAsync(
+        ProjectBrainConversation conversation,
+        CancellationToken cancellationToken = default)
+    {
+        await _context.ProjectBrainConversations
+            .AddAsync(conversation, cancellationToken)
+            .ConfigureAwait(false);
+        await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task UpdateAsync(
+        ProjectBrainConversation conversation,
+        CancellationToken cancellationToken = default)
+    {
+        var tracked = _context.ProjectBrainConversations.Local.FirstOrDefault(c => c.Id == conversation.Id);
+        if (tracked != null && !ReferenceEquals(tracked, conversation))
+        {
+            _context.Entry(tracked).CurrentValues.SetValues(conversation);
+        }
+        else if (tracked == null)
+        {
+            _context.ProjectBrainConversations.Update(conversation);
+        }
+
+        await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task AddMessageAsync(
+        ProjectBrainMessage message,
+        CancellationToken cancellationToken = default)
+    {
+        await _context.ProjectBrainMessages
+            .AddAsync(message, cancellationToken)
+            .ConfigureAwait(false);
+        await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task DeleteAsync(
+        ProjectBrainConversation conversation,
+        CancellationToken cancellationToken = default)
+    {
+        var tracked = _context.ProjectBrainConversations.Local.FirstOrDefault(c => c.Id == conversation.Id);
+        if (tracked != null)
+        {
+            _context.ProjectBrainConversations.Remove(tracked);
+        }
+        else
+        {
+            _context.ProjectBrainConversations.Attach(conversation);
+            _context.ProjectBrainConversations.Remove(conversation);
+        }
+        await _context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+}

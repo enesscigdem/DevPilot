@@ -288,13 +288,14 @@ public class ProviderResilienceTests : IDisposable
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
     }
 
-    [Fact]
-    public async Task GenerateAndApplyEditsAsync_SuccessfulRetry_StillUndergoesSemanticSymbolResolution()
-    {
-        var file1 = "src/Contracts/IRepository.cs";
-        var file2 = "src/Services/RepoService.cs";
 
-        // File 1: Success
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_SuccessfulRetry_AppliesEditsDirectlyToWorktreeWithoutPreBuildSemanticRepair()
+    {
+        var file1 = "src/Models/CreateUserCommand.cs";
+        var file2 = "src/Services/UserService.cs";
+
+        // File 1: Declares CreateUserCommand with 2 parameters
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
             Provider = "Kimi",
@@ -302,9 +303,9 @@ public class ProviderResilienceTests : IDisposable
             StatusCode = 200,
             Content = """
                 {
-                  "filePath": "src/Contracts/IRepository.cs",
+                  "filePath": "src/Models/CreateUserCommand.cs",
                   "action": "Create",
-                  "newContent": "namespace Contracts;\npublic interface IRepository { void Save(); }"
+                  "newContent": "namespace Models;\npublic record CreateUserCommand(string Name, int Age);"
                 }
                 """
         });
@@ -320,7 +321,7 @@ public class ProviderResilienceTests : IDisposable
             ErrorMessage = "Kimi HTTP 503 service unavailable after 4 attempts."
         });
 
-        // File 2: Retry succeeds with invalid invented internal type
+        // File 2: Retry succeeds with valid JSON (code correctness will be checked by compiler, not pre-build AI repair)
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
             Provider = "Kimi",
@@ -328,24 +329,9 @@ public class ProviderResilienceTests : IDisposable
             StatusCode = 200,
             Content = """
                 {
-                  "filePath": "src/Services/RepoService.cs",
+                  "filePath": "src/Services/UserService.cs",
                   "action": "Create",
-                  "newContent": "namespace Services;\npublic class RepoService { public void Run(INonExistentInternalRepository repo) {} }"
-                }
-                """
-        });
-
-        // File 2: Bounded repair also returns invalid invented internal type
-        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
-        {
-            Provider = "Kimi",
-            IsSuccess = true,
-            StatusCode = 200,
-            Content = """
-                {
-                  "filePath": "src/Services/RepoService.cs",
-                  "action": "Create",
-                  "newContent": "namespace Services;\npublic class RepoService { public void Run(INonExistentInternalRepository repo) {} }"
+                  "newContent": "using Models;\nnamespace Services;\npublic class UserService { public void Run() { var cmd = new CreateUserCommand(); } }"
                 }
                 """
         });
@@ -353,8 +339,8 @@ public class ProviderResilienceTests : IDisposable
         var request = new DeveloperAgentRequest(
             TaskId: Guid.NewGuid(),
             ExecutionId: Guid.NewGuid(),
-            TaskTitle: "Add RepoService",
-            TaskDescription: "Implement RepoService",
+            TaskTitle: "Add UserService",
+            TaskDescription: "Implement UserService",
             AcceptanceCriteria: null,
             ImpactAnalysisSummary: "Summary",
             ProposedPlan: "Plan",
@@ -364,13 +350,15 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        // Validation must reject the hallucinated internal symbol even though AI retry succeeded
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("INonExistentInternalRepository");
+        // Edits are applied to worktree directly; no extra pre-build AI repair call occurred
+        result.Success.Should().BeTrue();
+        result.ModifiedFiles.Should().Contain(file1);
+        result.ModifiedFiles.Should().Contain(file2);
+        _fakeAiProvider.StructuredResponsesToReturn.Should().BeEmpty();
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_SuccessfulRetry_StillUndergoesDuplicateTypeValidation()
+    public async Task GenerateAndApplyEditsAsync_SuccessfulRetry_AppliesDirectlyToWorktreeForCompilerValidation()
     {
         var file1 = "src/Models/UserDto.cs";
         var file2 = "src/Models/AnotherUserDto.cs";
@@ -401,22 +389,7 @@ public class ProviderResilienceTests : IDisposable
             ErrorMessage = "Kimi HTTP 503 service unavailable after 4 attempts."
         });
 
-        // File 2: Retry succeeds but duplicates UserDto in the same namespace
-        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
-        {
-            Provider = "Kimi",
-            IsSuccess = true,
-            StatusCode = 200,
-            Content = """
-                {
-                  "filePath": "src/Models/AnotherUserDto.cs",
-                  "action": "Create",
-                  "newContent": "namespace Models;\npublic class UserDto { public int Age { get; set; } }"
-                }
-                """
-        });
-
-        // File 2: Bounded repair also returns duplicate UserDto
+        // File 2: Retry succeeds with valid JSON
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
             Provider = "Kimi",
@@ -445,10 +418,9 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        // Validation must reject the duplicate type even though AI retry succeeded
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("Duplicate type declaration detected");
-        result.ErrorMessage.Should().Contain("Models.UserDto");
+        result.Success.Should().BeTrue();
+        result.ModifiedFiles.Should().Contain(file1);
+        result.ModifiedFiles.Should().Contain(file2);
     }
 
     [Fact]

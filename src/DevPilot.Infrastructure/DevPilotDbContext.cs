@@ -40,6 +40,10 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<ExecutionCiCheck> ExecutionCiChecks => Set<ExecutionCiCheck>();
 
+    public DbSet<ProjectBrainConversation> ProjectBrainConversations => Set<ProjectBrainConversation>();
+
+    public DbSet<ProjectBrainMessage> ProjectBrainMessages => Set<ProjectBrainMessage>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -326,6 +330,39 @@ public class DevPilotDbContext : DbContext
             entity.HasOne(e => e.TaskExecution)
                 .WithMany(e => e.CiChecks)
                 .HasForeignKey(e => e.TaskExecutionId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ProjectBrainConversation>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.RepositoryWorkspaceId);
+            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.UpdatedAt });
+            entity.Property(e => e.Title).HasMaxLength(200);
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+
+            entity.HasOne<RepositoryWorkspace>()
+                .WithMany()
+                .HasForeignKey(e => e.RepositoryWorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ProjectBrainMessage>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.ConversationId);
+            entity.HasIndex(e => new { e.ConversationId, e.CreatedAt });
+            entity.Property(e => e.Role).HasMaxLength(50);
+            entity.Property(e => e.Content).HasColumnType("text");
+            entity.Property(e => e.Elapsed).HasMaxLength(50);
+            entity.Property(e => e.CitationsJson).HasColumnType("jsonb");
+            entity.Property(e => e.ContextFilesJson).HasColumnType("jsonb");
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+
+            entity.HasOne(e => e.Conversation)
+                .WithMany(e => e.Messages)
+                .HasForeignKey(e => e.ConversationId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

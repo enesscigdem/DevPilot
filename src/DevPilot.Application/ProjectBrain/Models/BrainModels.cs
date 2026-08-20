@@ -81,6 +81,8 @@ public sealed class BrainChatResult
 
     public string? ErrorMessage { get; set; }
 
+    public Guid? ConversationId { get; set; }
+
     public string Role { get; set; } = "assistant";
 
     public string Content { get; set; } = string.Empty;
@@ -98,4 +100,55 @@ public sealed class BrainChatResult
     public bool IsUnindexed { get; set; }
 
     public bool IsStale { get; set; }
+}
+
+public sealed class BrainConversationDto
+{
+    public Guid Id { get; set; }
+
+    public Guid RepositoryWorkspaceId { get; set; }
+
+    public string Title { get; set; } = string.Empty;
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public int MessageCount { get; set; }
+}
+
+public sealed class BrainConversationDetailDto
+{
+    public Guid Id { get; set; }
+
+    public Guid RepositoryWorkspaceId { get; set; }
+
+    public string Title { get; set; } = string.Empty;
+
+    public DateTime CreatedAt { get; set; }
+
+    public DateTime UpdatedAt { get; set; }
+
+    public List<BrainMessageDto> Messages { get; set; } = new();
+}
+
+public sealed class BrainMessageDto
+{
+    public Guid Id { get; set; }
+
+    public Guid ConversationId { get; set; }
+
+    public string Role { get; set; } = "user";
+
+    public string Content { get; set; } = string.Empty;
+
+    public int? Confidence { get; set; }
+
+    public string? Elapsed { get; set; }
+
+    public List<BrainCitationDto>? Citations { get; set; }
+
+    public List<BrainContextFileDto>? ContextFiles { get; set; }
+
+    public DateTime CreatedAt { get; set; }
 }

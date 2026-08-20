@@ -307,6 +307,277 @@ public class TaskImpactAnalysisGroundingTests
         task.Status.Should().Be(DevelopmentTaskStatus.Failed, "Task must NOT reach AwaitingApproval");
     }
 
+    [Fact]
+    public async Task Scenario10_InvalidModifyPath_TriggersBoundedRepair_AndSucceedsWhenRepairedWithValidPath()
+    {
+        var taskRepo = new FakeTaskRepository();
+        var workspaceQuery = new FakeWorkspaceQuery
+        {
+            WorkspaceToReturn = new RepositoryWorkspace
+            {
+                Id = Guid.NewGuid(),
+                Status = RepositoryWorkspaceStatus.Completed,
+                LocalPath = _repoRoot
+            }
+        };
+        var analysisRepo = new FakeAnalysisRepository();
+        var analyzer = new FakeRepositoryAnalyzer();
+        var embeddingProvider = new FakeEmbeddingProvider();
+        var searchService = new FakeSearchService();
+
+        var initialInvalidResponse = """
+        {
+            "summary": "Implement search feature",
+            "confidence": 85,
+            "impactedFiles": [
+                {
+                    "filePath": "src/DevPilot.Domain/Entities/DevelopmentTask.cs",
+                    "changeType": "Modify",
+                    "reason": "Valid domain model modification"
+                },
+                {
+                    "filePath": "src/DevPilot.Application/Features/Products/Queries/ListProductsQueryHandler.cs",
+                    "changeType": "Modify",
+                    "reason": "Invented nonexistent handler"
+                }
+            ],
+            "proposedPlan": [
+                {
+                    "order": 1,
+                    "title": "Update handler",
+                    "description": "Add search parameter",
+                    "relatedFiles": ["src/DevPilot.Domain/Entities/DevelopmentTask.cs"]
+                }
+            ]
+        }
+        """;
+
+        var repairedValidResponse = """
+        {
+            "summary": "Implement search feature (repaired)",
+            "confidence": 90,
+            "impactedFiles": [
+                {
+                    "filePath": "src/DevPilot.Domain/Entities/DevelopmentTask.cs",
+                    "changeType": "Modify",
+                    "reason": "Valid domain model modification"
+                },
+                {
+                    "filePath": "src/DevPilot.Application/Tasks/Commands/AnalyzeTaskImpact/AnalyzeTaskImpactCommandHandler.cs",
+                    "changeType": "Modify",
+                    "reason": "Existing real handler"
+                }
+            ],
+            "proposedPlan": [
+                {
+                    "order": 1,
+                    "title": "Update real handler",
+                    "description": "Add search logic",
+                    "relatedFiles": ["src/DevPilot.Domain/Entities/DevelopmentTask.cs"]
+                }
+            ]
+        }
+        """;
+
+        var aiProvider = new FakeAiProvider();
+        aiProvider.ResponsesToReturn.Enqueue(initialInvalidResponse);
+        aiProvider.ResponsesToReturn.Enqueue(repairedValidResponse);
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            workspaceQuery,
+            analysisRepo,
+            analyzer,
+            aiProvider,
+            embeddingProvider,
+            searchService,
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance);
+
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = workspaceQuery.WorkspaceToReturn.Id,
+            Title = "Search products",
+            Description = "Add query search capability",
+            Status = DevelopmentTaskStatus.Draft
+        };
+        taskRepo.Tasks[task.Id] = task;
+
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(task.Id));
+
+        result.Success.Should().BeTrue("Analysis must succeed after bounded repair with valid real path");
+        aiProvider.SendAsyncCallCount.Should().Be(2, "Exactly one initial call and one repair call must occur");
+        task.Status.Should().Be(DevelopmentTaskStatus.AwaitingApproval);
+        result.Analysis!.StructuredResult!.ImpactedFiles.Should().HaveCount(2);
+        result.Analysis.StructuredResult.ImpactedFiles[0].FilePath.Should().Be("src/DevPilot.Domain/Entities/DevelopmentTask.cs");
+        result.Analysis.StructuredResult.ImpactedFiles[1].FilePath.Should().Be("src/DevPilot.Application/TaskImpactAnalysis/Commands/AnalyzeTaskImpact/AnalyzeTaskImpactCommandHandler.cs");
+
+        // Verify repair prompt received error details and preserved entries
+        aiProvider.ReceivedRequests[1].UserPrompt.Should().Contain("ListProductsQueryHandler.cs");
+        aiProvider.ReceivedRequests[1].UserPrompt.Should().Contain("src/DevPilot.Domain/Entities/DevelopmentTask.cs");
+    }
+
+    [Fact]
+    public async Task Scenario11_InvalidModifyPath_BoundedRepairFailsOnSecondInvalidPath_NoSecondRepair()
+    {
+        var taskRepo = new FakeTaskRepository();
+        var workspaceQuery = new FakeWorkspaceQuery
+        {
+            WorkspaceToReturn = new RepositoryWorkspace
+            {
+                Id = Guid.NewGuid(),
+                Status = RepositoryWorkspaceStatus.Completed,
+                LocalPath = _repoRoot
+            }
+        };
+        var analysisRepo = new FakeAnalysisRepository();
+        var analyzer = new FakeRepositoryAnalyzer();
+        var embeddingProvider = new FakeEmbeddingProvider();
+        var searchService = new FakeSearchService();
+
+        var initialInvalidResponse = """
+        {
+            "summary": "Implement feature",
+            "confidence": 80,
+            "impactedFiles": [
+                {
+                    "filePath": "src/DevPilot.Application/NonExistentFileA.cs",
+                    "changeType": "Modify",
+                    "reason": "Nonexistent file A"
+                }
+            ],
+            "proposedPlan": []
+        }
+        """;
+
+        var secondInvalidResponse = """
+        {
+            "summary": "Implement feature retry",
+            "confidence": 80,
+            "impactedFiles": [
+                {
+                    "filePath": "src/DevPilot.Application/StillNonExistentFileB.cs",
+                    "changeType": "Modify",
+                    "reason": "Nonexistent file B"
+                }
+            ],
+            "proposedPlan": []
+        }
+        """;
+
+        var aiProvider = new FakeAiProvider();
+        aiProvider.ResponsesToReturn.Enqueue(initialInvalidResponse);
+        aiProvider.ResponsesToReturn.Enqueue(secondInvalidResponse);
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            workspaceQuery,
+            analysisRepo,
+            analyzer,
+            aiProvider,
+            embeddingProvider,
+            searchService,
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance);
+
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = workspaceQuery.WorkspaceToReturn.Id,
+            Title = "Task Title",
+            Description = "Task Desc",
+            Status = DevelopmentTaskStatus.Draft
+        };
+        taskRepo.Tasks[task.Id] = task;
+
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(task.Id));
+
+        result.Success.Should().BeFalse("Analysis must fail after single repair attempt still returns invalid path");
+        aiProvider.SendAsyncCallCount.Should().Be(2, "Must NOT perform a second repair attempt");
+        result.ErrorMessage.Should().Contain("does not exist in the repository and cannot be deterministically resolved");
+        task.Status.Should().Be(DevelopmentTaskStatus.Failed);
+    }
+
+    [Fact]
+    public async Task Scenario12_CreateActionOnExistingFile_IsRejectedAndTriggersRepair()
+    {
+        var taskRepo = new FakeTaskRepository();
+        var workspaceQuery = new FakeWorkspaceQuery
+        {
+            WorkspaceToReturn = new RepositoryWorkspace
+            {
+                Id = Guid.NewGuid(),
+                Status = RepositoryWorkspaceStatus.Completed,
+                LocalPath = _repoRoot
+            }
+        };
+        var analysisRepo = new FakeAnalysisRepository();
+        var analyzer = new FakeRepositoryAnalyzer();
+        var embeddingProvider = new FakeEmbeddingProvider();
+        var searchService = new FakeSearchService();
+
+        // Existing file marked as Create
+        var initialCreateOnExistingResponse = """
+        {
+            "summary": "Create existing file",
+            "confidence": 80,
+            "impactedFiles": [
+                {
+                    "filePath": "src/DevPilot.Domain/Entities/DevelopmentTask.cs",
+                    "changeType": "Create",
+                    "reason": "Creating already existing entity"
+                }
+            ],
+            "proposedPlan": []
+        }
+        """;
+
+        var repairedResponse = """
+        {
+            "summary": "Modify existing file",
+            "confidence": 90,
+            "impactedFiles": [
+                {
+                    "filePath": "src/DevPilot.Domain/Entities/DevelopmentTask.cs",
+                    "changeType": "Modify",
+                    "reason": "Modifying existing entity"
+                }
+            ],
+            "proposedPlan": []
+        }
+        """;
+
+        var aiProvider = new FakeAiProvider();
+        aiProvider.ResponsesToReturn.Enqueue(initialCreateOnExistingResponse);
+        aiProvider.ResponsesToReturn.Enqueue(repairedResponse);
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            workspaceQuery,
+            analysisRepo,
+            analyzer,
+            aiProvider,
+            embeddingProvider,
+            searchService,
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance);
+
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = workspaceQuery.WorkspaceToReturn.Id,
+            Title = "Task Title",
+            Description = "Task Desc",
+            Status = DevelopmentTaskStatus.Draft
+        };
+        taskRepo.Tasks[task.Id] = task;
+
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(task.Id));
+
+        result.Success.Should().BeTrue("Analysis must succeed after repair corrects Create to Modify for existing file");
+        aiProvider.SendAsyncCallCount.Should().Be(2);
+        aiProvider.ReceivedRequests[1].UserPrompt.Should().Contain("already exists in the repository");
+        task.Status.Should().Be(DevelopmentTaskStatus.AwaitingApproval);
+    }
+
     private class FakeTaskRepository : ITaskRepository
     {
         public Dictionary<Guid, DevelopmentTask> Tasks { get; } = new();

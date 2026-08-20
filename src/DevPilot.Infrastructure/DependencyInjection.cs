@@ -239,11 +239,16 @@ public static class DependencyInjection
         services.AddScoped<IEmbeddingProvider, NullEmbeddingProvider>();
         services.AddScoped<ICodeChunkRepository, EfCodeChunkRepository>();
         services.AddScoped<IIndexJobRepository, EfIndexJobRepository>();
+        services.AddScoped<IProjectBrainConversationRepository, EfProjectBrainConversationRepository>();
         services.AddScoped<IIndexWorkspaceCommandHandler, IndexWorkspaceCommandHandler>();
         services.AddScoped<ISemanticSearchQueryHandler, SemanticSearchQueryHandler>();
         services.AddScoped<ISemanticSearchService, EfSemanticSearchService>();
         services.AddScoped<IGetBrainStatusQueryHandler, GetBrainStatusQueryHandler>();
         services.AddScoped<IAskBrainCommandHandler, AskBrainCommandHandler>();
+        services.AddScoped<DevPilot.Application.ProjectBrain.Queries.GetBrainConversations.IGetBrainConversationsQueryHandler, DevPilot.Application.ProjectBrain.Queries.GetBrainConversations.GetBrainConversationsQueryHandler>();
+        services.AddScoped<DevPilot.Application.ProjectBrain.Queries.GetBrainConversationById.IGetBrainConversationByIdQueryHandler, DevPilot.Application.ProjectBrain.Queries.GetBrainConversationById.GetBrainConversationByIdQueryHandler>();
+        services.AddScoped<DevPilot.Application.ProjectBrain.Commands.CreateBrainConversation.ICreateBrainConversationCommandHandler, DevPilot.Application.ProjectBrain.Commands.CreateBrainConversation.CreateBrainConversationCommandHandler>();
+        services.AddScoped<DevPilot.Application.ProjectBrain.Commands.DeleteBrainConversation.IDeleteBrainConversationCommandHandler, DevPilot.Application.ProjectBrain.Commands.DeleteBrainConversation.DeleteBrainConversationCommandHandler>();
 
         return services;
     }
