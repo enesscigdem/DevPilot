@@ -93,6 +93,15 @@ function formatTimeOnly(dateStr: string): string {
 function getMetadataDisplay(act: ExecutionActivityItem): string | null {
   if (act.metadata) {
     const m = act.metadata
+    if (m.eventKind === "ProviderCall") {
+      const budget = m.requestedOutputTokens ? ` · budget ${m.requestedOutputTokens}` : ""
+      const actual = m.outputTokens !== undefined && m.outputTokens !== null ? ` · output ${m.outputTokens}` : ""
+      const duration = m.stageDurationMs !== undefined && m.stageDurationMs !== null ? ` · ${m.stageDurationMs}ms` : ""
+      return `${m.providerCallKind ?? "Provider call"}${budget}${actual}${duration}`
+    }
+    if (m.eventKind === "GenerationSummary") {
+      return `${m.logicalProviderCallCount ?? 0} calls · ${m.compactRetryCount ?? 0} compact · ${m.applicabilityRepairCount ?? 0} applicability · ${m.totalGenerationTimeMs ?? 0}ms`
+    }
     if (m.repairKind && m.repairRound) {
       const fileCount = m.repairFiles?.length ?? m.modifiedFileCount
       const scope = fileCount ? ` · ${fileCount} ${fileCount === 1 ? "file" : "files"}` : ""
@@ -556,6 +565,7 @@ export function ExecutionWorkspace() {
                   const genActivities = activities.filter(
                     (a) =>
                       a.metadata?.eventKind === "ProviderCall" ||
+                      a.metadata?.eventKind === "GenerationSummary" ||
                       (a.stage === "DeveloperAgent" &&
                        (a.message.startsWith("Generating edit") ||
                         a.message.startsWith("Generated edit") ||

@@ -208,15 +208,15 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         var sysPrompt = DeveloperAgent.BuildSingleFileRepairSystemPrompt(entry);
         var userPrompt = DeveloperAgent.BuildSingleFileRepairUserPrompt("Error", "{}", entry);
 
-        sysPrompt.Should().Contain("Do NOT return the entire file. Return only the smallest changed block.");
+        sysPrompt.Should().Contain("Return only compact 'searchReplaceEdits'");
         sysPrompt.Should().Contain("searchReplaceEdits");
 
-        userPrompt.Should().Contain("DO NOT RETURN THE ENTIRE FILE. Return only the smallest changed block.");
-        userPrompt.Should().Contain("Do not return the entire file.");
+        userPrompt.Should().Contain("surgical patch");
+        userPrompt.Should().Contain("smallest verbatim search anchors");
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_WhenRepairHitsTokenLimit_PerformsAtMostOneCompactRepairRetry()
+    public async Task GenerateAndApplyEditsAsync_WhenApplicabilityRecoveryHitsTokenLimit_StopsAfterOneRecovery()
     {
         var testProjPath = Path.Combine(_worktreeDir, "NetCaseStudy.Tests", "NetCaseStudy.Tests.csproj");
         Directory.CreateDirectory(Path.GetDirectoryName(testProjPath)!);
@@ -299,20 +299,18 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
 
         var result = await agent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeTrue(result.ErrorMessage ?? "Should succeed");
-        result.ModifiedFiles.Should().ContainSingle(f => f.EndsWith("ProductsApiTests.cs"));
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("output token limit");
 
         var modifiedContent = await File.ReadAllTextAsync(testFilePath);
-        modifiedContent.Should().Contain("GetLowStockProducts_ReturnsOk");
+        modifiedContent.Should().NotContain("GetLowStockProducts_ReturnsOk");
         modifiedContent.Should().Contain("ExistingLastTest_ReturnsOk");
 
-        // Verify activity logging distinguishing repair and compact repair retry
         var messages = _activityRecorder.RecordedMessages.ToList();
         messages.Should().Contain(m => m.StartsWith("Repair triggered for ProductsApiTests.cs"));
-        messages.Should().Contain(m => m.StartsWith("Performing compact repair retry for ProductsApiTests.cs"));
+        messages.Should().NotContain(m => m.StartsWith("Performing compact repair retry for ProductsApiTests.cs"));
 
-        // Verify total AI provider calls: exactly 3 (initial generation + repair + 1 compact repair retry)
-        _fakeAiProvider.ReceivedRequests.Should().HaveCount(3);
+        _fakeAiProvider.ReceivedRequests.Should().HaveCount(2, "applicability recovery owns one bounded call and cannot stack a compact retry");
     }
 
     [Fact]
@@ -386,7 +384,7 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
     }
 
     [Fact]
-    public void TokenLimitPolicy_ConfiguredMaxCompactRetryOutputTokens_Reaches24576Deterministically()
+    public void TokenLimitPolicy_ModifyRetryNeverUsesFullFileOrTestFileCeiling()
     {
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -403,10 +401,10 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         var entry = new ManifestFileEntry("NetCaseStudy.Tests/Api/ProductsApiTests.cs", FileEditAction.Modify, "Add tests", null);
 
         var retryBudget = agent.DetermineCompactRetryBudget(6144, largeContent, entry, isRepair: false);
-        retryBudget.Should().Be(24576, "Large test file >300 lines should scale to configured 24576 retry budget");
+        retryBudget.Should().Be(8192, "Modify retry is capped by expected compact patch size");
 
         var repairRetryBudget = agent.DetermineCompactRetryBudget(6144, largeContent, entry, isRepair: true);
-        repairRetryBudget.Should().Be(24576);
+        repairRetryBudget.Should().Be(6144, "applicability recovery cannot own another token escalation");
     }
 
     [Fact]

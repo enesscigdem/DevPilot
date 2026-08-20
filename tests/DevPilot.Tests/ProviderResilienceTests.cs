@@ -39,7 +39,6 @@ public class ProviderResilienceTests : IDisposable
 
         var inMemoryConfig = new Dictionary<string, string?>
         {
-            ["DeveloperAgent:TransientRecoveryCooldownMs"] = "0", // Instant test execution without thread sleep
             ["DeveloperAgent:MaxGenerationCalls"] = "15"
         };
 
@@ -76,7 +75,7 @@ public class ProviderResilienceTests : IDisposable
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_TransientFailureOnFile3_RetriesFile3AndCompletesAllFiles_WithoutRegeneratingFiles1And2()
+    public async Task GenerateAndApplyEditsAsync_ProviderExhaustedTransientFailure_IsNotRetriedByDeveloperAgent()
     {
         // 4 planned files with layer scoring (File1: score 10, File2: score 20, File3: score 30, File4: score 60)
         var file1 = "src/Contracts/IOrderService.cs";
@@ -125,7 +124,7 @@ public class ProviderResilienceTests : IDisposable
             ErrorMessage = "Kimi HTTP 503 service unavailable after 4 attempts."
         });
 
-        // File 3: Attempt 2 (bounded file recovery) -> Success
+        // This response must remain unused: transport retry ownership belongs to the provider.
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
             Provider = "Kimi",
@@ -169,18 +168,16 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeTrue();
-        result.ErrorMessage.Should().BeNull();
-        result.ModifiedFiles.Should().HaveCount(4);
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("remained unavailable");
 
-        // 5 AI calls total: File1 (1), File2 (1), File3 (1 fail + 1 retry = 2), File4 (1)
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(5);
+        // One logical call per reached file; DeveloperAgent does not retry the provider's exhausted failure.
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(3);
 
-        // Verify all 4 files applied to worktree
-        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeTrue();
-        File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeTrue();
-        File.Exists(Path.Combine(_worktreeDir, file3)).Should().BeTrue();
-        File.Exists(Path.Combine(_worktreeDir, file4)).Should().BeTrue();
+        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file3)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file4)).Should().BeFalse();
     }
 
     [Fact]
@@ -243,8 +240,8 @@ public class ProviderResilienceTests : IDisposable
         result.Success.Should().BeFalse();
         result.ErrorMessage.Should().Contain("AI provider Kimi remained unavailable (HTTP 503) while generating 'src/Services/PaymentService.cs' after bounded retries.");
 
-        // Exactly 3 AI calls: File1 (1 call), File2 (1 initial + 1 recovery = 2 calls)
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(3);
+        // Exactly 2 logical calls: File1 and one provider-owned exhausted attempt for File2.
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
 
         // Atomic apply MUST NOT have occurred: File1 was never applied to disk
         File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeFalse();
@@ -290,7 +287,7 @@ public class ProviderResilienceTests : IDisposable
 
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_SuccessfulRetry_AppliesEditsDirectlyToWorktreeWithoutPreBuildSemanticRepair()
+    public async Task GenerateAndApplyEditsAsync_ExhaustedProviderFailure_DoesNotConsumeQueuedDeveloperRetry()
     {
         var file1 = "src/Models/CreateUserCommand.cs";
         var file2 = "src/Services/UserService.cs";
@@ -321,7 +318,7 @@ public class ProviderResilienceTests : IDisposable
             ErrorMessage = "Kimi HTTP 503 service unavailable after 4 attempts."
         });
 
-        // File 2: Retry succeeds with valid JSON (code correctness will be checked by compiler, not pre-build AI repair)
+        // This queued response would have represented a duplicate DeveloperAgent retry and must remain unused.
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
             Provider = "Kimi",
@@ -350,15 +347,15 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        // Edits are applied to worktree directly; no extra pre-build AI repair call occurred
-        result.Success.Should().BeTrue();
-        result.ModifiedFiles.Should().Contain(file1);
-        result.ModifiedFiles.Should().Contain(file2);
-        _fakeAiProvider.StructuredResponsesToReturn.Should().BeEmpty();
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("remained unavailable");
+        _fakeAiProvider.StructuredResponsesToReturn.Should().ContainSingle("DeveloperAgent must not consume a second transport response");
+        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeFalse();
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_SuccessfulRetry_AppliesDirectlyToWorktreeForCompilerValidation()
+    public async Task GenerateAndApplyEditsAsync_ProviderOwnedRetryExhaustion_StopsAtomicGeneration()
     {
         var file1 = "src/Models/UserDto.cs";
         var file2 = "src/Models/AnotherUserDto.cs";
@@ -389,7 +386,7 @@ public class ProviderResilienceTests : IDisposable
             ErrorMessage = "Kimi HTTP 503 service unavailable after 4 attempts."
         });
 
-        // File 2: Retry succeeds with valid JSON
+        // This queued response must remain unused because the provider owns transport retry.
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
             Provider = "Kimi",
@@ -418,9 +415,11 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeTrue();
-        result.ModifiedFiles.Should().Contain(file1);
-        result.ModifiedFiles.Should().Contain(file2);
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("remained unavailable");
+        _fakeAiProvider.StructuredResponsesToReturn.Should().ContainSingle();
+        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeFalse();
     }
 
     [Fact]

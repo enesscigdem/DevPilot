@@ -103,8 +103,8 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
         var entry = new ManifestFileEntry("tests/DevPilot.Tests/MyTests.cs", FileEditAction.Create, "Add test", null);
         var sysPrompt = DeveloperAgent.BuildSingleFileSystemPrompt(entry);
 
-        sysPrompt.Should().Contain("MINIMAL SUFFICIENT TESTS");
-        sysPrompt.Should().Contain("DevPilot.Tests conventions");
+        sysPrompt.Should().Contain("MINIMAL TESTS");
+        sysPrompt.Should().Contain("existing test conventions");
 
         var userPrompt = DeveloperAgent.BuildSingleFileUserPrompt(
             new DeveloperAgentRequest(
@@ -456,6 +456,13 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
             metadata != null &&
             metadata.ProviderCallKind == "Generation");
         providerCalls.Select(metadata => metadata!.TargetFile).Should().BeEquivalentTo(f1, f2);
+
+        var summary = _activityRecorder.RecordedMetadata
+            .Single(metadata => metadata?.EventKind == "GenerationSummary");
+        summary!.LogicalProviderCallCount.Should().Be(2);
+        summary.CompactRetryCount.Should().Be(0);
+        summary.ApplicabilityRepairCount.Should().Be(0);
+        summary.TotalGenerationTimeMs.Should().NotBeNull();
 
         // Ensure no prompt content or raw source code is leaked into messages
         foreach (var msg in messages)

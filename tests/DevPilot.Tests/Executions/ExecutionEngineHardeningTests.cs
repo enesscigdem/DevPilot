@@ -426,7 +426,7 @@ public class ExecutionEngineHardeningTests
     {
         var prompt = DeveloperAgent.BuildSingleFileSystemPrompt(new ManifestFileEntry("src/App.cs", FileEditAction.Modify, "test"));
         prompt.Should().Contain("searchReplaceEdits");
-        prompt.Should().Contain("Do NOT rewrite whole methods");
+        prompt.Should().Contain("small exact search anchor");
     }
 
     [Fact]
