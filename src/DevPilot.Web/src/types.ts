@@ -309,6 +309,9 @@ export interface ExecutionActivityMetadata {
   beforeChangeFingerprint?: string | null;
   afterChangeFingerprint?: string | null;
   progressResult?: string | null;
+  compactRetryCount?: number | null;
+  applicabilityRepairCount?: number | null;
+  totalGenerationTimeMs?: number | null;
 }
 
 export interface ExecutionActivityItem {

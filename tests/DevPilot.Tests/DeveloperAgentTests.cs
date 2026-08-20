@@ -572,19 +572,18 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeTrue();
         _fakeAiProvider.ReceivedRequests.Should().HaveCount(2);
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(6144, "Modify uses category budget (6144)");
-        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(6144, "File edit repair uses category budget (6144)");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048, "small-file Modify uses an expected full-file output budget");
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(2048, "small-file applicability recovery keeps the same bounded budget");
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_ConfigurationOverrides_CappedAtMaxOutputTokens()
+    public async Task GenerateAndApplyEditsAsync_LargeConfiguredCeilings_DoNotInflateSmallModifyBudget()
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["DeveloperAgent:MaxOutputTokens"] = "10000",
-                ["DeveloperAgent:FileEditMaxTokens"] = "15000",
-                ["DeveloperAgent:TokenBudgets:ModifyPatch"] = "15000" // exceeds MaxOutputTokens, must be capped at 10000
+                ["DeveloperAgent:TokenBudgets:ModifyPatch"] = "15000"
             })
             .Build();
 
@@ -626,7 +625,7 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeTrue();
         _fakeAiProvider.ReceivedRequests.Should().HaveCount(1);
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(10000, "FileEditMaxTokens capped at MaxOutputTokens (10000)");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048, "small-file Modify budget is based on expected output, not the global ceiling");
     }
 
     [Fact]
@@ -935,6 +934,126 @@ public class DeveloperAgentTests : IDisposable
         result.ErrorMessage.Should().Be("Kimi HTTP 503 after 4 attempts (RequestId: req-prod-503) while generating 'WorkspaceTaskActivityItemDto.cs'.");
     }
 
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_SmallFileModify_UsesHashGuardedFullReplacementInOneCall()
+    {
+        const string relativePath = "SmallService.cs";
+        var targetFile = Path.Combine(_worktreeDir, relativePath);
+        await File.WriteAllTextAsync(targetFile, "public class SmallService { public int Value => 1; }");
+
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "SmallService.cs",
+              "action": "Modify",
+              "newContent": "public class SmallService { public int Value => 2; }"
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(CreateModifyRequest(relativePath));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048);
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("small-file Modify");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("newContent");
+        (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 2");
+    }
+
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_LargeFileModify_KeepsSurgicalPatchContract()
+    {
+        const string relativePath = "LargeService.cs";
+        var targetFile = Path.Combine(_worktreeDir, relativePath);
+        var largeContent = string.Join('\n', Enumerable.Range(1, 120).Select(i => $"// line {i}")) +
+                           "\npublic class LargeService { public int Value => 1; }\n";
+        await File.WriteAllTextAsync(targetFile, largeContent);
+
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "LargeService.cs",
+              "action": "Modify",
+              "searchReplaceEdits": [
+                { "search": "public int Value => 1;", "replace": "public int Value => 2;" }
+              ]
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(CreateModifyRequest(relativePath));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("large-file Modify");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("searchReplaceEdits");
+        (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 2");
+    }
+
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_ModifyCompactRetry_IsCappedBelow32768()
+    {
+        const string relativePath = "LargeRetryService.cs";
+        var targetFile = Path.Combine(_worktreeDir, relativePath);
+        var largeContent = string.Join('\n', Enumerable.Range(1, 120).Select(i => $"// line {i}")) +
+                           "\npublic class LargeRetryService { public int Value => 1; }\n";
+        await File.WriteAllTextAsync(targetFile, largeContent);
+
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded
+        });
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = true,
+            Content = """
+                {
+                  "filePath": "LargeRetryService.cs",
+                  "action": "Modify",
+                  "searchReplaceEdits": [
+                    { "search": "public int Value => 1;", "replace": "public int Value => 2;" }
+                  ]
+                }
+                """
+        });
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(CreateModifyRequest(relativePath));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _fakeAiProvider.ReceivedRequests.Select(request => request.MaxTokens).Should().Equal(4096, 8192);
+        _fakeAiProvider.ReceivedRequests.Should().OnlyContain(request => request.MaxTokens < 32768);
+    }
+
+    [Fact]
+    public async Task GenerateAndApplyEditsAsync_ApplicabilityRecovery_UsesCurrentWorktreeSource()
+    {
+        const string relativePath = "CurrentSourceService.cs";
+        var targetFile = Path.Combine(_worktreeDir, relativePath);
+        await File.WriteAllTextAsync(targetFile, "public class CurrentSourceService { public int Value => 1; }");
+        var provider = new MutatingRepairAiProvider(targetFile);
+        var agent = new DeveloperAgent(provider, _editApplier, NullLogger<DeveloperAgent>.Instance);
+
+        var result = await agent.GenerateAndApplyEditsAsync(CreateModifyRequest(relativePath));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        provider.Requests.Should().HaveCount(2);
+        provider.Requests[1].UserPrompt.Should().Contain("Value => 10", "repair evidence must come from the current worktree snapshot");
+        (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 20");
+    }
+
+    private DeveloperAgentRequest CreateModifyRequest(string relativePath) => new(
+        TaskId: Guid.NewGuid(),
+        ExecutionId: Guid.NewGuid(),
+        TaskTitle: "Focused modify",
+        TaskDescription: "Change Value from 1 to 2",
+        AcceptanceCriteria: "Value returns 2",
+        ImpactAnalysisSummary: $"Modify {relativePath}",
+        ProposedPlan: $"Update {relativePath}",
+        ImpactedFilePaths: new[] { relativePath },
+        WorkspacePath: _worktreeDir,
+        BranchName: _branchName,
+        ImpactedFiles: new[] { new ImpactedFileDetail(relativePath, "Modify", "Update Value") });
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");
@@ -971,6 +1090,59 @@ public class DeveloperAgentTests : IDisposable
             }
 
             return Task.FromResult(new AiResponse { IsSuccess = false, ErrorMessage = "No responses configured" });
+        }
+    }
+
+    private sealed class MutatingRepairAiProvider : IAiProvider
+    {
+        private readonly string _targetFile;
+        private int _callCount;
+
+        public MutatingRepairAiProvider(string targetFile)
+        {
+            _targetFile = targetFile;
+        }
+
+        public string ProviderName => "MutatingRepairProvider";
+        public List<AiRequest> Requests { get; } = new();
+
+        public async Task<AiResponse> SendAsync(AiRequest request, CancellationToken cancellationToken = default)
+        {
+            Requests.Add(request);
+            _callCount++;
+
+            if (_callCount == 1)
+            {
+                await File.WriteAllTextAsync(
+                    _targetFile,
+                    "public class CurrentSourceService { public int Value => 10; }",
+                    cancellationToken);
+                return new AiResponse
+                {
+                    IsSuccess = true,
+                    Content = """
+                        {
+                          "filePath": "CurrentSourceService.cs",
+                          "action": "Modify",
+                          "searchReplaceEdits": [
+                            { "search": "Value => 999", "replace": "Value => 20" }
+                          ]
+                        }
+                        """
+                };
+            }
+
+            return new AiResponse
+            {
+                IsSuccess = true,
+                Content = """
+                    {
+                      "filePath": "CurrentSourceService.cs",
+                      "action": "Modify",
+                      "newContent": "public class CurrentSourceService { public int Value => 20; }"
+                    }
+                    """
+            };
         }
     }
 }

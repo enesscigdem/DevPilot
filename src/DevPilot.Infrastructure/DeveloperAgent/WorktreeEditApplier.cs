@@ -11,6 +11,9 @@ namespace DevPilot.Infrastructure.DeveloperAgent;
 
 public sealed class WorktreeEditApplier : IWorktreeEditApplier
 {
+    public const int SmallFileMaxLines = 100;
+    public const int SmallFileMaxChars = 4000;
+
     private static readonly string[] SensitiveFileNameExact =
     {
         ".env",
@@ -61,6 +64,13 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             text = text.Substring(1);
         }
         return text;
+    }
+
+    public static bool IsSmallTextFile(string content)
+    {
+        if (content == null) throw new ArgumentNullException(nameof(content));
+        return content.Length <= SmallFileMaxChars &&
+               content.Count(character => character == '\n') + 1 <= SmallFileMaxLines;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> ReadContextFilesAsync(
@@ -231,12 +241,6 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                             $"Strict Modify action failed: target file does not exist at '{spec.FilePath}'.");
                     }
 
-                    if (spec.SearchReplaceEdits == null || spec.SearchReplaceEdits.Count == 0)
-                    {
-                        return DeveloperAgentResult.Fail(
-                            $"Strict Modify action failed: searchReplaceEdits list was empty for '{spec.FilePath}'.");
-                    }
-
                     var originalBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
                     if (IsBinaryContent(originalBytes))
                     {
@@ -245,6 +249,26 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                     }
 
                     var originalContent = DecodeUtf8Text(originalBytes, out var hasBom);
+
+                    var usesFullFileReplacement = spec.NewContent != null;
+                    var hasSearchReplaceEdits = spec.SearchReplaceEdits is { Count: > 0 };
+                    if (usesFullFileReplacement == hasSearchReplaceEdits)
+                    {
+                        return DeveloperAgentResult.Fail(
+                            $"Strict Modify action failed: provide exactly one edit representation for '{spec.FilePath}'.");
+                    }
+
+                    if (usesFullFileReplacement && !IsSmallTextFile(originalContent))
+                    {
+                        return DeveloperAgentResult.Fail(
+                            $"Strict Modify action failed: full-file replacement is limited to small text files for '{spec.FilePath}'.");
+                    }
+
+                    if (usesFullFileReplacement && string.IsNullOrEmpty(spec.TargetContentHash))
+                    {
+                        return DeveloperAgentResult.Fail(
+                            $"Strict Modify action failed: small-file replacement requires a target content hash for '{spec.FilePath}'.");
+                    }
 
                     if (!string.IsNullOrEmpty(spec.TargetContentHash))
                     {
@@ -256,13 +280,26 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                         }
                     }
 
-                    var appResult = ValidateAndApplySearchReplaceEdits(originalContent, spec.SearchReplaceEdits, spec.FilePath);
-                    if (!appResult.Success)
+                    string modifiedContent;
+                    if (usesFullFileReplacement)
                     {
-                        return DeveloperAgentResult.Fail(appResult.ErrorMessage!);
+                        var normalizedReplacement = NormalizeLineEndings(spec.NewContent!);
+                        modifiedContent = originalContent.Contains("\r\n", StringComparison.Ordinal)
+                            ? normalizedReplacement.Replace("\n", "\r\n", StringComparison.Ordinal)
+                            : normalizedReplacement;
+                    }
+                    else
+                    {
+                        var appResult = ValidateAndApplySearchReplaceEdits(originalContent, spec.SearchReplaceEdits, spec.FilePath);
+                        if (!appResult.Success)
+                        {
+                            return DeveloperAgentResult.Fail(appResult.ErrorMessage!);
+                        }
+
+                        modifiedContent = appResult.ModifiedContent!;
                     }
 
-                    preparedModifies.Add((resolvedPath, spec.FilePath, appResult.ModifiedContent!, originalContent, hasBom));
+                    preparedModifies.Add((resolvedPath, spec.FilePath, modifiedContent, originalContent, hasBom));
                     modifiedRelativePaths.Add(spec.FilePath);
                     break;
 

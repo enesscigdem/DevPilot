@@ -48,7 +48,6 @@ public class TokenLimitDisciplineTests : IDisposable
 
         var inMemoryConfig = new Dictionary<string, string?>
         {
-            ["DeveloperAgent:TransientRecoveryCooldownMs"] = "0",
             ["DeveloperAgent:MaxGenerationCalls"] = "15",
             ["DeveloperAgent:TokenBudgets:ModifyPatch"] = "6144",
             ["DeveloperAgent:MaxOutputTokens"] = "32768"
@@ -610,7 +609,7 @@ public class TokenLimitDisciplineTests : IDisposable
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
         result.Success.Should().BeTrue();
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(6144, "Modify category budget must be requested");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048, "small-file Modify uses the bounded expected-output budget");
 
         // Verify activities were safely recorded
         _activityRecorder.RecordedActivities.Should().NotBeEmpty();

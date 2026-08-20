@@ -711,6 +711,53 @@ public class WorktreeEditApplierTests : IDisposable
         (await File.ReadAllTextAsync(fullPath)).Should().Be(initialContent);
     }
 
+    [Fact]
+    public async Task ApplyEdits_SmallFileFullReplacement_WithCurrentContentHash_AppliesAtomically()
+    {
+        const string relative = "small_replace.cs";
+        var fullPath = Path.Combine(_worktreeDir, relative);
+        const string initialContent = "public class SmallReplace { public int V = 1; }";
+        const string replacement = "public class SmallReplace { public int V = 2; }";
+        await File.WriteAllTextAsync(fullPath, initialContent);
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(
+                relative,
+                Action: FileEditAction.Modify,
+                NewContent: replacement,
+                TargetContentHash: WorktreeEditApplier.ComputeContentHash(initialContent))
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        (await File.ReadAllTextAsync(fullPath)).Should().Be(replacement);
+    }
+
+    [Fact]
+    public async Task ApplyEdits_SmallFileFullReplacement_WithoutCurrentContentHash_IsRejected()
+    {
+        const string relative = "unguarded_replace.cs";
+        var fullPath = Path.Combine(_worktreeDir, relative);
+        const string initialContent = "public class UnguardedReplace { public int V = 1; }";
+        await File.WriteAllTextAsync(fullPath, initialContent);
+
+        var plan = new StructuredEditPlan(new[]
+        {
+            new FileEditSpec(
+                relative,
+                Action: FileEditAction.Modify,
+                NewContent: "public class UnguardedReplace { public int V = 2; }")
+        });
+
+        var result = await _applier.ApplyEditsAsync(_worktreeDir, _branchName, plan);
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("requires a target content hash");
+        (await File.ReadAllTextAsync(fullPath)).Should().Be(initialContent);
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");

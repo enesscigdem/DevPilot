@@ -25,4 +25,7 @@ public sealed record ExecutionActivityMetadata(
     string? FailureFingerprint = null,
     string? BeforeChangeFingerprint = null,
     string? AfterChangeFingerprint = null,
-    string? ProgressResult = null);
+    string? ProgressResult = null,
+    int? CompactRetryCount = null,
+    int? ApplicabilityRepairCount = null,
+    long? TotalGenerationTimeMs = null);
