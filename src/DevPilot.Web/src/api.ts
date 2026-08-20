@@ -22,6 +22,9 @@ import type {
   BrainChatResponse,
   BrainIndexResponse,
   WorkspaceOverview,
+  GitHubConnectionStatus,
+  GitHubDiscoveredRepository,
+  GitHubBranch,
 } from './types';
 
 const BASE_URL = '/api';
@@ -273,4 +276,27 @@ export async function getWorkspaceOverview(
   init?: RequestInit,
 ): Promise<WorkspaceOverview> {
   return http<WorkspaceOverview>(`/repositoryworkspaces/${workspaceId}/overview`, init);
+}
+
+export async function getGitHubStatus(): Promise<GitHubConnectionStatus> {
+  return http<GitHubConnectionStatus>('/github/status');
+}
+
+export async function getGitHubConnectUrl(returnUrl?: string): Promise<{ url: string }> {
+  const query = returnUrl ? `?returnUrl=${encodeURIComponent(returnUrl)}` : '';
+  return http<{ url: string }>(`/github/connect-url${query}`);
+}
+
+export async function getGitHubRepositories(): Promise<GitHubDiscoveredRepository[]> {
+  return http<GitHubDiscoveredRepository[]>('/github/repositories');
+}
+
+export async function getGitHubBranches(owner: string, repo: string): Promise<GitHubBranch[]> {
+  return http<GitHubBranch[]>(`/github/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`);
+}
+
+export async function disconnectGitHubInstallation(id: string): Promise<void> {
+  await http<void>(`/github/installations/${id}`, {
+    method: 'DELETE',
+  });
 }

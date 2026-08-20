@@ -9,23 +9,29 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
+using DevPilot.Infrastructure.Executions;
+using DevPilot.Infrastructure.GitProviders;
+
 namespace DevPilot.Infrastructure.RepositoryClone;
 
 internal sealed class RepositoryCloneService : IRepositoryCloneService
 {
     private readonly IOptions<RepositoryCloneOptions> _options;
     private readonly DevPilotDbContext _dbContext;
+    private readonly IGitHubAppTokenService _tokenService;
     private readonly IConfiguration _configuration;
     private readonly ILogger<RepositoryCloneService> _logger;
 
     public RepositoryCloneService(
         IOptions<RepositoryCloneOptions> options,
         DevPilotDbContext dbContext,
+        IGitHubAppTokenService tokenService,
         IConfiguration configuration,
         ILogger<RepositoryCloneService> logger)
     {
         _options = options;
         _dbContext = dbContext;
+        _tokenService = tokenService;
         _configuration = configuration;
         _logger = logger;
     }
@@ -148,14 +154,36 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         }
 
         var cloneUrl = $"https://github.com/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}.git";
-        var token = GetToken();
+        string? token = null;
+
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (tokenResult.IsSuccess && !string.IsNullOrWhiteSpace(tokenResult.Token))
+        {
+            token = tokenResult.Token;
+            if (tokenResult.ExternalInstallationId.HasValue)
+            {
+                var conn = await _dbContext.GitHubInstallationConnections
+                    .FirstOrDefaultAsync(c => c.ExternalInstallationId == tokenResult.ExternalInstallationId.Value, cancellationToken)
+                    .ConfigureAwait(false);
+                if (conn != null)
+                {
+                    existingWorkspace.GitHubInstallationConnectionId = conn.Id;
+                }
+            }
+        }
+        else
+        {
+            token = GetToken();
+        }
+
+        existingWorkspace.RemoteUrl = cloneUrl;
 
         string? tempHomeDirectory = null;
         try
         {
             if (!string.IsNullOrWhiteSpace(token))
             {
-                tempHomeDirectory = CreateAuthenticatedHomeDirectory(token);
+                tempHomeDirectory = GitAuthenticationHelper.CreateTransientHomeDirectory(token);
             }
 
             using var timeoutCts = new CancellationTokenSource(_options.Value.Timeout);
@@ -226,17 +254,7 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         }
         finally
         {
-            if (!string.IsNullOrEmpty(tempHomeDirectory) && Directory.Exists(tempHomeDirectory))
-            {
-                try
-                {
-                    Directory.Delete(tempHomeDirectory, true);
-                }
-                catch
-                {
-                    // Best-effort cleanup.
-                }
-            }
+            GitAuthenticationHelper.TryDeleteDirectory(tempHomeDirectory);
         }
     }
 

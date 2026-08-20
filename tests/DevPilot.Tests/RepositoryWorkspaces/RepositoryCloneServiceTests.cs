@@ -47,6 +47,7 @@ public class RepositoryCloneServiceTests : IDisposable
         _service = new RepositoryCloneService(
             cloneOptions,
             _dbContext,
+            new GitProviders.FakeGitHubAppTokenService(),
             configuration,
             NullLogger<RepositoryCloneService>.Instance);
     }

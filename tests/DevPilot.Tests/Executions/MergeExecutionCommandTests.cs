@@ -28,7 +28,7 @@ public sealed class MergeExecutionCommandTests
         var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
 
         result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
-        result.ErrorMessage.Should().Contain("preconditions do not allow merge");
+        result.ErrorMessage.Should().Contain("Review is Pending, expected Approved");
     }
 
     [Fact]
@@ -579,18 +579,184 @@ public sealed class MergeExecutionCommandTests
         recorder.Recorded.Count.Should().Be(0, "Repeated POST after Merged must not create duplicate Merge activity");
     }
 
+    [Fact]
+    public async Task Merge_ReproducedState_CiNoChecks_AllowNoChecksTrue_BuildTestPassed_ProceedsToMerge()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var approvedSha = "a451333161ec91ce5edffc1770ec7617818e2b9d";
+
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "open", false, "devpilot/task-1", approvedSha, "master"),
+            checkRunsJson: "[]",
+            statusesJson: "[]",
+            postMergePrJson: CreatePrJson(42, "closed", true, "devpilot/task-1", approvedSha, "master", DateTime.UtcNow));
+
+        var activityRepo = new TestActivityRepository();
+        var execution = SeedExecution(repository, approvedSha: approvedSha, ciStatus: ExecutionCiStatus.NoChecks);
+
+        activityRepo.Seed(execution.Id, new[]
+        {
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow }
+        });
+
+        var handler = CreateHandler(repository, testHandler, allowNoChecks: true, activityRepo: activityRepo);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().BeOneOf(MergeExecutionResultStatus.Created, MergeExecutionResultStatus.Success);
+        result.Response!.MergeStatus.Should().Be("Merged");
+    }
+
+    [Fact]
+    public async Task Merge_CiNoChecks_AllowNoChecksFalse_ReturnsConflictWithExplicitReason()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var approvedSha = "a451333161ec91ce5edffc1770ec7617818e2b9d";
+
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(1, "open", false, "devpilot/task-1", approvedSha, "master"),
+            checkRunsJson: "[]",
+            statusesJson: "[]");
+
+        var activityRepo = new TestActivityRepository();
+        var execution = SeedExecution(repository, approvedSha: approvedSha, ciStatus: ExecutionCiStatus.NoChecks);
+
+        activityRepo.Seed(execution.Id, new[]
+        {
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow }
+        });
+
+        var handler = CreateHandler(repository, testHandler, allowNoChecks: false, activityRepo: activityRepo);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("CI checks were not found (CI checks are required by merge policy)");
+    }
+
+    [Fact]
+    public async Task Merge_LocalBuildFailed_ReturnsConflictWithExplicitReason()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var approvedSha = "a451333161ec91ce5edffc1770ec7617818e2b9d";
+
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(1, "open", false, "devpilot/task-1", approvedSha, "master"),
+            checkRunsJson: "[]",
+            statusesJson: "[]");
+
+        var activityRepo = new TestActivityRepository();
+        var execution = SeedExecution(repository, approvedSha: approvedSha, ciStatus: ExecutionCiStatus.NoChecks);
+
+        // Only Test completed, Build did not pass
+        activityRepo.Seed(execution.Id, new[]
+        {
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow }
+        });
+
+        var handler = CreateHandler(repository, testHandler, allowNoChecks: true, activityRepo: activityRepo);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("Local build did not pass");
+    }
+
+    [Fact]
+    public async Task Merge_LocalTestsFailed_ReturnsConflictWithExplicitReason()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var approvedSha = "a451333161ec91ce5edffc1770ec7617818e2b9d";
+
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(1, "open", false, "devpilot/task-1", approvedSha, "master"),
+            checkRunsJson: "[]",
+            statusesJson: "[]");
+
+        var activityRepo = new TestActivityRepository();
+        var execution = SeedExecution(repository, approvedSha: approvedSha, ciStatus: ExecutionCiStatus.NoChecks);
+
+        // Only Build completed, Test did not pass
+        activityRepo.Seed(execution.Id, new[]
+        {
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow }
+        });
+
+        var handler = CreateHandler(repository, testHandler, allowNoChecks: true, activityRepo: activityRepo);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("Local tests did not pass");
+    }
+
+    [Fact]
+    public async Task Merge_PushedShaDiffersFromApprovedSha_ReturnsConflictWithExplicitReason()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var execution = SeedExecution(repository);
+        execution.RemoteCommitSha = "differentpushedsha12345678901234567890";
+
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "open", false, "devpilot/task-1", execution.RemoteCommitSha, "master"),
+            checkRunsJson: "[]",
+            statusesJson: "[]");
+
+        var handler = CreateHandler(repository, testHandler, allowNoChecks: true);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("does not match pushed SHA");
+    }
+
+    [Fact]
+    public async Task Merge_PullRequestNotOpen_ReturnsConflictWithExplicitReason()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var execution = SeedExecution(repository, prStatus: ExecutionPullRequestStatus.None);
+
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "closed", false, "devpilot/task-1", execution.CommitSha!, "master"),
+            checkRunsJson: "[]",
+            statusesJson: "[]");
+
+        var handler = CreateHandler(repository, testHandler, allowNoChecks: true);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("Pull request is not open");
+    }
+
+    [Fact]
+    public async Task Merge_StaleIntegrity_ReturnsConflictWithExplicitReason()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var execution = SeedExecution(repository, prIntegrity: ExecutionPullRequestIntegrityStatus.HeadChanged);
+
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "open", false, "devpilot/task-1", execution.CommitSha!, "master"),
+            checkRunsJson: "[]",
+            statusesJson: "[]");
+
+        var handler = CreateHandler(repository, testHandler, allowNoChecks: true);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("Pull request integrity is HeadChanged");
+    }
+
     private static GitHubPullRequestClient CreateClient(HttpMessageHandler httpHandler)
     {
         var clientFactory = new TestHttpClientFactory(httpHandler);
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["GitProvider:GitHub:BaseUrl"] = "https://api.github.com",
-                ["GitProvider:GitHub:Token"] = "test-token"
-            })
-            .Build();
+        var tokenService = new GitProviders.FakeGitHubAppTokenService();
+        var options = Options.Create(new GitHubAppOptions { BaseUrl = "https://api.github.com" });
 
-        return new GitHubPullRequestClient(clientFactory, config, NullLogger<GitHubPullRequestClient>.Instance);
+        return new GitHubPullRequestClient(clientFactory, tokenService, options, NullLogger<GitHubPullRequestClient>.Instance);
     }
 
     private static MergeExecutionCommandHandler CreateHandler(
@@ -600,16 +766,7 @@ public sealed class MergeExecutionCommandTests
         IExecutionActivityRepository? activityRepo = null,
         IExecutionActivityRecorder? recorder = null)
     {
-        var clientFactory = new TestHttpClientFactory(httpHandler);
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["GitProvider:GitHub:BaseUrl"] = "https://api.github.com",
-                ["GitProvider:GitHub:Token"] = "test-token"
-            })
-            .Build();
-
-        var client = new GitHubPullRequestClient(clientFactory, config, NullLogger<GitHubPullRequestClient>.Instance);
+        var client = CreateClient(httpHandler);
         var syncService = new ExecutionGitHubSyncService(client, NullLogger<ExecutionGitHubSyncService>.Instance);
         var recorderToUse = recorder ?? new TestActivityRecorder();
         var repoForActivity = activityRepo ?? new TestActivityRepository();
@@ -619,7 +776,7 @@ public sealed class MergeExecutionCommandTests
             repository,
             client,
             syncService,
-            recorder,
+            recorderToUse,
             repoForActivity,
             options,
             NullLogger<MergeExecutionCommandHandler>.Instance);
@@ -689,6 +846,10 @@ public sealed class MergeExecutionCommandTests
         string? postMergePrJson = null)
     {
         var pullGetCount = 0;
+        var validCheckRunsJson = checkRunsJson == "[]"
+            ? CreateCheckRunsJson(Array.Empty<(long id, string name, string status, string? conclusion, string appName)>())
+            : checkRunsJson;
+
         return new CustomTestHttpMessageHandler(req =>
         {
             if (req.Method == HttpMethod.Put && req.RequestUri!.AbsolutePath.EndsWith("/merge"))
@@ -697,7 +858,7 @@ public sealed class MergeExecutionCommandTests
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
             }
 
-            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/pulls/42"))
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.Contains("/pulls/"))
             {
                 pullGetCount++;
                 var body = (postMergePrJson != null && pullGetCount > 1) ? postMergePrJson : prJson;
@@ -706,7 +867,7 @@ public sealed class MergeExecutionCommandTests
 
             if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.Contains("/check-runs"))
             {
-                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(checkRunsJson) };
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(validCheckRunsJson) };
             }
 
             if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.Contains("/statuses"))
@@ -800,6 +961,11 @@ public sealed class MergeExecutionCommandTests
     private sealed class TestActivityRepository : IExecutionActivityRepository
     {
         public List<ExecutionActivity> ActivitiesToReturn { get; set; } = new();
+
+        public void Seed(Guid executionId, IEnumerable<ExecutionActivity> activities)
+        {
+            ActivitiesToReturn.AddRange(activities);
+        }
 
         public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(Guid executionId, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<ExecutionActivity>>(ActivitiesToReturn);

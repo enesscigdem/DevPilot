@@ -436,6 +436,51 @@ public sealed class SyncPullRequestCommandTests
         reloaded.CiChecks.Should().ContainSingle(c => c.Name == "Prior Check");
     }
 
+    [Fact]
+    public async Task Sync_WithMatchingRepositoryWorkspaceId_Succeeds()
+    {
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "open", false, "devpilot/task-1", "161ec91ce5edffc1770ec7617818e2b9d57f2341", "master"),
+            checkRunsJson: CreateCheckRunsJson(new (long id, string name, string status, string? conclusion, string appName)[] { (101L, "Build", "completed", "success", "GitHub Actions") }),
+            statusesJson: "[]");
+
+        var repository = new InMemoryExecutionRepository();
+        var client = CreateGitHubClient(testHandler);
+        var syncService = new ExecutionGitHubSyncService(client, NullLogger<ExecutionGitHubSyncService>.Instance);
+        var handler = new SyncPullRequestCommandHandler(repository, syncService, NullLogger<SyncPullRequestCommandHandler>.Instance);
+
+        var execution = SeedExecution(repository, prStatus: ExecutionPullRequestStatus.Open, prNumber: 42);
+        var workspaceId = execution.DevelopmentTask!.RepositoryWorkspaceId;
+
+        var result = await handler.HandleAsync(new SyncPullRequestCommand(execution.Id, workspaceId));
+
+        result.Status.Should().Be(SyncPullRequestResultStatus.Success);
+        result.Response.Should().NotBeNull();
+        result.Response!.PullRequestNumber.Should().Be(42);
+    }
+
+    [Fact]
+    public async Task Sync_WithDifferentRepositoryWorkspaceId_ReturnsNotFoundPreventingCrossWorkspaceSync()
+    {
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "open", false, "devpilot/task-1", "161ec91ce5edffc1770ec7617818e2b9d57f2341", "master"),
+            checkRunsJson: "{\"check_runs\":[]}",
+            statusesJson: "[]");
+
+        var repository = new InMemoryExecutionRepository();
+        var client = CreateGitHubClient(testHandler);
+        var syncService = new ExecutionGitHubSyncService(client, NullLogger<ExecutionGitHubSyncService>.Instance);
+        var handler = new SyncPullRequestCommandHandler(repository, syncService, NullLogger<SyncPullRequestCommandHandler>.Instance);
+
+        var execution = SeedExecution(repository, prStatus: ExecutionPullRequestStatus.Open, prNumber: 42);
+        var otherWorkspaceId = Guid.NewGuid();
+
+        var result = await handler.HandleAsync(new SyncPullRequestCommand(execution.Id, otherWorkspaceId));
+
+        result.Status.Should().Be(SyncPullRequestResultStatus.NotFound);
+        result.ErrorMessage.Should().Contain("not found");
+    }
+
     private static TaskExecution SeedExecution(
         InMemoryExecutionRepository repository,
         ExecutionPullRequestStatus prStatus = ExecutionPullRequestStatus.None,
@@ -490,15 +535,10 @@ public sealed class SyncPullRequestCommandTests
     private static IGitHubPullRequestClient CreateGitHubClient(TestHttpMessageHandler handler)
     {
         var factory = new TestHttpClientFactory(handler);
-        var config = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                { "GitProvider:GitHub:BaseUrl", "https://api.github.com" },
-                { "GitProvider:GitHub:Token", "fake-test-token" }
-            })
-            .Build();
+        var tokenService = new GitProviders.FakeGitHubAppTokenService();
+        var options = Microsoft.Extensions.Options.Options.Create(new GitHubAppOptions { BaseUrl = "https://api.github.com" });
 
-        return new GitHubPullRequestClient(factory, config, NullLogger<GitHubPullRequestClient>.Instance);
+        return new GitHubPullRequestClient(factory, tokenService, options, NullLogger<GitHubPullRequestClient>.Instance);
     }
 
     private static TestHttpMessageHandler CreateTestHttpMessageHandler(
@@ -543,6 +583,88 @@ public sealed class SyncPullRequestCommandTests
             })
         });
 
+    [Fact]
+    public async Task Sync_WithAllowNoChecksAndActivities_ReturnsCanRequestMergeTrue()
+    {
+        var approvedSha = "161ec91ce5edffc1770ec7617818e2b9d57f2341";
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "open", false, "devpilot/task-1", approvedSha, "master"),
+            checkRunsJson: CreateCheckRunsJson(Array.Empty<(long id, string name, string status, string? conclusion, string appName)>()),
+            statusesJson: "[]");
+
+        var repository = new InMemoryExecutionRepository();
+        var client = CreateGitHubClient(testHandler);
+        var syncService = new ExecutionGitHubSyncService(client, NullLogger<ExecutionGitHubSyncService>.Instance);
+        var activityRepo = new TestActivityRepository();
+        var options = Microsoft.Extensions.Options.Options.Create(new DevPilot.Application.Executions.Options.MergePolicyOptions { AllowNoChecks = true });
+
+        var handler = new SyncPullRequestCommandHandler(
+            repository,
+            syncService,
+            activityRepo,
+            options,
+            NullLogger<SyncPullRequestCommandHandler>.Instance);
+
+        var execution = SeedExecution(repository, prStatus: ExecutionPullRequestStatus.Open, prNumber: 42);
+        execution.CommitSha = approvedSha;
+        execution.RemoteCommitSha = approvedSha;
+        execution.BranchName = "devpilot/task-1";
+        execution.RemoteBranchName = "devpilot/task-1";
+
+        activityRepo.Seed(execution.Id, new[]
+        {
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow }
+        });
+
+        var result = await handler.HandleAsync(new SyncPullRequestCommand(execution.Id));
+
+        result.Status.Should().Be(SyncPullRequestResultStatus.Success);
+        result.Response!.CanRequestMerge.Should().BeTrue();
+        result.Response.MergeBlockedReason.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Sync_WithAllowNoChecksFalse_ReturnsCanRequestMergeFalseWithReason()
+    {
+        var approvedSha = "161ec91ce5edffc1770ec7617818e2b9d57f2341";
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "open", false, "devpilot/task-1", approvedSha, "master"),
+            checkRunsJson: CreateCheckRunsJson(Array.Empty<(long id, string name, string status, string? conclusion, string appName)>()),
+            statusesJson: "[]");
+
+        var repository = new InMemoryExecutionRepository();
+        var client = CreateGitHubClient(testHandler);
+        var syncService = new ExecutionGitHubSyncService(client, NullLogger<ExecutionGitHubSyncService>.Instance);
+        var activityRepo = new TestActivityRepository();
+        var options = Microsoft.Extensions.Options.Options.Create(new DevPilot.Application.Executions.Options.MergePolicyOptions { AllowNoChecks = false });
+
+        var handler = new SyncPullRequestCommandHandler(
+            repository,
+            syncService,
+            activityRepo,
+            options,
+            NullLogger<SyncPullRequestCommandHandler>.Instance);
+
+        var execution = SeedExecution(repository, prStatus: ExecutionPullRequestStatus.Open, prNumber: 42);
+        execution.CommitSha = approvedSha;
+        execution.RemoteCommitSha = approvedSha;
+        execution.BranchName = "devpilot/task-1";
+        execution.RemoteBranchName = "devpilot/task-1";
+
+        activityRepo.Seed(execution.Id, new[]
+        {
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow }
+        });
+
+        var result = await handler.HandleAsync(new SyncPullRequestCommand(execution.Id));
+
+        result.Status.Should().Be(SyncPullRequestResultStatus.Success);
+        result.Response!.CanRequestMerge.Should().BeFalse();
+        result.Response.MergeBlockedReason.Should().Contain("CI checks were not found (CI checks are required by merge policy)");
+    }
+
     private sealed class TestHttpClientFactory : IHttpClientFactory
     {
         private readonly HttpMessageHandler _handler;
@@ -586,5 +708,18 @@ public sealed class SyncPullRequestCommandTests
 
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
+    }
+
+    private sealed class TestActivityRepository : IExecutionActivityRepository
+    {
+        public List<ExecutionActivity> ActivitiesToReturn { get; set; } = new();
+
+        public void Seed(Guid executionId, IEnumerable<ExecutionActivity> activities)
+        {
+            ActivitiesToReturn.AddRange(activities);
+        }
+
+        public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(Guid executionId, CancellationToken cancellationToken = default)
+            => Task.FromResult<IReadOnlyList<ExecutionActivity>>(ActivitiesToReturn);
     }
 }

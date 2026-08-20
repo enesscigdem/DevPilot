@@ -50,4 +50,8 @@ public sealed record ExecutionReviewDto(
     string MergeStatus = "None",
     string? MergeCommitSha = null,
     DateTime? MergedAt = null,
-    bool CanRequestMerge = false);
+    bool CanRequestMerge = false,
+    string? MergeBlockedReason = null,
+    Guid? RepositoryWorkspaceId = null,
+    string? RepositoryOwner = null,
+    string? RepositoryName = null);

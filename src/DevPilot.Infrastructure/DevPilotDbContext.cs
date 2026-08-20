@@ -22,6 +22,8 @@ public class DevPilotDbContext : DbContext
     {
     }
 
+    public DbSet<GitHubInstallationConnection> GitHubInstallationConnections => Set<GitHubInstallationConnection>();
+
     public DbSet<RepositoryWorkspace> RepositoryWorkspaces => Set<RepositoryWorkspace>();
 
     public DbSet<CodeChunk> CodeChunks => Set<CodeChunk>();
@@ -44,10 +46,25 @@ public class DevPilotDbContext : DbContext
 
         modelBuilder.HasPostgresExtension("vector");
 
+        modelBuilder.Entity<GitHubInstallationConnection>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.ExternalInstallationId).IsUnique();
+            entity.HasIndex(e => e.AccountLogin);
+            entity.Property(e => e.AccountLogin).HasMaxLength(200);
+            entity.Property(e => e.AccountType).HasMaxLength(50);
+            entity.Property(e => e.TargetAvatarUrl).HasMaxLength(500);
+            entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.ConnectedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.LastVerifiedAt).HasColumnType("timestamp with time zone");
+        });
+
         modelBuilder.Entity<RepositoryWorkspace>(entity =>
         {
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => new { e.Owner, e.Repository, e.Branch }).IsUnique();
+            entity.HasIndex(e => e.GitHubInstallationConnectionId);
             entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.Owner).HasMaxLength(200);
             entity.Property(e => e.Repository).HasMaxLength(200);
@@ -55,6 +72,11 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.CommitSha).HasMaxLength(100);
             entity.Property(e => e.LocalPath).HasMaxLength(500);
             entity.Property(e => e.ErrorMessage).HasMaxLength(1000);
+            entity.Property(e => e.RemoteUrl).HasMaxLength(500);
+            entity.HasOne(e => e.GitHubInstallationConnection)
+                .WithMany(e => e.Workspaces)
+                .HasForeignKey(e => e.GitHubInstallationConnectionId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         modelBuilder.Entity<CodeChunk>(entity =>

@@ -4,6 +4,7 @@ using System.Text;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
+using DevPilot.Infrastructure.GitProviders;
 using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Infrastructure.Executions;
@@ -13,13 +14,16 @@ public sealed class GitExecutionPushService : IExecutionGitPushService
     private static readonly TimeSpan DefaultGitTimeout = TimeSpan.FromSeconds(30);
 
     private readonly IExecutionRepository _executionRepository;
+    private readonly IGitHubAppTokenService _tokenService;
     private readonly ILogger<GitExecutionPushService> _logger;
 
     public GitExecutionPushService(
         IExecutionRepository executionRepository,
+        IGitHubAppTokenService tokenService,
         ILogger<GitExecutionPushService> logger)
     {
         _executionRepository = executionRepository;
+        _tokenService = tokenService;
         _logger = logger;
     }
 
@@ -114,69 +118,101 @@ public sealed class GitExecutionPushService : IExecutionGitPushService
             return new ExecutionPushResult(false, ErrorMessage: "Remote origin repository URL does not match configured task repository owner and name.");
         }
 
-        // 6. Preflight remote branch inspection via ls-remote
-        var remoteRef = $"refs/heads/{branchName}";
-        var lsRemoteCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, null, "ls-remote", "--heads", "origin", remoteRef).ConfigureAwait(false);
-
-        if (!lsRemoteCmd.IsSuccess)
+        // 6. Resolve transient installation token for remote operations
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(repoOwner, repoName, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
         {
             await _executionRepository.SetPushFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);
-            var sanitizedErr = GitRemoteUrlNormalizer.SanitizeOutput(lsRemoteCmd.StdErr);
-            return new ExecutionPushResult(false, ErrorMessage: $"Failed to inspect remote branch status: {sanitizedErr}");
+            var errMsg = tokenResult.FailureKind switch
+            {
+                GitHubTokenFailureKind.Disconnected => "Connect GitHub to push execution branch.",
+                GitHubTokenFailureKind.RepositoryUnauthorized => $"DevPilot does not have access to repository '{repoOwner}/{repoName}'. Please update repository permissions.",
+                GitHubTokenFailureKind.InstallationInvalidOrRevoked => "GitHub connection has expired or been revoked. Please reconnect GitHub.",
+                _ => tokenResult.ErrorMessage ?? "Repository authorization failed for remote push."
+            };
+            return new ExecutionPushResult(false, ErrorMessage: errMsg);
         }
 
-        var lsOutput = lsRemoteCmd.StdOut.Trim();
-        if (!string.IsNullOrWhiteSpace(lsOutput))
-        {
-            var parts = lsOutput.Split(new[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            var remoteSha = parts.Length > 0 ? parts[0].Trim() : string.Empty;
+        string? tempHome = null;
+        Dictionary<string, string>? env = null;
 
-            if (string.Equals(remoteSha, expectedCommitSha, StringComparison.OrdinalIgnoreCase))
+        try
+        {
+            tempHome = GitAuthenticationHelper.CreateTransientHomeDirectory(tokenResult.Token);
+            env = new Dictionary<string, string>
             {
-                // Remote branch already exists at exact CommitSha (Idempotent Recovery)
-                var now = DateTime.UtcNow;
-                await _executionRepository.SetPushCompletedAsync(execution.Id, attemptId, branchName, expectedCommitSha, now, cancellationToken).ConfigureAwait(false);
-                return new ExecutionPushResult(Success: true, IsAlreadyPushed: true, RemoteBranchName: branchName, RemoteCommitSha: expectedCommitSha, PushedAt: now);
-            }
-            else
+                ["HOME"] = tempHome,
+                ["USERPROFILE"] = tempHome,
+                ["GIT_CONFIG_NOSYSTEM"] = "1"
+            };
+
+            // 7. Preflight remote branch inspection via ls-remote
+            var remoteRef = $"refs/heads/{branchName}";
+            var lsRemoteCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, env, "ls-remote", "--heads", "origin", remoteRef).ConfigureAwait(false);
+
+            if (!lsRemoteCmd.IsSuccess)
             {
-                // Remote branch exists at a different SHA -> Conflict!
                 await _executionRepository.SetPushFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);
-                return new ExecutionPushResult(false, ErrorMessage: $"Remote branch '{branchName}' already exists at a different commit SHA '{remoteSha}'. Direct push refused.");
+                var sanitizedErr = GitRemoteUrlNormalizer.SanitizeOutput(lsRemoteCmd.StdErr);
+                return new ExecutionPushResult(false, ErrorMessage: $"Failed to inspect remote branch status: {sanitizedErr}");
             }
+
+            var lsOutput = lsRemoteCmd.StdOut.Trim();
+            if (!string.IsNullOrWhiteSpace(lsOutput))
+            {
+                var parts = lsOutput.Split(new[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                var remoteSha = parts.Length > 0 ? parts[0].Trim() : string.Empty;
+
+                if (string.Equals(remoteSha, expectedCommitSha, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Remote branch already exists at exact CommitSha (Idempotent Recovery)
+                    var now = DateTime.UtcNow;
+                    await _executionRepository.SetPushCompletedAsync(execution.Id, attemptId, branchName, expectedCommitSha, now, cancellationToken).ConfigureAwait(false);
+                    return new ExecutionPushResult(Success: true, IsAlreadyPushed: true, RemoteBranchName: branchName, RemoteCommitSha: expectedCommitSha, PushedAt: now);
+                }
+                else
+                {
+                    // Remote branch exists at a different SHA -> Conflict!
+                    await _executionRepository.SetPushFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);
+                    return new ExecutionPushResult(false, ErrorMessage: $"Remote branch '{branchName}' already exists at a different commit SHA '{remoteSha}'. Direct push refused.");
+                }
+            }
+
+            // 8. Execute direct refspec push strictly as <CommitSha>:refs/heads/<BranchName>
+            var pushCmd = await RunGitCommandAsync(
+                fullWorkspacePath,
+                cancellationToken,
+                env,
+                "push", "--porcelain", "origin", $"{expectedCommitSha}:{remoteRef}").ConfigureAwait(false);
+
+            // 9. Post-push remote ref verification
+            var postLsRemoteCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, env, "ls-remote", "--heads", "origin", remoteRef).ConfigureAwait(false);
+            var postLsOutput = postLsRemoteCmd.StdOut.Trim();
+            var postRemoteSha = string.Empty;
+            if (!string.IsNullOrWhiteSpace(postLsOutput))
+            {
+                var parts = postLsOutput.Split(new[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                postRemoteSha = parts.Length > 0 ? parts[0].Trim() : string.Empty;
+            }
+
+            if (string.Equals(postRemoteSha, expectedCommitSha, StringComparison.OrdinalIgnoreCase))
+            {
+                var pushedAt = DateTime.UtcNow;
+                await _executionRepository.SetPushCompletedAsync(execution.Id, attemptId, branchName, expectedCommitSha, pushedAt, cancellationToken).ConfigureAwait(false);
+                return new ExecutionPushResult(Success: true, RemoteBranchName: branchName, RemoteCommitSha: expectedCommitSha, PushedAt: pushedAt);
+            }
+
+            // Push outcome is uncertain or failed without verification -> keep InProgress for retry recovery
+            var sanitizedPushError = GitRemoteUrlNormalizer.SanitizeOutput(
+                !string.IsNullOrWhiteSpace(pushCmd.StdErr) ? pushCmd.StdErr : "Remote branch SHA post-verification failed.");
+            _logger.LogWarning("Remote push for execution {ExecutionId} did not pass post-verification: {Error}", execution.Id, sanitizedPushError);
+
+            return new ExecutionPushResult(false, ErrorMessage: $"Remote push execution failed or could not be verified: {sanitizedPushError}");
         }
-
-        // 7. Execute direct refspec push strictly as <CommitSha>:refs/heads/<BranchName>
-        // Note: From this point forward, remote mutation may happen! Do NOT set Failed if push outcome is uncertain.
-        var pushCmd = await RunGitCommandAsync(
-            fullWorkspacePath,
-            cancellationToken,
-            null,
-            "push", "--porcelain", "origin", $"{expectedCommitSha}:{remoteRef}").ConfigureAwait(false);
-
-        // 8. Post-push remote ref verification
-        var postLsRemoteCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, null, "ls-remote", "--heads", "origin", remoteRef).ConfigureAwait(false);
-        var postLsOutput = postLsRemoteCmd.StdOut.Trim();
-        var postRemoteSha = string.Empty;
-        if (!string.IsNullOrWhiteSpace(postLsOutput))
+        finally
         {
-            var parts = postLsOutput.Split(new[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            postRemoteSha = parts.Length > 0 ? parts[0].Trim() : string.Empty;
+            GitAuthenticationHelper.TryDeleteDirectory(tempHome);
         }
-
-        if (string.Equals(postRemoteSha, expectedCommitSha, StringComparison.OrdinalIgnoreCase))
-        {
-            var pushedAt = DateTime.UtcNow;
-            await _executionRepository.SetPushCompletedAsync(execution.Id, attemptId, branchName, expectedCommitSha, pushedAt, cancellationToken).ConfigureAwait(false);
-            return new ExecutionPushResult(Success: true, RemoteBranchName: branchName, RemoteCommitSha: expectedCommitSha, PushedAt: pushedAt);
-        }
-
-        // Push outcome is uncertain or failed without verification -> keep InProgress for retry recovery
-        var sanitizedPushError = GitRemoteUrlNormalizer.SanitizeOutput(
-            !string.IsNullOrWhiteSpace(pushCmd.StdErr) ? pushCmd.StdErr : "Remote branch SHA post-verification failed.");
-        _logger.LogWarning("Remote push for execution {ExecutionId} did not pass post-verification: {Error}", execution.Id, sanitizedPushError);
-
-        return new ExecutionPushResult(false, ErrorMessage: $"Remote push execution failed or could not be verified: {sanitizedPushError}");
     }
 
     private static async Task<GitCommandResult> RunGitCommandAsync(
@@ -198,8 +234,7 @@ public sealed class GitExecutionPushService : IExecutionGitPushService
             WorkingDirectory = workingDirectory
         };
 
-        // Non-interactive git execution
-        psi.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0";
+        GitAuthenticationHelper.ApplyEnvironment(psi, null);
         psi.EnvironmentVariables["GPG_TTY"] = "";
 
         if (environmentVariables != null)

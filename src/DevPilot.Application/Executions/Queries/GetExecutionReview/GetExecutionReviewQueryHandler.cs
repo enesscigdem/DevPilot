@@ -86,7 +86,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         var buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
         var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
-        var canRequestMerge = ExecutionMergeEligibility.CalculateCanRequestMerge(execution, allowNoChecks, buildPassed, testPassed);
+        var (canRequestMerge, mergeBlockedReason) = ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks, buildPassed, testPassed);
         var (buildStatus, testStatus) = DetermineStageStatuses(execution, activities);
 
         if (execution.CommitStatus == ExecutionCommitStatus.Committed)
@@ -273,7 +273,11 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             MergeStatus: execution.MergeStatus.ToString(),
             MergeCommitSha: execution.MergeCommitSha,
             MergedAt: execution.MergedAt,
-            CanRequestMerge: canRequestMerge);
+            CanRequestMerge: canRequestMerge,
+            MergeBlockedReason: mergeBlockedReason,
+            RepositoryWorkspaceId: execution.DevelopmentTask?.RepositoryWorkspaceId,
+            RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
+            RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository);
 
         return GetExecutionReviewResult.Ok(review);
     }

@@ -2,70 +2,139 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DevPilot.Application.GitProviders;
-using Microsoft.Extensions.Configuration;
+using DevPilot.Domain.Enums;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace DevPilot.Infrastructure.GitProviders;
 
 internal sealed class GitHubGitProvider : IGitProvider
 {
     public const string HttpClientName = "GitHub";
+    private const string ApiVersion = "2022-11-28";
 
     public string ProviderName => GitProviderNames.GitHub;
 
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IGitHubAppTokenService _tokenService;
+    private readonly IOptions<GitHubAppOptions> _options;
+    private readonly DevPilotDbContext _dbContext;
     private readonly ILogger<GitHubGitProvider> _logger;
-    private readonly string _baseUrl;
-    private readonly string _token;
-    private readonly bool _isConfigured;
 
     public GitHubGitProvider(
         IHttpClientFactory httpClientFactory,
-        IConfiguration configuration,
+        IGitHubAppTokenService tokenService,
+        IOptions<GitHubAppOptions> options,
+        DevPilotDbContext dbContext,
         ILogger<GitHubGitProvider> logger)
     {
         _httpClientFactory = httpClientFactory;
+        _tokenService = tokenService;
+        _options = options;
+        _dbContext = dbContext;
         _logger = logger;
-
-        _baseUrl = configuration["GitProvider:GitHub:BaseUrl"] ?? string.Empty;
-        _token = configuration["GitProvider:GitHub:Token"]
-            ?? configuration["GITHUB_TOKEN"]
-            ?? string.Empty;
-
-        _isConfigured =
-            !string.IsNullOrWhiteSpace(_token) &&
-            !string.IsNullOrWhiteSpace(_baseUrl);
     }
 
-    public Task<GitProviderResult<IReadOnlyList<GitRepository>>> GetRepositoriesAsync(
+    public async Task<GitProviderResult<IReadOnlyList<GitRepository>>> GetRepositoriesAsync(
         CancellationToken cancellationToken = default)
     {
-        return GetListAsync<GitHubRepositoryDto, GitRepository>(
-            "user/repos?per_page=100&sort=updated",
-            dto => dto.ToRepository(),
-            cancellationToken);
+        var activeConnections = await _dbContext.GitHubInstallationConnections
+            .Where(c => c.Status == GitHubInstallationStatus.Active)
+            .OrderByDescending(c => c.UpdatedAt)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (activeConnections.Count == 0)
+        {
+            if (_options.Value.EnableLegacyPatFallback && !string.IsNullOrWhiteSpace(_options.Value.FallbackToken))
+            {
+                return await GetRepositoriesWithTokenAsync(_options.Value.FallbackToken, "user/repos?per_page=100&sort=updated", cancellationToken).ConfigureAwait(false);
+            }
+
+            return GitProviderResult<IReadOnlyList<GitRepository>>.Success(Array.Empty<GitRepository>());
+        }
+
+        var allRepos = new List<GitRepository>();
+        var seenFullNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var conn in activeConnections)
+        {
+            var tokenResult = await _tokenService.GetInstallationTokenAsync(conn.ExternalInstallationId, null, cancellationToken).ConfigureAwait(false);
+            if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
+            {
+                _logger.LogWarning("Failed to resolve installation token for installation {InstallationId}: {Error}", conn.ExternalInstallationId, tokenResult.ErrorMessage);
+                continue;
+            }
+
+            var page = 1;
+            const int perPage = 100;
+            while (page <= 10)
+            {
+                var uri = $"installation/repositories?per_page={perPage}&page={page}";
+                var pageResult = await GetInstallationRepositoriesPageAsync(tokenResult.Token, uri, cancellationToken).ConfigureAwait(false);
+
+                if (!pageResult.IsSuccess || pageResult.Data == null || pageResult.Data.Count == 0)
+                {
+                    break;
+                }
+
+                foreach (var repo in pageResult.Data)
+                {
+                    if (seenFullNames.Add(repo.FullName))
+                    {
+                        allRepos.Add(repo);
+                    }
+                }
+
+                if (pageResult.Data.Count < perPage)
+                {
+                    break;
+                }
+
+                page++;
+            }
+        }
+
+        return GitProviderResult<IReadOnlyList<GitRepository>>.Success(allRepos);
     }
 
-    public Task<GitProviderResult<GitRepository>> GetRepositoryAsync(
+    public async Task<GitProviderResult<GitRepository>> GetRepositoryAsync(
         string owner,
         string repository,
         CancellationToken cancellationToken = default)
     {
-        return GetSingleAsync<GitHubRepositoryDto, GitRepository>(
-            $"repos/{Escape(owner)}/{Escape(repository)}",
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
+        {
+            return GitProviderResult<GitRepository>.Failure(tokenResult.ErrorMessage ?? "Repository authorization failed.");
+        }
+
+        var uri = $"repos/{Escape(owner)}/{Escape(repository)}";
+        return await GetSingleWithTokenAsync<GitHubRepositoryDto, GitRepository>(
+            tokenResult.Token,
+            uri,
             dto => dto.ToRepository(),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
     }
 
-    public Task<GitProviderResult<IReadOnlyList<GitBranch>>> GetBranchesAsync(
+    public async Task<GitProviderResult<IReadOnlyList<GitBranch>>> GetBranchesAsync(
         string owner,
         string repository,
         CancellationToken cancellationToken = default)
     {
-        return GetListAsync<GitHubBranchDto, GitBranch>(
-            $"repos/{Escape(owner)}/{Escape(repository)}/branches?per_page=100",
+        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
+        {
+            return GitProviderResult<IReadOnlyList<GitBranch>>.Failure(tokenResult.ErrorMessage ?? "Repository authorization failed.");
+        }
+
+        var uri = $"repos/{Escape(owner)}/{Escape(repository)}/branches?per_page=100";
+        return await GetListWithTokenAsync<GitHubBranchDto, GitBranch>(
+            tokenResult.Token,
+            uri,
             dto => dto.ToBranch(),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<GitProviderResult<string>> GetDefaultBranchAsync(
@@ -73,28 +142,49 @@ internal sealed class GitHubGitProvider : IGitProvider
         string repository,
         CancellationToken cancellationToken = default)
     {
-        var result = await GetRepositoryAsync(owner, repository, cancellationToken)
-            .ConfigureAwait(false);
-
+        var result = await GetRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
         return result.IsSuccess
             ? GitProviderResult<string>.Success(result.Data?.DefaultBranch ?? string.Empty)
             : GitProviderResult<string>.Failure(result.ErrorMessage ?? "Repository details could not be retrieved.");
     }
 
-    private async Task<GitProviderResult<IReadOnlyList<TModel>>> GetListAsync<TDto, TModel>(
+    private async Task<GitProviderResult<IReadOnlyList<GitRepository>>> GetInstallationRepositoriesPageAsync(
+        string token,
+        string relativeUri,
+        CancellationToken cancellationToken)
+    {
+        var response = await GetWithTokenAsync<InstallationRepositoriesWrapperDto>(token, relativeUri, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccess)
+        {
+            return GitProviderResult<IReadOnlyList<GitRepository>>.Failure(response.ErrorMessage ?? "Failed to retrieve installation repositories.");
+        }
+
+        var list = response.Data?.Repositories?.Select(r => r.ToRepository()).ToList() ?? new List<GitRepository>();
+        return GitProviderResult<IReadOnlyList<GitRepository>>.Success(list);
+    }
+
+    private async Task<GitProviderResult<IReadOnlyList<GitRepository>>> GetRepositoriesWithTokenAsync(
+        string token,
+        string relativeUri,
+        CancellationToken cancellationToken)
+    {
+        return await GetListWithTokenAsync<GitHubRepositoryDto, GitRepository>(
+            token,
+            relativeUri,
+            dto => dto.ToRepository(),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GitProviderResult<IReadOnlyList<TModel>>> GetListWithTokenAsync<TDto, TModel>(
+        string token,
         string relativeUri,
         Func<TDto, TModel> map,
         CancellationToken cancellationToken)
     {
-        var result = await GetAsync<List<TDto>>(
-            relativeUri,
-            cancellationToken)
-            .ConfigureAwait(false);
-
+        var result = await GetWithTokenAsync<List<TDto>>(token, relativeUri, cancellationToken).ConfigureAwait(false);
         if (!result.IsSuccess)
         {
-            return GitProviderResult<IReadOnlyList<TModel>>.Failure(
-                result.ErrorMessage ?? "Request failed.");
+            return GitProviderResult<IReadOnlyList<TModel>>.Failure(result.ErrorMessage ?? "Request failed.");
         }
 
         if (result.Data is null)
@@ -106,20 +196,16 @@ internal sealed class GitHubGitProvider : IGitProvider
         return GitProviderResult<IReadOnlyList<TModel>>.Success(list);
     }
 
-    private async Task<GitProviderResult<TModel>> GetSingleAsync<TDto, TModel>(
+    private async Task<GitProviderResult<TModel>> GetSingleWithTokenAsync<TDto, TModel>(
+        string token,
         string relativeUri,
         Func<TDto, TModel> map,
         CancellationToken cancellationToken)
     {
-        var result = await GetAsync<TDto>(
-            relativeUri,
-            cancellationToken)
-            .ConfigureAwait(false);
-
+        var result = await GetWithTokenAsync<TDto>(token, relativeUri, cancellationToken).ConfigureAwait(false);
         if (!result.IsSuccess)
         {
-            return GitProviderResult<TModel>.Failure(
-                result.ErrorMessage ?? "Request failed.");
+            return GitProviderResult<TModel>.Failure(result.ErrorMessage ?? "Request failed.");
         }
 
         if (result.Data is null)
@@ -130,45 +216,39 @@ internal sealed class GitHubGitProvider : IGitProvider
         return GitProviderResult<TModel>.Success(map(result.Data));
     }
 
-    private async Task<GitProviderResult<T>> GetAsync<T>(
+    private async Task<GitProviderResult<T>> GetWithTokenAsync<T>(
+        string token,
         string relativeUri,
         CancellationToken cancellationToken)
     {
-        if (!_isConfigured)
-        {
-            _logger.LogWarning(
-                "GitHub provider is not configured. Ensure GitProvider:GitHub:BaseUrl " +
-                "and the token (GitProvider:GitHub:Token or GITHUB_TOKEN environment variable) are set.");
-
-            return GitProviderResult<T>.Failure(
-                "GitHub provider is not configured. The base URL or token is missing.");
-        }
-
         try
         {
             using var client = _httpClientFactory.CreateClient(HttpClientName);
+            var uri = BuildUri(relativeUri);
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, BuildUri(relativeUri));
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             request.Headers.UserAgent.Add(new ProductInfoHeaderValue("DevPilot", "1.0"));
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+            request.Headers.Add("X-GitHub-Api-Version", ApiVersion);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
-            using var response = await client.SendAsync(
-                request,
-                HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken)
-                .ConfigureAwait(false);
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
             {
-                return await HandleErrorResponseAsync<T>(response)
-                    .ConfigureAwait(false);
+                var statusCode = (int)response.StatusCode;
+                if (statusCode == 404)
+                {
+                    return GitProviderResult<T>.Failure("The requested GitHub resource was not found.");
+                }
+                if (statusCode is 403 or 429)
+                {
+                    return GitProviderResult<T>.Failure("GitHub API rate limit or permission constraint encountered.");
+                }
+                return GitProviderResult<T>.Failure($"GitHub API returned status HTTP {statusCode}.");
             }
 
-            var json = await response.Content.ReadAsStringAsync(cancellationToken)
-                .ConfigureAwait(false);
-
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var dto = JsonSerializer.Deserialize<T>(json, JsonSerializerOptions.Web);
 
             if (dto is null)
@@ -180,79 +260,36 @@ internal sealed class GitHubGitProvider : IGitProvider
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogInformation("The GitHub API request was cancelled.");
             return GitProviderResult<T>.Failure("The request was cancelled.");
         }
-        catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception ex)
         {
-            _logger.LogWarning(exception, "The request to the GitHub API timed out.");
-            return GitProviderResult<T>.Failure("The request to the GitHub API timed out.");
+            _logger.LogError(ex, "Unexpected error during GitHub API call to {Uri}.", relativeUri);
+            return GitProviderResult<T>.Failure($"GitHub API communication error: {ex.Message}");
         }
-        catch (HttpRequestException exception)
-        {
-            _logger.LogWarning(exception, "An HTTP error occurred while calling the GitHub API.");
-            return GitProviderResult<T>.Failure("An HTTP error occurred while calling the GitHub API.");
-        }
-        catch (JsonException exception)
-        {
-            _logger.LogWarning(exception, "Failed to parse the GitHub API response.");
-            return GitProviderResult<T>.Failure("Failed to parse the GitHub API response.");
-        }
-        catch (Exception exception)
-        {
-            _logger.LogError(exception, "An unexpected error occurred while calling the GitHub API.");
-            return GitProviderResult<T>.Failure("An unexpected error occurred while calling the GitHub API.");
-        }
-    }
-
-    private async Task<GitProviderResult<T>> HandleErrorResponseAsync<T>(HttpResponseMessage response)
-    {
-        var statusCode = (int)response.StatusCode;
-        var rateLimitRemaining = response.Headers.TryGetValues("X-RateLimit-Remaining", out var remaining)
-            ? remaining?.FirstOrDefault()
-            : null;
-
-        if (statusCode is 403 or 429 && rateLimitRemaining == "0")
-        {
-            _logger.LogWarning(
-                "GitHub API rate limit exceeded (HTTP {StatusCode}).",
-                statusCode);
-
-            return GitProviderResult<T>.Failure(
-                "GitHub API rate limit exceeded. Please try again later.");
-        }
-
-        if (statusCode == 404)
-        {
-            _logger.LogWarning(
-                "GitHub resource was not found (HTTP {StatusCode}).",
-                statusCode);
-
-            return GitProviderResult<T>.Failure(
-                "The requested GitHub resource was not found.");
-        }
-
-        _logger.LogWarning(
-            "GitHub API returned a non-success status code (HTTP {StatusCode}).",
-            statusCode);
-
-        // Drain the response body to avoid leaking connections.
-        _ = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-
-        return GitProviderResult<T>.Failure(
-            "GitHub API returned a non-success status code.");
     }
 
     private Uri BuildUri(string relativeUri)
     {
-        var baseUrl = _baseUrl.TrimEnd('/');
+        var baseUrl = _options.Value.BaseUrl.TrimEnd('/');
         return new Uri($"{baseUrl}/{relativeUri}", UriKind.Absolute);
     }
 
     private static string Escape(string value) => Uri.EscapeDataString(value);
 
+    private sealed class InstallationRepositoriesWrapperDto
+    {
+        [JsonPropertyName("total_count")]
+        public int TotalCount { get; set; }
+
+        [JsonPropertyName("repositories")]
+        public List<GitHubRepositoryDto>? Repositories { get; set; }
+    }
+
     private sealed class GitHubRepositoryDto
     {
+        public long Id { get; set; }
+
         public string Name { get; set; } = string.Empty;
 
         [JsonPropertyName("full_name")]

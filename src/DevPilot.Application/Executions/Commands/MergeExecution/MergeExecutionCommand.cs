@@ -126,9 +126,10 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
 
         // 3. Local Preconditions Check
-        if (!ExecutionMergeEligibility.CalculateCanRequestMerge(execution, allowNoChecks, buildPassed, testPassed, allowInProgress: true))
+        var (canMerge, blockedReason) = ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks, buildPassed, testPassed, allowInProgress: true);
+        if (!canMerge)
         {
-            return MergeExecutionResult.Conflict("Execution local lifecycle or CI preconditions do not allow merge.");
+            return MergeExecutionResult.Conflict(blockedReason ?? "Execution local lifecycle or CI preconditions do not allow merge.");
         }
 
         // 4. Claim DB Merge Lease
@@ -212,10 +213,11 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
         }
 
         // Live CI eligibility re-validation
-        if (!ExecutionMergeEligibility.EvaluateCiEligibility(liveSync.CiStatus, allowNoChecks, buildPassed, testPassed))
+        var (liveCiEligible, liveCiReason) = ExecutionMergeEligibility.EvaluateCiEligibilityDetailed(liveSync.CiStatus, allowNoChecks, buildPassed, testPassed);
+        if (!liveCiEligible)
         {
             await _executionRepository.SetMergeFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);
-            return MergeExecutionResult.Conflict($"Live CI status '{liveSync.CiStatus}' does not satisfy merge policy.");
+            return MergeExecutionResult.Conflict(liveCiReason ?? $"Live CI status '{liveSync.CiStatus}' does not satisfy merge policy.");
         }
 
         // 6. Execute Remote GitHub Merge PUT using exact RemoteCommitSha

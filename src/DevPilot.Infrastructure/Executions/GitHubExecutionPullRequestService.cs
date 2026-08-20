@@ -128,25 +128,15 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
         if (matchingPrs.Count == 1)
         {
             var existingPr = matchingPrs[0];
-            var isDevPilotOwned = existingPr.Body.Contains(expectedMarker, StringComparison.OrdinalIgnoreCase);
-
-            if (isDevPilotOwned)
+            if (string.Equals(existingPr.State, "open", StringComparison.OrdinalIgnoreCase))
             {
-                if (string.Equals(existingPr.State, "open", StringComparison.OrdinalIgnoreCase))
-                {
-                    var trustedUrl = BuildTrustedPrUrl(repoOwner, repoName, existingPr.Number);
-                    return Success(existingPr.Number, trustedUrl, baseBranch, DateTime.UtcNow);
-                }
-                else
-                {
-                    // Closed or Merged DevPilot PR
-                    return Failure($"A DevPilot PR (#{existingPr.Number}) for this execution already exists in state '{existingPr.State}'. Re-creating PR refused.", isConflict: true);
-                }
+                var trustedUrl = BuildTrustedPrUrl(repoOwner, repoName, existingPr.Number);
+                return Success(existingPr.Number, trustedUrl, baseBranch, DateTime.UtcNow);
             }
             else
             {
-                // Foreign / manual matching PR
-                return Failure($"A foreign/manual PR (#{existingPr.Number}) exists for branch '{headBranch}' without DevPilot execution marker.", isConflict: true);
+                // Closed or Merged PR
+                return Failure($"A pull request (#{existingPr.Number}) for branch '{headBranch}' already exists in state '{existingPr.State}'. Re-creating PR refused.", isConflict: true);
             }
         }
 
@@ -186,7 +176,7 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
             {
                 var retryMatch = retryList.Data.FirstOrDefault(p =>
                     string.Equals(p.HeadRef, headBranch, StringComparison.OrdinalIgnoreCase) &&
-                    p.Body.Contains(expectedMarker, StringComparison.OrdinalIgnoreCase));
+                    string.Equals(p.BaseRef, baseBranch, StringComparison.OrdinalIgnoreCase));
 
                 if (retryMatch != null)
                 {
@@ -197,7 +187,7 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
                     }
                     else
                     {
-                        return Failure($"DevPilot PR (#{retryMatch.Number}) exists in state '{retryMatch.State}'.", isConflict: true, wasPostSent: true);
+                        return Failure($"A pull request (#{retryMatch.Number}) exists in state '{retryMatch.State}'.", isConflict: true, wasPostSent: true);
                     }
                 }
             }

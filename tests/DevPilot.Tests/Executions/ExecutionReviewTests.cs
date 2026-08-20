@@ -99,6 +99,72 @@ public class ExecutionReviewTests : IDisposable
     }
 
     [Fact]
+    public async Task GetExecutionReview_WithMatchingRepositoryWorkspaceId_ReturnsWorkspaceInfo()
+    {
+        // Arrange
+        var fileRelPath = "src/Calculator.cs";
+        var fullPath = Path.Combine(_workspaceDir, fileRelPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, "public class Calculator { public int Add(int a, int b) => a + b; }");
+
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial commit");
+
+        File.WriteAllText(fullPath, "public class Calculator { public int Add(int a, int b) => a + b;\npublic int Sub(int a, int b) => a - b; }");
+
+        var executionId = Guid.NewGuid();
+        var workspaceId = Guid.NewGuid();
+        var workspace = new RepositoryWorkspace
+        {
+            Id = workspaceId,
+            Owner = "enesscigdem",
+            Repository = "DevPilot.E2EFixture",
+            Branch = "master",
+            LocalPath = _workspaceDir,
+            Status = RepositoryWorkspaceStatus.Completed
+        };
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = workspaceId,
+            RepositoryWorkspace = workspace,
+            Title = "Add Subtraction"
+        };
+
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = task.Id,
+            DevelopmentTask = task,
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main"
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, new FakeExecutionActivityRepository(), Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act - matching workspace ID
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId, workspaceId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.RepositoryWorkspaceId.Should().Be(workspaceId);
+        result.Review.RepositoryOwner.Should().Be("enesscigdem");
+        result.Review.RepositoryName.Should().Be("DevPilot.E2EFixture");
+
+        // Act - mismatched workspace ID
+        var mismatchedResult = await handler.HandleAsync(new GetExecutionReviewQuery(executionId, Guid.NewGuid()));
+
+        // Assert mismatched
+        mismatchedResult.Status.Should().Be(ExecutionReviewResultStatus.NotFound);
+    }
+
+    [Fact]
     public async Task GetExecutionReview_AddedUntrackedFile_RepresentedCorrectly()
     {
         // Arrange

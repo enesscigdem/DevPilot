@@ -43,7 +43,9 @@ const STORAGE_KEY = "devpilot-active-workspace-id"
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<RepositoryWorkspace[]>([])
-  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null)
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(() => {
+    return typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null
+  })
   const [overview, setOverview] = useState<WorkspaceOverview | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isLoadingOverview, setIsLoadingOverview] = useState(true)
@@ -59,20 +61,24 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       list: RepositoryWorkspace[],
       preferredId?: string | null,
     ): string | null => {
-      const persistedId =
-        preferredId !== undefined
-          ? preferredId
-          : typeof window !== "undefined"
-            ? window.localStorage.getItem(STORAGE_KEY)
-            : null
-
-      if (persistedId) {
-        const found = list.find((w) => w.id === persistedId)
-        if (found && found.status === RepositoryWorkspaceStatus.Completed) {
-          return found.id
+      // 1. If preferredId (current in-memory selection) is valid and completed, preserve it
+      if (preferredId) {
+        const foundPreferred = list.find((w) => w.id === preferredId)
+        if (foundPreferred && foundPreferred.status === RepositoryWorkspaceStatus.Completed) {
+          return foundPreferred.id
         }
       }
 
+      // 2. If no valid preferredId, check persisted localStorage ID
+      const persistedId = typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null
+      if (persistedId) {
+        const foundPersisted = list.find((w) => w.id === persistedId)
+        if (foundPersisted && foundPersisted.status === RepositoryWorkspaceStatus.Completed) {
+          return foundPersisted.id
+        }
+      }
+
+      // 3. Fallback only if no active or persisted completed workspace exists
       const firstCompleted = list.find(
         (w) => w.status === RepositoryWorkspaceStatus.Completed,
       )

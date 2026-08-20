@@ -18,7 +18,7 @@ import {
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import {
   getExecutionStatusMeta,
@@ -200,12 +200,7 @@ function DiffRow({ line }: { line: ParsedLine }) {
 
 export function CodeReview() {
   const { id } = useReactParams<{ id: string }>()
-  const { activeWorkspaceId, isLoading: isWorkspaceLoading } = useWorkspace()
-  const activeWorkspaceIdRef = useRef<string | null>(activeWorkspaceId)
-
-  useEffect(() => {
-    activeWorkspaceIdRef.current = activeWorkspaceId
-  }, [activeWorkspaceId])
+  const { selectWorkspace, activeWorkspaceId } = useWorkspace()
 
   const [review, setReview] = useState<ExecutionReview | null>(null)
   const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
@@ -218,9 +213,10 @@ export function CodeReview() {
   const [rejectionReasonInput, setRejectionReasonInput] = useState("")
 
   const activeRequestIdRef = useRef(0)
+  const hasSyncedSidebarWorkspaceRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (isWorkspaceLoading || !id) {
+    if (!id) {
       setIsLoading(true)
       return
     }
@@ -234,19 +230,25 @@ export function CodeReview() {
     setReview(null)
 
     Promise.all([
-      getExecutionReview(id, activeWorkspaceId, { signal: controller.signal }),
-      getExecutionActivity(id, activeWorkspaceId, { signal: controller.signal }).catch(() => []),
+      getExecutionReview(id, undefined, { signal: controller.signal }),
+      getExecutionActivity(id, undefined, { signal: controller.signal }).catch(() => []),
     ])
       .then(([reviewData, actData]) => {
-        if (!isCancelled && currentRequestId === activeRequestIdRef.current && activeWorkspaceIdRef.current === activeWorkspaceId) {
+        if (!isCancelled && currentRequestId === activeRequestIdRef.current) {
           setReview(reviewData)
           setActivities(actData)
           setError(null)
           setIsLoading(false)
+
+          // Synchronize sidebar active workspace to execution workspace once when entering the route
+          if (reviewData.repositoryWorkspaceId && hasSyncedSidebarWorkspaceRef.current !== id) {
+            hasSyncedSidebarWorkspaceRef.current = id
+            selectWorkspace(reviewData.repositoryWorkspaceId)
+          }
         }
       })
       .catch((err) => {
-        if (!isCancelled && err.name !== "AbortError" && currentRequestId === activeRequestIdRef.current && activeWorkspaceIdRef.current === activeWorkspaceId) {
+        if (!isCancelled && err.name !== "AbortError" && currentRequestId === activeRequestIdRef.current) {
           setError(err instanceof Error ? err.message : "Failed to load execution review.")
           setReview(null)
           setIsLoading(false)
@@ -257,7 +259,7 @@ export function CodeReview() {
       isCancelled = true
       controller.abort()
     }
-  }, [id, isWorkspaceLoading, activeWorkspaceId])
+  }, [id, selectWorkspace])
 
   const [isSubmittingCommit, setIsSubmittingCommit] = useState(false)
   const [isSubmittingPush, setIsSubmittingPush] = useState(false)
@@ -268,23 +270,18 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const decision = await approveExecutionReview(id, review.changeFingerprint, activeWorkspaceId)
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setReview({
-          ...review,
-          reviewStatus: decision.reviewStatus,
-          decidedAt: decision.decidedAt,
-          rejectionReason: decision.rejectionReason,
-        })
-      }
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      const decision = await approveExecutionReview(id, review.changeFingerprint, wsId)
+      setReview((prev) => prev ? {
+        ...prev,
+        reviewStatus: decision.reviewStatus,
+        decidedAt: decision.decidedAt,
+        rejectionReason: decision.rejectionReason,
+      } : null)
     } catch (err) {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setDecisionError(err instanceof Error ? err.message : "Failed to approve review.")
-      }
+      setDecisionError(err instanceof Error ? err.message : "Failed to approve review.")
     } finally {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setIsSubmittingDecision(false)
-      }
+      setIsSubmittingDecision(false)
     }
   }
 
@@ -294,25 +291,20 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const res = await commitExecution(id, activeWorkspaceId)
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setReview({
-          ...review,
-          commitStatus: res.commitStatus,
-          commitSha: res.commitSha,
-          committedAt: res.committedAt,
-          commitEligible: false,
-          canRequestPush: true,
-        })
-      }
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      const res = await commitExecution(id, wsId)
+      setReview((prev) => prev ? {
+        ...prev,
+        commitStatus: res.commitStatus,
+        commitSha: res.commitSha,
+        committedAt: res.committedAt,
+        commitEligible: false,
+        canRequestPush: true,
+      } : null)
     } catch (err) {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setDecisionError(err instanceof Error ? err.message : "Failed to commit changes.")
-      }
+      setDecisionError(err instanceof Error ? err.message : "Failed to commit changes.")
     } finally {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setIsSubmittingCommit(false)
-      }
+      setIsSubmittingCommit(false)
     }
   }
 
@@ -322,25 +314,20 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const res = await pushExecution(id, activeWorkspaceId)
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setReview({
-          ...review,
-          pushStatus: res.pushStatus,
-          remoteBranchName: res.branchName,
-          remoteCommitSha: res.remoteCommitSha,
-          pushedAt: res.pushedAt,
-          canRequestPush: false,
-        })
-      }
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      const res = await pushExecution(id, wsId)
+      setReview((prev) => prev ? {
+        ...prev,
+        pushStatus: res.pushStatus,
+        remoteBranchName: res.branchName,
+        remoteCommitSha: res.remoteCommitSha,
+        pushedAt: res.pushedAt,
+        canRequestPush: false,
+      } : null)
     } catch (err) {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setDecisionError(err instanceof Error ? err.message : "Failed to push execution branch.")
-      }
+      setDecisionError(err instanceof Error ? err.message : "Failed to push execution branch.")
     } finally {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setIsSubmittingPush(false)
-      }
+      setIsSubmittingPush(false)
     }
   }
 
@@ -349,33 +336,33 @@ export function CodeReview() {
   const [syncError, setSyncError] = useState<string | null>(null)
   const [isSubmittingMerge, setIsSubmittingMerge] = useState(false)
   const [showMergeConfirmModal, setShowMergeConfirmModal] = useState(false)
+  const [mergeError, setMergeError] = useState<string | null>(null)
 
   const handleConfirmMerge = async () => {
     if (!id || !review || isSubmittingMerge) return
     setIsSubmittingMerge(true)
+    setMergeError(null)
     setDecisionError(null)
 
     try {
-      const res = await mergeExecution(id, activeWorkspaceId)
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setReview({
-          ...review,
-          mergeStatus: res.mergeStatus,
-          mergeCommitSha: res.mergeCommitSha,
-          mergedAt: res.mergedAt,
-          canRequestMerge: false,
-          pullRequestRemoteState: "Merged",
-        })
-        setShowMergeConfirmModal(false)
-      }
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      const res = await mergeExecution(id, wsId)
+      setReview((prev) => prev ? {
+        ...prev,
+        mergeStatus: res.mergeStatus,
+        mergeCommitSha: res.mergeCommitSha,
+        mergedAt: res.mergedAt,
+        canRequestMerge: false,
+        mergeBlockedReason: null,
+        pullRequestRemoteState: "Merged",
+      } : null)
+      setShowMergeConfirmModal(false)
     } catch (err) {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setDecisionError(err instanceof Error ? err.message : "Failed to merge pull request.")
-      }
+      const errorMsg = err instanceof Error ? err.message : "Failed to merge pull request."
+      setMergeError(errorMsg)
+      setDecisionError(errorMsg)
     } finally {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setIsSubmittingMerge(false)
-      }
+      setIsSubmittingMerge(false)
     }
   }
 
@@ -385,30 +372,30 @@ export function CodeReview() {
     setSyncError(null)
 
     try {
-      const res = await syncPullRequest(id, activeWorkspaceId)
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setReview({
-          ...review,
-          pullRequestNumber: res.pullRequestNumber ?? review.pullRequestNumber,
-          pullRequestUrl: res.pullRequestUrl ?? review.pullRequestUrl,
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      const res = await syncPullRequest(id, wsId)
+      setReview((prev) => {
+        if (!prev) return null
+        return {
+          ...prev,
+          pullRequestNumber: res.pullRequestNumber ?? prev.pullRequestNumber,
+          pullRequestUrl: res.pullRequestUrl ?? prev.pullRequestUrl,
           pullRequestRemoteState: res.pullRequestRemoteState,
           pullRequestIntegrityStatus: res.pullRequestIntegrityStatus,
           pullRequestLastSyncedAt: res.lastSyncedAt,
           ciStatus: res.ciStatus,
           ciChecks: res.ciChecks,
-        })
-        if (res.syncError) {
-          setSyncError(res.syncError)
+          canRequestMerge: res.canRequestMerge !== undefined ? res.canRequestMerge : prev.canRequestMerge,
+          mergeBlockedReason: res.mergeBlockedReason !== undefined ? res.mergeBlockedReason : prev.mergeBlockedReason,
         }
+      })
+      if (res.syncError) {
+        setSyncError(res.syncError)
       }
     } catch (err) {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setSyncError(err instanceof Error ? err.message : "GitHub sync failed.")
-      }
+      setSyncError(err instanceof Error ? err.message : "GitHub sync failed.")
     } finally {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setIsSyncingPr(false)
-      }
+      setIsSyncingPr(false)
     }
   }
 
@@ -418,25 +405,29 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const res = await createPullRequest(id, activeWorkspaceId)
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setReview({
-          ...review,
-          pullRequestStatus: res.pullRequestStatus,
-          pullRequestNumber: res.pullRequestNumber,
-          pullRequestUrl: res.pullRequestUrl,
-          pullRequestCreatedAt: res.createdAt,
-          canRequestPullRequest: false,
-        })
-      }
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      const res = await createPullRequest(id, wsId)
+      setReview((prev) => prev ? {
+        ...prev,
+        pullRequestStatus: res.pullRequestStatus,
+        pullRequestNumber: res.pullRequestNumber,
+        pullRequestUrl: res.pullRequestUrl,
+        pullRequestCreatedAt: res.createdAt,
+        canRequestPullRequest: false,
+      } : null)
     } catch (err) {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setDecisionError(err instanceof Error ? err.message : "Failed to open pull request.")
-      }
+      setDecisionError(err instanceof Error ? err.message : "Failed to open pull request.")
     } finally {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setIsSubmittingPr(false)
-      }
+      setIsSubmittingPr(false)
+    }
+  }
+
+  const handleConnectGitHubFromReview = async () => {
+    try {
+      const { url } = await getGitHubConnectUrl(window.location.pathname)
+      window.location.href = url
+    } catch {
+      // ignore
     }
   }
 
@@ -446,29 +437,24 @@ export function CodeReview() {
     setDecisionError(null)
 
     try {
-      const decision = await rejectExecutionReview(id, rejectionReasonInput, activeWorkspaceId)
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setReview({
-          ...review,
-          reviewStatus: decision.reviewStatus,
-          decidedAt: decision.decidedAt,
-          rejectionReason: decision.rejectionReason,
-        })
-        setShowRejectModal(false)
-        setRejectionReasonInput("")
-      }
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      const decision = await rejectExecutionReview(id, rejectionReasonInput, wsId)
+      setReview((prev) => prev ? {
+        ...prev,
+        reviewStatus: decision.reviewStatus,
+        decidedAt: decision.decidedAt,
+        rejectionReason: decision.rejectionReason,
+      } : null)
+      setShowRejectModal(false)
+      setRejectionReasonInput("")
     } catch (err) {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setDecisionError(err instanceof Error ? err.message : "Failed to reject review.")
-      }
+      setDecisionError(err instanceof Error ? err.message : "Failed to reject review.")
     } finally {
-      if (activeWorkspaceIdRef.current === activeWorkspaceId) {
-        setIsSubmittingDecision(false)
-      }
+      setIsSubmittingDecision(false)
     }
   }
 
-  if (isWorkspaceLoading || isLoading) {
+  if (isLoading) {
     return (
       <PageContainer className="flex h-[calc(100vh-100px)] w-full items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-center">
@@ -609,11 +595,44 @@ export function CodeReview() {
 
       {decisionError && (
         <div className="mx-auto max-w-[1600px] px-6 pt-3">
-          <div className="flex items-center justify-between rounded-[var(--radius-md)] border border-danger/30 bg-danger-soft/80 px-4 py-2 text-[12.5px] text-danger">
-            <span>{decisionError}</span>
-            <button onClick={() => setDecisionError(null)} className="text-subtle-foreground hover:text-foreground">
-              &times;
-            </button>
+          <div className="flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-danger/30 bg-danger-soft/80 px-4 py-2.5 text-[12.5px] text-danger">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{decisionError}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {decisionError.toLowerCase().includes("connect github") && (
+                <button
+                  type="button"
+                  onClick={handleConnectGitHubFromReview}
+                  className="rounded bg-danger px-2.5 py-1 text-xs font-medium text-white hover:opacity-90 transition-opacity"
+                >
+                  Connect GitHub
+                </button>
+              )}
+              {(decisionError.toLowerCase().includes("update repository") || decisionError.toLowerCase().includes("permissions")) && (
+                <a
+                  href="https://github.com/settings/installations"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="rounded border border-danger/40 bg-surface px-2.5 py-1 text-xs font-medium text-danger hover:bg-danger-soft transition-colors"
+                >
+                  Update GitHub Access ↗
+                </a>
+              )}
+              {decisionError.toLowerCase().includes("reconnect") && (
+                <button
+                  type="button"
+                  onClick={handleConnectGitHubFromReview}
+                  className="rounded bg-danger px-2.5 py-1 text-xs font-medium text-white hover:opacity-90 transition-opacity"
+                >
+                  Reconnect GitHub
+                </button>
+              )}
+              <button onClick={() => setDecisionError(null)} className="text-subtle-foreground hover:text-foreground">
+                &times;
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -978,13 +997,18 @@ export function CodeReview() {
                                 onClick={() => setShowMergeConfirmModal(true)}
                                 className="w-full mt-3 bg-emerald-600 hover:bg-emerald-500 text-white"
                               >
-                                {isSubmittingMerge ? (
+                      {isSubmittingMerge ? (
                                   <Loader2 className="h-4 w-4 animate-spin" />
                                 ) : (
                                   <GitPullRequest className="h-4 w-4" />
                                 )}
                                 Merge pull request
                               </Button>
+                            ) : review.mergeBlockedReason ? (
+                              <div className="mt-3 rounded-[var(--radius-md)] border border-amber-500/20 bg-amber-500/10 p-2.5 text-[11.5px] text-amber-400 flex items-start gap-2">
+                                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                                <span>{review.mergeBlockedReason}</span>
+                              </div>
                             ) : null}
                           </Panel>
                         ) : (
@@ -1125,6 +1149,14 @@ export function CodeReview() {
               <GitPullRequest className="h-5 w-5 text-emerald-500" />
               <span>Merge Pull Request #{review.pullRequestNumber}?</span>
             </div>
+
+            {mergeError && (
+              <div className="rounded-[var(--radius-md)] border border-danger/30 bg-danger-soft/80 p-3 text-[12.5px] text-danger flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{mergeError}</span>
+              </div>
+            )}
+
             <div className="rounded-[var(--radius-md)] border border-border/60 bg-surface p-3.5 space-y-2 font-mono text-[12px]">
               <div className="flex justify-between text-subtle-foreground">
                 <span>Base branch:</span>
@@ -1151,7 +1183,10 @@ export function CodeReview() {
                 variant="default"
                 size="sm"
                 disabled={isSubmittingMerge}
-                onClick={() => setShowMergeConfirmModal(false)}
+                onClick={() => {
+                  setShowMergeConfirmModal(false)
+                  setMergeError(null)
+                }}
               >
                 Cancel
               </Button>
