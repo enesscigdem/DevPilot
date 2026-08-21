@@ -49,7 +49,8 @@ public sealed record RepositoryCheck(
     string? EvidenceFingerprint = null,
     bool SupportsSkipBuild = false,
     bool SupportsTargetedTest = false,
-    int Order = 0);
+    int Order = 0,
+    string? DiscoveryEvidence = null);
 
 public sealed record RepositoryProfile(
     RepositoryVerificationState State,

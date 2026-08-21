@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Xml;
+using System.Xml.Linq;
 using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
 using Microsoft.Extensions.Logging;
@@ -268,9 +270,12 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
         ecosystems.Add("dotnet");
 
         string? buildTarget = null;
+        string? buildDiscoveryEvidence = null;
+        var buildTargetFromProjectGraph = false;
         if (rootSolutions.Count == 1)
         {
             buildTarget = rootSolutions[0];
+            buildDiscoveryEvidence = "Single solution file at the repository root.";
         }
         else if (rootSolutions.Count > 1)
         {
@@ -279,6 +284,7 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
         else if (allSolutions.Count == 1)
         {
             buildTarget = allSolutions[0];
+            buildDiscoveryEvidence = "Single solution file in the repository.";
         }
         else if (allSolutions.Count > 1)
         {
@@ -287,10 +293,25 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
         else if (allProjects.Count == 1)
         {
             buildTarget = allProjects[0];
+            buildDiscoveryEvidence = "Single project file in the repository.";
         }
         else if (allProjects.Count > 1)
         {
-            notes.Add(".NET build verification is ambiguous because no solution and multiple project files exist.");
+            if (TryResolveUniqueProjectReferenceRoot(
+                    workspace,
+                    allProjects,
+                    out var projectRoot,
+                    out var projectGraphEvidence,
+                    out var ambiguityReason))
+            {
+                buildTarget = projectRoot;
+                buildDiscoveryEvidence = projectGraphEvidence;
+                buildTargetFromProjectGraph = true;
+            }
+            else
+            {
+                notes.Add($".NET build verification is ambiguous because {ambiguityReason}");
+            }
         }
 
         if (buildTarget != null)
@@ -308,17 +329,25 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
                 DefaultBuildTimeout,
                 RepositoryCheckSource.DotNetManifest,
                 relativeTarget,
-                Order: 100));
+                Order: 100,
+                DiscoveryEvidence: buildDiscoveryEvidence));
+        }
+
+        if (buildTarget == null)
+        {
+            return;
         }
 
         var testProjects = allProjects
             .Where(path => Path.GetFileName(path).Contains("Test", StringComparison.OrdinalIgnoreCase))
             .ToList();
         string? testTarget = null;
+        string? testDiscoveryEvidence = null;
 
         if (testProjects.Count == 1)
         {
             testTarget = testProjects[0];
+            testDiscoveryEvidence = "Single test project identified from project metadata path evidence.";
         }
         else if (testProjects.Count > 1)
         {
@@ -327,6 +356,12 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
         else if (rootSolutions.Count == 1)
         {
             testTarget = rootSolutions[0];
+            testDiscoveryEvidence = "Single root solution used as the deterministic test target.";
+        }
+        else if (buildTargetFromProjectGraph)
+        {
+            testTarget = buildTarget;
+            testDiscoveryEvidence = $"{buildDiscoveryEvidence} The same deterministic project root is used for dotnet test.";
         }
 
         if (testTarget != null)
@@ -346,12 +381,170 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
                 relativeTarget,
                 SupportsSkipBuild: buildTarget != null,
                 SupportsTargetedTest: true,
-                Order: 400));
+                Order: 400,
+                DiscoveryEvidence: testDiscoveryEvidence));
         }
         else if (buildTarget != null && testProjects.Count == 0)
         {
             notes.Add("No deterministic .NET test target was found; only the discovered build check will run.");
         }
+    }
+
+    private static bool TryResolveUniqueProjectReferenceRoot(
+        string workspace,
+        IReadOnlyList<string> projects,
+        out string? rootProject,
+        out string? discoveryEvidence,
+        out string ambiguityReason)
+    {
+        rootProject = null;
+        discoveryEvidence = null;
+        ambiguityReason = "no solution and multiple project files exist.";
+
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var projectSet = projects.ToHashSet(comparer);
+        var references = projects.ToDictionary(project => project, _ => new HashSet<string>(comparer), comparer);
+
+        foreach (var project in projects)
+        {
+            if (!TryReadProjectReferences(workspace, project, projectSet, references[project], out ambiguityReason))
+            {
+                return false;
+            }
+        }
+
+        var incomingReferenceCount = projects.ToDictionary(project => project, _ => 0, comparer);
+        foreach (var dependency in references.Values.SelectMany(projectReferences => projectReferences))
+        {
+            incomingReferenceCount[dependency]++;
+        }
+
+        var roots = projects
+            .Where(project => incomingReferenceCount[project] == 0)
+            .OrderBy(project => project, comparer)
+            .ToList();
+
+        if (!IsAcyclicProjectGraph(projects, references, incomingReferenceCount, comparer))
+        {
+            ambiguityReason = "the ProjectReference graph contains a cycle.";
+            return false;
+        }
+
+        if (roots.Count != 1)
+        {
+            ambiguityReason = roots.Count == 0
+                ? "the ProjectReference graph has no root project."
+                : $"the ProjectReference graph has {roots.Count} independent root projects.";
+            return false;
+        }
+
+        var reachable = new HashSet<string>(comparer);
+        var pending = new Stack<string>();
+        pending.Push(roots[0]);
+        while (pending.Count > 0)
+        {
+            var current = pending.Pop();
+            if (!reachable.Add(current))
+            {
+                continue;
+            }
+
+            foreach (var dependency in references[current])
+            {
+                pending.Push(dependency);
+            }
+        }
+
+        if (reachable.Count != projects.Count)
+        {
+            ambiguityReason = "the unique ProjectReference root does not transitively reach every discovered project.";
+            return false;
+        }
+
+        rootProject = roots[0];
+        var relativeRoot = NormalizeRelativePath(Path.GetRelativePath(workspace, rootProject));
+        discoveryEvidence = $"Selected '{relativeRoot}' as the unique acyclic ProjectReference root reaching all {projects.Count} projects.";
+        return true;
+    }
+
+    private static bool TryReadProjectReferences(
+        string workspace,
+        string project,
+        ISet<string> projectSet,
+        ISet<string> references,
+        out string ambiguityReason)
+    {
+        ambiguityReason = string.Empty;
+        try
+        {
+            var settings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null
+            };
+            using var stream = File.OpenRead(project);
+            using var reader = XmlReader.Create(stream, settings);
+            var document = XDocument.Load(reader, LoadOptions.None);
+
+            foreach (var element in document.Descendants().Where(node => node.Name.LocalName == "ProjectReference"))
+            {
+                var include = element.Attributes().FirstOrDefault(attribute => attribute.Name.LocalName == "Include")?.Value;
+                if (string.IsNullOrWhiteSpace(include))
+                {
+                    ambiguityReason = $"project '{NormalizeRelativePath(Path.GetRelativePath(workspace, project))}' contains an invalid ProjectReference.";
+                    return false;
+                }
+
+                var repositoryPath = include
+                    .Replace('\\', Path.DirectorySeparatorChar)
+                    .Replace('/', Path.DirectorySeparatorChar);
+                var candidate = GetCanonicalRealPath(Path.Combine(Path.GetDirectoryName(project)!, repositoryPath));
+                if (!IsSubPath(workspace, candidate) ||
+                    !File.Exists(candidate) ||
+                    !Path.GetExtension(candidate).Equals(".csproj", StringComparison.OrdinalIgnoreCase) ||
+                    !projectSet.Contains(candidate))
+                {
+                    ambiguityReason = $"project '{NormalizeRelativePath(Path.GetRelativePath(workspace, project))}' references a missing, external, or unsupported project.";
+                    return false;
+                }
+
+                references.Add(candidate);
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or XmlException)
+        {
+            ambiguityReason = $"project '{NormalizeRelativePath(Path.GetRelativePath(workspace, project))}' could not be parsed as deterministic MSBuild XML.";
+            return false;
+        }
+    }
+
+    private static bool IsAcyclicProjectGraph(
+        IReadOnlyList<string> projects,
+        IReadOnlyDictionary<string, HashSet<string>> references,
+        IReadOnlyDictionary<string, int> incomingReferenceCount,
+        IEqualityComparer<string> comparer)
+    {
+        var remainingIncoming = incomingReferenceCount.ToDictionary(pair => pair.Key, pair => pair.Value, comparer);
+        var pending = new Queue<string>(projects.Where(project => remainingIncoming[project] == 0));
+        var visited = 0;
+
+        while (pending.Count > 0)
+        {
+            var current = pending.Dequeue();
+            visited++;
+            foreach (var dependency in references[current])
+            {
+                remainingIncoming[dependency]--;
+                if (remainingIncoming[dependency] == 0)
+                {
+                    pending.Enqueue(dependency);
+                }
+            }
+        }
+
+        return visited == projects.Count;
     }
 
     private static void DiscoverNodeChecks(

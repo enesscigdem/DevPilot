@@ -38,4 +38,6 @@ public sealed record ExecutionActivityMetadata(
     int? ProcessExitCode = null,
     string? VerificationFailureCategory = null,
     bool? DeterministicCheck = null,
-    bool? VerificationUnresolved = null);
+    bool? VerificationUnresolved = null,
+    IReadOnlyList<string>? DiscoveredCheckEvidence = null,
+    string? RepositoryCheckEvidence = null);

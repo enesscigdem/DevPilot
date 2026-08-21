@@ -322,6 +322,8 @@ export interface ExecutionActivityMetadata {
   verificationFailureCategory?: string | null;
   deterministicCheck?: boolean | null;
   verificationUnresolved?: boolean | null;
+  discoveredCheckEvidence?: string[] | null;
+  repositoryCheckEvidence?: string | null;
 }
 
 export interface ExecutionActivityItem {

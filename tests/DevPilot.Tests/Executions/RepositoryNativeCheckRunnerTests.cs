@@ -62,6 +62,118 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task SolutionlessMultiProjectRepository_WithUniqueProjectReferenceRoot_ResolvesThatProject()
+    {
+        WriteFile("src/Entry/Entry.csproj", ProjectFile("../Feature/Feature.csproj", "../Data/Data.csproj"));
+        WriteFile("src/Feature/Feature.csproj", ProjectFile("../Core/Core.csproj"));
+        WriteFile("src/Data/Data.csproj", ProjectFile("../Core/Core.csproj"));
+        WriteFile("src/Core/Core.csproj", ProjectFile());
+
+        var profile = await DiscoverAsync();
+
+        profile.State.Should().Be(RepositoryVerificationState.Configured);
+        profile.HasUnresolvedVerification.Should().BeFalse();
+        var build = profile.Checks.Single(check => check.Kind == RepositoryCheckKind.Build);
+        build.Arguments.Should().Equal("build", "src/Entry/Entry.csproj");
+        build.DiscoveryEvidence.Should().Contain("unique acyclic ProjectReference root");
+        profile.Checks.Should().ContainSingle(check =>
+            check.Kind == RepositoryCheckKind.Test &&
+            check.Arguments.SequenceEqual(new[] { "test", "src/Entry/Entry.csproj" }));
+    }
+
+    [Fact]
+    public async Task ProjectReferenceRootSelection_DoesNotUseApiLikeFilename()
+    {
+        WriteFile("src/Coordinator/PlainCoordinator.csproj", ProjectFile("../LooksLikeApi/LooksLikeApi.csproj"));
+        WriteFile("src/LooksLikeApi/LooksLikeApi.csproj", ProjectFile());
+
+        var profile = await DiscoverAsync();
+
+        profile.Checks.Single(check => check.Kind == RepositoryCheckKind.Build)
+            .Arguments.Should().Equal("build", "src/Coordinator/PlainCoordinator.csproj");
+    }
+
+    [Fact]
+    public async Task ProjectReferenceGraph_WithTwoIndependentRoots_RemainsUnconfigured()
+    {
+        WriteFile("src/HostOne/HostOne.csproj", ProjectFile("../Shared/Shared.csproj"));
+        WriteFile("src/HostTwo/HostTwo.Tests.csproj", ProjectFile("../Shared/Shared.csproj"));
+        WriteFile("src/Shared/Shared.csproj", ProjectFile());
+
+        var profile = await DiscoverAsync();
+
+        profile.State.Should().Be(RepositoryVerificationState.Unconfigured);
+        profile.Checks.Should().BeEmpty();
+        profile.Message.Should().Contain("2 independent root projects");
+    }
+
+    [Fact]
+    public async Task ProjectReferenceGraph_WithCycle_RemainsUnconfigured()
+    {
+        WriteFile("src/One/One.csproj", ProjectFile("../Two/Two.csproj"));
+        WriteFile("src/Two/Two.csproj", ProjectFile("../One/One.csproj"));
+
+        var profile = await DiscoverAsync();
+
+        profile.State.Should().Be(RepositoryVerificationState.Unconfigured);
+        profile.Checks.Should().BeEmpty();
+        profile.Message.Should().Contain("contains a cycle");
+    }
+
+    [Fact]
+    public async Task ProjectReferenceGraph_WithInvalidReference_RemainsUnconfigured()
+    {
+        WriteFile("src/One/One.csproj", ProjectFile("../Missing/Missing.csproj"));
+        WriteFile("src/Two/Two.csproj", ProjectFile());
+
+        var profile = await DiscoverAsync();
+
+        profile.State.Should().Be(RepositoryVerificationState.Unconfigured);
+        profile.Checks.Should().BeEmpty();
+        profile.Message.Should().Contain("missing, external, or unsupported project");
+    }
+
+    [Fact]
+    public async Task SingleProjectRepository_PreservesExistingBuildOnlyBehavior()
+    {
+        WriteFile("src/Only/Only.csproj", ProjectFile());
+
+        var profile = await DiscoverAsync();
+
+        profile.State.Should().Be(RepositoryVerificationState.Configured);
+        profile.Checks.Should().ContainSingle(check =>
+            check.Kind == RepositoryCheckKind.Build &&
+            check.Arguments.SequenceEqual(new[] { "build", "src/Only/Only.csproj" }));
+        profile.Checks.Should().NotContain(check => check.Kind == RepositoryCheckKind.Test);
+    }
+
+    [Fact]
+    public async Task LayeredSolutionlessRepository_UsesActualReferencesToResolveAcceptanceTopology()
+    {
+        WriteFile("src/Host/Host.csproj", ProjectFile(
+            "../Application/Application.csproj",
+            "../Infrastructure/Infrastructure.csproj"));
+        WriteFile("src/Application/Application.csproj", ProjectFile("../Domain/Domain.csproj"));
+        WriteFile("src/Infrastructure/Infrastructure.csproj", ProjectFile(
+            "../Application/Application.csproj",
+            "../Domain/Domain.csproj"));
+        WriteFile("src/Domain/Domain.csproj", ProjectFile());
+
+        var profile = await DiscoverAsync();
+
+        profile.State.Should().Be(RepositoryVerificationState.Configured);
+        profile.Checks.Should().Contain(check =>
+            check.Kind == RepositoryCheckKind.Build &&
+            check.Arguments.SequenceEqual(new[] { "build", "src/Host/Host.csproj" }));
+        profile.Checks.Should().Contain(check =>
+            check.Kind == RepositoryCheckKind.Test &&
+            check.Arguments.SequenceEqual(new[] { "test", "src/Host/Host.csproj" }));
+        profile.Checks.Should().OnlyContain(check =>
+            check.DiscoveryEvidence != null &&
+            check.DiscoveryEvidence.Contains("ProjectReference root", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task DotNetChecks_ExecuteThroughGenericContract_AndPreserveNoBuildAndTargetFilter()
     {
         WriteFile("App.sln", string.Empty);
@@ -337,6 +449,14 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
         var fullPath = Path.Combine(_workspace, relativePath.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         File.WriteAllText(fullPath, content);
+    }
+
+    private static string ProjectFile(params string[] projectReferences)
+    {
+        var references = projectReferences.Length == 0
+            ? string.Empty
+            : $"<ItemGroup>{string.Join(string.Empty, projectReferences.Select(reference => $"<ProjectReference Include=\"{reference}\" />"))}</ItemGroup>";
+        return $"<Project Sdk=\"Microsoft.NET.Sdk\">{references}</Project>";
     }
 
     private static ProcessExecutionResult Result(int exitCode, string? error = null)

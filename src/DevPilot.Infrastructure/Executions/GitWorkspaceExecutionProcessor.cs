@@ -159,6 +159,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     EventKind: "StoppedWithEvidence",
                     DiscoveredCheckCount: requiredChecks.Count,
                     DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
+                    DiscoveredCheckEvidence: requiredChecks
+                        .Where(check => !string.IsNullOrWhiteSpace(check.DiscoveryEvidence))
+                        .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
+                        .ToList(),
                     DetectedEcosystems: profile.Ecosystems,
                     VerificationFailureCategory: category,
                     DeterministicCheck: true,
@@ -176,6 +180,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 EventKind: "RepositoryPreflight",
                 DiscoveredCheckCount: requiredChecks.Count,
                 DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
+                DiscoveredCheckEvidence: requiredChecks
+                    .Where(check => !string.IsNullOrWhiteSpace(check.DiscoveryEvidence))
+                    .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
+                    .ToList(),
                 DetectedEcosystems: profile.Ecosystems,
                 DeterministicCheck: true,
                 VerificationUnresolved: profile.HasUnresolvedVerification),
@@ -956,7 +964,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             RepositoryCheckSource: check.Source.ToString(),
             ProcessExitCode: result?.ExitCode,
             VerificationFailureCategory: result?.FailureCategory.ToString(),
-            DeterministicCheck: true);
+            DeterministicCheck: true,
+            RepositoryCheckEvidence: check.DiscoveryEvidence);
 
     private async Task<string?> GetChangeFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
     {
