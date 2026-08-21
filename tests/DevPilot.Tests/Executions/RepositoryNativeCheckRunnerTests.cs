@@ -349,7 +349,8 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
     public async Task CheckExitFailure_IsDistinguishedFromProcessInfrastructureFailure()
     {
         WriteFile("App.sln", string.Empty);
-        var check = (await DiscoverAsync()).Checks.Single();
+        var check = (await DiscoverAsync()).Checks
+            .Single(check => check.Kind == RepositoryCheckKind.Build);
         _processRunner.Results.Enqueue(Result(exitCode: 1));
         _processRunner.Results.Enqueue(Result(exitCode: -1, error: "Failed to start process 'dotnet'."));
 
@@ -431,7 +432,8 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
     public async Task TraversalWorkingDirectory_IsRejectedBeforeProcessExecution()
     {
         WriteFile("App.sln", string.Empty);
-        var discovered = (await DiscoverAsync()).Checks.Single();
+        var discovered = (await DiscoverAsync()).Checks
+            .Single(check => check.Kind == RepositoryCheckKind.Build);
         var unsafeCheck = discovered with { WorkingDirectory = "../outside" };
 
         var result = await _runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", unsafeCheck));

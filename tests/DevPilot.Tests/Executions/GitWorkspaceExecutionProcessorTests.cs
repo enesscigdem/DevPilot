@@ -130,11 +130,9 @@ public class GitWorkspaceExecutionProcessorTests
             .WithMessage("Repository verification is unconfigured:*");
         agent.CallCount.Should().Be(0);
         recorder.RecordedActivities.Should().Contain(activity =>
-            activity.metadata is
-            {
-                VerificationFailureCategory: "Unconfigured",
-                EventKind: "StoppedWithEvidence"
-            });
+            activity.metadata != null &&
+            activity.metadata.VerificationFailureCategory == "Unconfigured" &&
+            activity.metadata.EventKind == "StoppedWithEvidence");
     }
 
     [Fact]

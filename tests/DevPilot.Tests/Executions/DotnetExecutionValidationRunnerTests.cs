@@ -136,7 +136,8 @@ public class DotnetExecutionValidationRunnerTests : IDisposable
             method.Name == nameof(IExecutionValidationRunner.ValidateTestAsync));
         methods.Should().NotContain(method =>
             method.GetParameters().Any(parameter =>
-                parameter.Name?.Contains("command", StringComparison.OrdinalIgnoreCase) == true &&
+                parameter.Name != null &&
+                parameter.Name.Contains("command", StringComparison.OrdinalIgnoreCase) &&
                 parameter.ParameterType == typeof(string)));
     }
 
