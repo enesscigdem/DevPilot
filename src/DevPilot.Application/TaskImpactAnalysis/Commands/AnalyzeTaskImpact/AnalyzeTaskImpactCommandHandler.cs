@@ -301,10 +301,15 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             var (context, roslynResult) = await BuildContextWithRoslynAsync(task, workspace, executionToken).ConfigureAwait(false);
             var evidenceProfile = ChangeIntelligenceEvidenceCollector.CollectEvidence(workspace.LocalPath, verificationProfile, roslynResult);
 
+            const int defaultImpactMaxTokens = 2048;
+            var totalProviderCalls = 1;
+            var compactRecoveryCount = 0;
+
             var aiRequest = new AiRequest
             {
                 SystemPrompt = SystemPrompt,
                 UserPrompt = BuildUserPrompt(task, workspace, context, evidenceProfile),
+                MaxTokens = defaultImpactMaxTokens,
             };
 
             var stopwatch = Stopwatch.StartNew();
@@ -319,7 +324,63 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 ? _aiProvider.ProviderName
                 : aiResponse.Provider;
 
-            if (!aiResponse.IsSuccess)
+            var isTruncated = aiResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
+                              string.Equals(aiResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
+                              (aiResponse.ErrorMessage != null && aiResponse.ErrorMessage.Contains("exhausted the configured output token limit", StringComparison.OrdinalIgnoreCase));
+
+            if (isTruncated)
+            {
+                _logger.LogWarning(
+                    "Impact analysis for task {TaskId} truncated on initial attempt (FinishReason: {FinishReason}). Initiating single compact recovery (budget: {Budget} tokens).",
+                    task.Id,
+                    aiResponse.FinishReason ?? "length",
+                    defaultImpactMaxTokens);
+
+                compactRecoveryCount = 1;
+                totalProviderCalls++;
+
+                var recoveryPrompt = BuildImpactTruncationRecoveryPrompt(task, workspace, context, evidenceProfile);
+                var recoveryRequest = new AiRequest
+                {
+                    SystemPrompt =
+                        "You are DevPilot's compact impact analysis recovery engine. " +
+                        "The previous response was truncated because it exceeded output token limits. " +
+                        "Output ONLY the minimal, ultra-compact JSON object matching the required schema. " +
+                        "No explanations, no markdown fences, no conversational text. " +
+                        "Keep summaries and reasons to 1 concise sentence. Output valid JSON only.",
+                    UserPrompt = recoveryPrompt,
+                    MaxTokens = defaultImpactMaxTokens,
+                };
+
+                var recoveryResponse = await _aiProvider
+                    .SendAsync(recoveryRequest, executionToken)
+                    .ConfigureAwait(false);
+
+                if (!recoveryResponse.IsSuccess)
+                {
+                    var isRecoveryTruncated = recoveryResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
+                                              string.Equals(recoveryResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
+                                              (recoveryResponse.ErrorMessage != null && recoveryResponse.ErrorMessage.Contains("exhausted the configured output token limit", StringComparison.OrdinalIgnoreCase));
+
+                    var errorMsg = isRecoveryTruncated
+                        ? "Impact analysis failed: AI response exhausted token limit on initial call and compact recovery also truncated."
+                        : $"Impact analysis failed: Compact truncation recovery failed: {recoveryResponse.ErrorMessage ?? "Unknown provider error."}";
+
+                    return await FailAnalysisAsync(
+                        analysis,
+                        task,
+                        errorMsg,
+                        recoveryResponse.Content,
+                        recoveryResponse.Model ?? model,
+                        recoveryResponse.Provider ?? providerName,
+                        executionToken).ConfigureAwait(false);
+                }
+
+                rawResponse = recoveryResponse.Content;
+                model = recoveryResponse.Model ?? model;
+                providerName = string.IsNullOrWhiteSpace(recoveryResponse.Provider) ? providerName : recoveryResponse.Provider;
+            }
+            else if (!aiResponse.IsSuccess)
             {
                 return await FailAnalysisAsync(
                     analysis,
@@ -333,14 +394,15 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
             var parseResult = TryParseStructuredResult(rawResponse, evidenceProfile, workspace.LocalPath);
 
-            // Bounded single repair attempt if deterministic grounding failure occurs
-            if (!parseResult.Success && parseResult.IsGroundingError && parseResult.GroundingErrorDetails != null)
+            // Bounded single repair attempt if deterministic grounding failure occurs (ONLY if truncation recovery was not used)
+            if (!parseResult.Success && parseResult.IsGroundingError && parseResult.GroundingErrorDetails != null && compactRecoveryCount == 0)
             {
                 _logger.LogWarning(
                     "Impact analysis for task {TaskId} encountered grounding error: {Error}. Initiating bounded 1-attempt impact plan repair.",
                     task.Id,
                     parseResult.ErrorMessage);
 
+                totalProviderCalls++;
                 var repairPrompt = BuildImpactPlanRepairPrompt(
                     task,
                     workspace,
@@ -356,6 +418,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                         "Use Create/Add ONLY for new files that do not currently exist in the repository. " +
                         "Respond with a single JSON object only matching the required schema. Do not wrap in markdown fences or commentary.",
                     UserPrompt = repairPrompt,
+                    MaxTokens = defaultImpactMaxTokens,
                 };
 
                 var repairAiResponse = await _aiProvider
@@ -412,11 +475,20 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             task.UpdatedAt = completedAt;
             await _taskRepository.UpdateAsync(task, executionToken).ConfigureAwait(false);
 
+            var finishReason = aiResponse.FinishReason ?? "stop";
+            var actualOutputTokens = aiResponse.OutputTokens;
+
             _logger.LogInformation(
-                "Change intelligence impact analysis {AnalysisId} completed for task {TaskId} in {ElapsedMs}ms.",
+                "Change intelligence impact analysis {AnalysisId} completed for task {TaskId} in {ElapsedMs}ms. " +
+                "ProviderCalls: {ProviderCalls}, CompactRecoveries: {CompactRecoveries}, RequestedBudget: {RequestedBudget}, OutputTokens: {OutputTokens}, FinishReason: {FinishReason}.",
                 analysis.Id,
                 task.Id,
-                stopwatch.ElapsedMilliseconds);
+                stopwatch.ElapsedMilliseconds,
+                totalProviderCalls,
+                compactRecoveryCount,
+                defaultImpactMaxTokens,
+                actualOutputTokens?.ToString() ?? "unknown",
+                finishReason);
 
             return new AnalyzeTaskImpactResult
             {
@@ -791,6 +863,51 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             "2. For changeType 'Modify' or 'Delete': Select ONLY from the available real repository files listed above. Do NOT propose nonexistent files.\n" +
             "3. For changeType 'Add' (or 'Create'): Use Add ONLY for genuinely new files that do not currently exist in the repository.\n" +
             "4. Return the complete corrected impact analysis as a single JSON object matching the schema below (no markdown fences, no commentary):");
+        builder.AppendLine(JsonSchema);
+
+        return builder.ToString();
+    }
+
+    private static string BuildImpactTruncationRecoveryPrompt(
+        DevelopmentTask task,
+        RepositoryWorkspace workspace,
+        string context,
+        RepositoryEvidenceProfile evidence)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("# Task");
+        builder.AppendLine($"Title: {task.Title}");
+        if (!string.IsNullOrWhiteSpace(task.Description))
+        {
+            builder.AppendLine($"Description: {task.Description}");
+        }
+        if (!string.IsNullOrWhiteSpace(task.AcceptanceCriteria))
+        {
+            builder.AppendLine($"Acceptance Criteria: {task.AcceptanceCriteria}");
+        }
+        builder.AppendLine();
+
+        builder.AppendLine("# Candidate Repository Files");
+        if (evidence.InventoryCsFiles.Count > 0)
+        {
+            foreach (var f in evidence.InventoryCsFiles.Take(25))
+            {
+                builder.AppendLine($"- {f}");
+            }
+            builder.AppendLine();
+        }
+
+        builder.AppendLine("# Minimal Compact Output Instructions");
+        builder.AppendLine(
+            "CRITICAL: The previous response was truncated because it exceeded output token limits.\n" +
+            "Provide ONLY the minimal, ultra-compact JSON impact analysis without extra prose or nested duplicate fields.\n" +
+            "- Output valid JSON only, no markdown code blocks.\n" +
+            "- Max 200 chars for summary.\n" +
+            "- Max 100 chars per file reason.\n" +
+            "- Max 100 chars per plan step description.\n" +
+            "- Do NOT repeat change briefs, expected checks, or file evidence details (DevPilot computes them deterministically).");
+        builder.AppendLine();
+        builder.AppendLine("Required JSON Schema:");
         builder.AppendLine(JsonSchema);
 
         return builder.ToString();
