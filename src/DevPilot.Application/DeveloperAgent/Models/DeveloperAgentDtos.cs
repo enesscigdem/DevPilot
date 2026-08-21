@@ -14,12 +14,17 @@ public sealed record DeveloperAgentRequest(
     string WorkspacePath,
     string BranchName,
     IReadOnlyList<ImpactedFileDetail>? ImpactedFiles = null,
-    string? Model = null);
+    string? Model = null,
+    IReadOnlyList<string>? ChangeDimensions = null,
+    IReadOnlyList<string>? ExpectedChecks = null,
+    IReadOnlyList<string>? Unknowns = null);
 
 public sealed record ImpactedFileDetail(
     string FilePath,
     string? ChangeType = null,
-    string? Reason = null);
+    string? Reason = null,
+    string? EvidenceType = null,
+    bool IsUncertain = false);
 
 public sealed record DeveloperAgentResult(
     bool Success,

@@ -16,8 +16,12 @@ import {
   Plus,
   Loader2,
   AlertCircle,
+  AlertTriangle,
   BrainCircuit,
   RotateCcw,
+  Layers,
+  Cpu,
+  FileCheck,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Panel, Badge, Meter, StatusDot, IconChip } from "@/components/ui/primitives"
@@ -620,16 +624,71 @@ export function TaskImpact() {
             </div>
           ) : (
             <>
+              {/* Change Brief */}
+              {structured?.changeBrief && (
+                <div className="mb-4 rounded-[var(--radius-lg)] border border-primary/25 bg-surface p-4 shadow-sm">
+                  <div className="flex items-center justify-between gap-2 border-b border-border/40 pb-2.5 mb-3">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="h-4 w-4 text-primary" />
+                      <span className="text-[13px] font-semibold text-foreground">Change Brief</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+                      <span className="font-semibold text-foreground">{structured.changeBrief.fileCount}</span> files
+                      <span>·</span>
+                      <span className="font-semibold text-foreground">{structured.changeBrief.projectCount}</span> project(s)
+                      <span>·</span>
+                      <Badge tone={analysisRiskInfo?.tone ?? "neutral"} className="px-1.5 py-0 text-[10.5px]">
+                        {structured.changeBrief.riskLevel} Risk
+                      </Badge>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 text-[12px]">
+                    <div>
+                      <span className="tech-label text-[10.5px]">Explainable Risk</span>
+                      <ul className="mt-1 space-y-1 text-[11.5px] text-muted-foreground">
+                        {structured.changeBrief.riskReasons.map((reason, idx) => (
+                          <li key={idx} className="flex items-start gap-1.5">
+                            <span className="text-primary mt-0.5">•</span>
+                            <span className="break-words">{reason}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div>
+                      <span className="tech-label text-[10.5px]">Verification Preflight</span>
+                      <p className="mt-1 text-[11.5px] text-muted-foreground break-words">
+                        {structured.changeBrief.verificationSummary || "Standard repository preflight checks"}
+                      </p>
+                      {structured.changeBrief.expectedChecks && structured.changeBrief.expectedChecks.length > 0 && (
+                        <div className="mt-1.5 flex flex-wrap gap-1">
+                          {structured.changeBrief.expectedChecks.map((chk) => (
+                            <span
+                              key={chk.checkId}
+                              className="rounded border border-border/60 bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-foreground"
+                              title={chk.discoveryEvidence || chk.source}
+                            >
+                              {chk.displayName}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="mb-3 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-[13px] font-semibold text-foreground">Impact analysis</h2>
+                  <h2 className="text-[13px] font-semibold text-foreground">Impacted files</h2>
                   <span className="rounded-full bg-surface-3 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
                     {isMockView ? mockAffectedFiles.length : realFiles.length} files
                   </span>
                 </div>
               </div>
 
-              <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,300px)] min-w-0">
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)] min-w-0">
                 {/* file list */}
                 <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border min-w-0">
                   {isMockView
@@ -691,7 +750,7 @@ export function TaskImpact() {
                               <Pencil className="h-3.5 w-3.5 shrink-0 text-accent" />
                             )}
                             <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2 min-w-0">
+                              <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
                                 <span
                                   className={
                                     "truncate text-[12.5px] font-medium " +
@@ -700,6 +759,16 @@ export function TaskImpact() {
                                 >
                                   {fileName}
                                 </span>
+                                {f.evidenceType && (
+                                  <span className="rounded bg-surface-3 px-1 py-0.2 font-mono text-[10px] text-muted-foreground">
+                                    {f.evidenceType}
+                                  </span>
+                                )}
+                                {f.isUncertain && (
+                                  <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1 py-0.2 font-mono text-[10px] text-amber-500">
+                                    Uncertain
+                                  </span>
+                                )}
                               </div>
                               <div className="truncate font-mono text-[10.5px] text-subtle-foreground" title={f.filePath}>
                                 {f.filePath}
@@ -713,8 +782,8 @@ export function TaskImpact() {
 
                 {/* inspector */}
                 {selectedFile && (
-                  <Panel className="h-fit p-4 min-w-0 overflow-hidden">
-                    <div className="mb-3 flex items-center gap-2 min-w-0">
+                  <Panel className="h-fit p-4 min-w-0 overflow-hidden space-y-3">
+                    <div className="flex items-center gap-2 min-w-0">
                       <IconChip tone="blue" className="shrink-0">
                         <FileCode2 className="h-4 w-4" />
                       </IconChip>
@@ -731,30 +800,8 @@ export function TaskImpact() {
                         </div>
                       </div>
                     </div>
-                    <div className="tech-label mb-1.5">Why it changes</div>
-                    <p className="text-[12.5px] leading-relaxed text-muted-foreground text-pretty break-words">
-                      {selectedFile.reason}
-                    </p>
 
-                    <div className="mt-4 flex items-center justify-between">
-                      <span className="tech-label">Confidence</span>
-                      <span className="font-mono text-[12px] font-semibold text-foreground">
-                        {selectedFile.confidence}%
-                      </span>
-                    </div>
-                    <Meter
-                      value={selectedFile.confidence}
-                      tone={
-                        selectedFile.confidence >= 90
-                          ? "green"
-                          : selectedFile.confidence >= 80
-                            ? "blue"
-                            : "amber"
-                      }
-                      className="mt-1.5"
-                    />
-
-                    <div className="mt-4 flex items-center gap-2 rounded-[var(--radius-md)] border border-border bg-inset px-2.5 py-2 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <Badge
                         tone={
                           "changeType" in selectedFile &&
@@ -762,7 +809,6 @@ export function TaskImpact() {
                             ? "green"
                             : "amber"
                         }
-                        className="shrink-0"
                       >
                         {"changeType" in selectedFile
                           ? selectedFile.changeType === "added" || selectedFile.changeType === "Add"
@@ -770,6 +816,52 @@ export function TaskImpact() {
                             : selectedFile.changeType
                           : "Modified"}
                       </Badge>
+                      {"evidenceType" in selectedFile && selectedFile.evidenceType && (
+                        <Badge tone="neutral" className="font-mono text-[10.5px]">
+                          {selectedFile.evidenceType}
+                        </Badge>
+                      )}
+                      {"isUncertain" in selectedFile && selectedFile.isUncertain && (
+                        <Badge tone="amber" className="text-[10.5px]">
+                          Uncertain
+                        </Badge>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="tech-label mb-1">Why it changes</div>
+                      <p className="text-[12px] leading-relaxed text-muted-foreground text-pretty break-words">
+                        {selectedFile.reason}
+                      </p>
+                    </div>
+
+                    {"evidenceDetails" in selectedFile && selectedFile.evidenceDetails && (
+                      <div className="rounded-[var(--radius-md)] border border-border/60 bg-surface-2 p-2.5">
+                        <div className="tech-label text-[10px] mb-1">Repository Evidence</div>
+                        <p className="text-[11.5px] leading-relaxed text-foreground font-mono break-words">
+                          {selectedFile.evidenceDetails}
+                        </p>
+                      </div>
+                    )}
+
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <span className="tech-label">Confidence</span>
+                        <span className="font-mono text-[12px] font-semibold text-foreground">
+                          {selectedFile.confidence}%
+                        </span>
+                      </div>
+                      <Meter
+                        value={selectedFile.confidence}
+                        tone={
+                          selectedFile.confidence >= 90
+                            ? "green"
+                            : selectedFile.confidence >= 80
+                              ? "blue"
+                              : "amber"
+                        }
+                        className="mt-1.5"
+                      />
                     </div>
                   </Panel>
                 )}
@@ -778,52 +870,114 @@ export function TaskImpact() {
           )}
         </section>
 
-        {/* RIGHT — System impact + decision */}
-        <aside className="p-5 lg:border-l lg:border-border min-w-0 overflow-hidden">
-          <div className="tech-label mb-3">System impact</div>
-          <div className="space-y-2.5 min-w-0">
-            {isMockView
-              ? [
-                  { label: "API surface", icon: Network, items: mockImpactSummary.apiChanges },
-                  { label: "Database", icon: Database, items: mockImpactSummary.database },
-                  { label: "Integrations", icon: ShieldCheck, items: mockImpactSummary.integrations },
-                  { label: "Tests", icon: FlaskConical, items: mockImpactSummary.tests },
-                ].map((g) => {
-                  const item = g.items[0]
-                  const Icon = g.icon
-                  return (
-                    <div key={g.label} className="rounded-[var(--radius-md)] border border-border bg-surface p-3 min-w-0">
-                      <div className="mb-1.5 flex items-center gap-2 min-w-0">
-                        <Icon className="h-3.5 w-3.5 text-subtle-foreground shrink-0" />
-                        <span className="truncate text-[12px] font-semibold text-foreground">{g.label}</span>
-                        <StatusDot tone={item.tone} className="ml-auto shrink-0" />
-                      </div>
-                      <div className="text-[12px] font-medium text-foreground break-words">{item.label}</div>
-                      <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground break-words">{item.detail}</p>
-                    </div>
-                  )
-                })
-              : structured?.systemImpacts && structured.systemImpacts.length > 0
-                ? structured.systemImpacts.map((si, i) => {
-                    const tone = getImpactLevelTone(si.impactLevel)
+        {/* RIGHT — System impact + Unknowns + decision */}
+        <aside className="p-5 lg:border-l lg:border-border min-w-0 overflow-hidden space-y-4">
+          <div>
+            <div className="tech-label mb-2.5">System impact & dimensions</div>
+            <div className="space-y-2.5 min-w-0">
+              {isMockView
+                ? [
+                    { label: "API surface", icon: Network, items: mockImpactSummary.apiChanges },
+                    { label: "Database", icon: Database, items: mockImpactSummary.database },
+                    { label: "Integrations", icon: ShieldCheck, items: mockImpactSummary.integrations },
+                    { label: "Tests", icon: FlaskConical, items: mockImpactSummary.tests },
+                  ].map((g) => {
+                    const item = g.items[0]
+                    const Icon = g.icon
                     return (
-                      <div key={i} className="rounded-[var(--radius-md)] border border-border bg-surface p-3 min-w-0">
+                      <div key={g.label} className="rounded-[var(--radius-md)] border border-border bg-surface p-3 min-w-0">
                         <div className="mb-1.5 flex items-center gap-2 min-w-0">
-                          <Network className="h-3.5 w-3.5 text-subtle-foreground shrink-0" />
-                          <span className="truncate text-[12px] font-semibold text-foreground">{si.area}</span>
-                          <StatusDot tone={tone} className="ml-auto shrink-0" />
+                          <Icon className="h-3.5 w-3.5 text-subtle-foreground shrink-0" />
+                          <span className="truncate text-[12px] font-semibold text-foreground">{g.label}</span>
+                          <StatusDot tone={item.tone} className="ml-auto shrink-0" />
                         </div>
-                        <div className="text-[12px] font-medium text-foreground">{si.impactLevel} Impact</div>
-                        <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground break-words">{si.description}</p>
+                        <div className="text-[12px] font-medium text-foreground break-words">{item.label}</div>
+                        <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground break-words">{item.detail}</p>
                       </div>
                     )
                   })
-                : (
-                    <div className="rounded-[var(--radius-md)] border border-border bg-surface p-3 text-[12px] text-muted-foreground">
-                      No system impacts recorded.
-                    </div>
-                  )}
+                : structured?.dimensions && structured.dimensions.length > 0
+                  ? structured.dimensions.map((dim, i) => {
+                      const tone = getImpactLevelTone(dim.impactLevel)
+                      const Icon = dim.area.toUpperCase() === "API"
+                        ? Network
+                        : dim.area.toUpperCase() === "DATA"
+                          ? Database
+                          : dim.area.toUpperCase() === "TESTS"
+                            ? FlaskConical
+                            : dim.area.toUpperCase() === "RUNTIME"
+                              ? Cpu
+                              : dim.area.toUpperCase() === "DEPENDENCIES"
+                                ? Layers
+                                : FileCode2
+
+                      return (
+                        <div key={i} className="rounded-[var(--radius-md)] border border-border bg-surface p-3 min-w-0">
+                          <div className="mb-1.5 flex items-center gap-2 min-w-0">
+                            <Icon className="h-3.5 w-3.5 text-subtle-foreground shrink-0" />
+                            <span className="truncate text-[12px] font-semibold text-foreground">{dim.area}</span>
+                            <StatusDot tone={tone} className="ml-auto shrink-0" />
+                          </div>
+                          <div className="text-[12px] font-medium text-foreground break-words">{dim.summary}</div>
+                          {dim.details && dim.details.length > 0 && (
+                            <ul className="mt-1 space-y-0.5 text-[11.5px] text-muted-foreground">
+                              {dim.details.map((d, idx) => (
+                                <li key={idx} className="break-words">• {d}</li>
+                              ))}
+                            </ul>
+                          )}
+                          {dim.evidence && dim.evidence.length > 0 && (
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              {dim.evidence.map((ev, idx) => (
+                                <span key={idx} className="rounded bg-surface-3 px-1 py-0.2 font-mono text-[10px] text-muted-foreground truncate max-w-full">
+                                  {ev}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })
+                  : structured?.systemImpacts && structured.systemImpacts.length > 0
+                    ? structured.systemImpacts.map((si, i) => {
+                        const tone = getImpactLevelTone(si.impactLevel)
+                        return (
+                          <div key={i} className="rounded-[var(--radius-md)] border border-border bg-surface p-3 min-w-0">
+                            <div className="mb-1.5 flex items-center gap-2 min-w-0">
+                              <Network className="h-3.5 w-3.5 text-subtle-foreground shrink-0" />
+                              <span className="truncate text-[12px] font-semibold text-foreground">{si.area}</span>
+                              <StatusDot tone={tone} className="ml-auto shrink-0" />
+                            </div>
+                            <div className="text-[12px] font-medium text-foreground">{si.impactLevel} Impact</div>
+                            <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground break-words">{si.description}</p>
+                          </div>
+                        )
+                      })
+                    : (
+                        <div className="rounded-[var(--radius-md)] border border-border bg-surface p-3 text-[12px] text-muted-foreground">
+                          No system impacts recorded.
+                        </div>
+                      )}
+            </div>
           </div>
+
+          {/* Unknowns section */}
+          {structured?.unknowns && structured.unknowns.length > 0 && (
+            <div className="rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/5 p-3 min-w-0">
+              <div className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold text-amber-500">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>Unknowns & Boundaries</span>
+              </div>
+              <ul className="space-y-1 text-[11.5px] leading-relaxed text-muted-foreground">
+                {structured.unknowns.map((u, i) => (
+                  <li key={i} className="flex items-start gap-1.5">
+                    <span className="text-amber-500">•</span>
+                    <span className="break-words">{u}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {hasCompletedAnalysis && (
             <div className="mt-6 rounded-[var(--radius-lg)] border border-primary-ring/50 bg-primary-soft/50 p-4 min-w-0">

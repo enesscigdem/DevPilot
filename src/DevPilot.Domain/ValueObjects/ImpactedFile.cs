@@ -11,4 +11,10 @@ public sealed class ImpactedFile
     public string Reason { get; set; } = string.Empty;
 
     public int Confidence { get; set; }
+
+    public string EvidenceType { get; set; } = "Inferred";
+
+    public string? EvidenceDetails { get; set; }
+
+    public bool IsUncertain { get; set; }
 }

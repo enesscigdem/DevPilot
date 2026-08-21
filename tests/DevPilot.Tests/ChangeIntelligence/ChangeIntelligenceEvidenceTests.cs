@@ -1,0 +1,319 @@
+using System.Text.Json;
+using DevPilot.Application.CodeAnalysis;
+using DevPilot.Application.DeveloperAgent.Models;
+using DevPilot.Application.Executions.Models;
+using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
+using DevPilot.Application.TaskImpactAnalysis.Services;
+using DevPilot.Domain.Entities;
+using DevPilot.Domain.Enums;
+using DevPilot.Domain.ValueObjects;
+using Xunit;
+
+namespace DevPilot.Tests.ChangeIntelligence;
+
+public sealed class ChangeIntelligenceEvidenceTests
+{
+    [Fact]
+    public void ClassifyFileEvidence_IdentifiesControllerUsage()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ControllerFiles = new[] { "src/DevPilot.Api/Controllers/TasksController.cs" }
+        };
+
+        var (type, details, isUncertain) = ChangeIntelligenceEvidenceCollector.ClassifyFileEvidence(
+            "src/DevPilot.Api/Controllers/TasksController.cs",
+            ImpactFileChangeType.Modify,
+            85,
+            evidence);
+
+        Assert.Equal("ControllerUsage", type);
+        Assert.Contains("Controller endpoint", details);
+        Assert.False(isUncertain);
+    }
+
+    [Fact]
+    public void ClassifyFileEvidence_IdentifiesPersistenceAndMigrationRelationships()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            PersistenceFiles = new[] { "src/DevPilot.Domain/Entities/Task.cs" },
+            MigrationFiles = new[] { "src/DevPilot.Infrastructure/Persistence/Migrations/20260821_Initial.cs" }
+        };
+
+        var (pType, pDetails, pUncertain) = ChangeIntelligenceEvidenceCollector.ClassifyFileEvidence(
+            "src/DevPilot.Domain/Entities/Task.cs",
+            ImpactFileChangeType.Modify,
+            90,
+            evidence);
+
+        Assert.Equal("PersistenceRelationship", pType);
+        Assert.Contains("DbContext", pDetails);
+        Assert.False(pUncertain);
+
+        var (mType, mDetails, mUncertain) = ChangeIntelligenceEvidenceCollector.ClassifyFileEvidence(
+            "src/DevPilot.Infrastructure/Persistence/Migrations/20260821_Initial.cs",
+            ImpactFileChangeType.Add,
+            80,
+            evidence);
+
+        Assert.Equal("MigrationRelationship", mType);
+        Assert.Contains("migration", mDetails, StringComparison.OrdinalIgnoreCase);
+        Assert.False(mUncertain);
+    }
+
+    [Fact]
+    public void ClassifyFileEvidence_IdentifiesRelevantTestFiles()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            TestFiles = new[] { "tests/DevPilot.Tests/TaskTests.cs" }
+        };
+
+        var (type, details, isUncertain) = ChangeIntelligenceEvidenceCollector.ClassifyFileEvidence(
+            "tests/DevPilot.Tests/TaskTests.cs",
+            ImpactFileChangeType.Modify,
+            85,
+            evidence);
+
+        Assert.Equal("RelevantTest", type);
+        Assert.Contains("test", details, StringComparison.OrdinalIgnoreCase);
+        Assert.False(isUncertain);
+    }
+
+    [Fact]
+    public void ClassifyFileEvidence_MarksLowConfidenceAsUncertain()
+    {
+        var evidence = new RepositoryEvidenceProfile();
+
+        var (type, details, isUncertain) = ChangeIntelligenceEvidenceCollector.ClassifyFileEvidence(
+            "src/DevPilot.Application/Services/Helper.cs",
+            ImpactFileChangeType.Modify,
+            60,
+            evidence);
+
+        Assert.Equal("Inferred", type);
+        Assert.True(isUncertain);
+    }
+
+    [Fact]
+    public void BuildChangeBrief_SynthesizesScopeRiskVerificationAndUnknowns()
+    {
+        var impactedFiles = new List<ImpactedFile>
+        {
+            new() { FilePath = "src/DevPilot.Api/Controllers/TasksController.cs", ChangeType = ImpactFileChangeType.Modify, Confidence = 90, EvidenceType = "ControllerUsage" },
+            new() { FilePath = "src/DevPilot.Domain/Entities/Task.cs", ChangeType = ImpactFileChangeType.Modify, Confidence = 90, EvidenceType = "PersistenceRelationship" }
+        };
+
+        var risks = new List<Risk>
+        {
+            new() { Level = RiskLevel.High, Description = "API surface and schema changes combined" }
+        };
+
+        var evidence = new RepositoryEvidenceProfile
+        {
+            HasEfCore = true,
+            HasTestProjects = true,
+            VerificationProfile = new RepositoryProfile(
+                State: RepositoryVerificationState.Configured,
+                Ecosystems: new[] { ".NET" },
+                Checks: new[]
+                {
+                    new RepositoryCheck(
+                        Id: "dotnet-build",
+                        DisplayName: "dotnet build",
+                        Kind: RepositoryCheckKind.Build,
+                        Ecosystem: ".NET",
+                        Executable: "dotnet",
+                        Arguments: new[] { "build" },
+                        WorkingDirectory: ".",
+                        Required: true,
+                        Timeout: TimeSpan.FromMinutes(2),
+                        Source: RepositoryCheckSource.DotNetManifest,
+                        EvidencePath: "DevPilot.sln",
+                        DiscoveryEvidence: "DevPilot.sln")
+                },
+                Message: null)
+        };
+
+        var brief = ChangeIntelligenceEvidenceCollector.BuildChangeBrief(
+            impactedFiles,
+            risks,
+            new List<SystemImpact>(),
+            new List<ChangeDimensionImpact>(),
+            new List<string> { "Deployment ordering unknown" },
+            evidence);
+
+        Assert.Equal(2, brief.FileCount);
+        Assert.True(brief.ProjectCount >= 1);
+        Assert.Equal(RiskLevel.High, brief.RiskLevel);
+        Assert.NotEmpty(brief.RiskReasons);
+        Assert.Contains(brief.RiskReasons, r => r.Contains("API surface modified"));
+        Assert.Contains(brief.RiskReasons, r => r.Contains("Database schema"));
+        Assert.Single(brief.ExpectedChecks);
+        Assert.Equal("dotnet build", brief.ExpectedChecks[0].DisplayName);
+        Assert.Contains("Deployment ordering unknown", brief.Unknowns);
+    }
+
+    [Fact]
+    public void SynthesizeUnknowns_AddsUnconfiguredVerificationAndMissingTests()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            HasTestProjects = false,
+            VerificationProfile = new RepositoryProfile(
+                State: RepositoryVerificationState.Unconfigured,
+                Ecosystems: Array.Empty<string>(),
+                Checks: Array.Empty<RepositoryCheck>(),
+                Message: "No test suite found")
+        };
+
+        var unknowns = ChangeIntelligenceEvidenceCollector.SynthesizeUnknowns(
+            new List<string> { "External webhook contract unknown" },
+            new List<ImpactedFile>(),
+            new List<ChangeDimensionImpact>(),
+            evidence);
+
+        Assert.Contains("External webhook contract unknown", unknowns);
+        Assert.Contains(unknowns, u => u.Contains("test project discovered", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(unknowns, u => u.Contains("unconfigured", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ChangeDimensions_SupportsAllStandardAreasAndNormalizes()
+    {
+        Assert.Equal("CODE", ChangeDimensionArea.Normalize("Code"));
+        Assert.Equal("API", ChangeDimensionArea.Normalize("Api / Endpoints"));
+        Assert.Equal("DATA", ChangeDimensionArea.Normalize("Database / Persistence"));
+        Assert.Equal("TESTS", ChangeDimensionArea.Normalize("Unit Tests"));
+        Assert.Equal("RUNTIME", ChangeDimensionArea.Normalize("Concurrency / Runtime"));
+        Assert.Equal("DEPENDENCIES", ChangeDimensionArea.Normalize("Package Dependencies"));
+        Assert.Equal("INFRASTRUCTURE", ChangeDimensionArea.Normalize("Docker / CI / Infrastructure"));
+    }
+
+    [Fact]
+    public void TaskImpactAnalysis_EntityPersistence_JsonSerializationRoundtrip()
+    {
+        var resultData = new ImpactAnalysisResultData
+        {
+            Summary = "Test summary",
+            Confidence = 95,
+            ImpactedFiles = new List<ImpactedFile>
+            {
+                new()
+                {
+                    FilePath = "src/DevPilot.Domain/Entities/Task.cs",
+                    ChangeType = ImpactFileChangeType.Modify,
+                    Reason = "Entity updated",
+                    Confidence = 95,
+                    EvidenceType = "PersistenceRelationship",
+                    EvidenceDetails = "Entity definition",
+                    IsUncertain = false
+                }
+            },
+            ChangeBrief = new ChangeBrief
+            {
+                FileCount = 1,
+                ProjectCount = 1,
+                RiskLevel = RiskLevel.Low,
+                RiskReasons = new List<string> { "Bounded entity change" },
+                ExpectedChecks = new List<ExpectedVerificationCheck>
+                {
+                    new() { CheckId = "build", DisplayName = "dotnet build", Kind = "Build", Required = true, Source = "Solution" }
+                },
+                Unknowns = new List<string> { "None" }
+            },
+            Dimensions = new List<ChangeDimensionImpact>
+            {
+                new()
+                {
+                    Area = "DATA",
+                    ImpactLevel = SystemImpactLevel.Low,
+                    Summary = "Schema change",
+                    Details = new List<string> { "Added field" },
+                    Evidence = new List<string> { "Task.cs" }
+                }
+            },
+            Unknowns = new List<string> { "None" },
+            RiskReasons = new List<string> { "Bounded entity change" }
+        };
+
+        var json = JsonSerializer.Serialize(resultData);
+        var deserialized = JsonSerializer.Deserialize<ImpactAnalysisResultData>(json);
+
+        Assert.NotNull(deserialized);
+        Assert.Equal("Test summary", deserialized.Summary);
+        Assert.Single(deserialized.ImpactedFiles);
+        Assert.Equal("PersistenceRelationship", deserialized.ImpactedFiles[0].EvidenceType);
+        Assert.NotNull(deserialized.ChangeBrief);
+        Assert.Equal(RiskLevel.Low, deserialized.ChangeBrief.RiskLevel);
+        Assert.Single(deserialized.Dimensions);
+        Assert.Equal("DATA", deserialized.Dimensions[0].Area);
+    }
+
+    [Fact]
+    public void DeveloperAgent_PromptHandoff_IsBoundedAndContainsGroundedEvidence()
+    {
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Add endpoint",
+            TaskDescription: "Add a new endpoint",
+            AcceptanceCriteria: "Must pass tests",
+            ImpactAnalysisSummary: "Impact summary",
+            ProposedPlan: "1. Add endpoint",
+            ImpactedFilePaths: new[] { "src/DevPilot.Api/Controllers/TasksController.cs" },
+            WorkspacePath: "C:/fake/workspace",
+            BranchName: "feature/test",
+            ImpactedFiles: new[]
+            {
+                new ImpactedFileDetail("src/DevPilot.Api/Controllers/TasksController.cs", "Modify", "Add endpoint", "ControllerUsage", false)
+            },
+            ChangeDimensions: new[] { "API: Controller endpoint updated" },
+            ExpectedChecks: new[] { "dotnet build" },
+            Unknowns: new[] { "External auth behavior unconfirmed" });
+
+        var contextFiles = new Dictionary<string, string>
+        {
+            ["src/DevPilot.Api/Controllers/TasksController.cs"] = "// Controller code"
+        };
+
+        var userPrompt = DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent.BuildManifestUserPrompt(
+            request,
+            contextFiles,
+            Array.Empty<DiscoveredProjectNode>());
+
+        Assert.Contains("=== Predicted Impacted Files ===", userPrompt);
+        Assert.Contains("Evidence: ControllerUsage", userPrompt);
+        Assert.Contains("=== Change Dimensions ===", userPrompt);
+        Assert.Contains("=== Unknowns / Boundaries ===", userPrompt);
+        Assert.True(userPrompt.Length < 3000, "DeveloperAgent prompt must remain bounded and compact.");
+    }
+
+    [Fact]
+    public void ChangeBrief_SurfacesProbabilisticMigrationStatement_WhenEfCorePresent()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            HasEfCore = true,
+            PersistenceFiles = new[] { "src/DevPilot.Domain/Entities/User.cs" },
+            MigrationFiles = new[] { "src/DevPilot.Infrastructure/Persistence/Migrations/20260101_Init.cs" }
+        };
+
+        var files = new List<ImpactedFile>
+        {
+            new() { FilePath = "src/DevPilot.Domain/Entities/User.cs", ChangeType = ImpactFileChangeType.Modify, Confidence = 90, EvidenceType = "PersistenceRelationship" }
+        };
+
+        var brief = ChangeIntelligenceEvidenceCollector.BuildChangeBrief(
+            files,
+            new List<Risk>(),
+            new List<SystemImpact>(),
+            new List<ChangeDimensionImpact>(),
+            new List<string>(),
+            evidence);
+
+        Assert.NotNull(brief.DataSummary);
+        Assert.Contains("migration likely/expected", brief.DataSummary, StringComparison.OrdinalIgnoreCase);
+    }
+}

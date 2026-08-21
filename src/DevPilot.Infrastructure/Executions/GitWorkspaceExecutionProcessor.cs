@@ -214,8 +214,27 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             .ToList() ?? new List<string>();
         var impactedFileDetails = analysis.StructuredResult?.ImpactedFiles?
             .Where(file => !string.IsNullOrWhiteSpace(file.FilePath))
-            .Select(file => new ImpactedFileDetail(file.FilePath, file.ChangeType.ToString(), file.Reason))
+            .Select(file => new ImpactedFileDetail(
+                file.FilePath,
+                file.ChangeType.ToString(),
+                file.Reason,
+                file.EvidenceType,
+                file.IsUncertain))
             .ToList() ?? new List<ImpactedFileDetail>();
+
+        var changeDimensions = analysis.StructuredResult?.Dimensions?
+            .Select(d => $"{d.Area}: {d.Summary}")
+            .Take(5)
+            .ToList();
+
+        var expectedChecks = analysis.StructuredResult?.ChangeBrief?.ExpectedChecks?
+            .Select(c => c.DisplayName)
+            .Take(5)
+            .ToList();
+
+        var criticalUnknowns = analysis.StructuredResult?.Unknowns?
+            .Take(3)
+            .ToList();
 
         var agentRequest = new DeveloperAgentRequest(
             context.TaskId,
@@ -229,7 +248,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             prepResult.WorkspacePath,
             prepResult.BranchName,
             impactedFileDetails,
-            analysis.Model);
+            analysis.Model,
+            ChangeDimensions: changeDimensions,
+            ExpectedChecks: expectedChecks,
+            Unknowns: criticalUnknowns);
 
         await SafeRecordActivityAsync(
             context.ExecutionId,
