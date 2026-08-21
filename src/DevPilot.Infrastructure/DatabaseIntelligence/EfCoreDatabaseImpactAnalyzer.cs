@@ -65,7 +65,7 @@ public sealed class EfCoreDatabaseImpactAnalyzer : IDatabaseImpactAnalyzer
         AnalyzeTaskAndFiles(taskPrompt, impactedFiles, workspaceRoot, changes, unknowns, evidenceList);
 
         // If no specific changes were extracted yet, but persistence files or data dimension exists
-        if (changes.Count == 0 && (hasPersistenceImpact || dataDim != null || promptHasDbIntent))
+        if (changes.Count == 0 && (hasPersistenceImpact || dataDim != null) && promptHasDbIntent)
         {
             changes.Add(new DatabaseChange
             {
@@ -133,7 +133,7 @@ public sealed class EfCoreDatabaseImpactAnalyzer : IDatabaseImpactAnalyzer
             changeKind = DatabaseChangeKind.PotentiallyDataSensitive;
         }
 
-        var requiresSchemaMigration = changes.Count > 0 || hasPersistenceImpact || promptHasDbIntent;
+        var requiresSchemaMigration = changes.Count > 0 || (hasPersistenceImpact && promptHasDbIntent);
         var migrationRequirement = requiresSchemaMigration
             ? DatabaseMigrationRequirement.Expected
             : DatabaseMigrationRequirement.None;
@@ -169,18 +169,26 @@ public sealed class EfCoreDatabaseImpactAnalyzer : IDatabaseImpactAnalyzer
     {
         if (string.IsNullOrWhiteSpace(prompt)) return false;
         var p = prompt.ToLowerInvariant();
+
+        // Exclude purely test/DI/factory/configuration prompts that don't modify persistent schemas
+        var isPureTestOrConfig = (p.Contains("webapplicationfactory") || p.Contains("testservice") || p.Contains("redis") || p.Contains("connectionstring") || p.Contains("program.cs")) &&
+                                 !p.Contains("migration") && !p.Contains("column") && !p.Contains("table") && !p.Contains("required") && !p.Contains("length");
+        if (isPureTestOrConfig)
+        {
+            return false;
+        }
+
         return p.Contains("migration") ||
-               p.Contains("database") ||
-               p.Contains("dbcontext") ||
-               p.Contains("entity") ||
-               p.Contains("table") ||
-               p.Contains("column") ||
-               p.Contains("field") ||
-               p.Contains("schema") ||
-               p.Contains("discountamount") ||
-               p.Contains("email") ||
+               p.Contains("add column") ||
+               p.Contains("drop column") ||
+               p.Contains("alter column") ||
+               p.Contains("create table") ||
+               p.Contains("drop table") ||
                p.Contains("foreign key") ||
-               p.Contains("index");
+               p.Contains("discountamount") ||
+               p.Contains("zorunlu") ||
+               p.Contains("düşür") ||
+               (p.Contains("entity") && (p.Contains("required") || p.Contains("column") || p.Contains("field") || p.Contains("length") || p.Contains("alanı")));
     }
 
     private static void AnalyzeTaskAndFiles(

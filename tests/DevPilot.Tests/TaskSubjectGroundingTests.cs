@@ -244,6 +244,135 @@ public class TaskSubjectGroundingTests
         result2.ErrorMessage.Should().Contain("Customer.Email could not be resolved in repository evidence.");
     }
 
+    [Fact]
+    public void Regression1_MissingCustomerEmail_StillBlocks()
+    {
+        var prompt = "Customer entity'sindeki Email alanını zorunlu yap";
+        var result = TaskSubjectGroundingValidator.Validate(prompt, _orderOnlyEvidence, null);
+
+        result.IsGrounded.Should().BeFalse();
+        result.TargetSubject.Should().Be("Customer.Email");
+        result.UnresolvedReason.Should().Be("Customer.Email could not be resolved in repository evidence.");
+    }
+
+    [Fact]
+    public void Regression2_MissingOrderServiceSomeMethod_Blocks_WhenOrderServiceIsRepoOwned()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "DevPilot_GroundingTest_" + Guid.NewGuid());
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var servicePath = Path.Combine(tempDir, "OrderService.cs");
+            File.WriteAllText(servicePath, "public class OrderService { public void ProcessOrder() { } }");
+
+            var evidence = new RepositoryEvidenceProfile(
+                InventoryCsFiles: new List<string> { "OrderService.cs" },
+                PersistenceFiles: new List<string>()
+            );
+
+            var prompt = "OrderService servisindeki CalculateTotal metodunu değiştir";
+            var result = TaskSubjectGroundingValidator.Validate(prompt, evidence, tempDir);
+
+            result.IsGrounded.Should().BeFalse();
+            result.TargetSubject.Should().Be("OrderService.CalculateTotal");
+            result.UnresolvedReason.Should().Be("OrderService.CalculateTotal could not be resolved in repository evidence.");
+        }
+        finally
+        {
+            Directory.Delete(tempDir, true);
+        }
+    }
+
+    [Fact]
+    public void Regression3_ConfigurationGetConnectionString_DoesNotBlock()
+    {
+        var prompt = "Configure ConnectionStrings via Configuration.GetConnectionString in Program.cs";
+        var result = TaskSubjectGroundingValidator.Validate(prompt, _orderOnlyEvidence, null);
+
+        result.IsGrounded.Should().BeTrue();
+        result.UnresolvedReason.Should().BeNull();
+    }
+
+    [Fact]
+    public void Regression4_AddDbContext_DoesNotBlock()
+    {
+        var prompt = "Register OrderDbContext using services.AddDbContext in Program.cs";
+        var result = TaskSubjectGroundingValidator.Validate(prompt, _orderOnlyEvidence, null);
+
+        result.IsGrounded.Should().BeTrue();
+        result.UnresolvedReason.Should().BeNull();
+    }
+
+    [Fact]
+    public void Regression5_UseAuthenticationAndUseAuthorization_DoNotBlock()
+    {
+        var prompt = "Add app.UseAuthentication and app.UseAuthorization to the middleware pipeline";
+        var result = TaskSubjectGroundingValidator.Validate(prompt, _orderOnlyEvidence, null);
+
+        result.IsGrounded.Should().BeTrue();
+        result.UnresolvedReason.Should().BeNull();
+    }
+
+    [Fact]
+    public void Regression6_TurkishHerTipinde_DoesNotBecomeDottedSubject_AndDoesNotBlock()
+    {
+        var prompt = "Veritabanındaki her tipinde ve tablolarda index yapılandırması kontrol edilmeli.";
+        var result = TaskSubjectGroundingValidator.Validate(prompt, _orderOnlyEvidence, null);
+
+        result.IsGrounded.Should().BeTrue();
+        result.UnresolvedReason.Should().BeNull();
+    }
+
+    [Fact]
+    public void Regression7_OrdinaryProseWithPunctuation_DoesNotProduceBlockingSubjects()
+    {
+        var prompt = "Please check the status. And make sure everything works correctly.";
+        var result = TaskSubjectGroundingValidator.Validate(prompt, _orderOnlyEvidence, null);
+
+        result.IsGrounded.Should().BeTrue();
+        result.UnresolvedReason.Should().BeNull();
+    }
+
+    [Fact]
+    public void Regression8_ProjectBrain_CustomWebApplicationFactory_RemainsExecutable()
+    {
+        var prompt = "Update CustomWebApplicationFactory to configure test services and in-memory options";
+        var result = TaskSubjectGroundingValidator.Validate(prompt, _orderOnlyEvidence, null);
+
+        result.IsGrounded.Should().BeTrue();
+        result.UnresolvedReason.Should().BeNull();
+    }
+
+    [Fact]
+    public void Regression9_RedisAndConnectionStringConfig_RemainsExecutable()
+    {
+        var prompt = "Add Redis caching configuration and connection string loading in Program.cs";
+        var result = TaskSubjectGroundingValidator.Validate(prompt, _orderOnlyEvidence, null);
+
+        result.IsGrounded.Should().BeTrue();
+        result.UnresolvedReason.Should().BeNull();
+    }
+
+    [Fact]
+    public void Regression10_DatabaseImpact_NotTriggered_ForTestFactoryAndDiTasks()
+    {
+        var prompt = "Update CustomWebApplicationFactory with AddDbContext for test services";
+        var impact = _databaseImpactAnalyzer.AnalyzeImpact(
+            new List<ImpactedFile>
+            {
+                new() { FilePath = "tests/DevPilot.Tests/CustomWebApplicationFactory.cs", ChangeType = ImpactFileChangeType.Modify }
+            },
+            new List<ChangeDimensionImpact>(),
+            new List<Risk>(),
+            _orderOnlyEvidence,
+            prompt,
+            null);
+
+        impact.RequiresSchemaMigration.Should().BeFalse();
+        impact.Changes.Should().BeEmpty();
+        impact.DataRiskLevel.Should().Be(RiskLevel.Low);
+    }
+
     private class FakeTaskRepository : ITaskRepository
     {
         private readonly DevelopmentTask _task;
