@@ -64,7 +64,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const overviewRef = useRef<WorkspaceOverview | null>(overview)
   const activeReqOverviewWorkspaceIdRef = useRef<string | null>(null)
-  const inFlightOverviewPromiseRef = useRef<{ workspaceId: string; promise: Promise<WorkspaceOverview> } | null>(null)
+  const inFlightOverviewRef = useRef<{
+    workspaceId: string
+    promise: Promise<WorkspaceOverview>
+    controller: AbortController
+  } | null>(null)
+  const inFlightWorkspacesPromiseRef = useRef<Promise<RepositoryWorkspace[]> | null>(null)
   const abortOverviewControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
@@ -105,8 +110,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const refreshWorkspaces = useCallback(async () => {
     setIsLoading(true)
     setError(null)
+
+    // Deduplicate in-flight getRepositoryWorkspaces requests (e.g. StrictMode double-mount)
+    if (!inFlightWorkspacesPromiseRef.current) {
+      inFlightWorkspacesPromiseRef.current = getRepositoryWorkspaces().finally(() => {
+        inFlightWorkspacesPromiseRef.current = null
+      })
+    }
+
     try {
-      const list = await getRepositoryWorkspaces()
+      const list = await inFlightWorkspacesPromiseRef.current
       setWorkspaces(list)
 
       setActiveWorkspaceId((prev) => {
@@ -157,18 +170,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setOverviewError(null)
       }
 
-      // If an identical request is already in flight for this workspace, reuse the in-flight promise
-      if (inFlightOverviewPromiseRef.current?.workspaceId === targetWorkspaceId) {
+      // If an identical non-aborted request is already in flight for this workspace, reuse it
+      const currentInFlight = inFlightOverviewRef.current
+      if (
+        currentInFlight &&
+        currentInFlight.workspaceId === targetWorkspaceId &&
+        !currentInFlight.controller.signal.aborted
+      ) {
         try {
-          const data = await inFlightOverviewPromiseRef.current.promise
+          const data = await currentInFlight.promise
           if (activeReqOverviewWorkspaceIdRef.current === targetWorkspaceId) {
             setOverview(data)
             setOverviewError(null)
           }
-        } catch {
-          // Handled by primary caller
+          return
+        } catch (err) {
+          // If the reused promise failed due to an abort from previous cleanup, fall through to fetch afresh
+          if (!(err instanceof DOMException && err.name === "AbortError")) {
+            return
+          }
         }
-        return
       }
 
       if (abortOverviewControllerRef.current) {
@@ -180,7 +201,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const reqPromise = getWorkspaceOverview(targetWorkspaceId, {
         signal: controller.signal,
       })
-      inFlightOverviewPromiseRef.current = { workspaceId: targetWorkspaceId, promise: reqPromise }
+      inFlightOverviewRef.current = {
+        workspaceId: targetWorkspaceId,
+        promise: reqPromise,
+        controller,
+      }
 
       try {
         const data = await reqPromise
@@ -191,6 +216,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
+          // Clean up this aborted controller ref so future callers don't reuse it
+          if (inFlightOverviewRef.current?.controller === controller) {
+            inFlightOverviewRef.current = null
+          }
           return
         }
         if (activeReqOverviewWorkspaceIdRef.current === targetWorkspaceId) {
@@ -203,8 +232,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           }
         }
       } finally {
-        if (inFlightOverviewPromiseRef.current?.workspaceId === targetWorkspaceId) {
-          inFlightOverviewPromiseRef.current = null
+        if (inFlightOverviewRef.current?.controller === controller) {
+          inFlightOverviewRef.current = null
         }
         if (
           activeReqOverviewWorkspaceIdRef.current === targetWorkspaceId &&
