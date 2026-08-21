@@ -316,4 +316,140 @@ public sealed class ChangeIntelligenceEvidenceTests
         Assert.NotNull(brief.DataSummary);
         Assert.Contains("migration likely/expected", brief.DataSummary, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void TryParseStructuredResult_CompactOrderSystemPayload_FitsBudgetAndPopulatesAllIntelligence()
+    {
+        var compactOrderSystemJson = """
+        {
+          "summary": "Add order cancellation endpoint with inventory restock and EF Core update.",
+          "confidence": 90,
+          "impactedFiles": [
+            { "filePath": "src/DevPilot.Api/Controllers/OrdersController.cs", "changeType": "Modify", "reason": "Add CancelOrder action" },
+            { "filePath": "src/DevPilot.Domain/Entities/Order.cs", "changeType": "Modify", "reason": "Add Cancel domain logic" },
+            { "filePath": "src/DevPilot.Application/Orders/Commands/CancelOrderCommand.cs", "changeType": "Add", "reason": "Handler for cancellation" },
+            { "filePath": "src/DevPilot.Infrastructure/Persistence/Migrations/20260821_CancelOrder.cs", "changeType": "Add", "reason": "Migration for cancellation timestamp" },
+            { "filePath": "tests/DevPilot.Tests/Orders/CancelOrderTests.cs", "changeType": "Add", "reason": "Unit tests" }
+          ],
+          "dimensions": [
+            { "area": "API", "impactLevel": "Medium", "summary": "New cancellation endpoint" },
+            { "area": "DATA", "impactLevel": "Medium", "summary": "Add status field to Orders table" }
+          ],
+          "proposedPlan": [
+            { "order": 1, "title": "Implement domain and command", "description": "Add Cancel logic to Order entity and implement handler" },
+            { "order": 2, "title": "Add controller endpoint and tests", "description": "Expose POST /api/orders/{id}/cancel and write tests" }
+          ],
+          "risks": [
+            { "level": "Medium", "description": "Concurrent cancellation race condition" }
+          ],
+          "unknowns": [
+            "Payment gateway refund webhook SLA"
+          ]
+        }
+        """;
+
+        // Verify that the payload is ultra-compact (< 1500 chars / ~350 tokens)
+        Assert.True(compactOrderSystemJson.Length < 1500, $"Payload size was {compactOrderSystemJson.Length} characters, which exceeds the compact budget.");
+
+        var projectGraph = new List<DiscoveredProjectNode>
+        {
+            new() { ProjectPath = "src/DevPilot.Api/DevPilot.Api.csproj", ProjectName = "DevPilot.Api", ProjectDirectory = "src/DevPilot.Api", PackageReferences = new() { "Microsoft.EntityFrameworkCore" }, IsTestProject = false },
+            new() { ProjectPath = "src/DevPilot.Domain/DevPilot.Domain.csproj", ProjectName = "DevPilot.Domain", ProjectDirectory = "src/DevPilot.Domain", IsTestProject = false },
+            new() { ProjectPath = "src/DevPilot.Application/DevPilot.Application.csproj", ProjectName = "DevPilot.Application", ProjectDirectory = "src/DevPilot.Application", IsTestProject = false },
+            new() { ProjectPath = "src/DevPilot.Infrastructure/DevPilot.Infrastructure.csproj", ProjectName = "DevPilot.Infrastructure", ProjectDirectory = "src/DevPilot.Infrastructure", PackageReferences = new() { "Microsoft.EntityFrameworkCore" }, IsTestProject = false },
+            new() { ProjectPath = "tests/DevPilot.Tests/DevPilot.Tests.csproj", ProjectName = "DevPilot.Tests", ProjectDirectory = "tests/DevPilot.Tests", IsTestProject = true }
+        };
+
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ProjectGraph = projectGraph,
+            ProjectRoots = new[] { "src/DevPilot.Api", "src/DevPilot.Domain", "src/DevPilot.Application", "src/DevPilot.Infrastructure", "tests/DevPilot.Tests" },
+            HasEfCore = true,
+            HasTestProjects = true,
+            ControllerFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs" },
+            PersistenceFiles = new[] { "src/DevPilot.Domain/Entities/Order.cs" },
+            InventoryCsFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs", "src/DevPilot.Domain/Entities/Order.cs" },
+            VerificationProfile = new RepositoryProfile(
+                State: RepositoryVerificationState.Configured,
+                Ecosystems: new[] { ".NET" },
+                Checks: new[]
+                {
+                    new RepositoryCheck("build", "dotnet build", RepositoryCheckKind.Build, ".NET", "dotnet", new[] { "build" }, ".", true, TimeSpan.FromMinutes(2), RepositoryCheckSource.DotNetManifest, "DevPilot.sln")
+                })
+        };
+
+        var parseResult = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(
+            compactOrderSystemJson,
+            evidence,
+            workspaceLocalPath: "");
+
+        Assert.True(parseResult.Success, parseResult.ErrorMessage);
+        var data = parseResult.ResultData!;
+
+        Assert.Equal(5, data.ImpactedFiles.Count);
+        Assert.Equal("ControllerUsage", data.ImpactedFiles[0].EvidenceType);
+        Assert.Equal("PersistenceRelationship", data.ImpactedFiles[1].EvidenceType);
+        Assert.Equal("Inferred", data.ImpactedFiles[2].EvidenceType);
+        Assert.Equal("MigrationRelationship", data.ImpactedFiles[3].EvidenceType);
+        Assert.Equal("RelevantTest", data.ImpactedFiles[4].EvidenceType);
+
+        Assert.NotNull(data.ChangeBrief);
+        Assert.Equal(5, data.ChangeBrief.FileCount);
+        Assert.True(data.ChangeBrief.ProjectCount >= 3);
+        Assert.NotEmpty(data.ChangeBrief.RiskReasons);
+        Assert.Single(data.ChangeBrief.ExpectedChecks);
+
+        Assert.NotEmpty(data.Dimensions);
+        Assert.Contains(data.Dimensions, d => d.Area == "API");
+        Assert.Contains(data.Dimensions, d => d.Area == "DATA");
+
+        Assert.NotEmpty(data.SystemImpacts);
+        Assert.NotEmpty(data.ProposedPlan);
+        Assert.NotEmpty(data.Risks);
+        Assert.NotEmpty(data.Unknowns);
+        Assert.Contains("Payment gateway refund webhook SLA", data.Unknowns);
+    }
+
+    [Fact]
+    public void TryParseStructuredResult_MinimalPayload_GracefullyEnrichesFromRepositoryEvidence()
+    {
+        var minimalJson = """
+        {
+          "summary": "Fix validation in orders controller",
+          "confidence": 85,
+          "impactedFiles": [
+            { "filePath": "src/DevPilot.Api/Controllers/OrdersController.cs", "changeType": "Modify" }
+          ]
+        }
+        """;
+
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ProjectRoots = new[] { "src/DevPilot.Api" },
+            ControllerFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs" },
+            InventoryCsFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs" },
+            HasEfCore = false,
+            HasTestProjects = false,
+            VerificationProfile = new RepositoryProfile(
+                State: RepositoryVerificationState.Unconfigured,
+                Ecosystems: Array.Empty<string>(),
+                Checks: Array.Empty<RepositoryCheck>())
+        };
+
+        var parseResult = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(
+            minimalJson,
+            evidence,
+            workspaceLocalPath: "");
+
+        Assert.True(parseResult.Success, parseResult.ErrorMessage);
+        var data = parseResult.ResultData!;
+
+        Assert.Single(data.ImpactedFiles);
+        Assert.Equal("ControllerUsage", data.ImpactedFiles[0].EvidenceType);
+        Assert.NotNull(data.ChangeBrief);
+        Assert.NotEmpty(data.ProposedPlan);
+        Assert.NotEmpty(data.Dimensions);
+        Assert.NotEmpty(data.Unknowns);
+        Assert.Contains(data.Unknowns, u => u.Contains("unconfigured", StringComparison.OrdinalIgnoreCase));
+    }
 }
