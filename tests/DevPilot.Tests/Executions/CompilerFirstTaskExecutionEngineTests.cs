@@ -92,7 +92,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
             new TestExecutionRepository(),
             new TestImpactAnalysisRepository { AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed } },
             agent,
-            runner,
+            new TestRepositoryCheckRunnerAdapter(runner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -351,7 +351,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
             new TestExecutionRepository(),
             new TestImpactAnalysisRepository { AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed } },
             agent,
-            runner,
+            new TestRepositoryCheckRunnerAdapter(runner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -379,7 +379,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
             new TestExecutionRepository(),
             new TestImpactAnalysisRepository { AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed } },
             agent,
-            runner,
+            new TestRepositoryCheckRunnerAdapter(runner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -412,7 +412,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
             new TestExecutionRepository(),
             new TestImpactAnalysisRepository { AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed } },
             agent,
-            runner,
+            new TestRepositoryCheckRunnerAdapter(runner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -441,7 +441,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
             new TestExecutionRepository(),
             new TestImpactAnalysisRepository { AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed } },
             agent,
-            runner,
+            new TestRepositoryCheckRunnerAdapter(runner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -479,7 +479,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
             new TestExecutionRepository(),
             new TestImpactAnalysisRepository { AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed } },
             agent,
-            runner,
+            new TestRepositoryCheckRunnerAdapter(runner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 

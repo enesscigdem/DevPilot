@@ -355,4 +355,35 @@ public sealed class ExecutionStageEvaluatorTests
         Assert.Equal(ExecutionStageStepState.Failed, stages[2].State); // Approved: Failed (pre-execution rejection)
         Assert.Equal(ExecutionStageStepState.Todo, stages[3].State);   // Implement: Todo
     }
+
+    [Fact]
+    public void EvaluateStages_WhenRepositoryHasNoTestCheck_ReadyVerificationStillCompletesVerifyStage()
+    {
+        var task = CreateTask(DevelopmentTaskStatus.Executing);
+        var execution = CreateExecution(task.Id, TaskExecutionStatus.Completed);
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Id = Guid.NewGuid(),
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.DeveloperAgent,
+                Status = ExecutionActivityStatus.Completed,
+                CreatedAt = DateTime.UtcNow
+            },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Repository checks passed.",
+                CreatedAt = DateTime.UtcNow.AddSeconds(1)
+            }
+        };
+
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        Assert.Equal(ExecutionStageStepState.Done, stages[4].State);
+    }
 }

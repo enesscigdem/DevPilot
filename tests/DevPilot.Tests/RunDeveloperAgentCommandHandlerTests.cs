@@ -10,6 +10,7 @@ using DevPilot.Domain.Enums;
 using DevPilot.Domain.ValueObjects;
 using DevPilot.Infrastructure.DeveloperAgent;
 using DevPilot.Infrastructure.Executions;
+using DevPilot.Tests.Executions;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -354,7 +355,7 @@ public class RunDeveloperAgentCommandHandlerTests : IDisposable
             _executionRepository,
             _analysisRepository,
             _developerAgent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             new NullActivityRecorder(),
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 

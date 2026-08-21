@@ -131,7 +131,14 @@ public class DotnetExecutionValidationRunnerTests : IDisposable
         // Assert via reflection that IExecutionValidationRunner has no RunAsync(string command) method
         var methods = typeof(IExecutionValidationRunner).GetMethods();
         methods.Should().NotContain(m => m.Name == "RunAsync");
-        methods.Should().OnlyContain(m => m.Name == nameof(IExecutionValidationRunner.ValidateBuildAsync) || m.Name == nameof(IExecutionValidationRunner.ValidateTestAsync));
+        methods.Should().OnlyContain(method =>
+            method.Name == nameof(IExecutionValidationRunner.ValidateBuildAsync) ||
+            method.Name == nameof(IExecutionValidationRunner.ValidateTestAsync));
+        methods.Should().NotContain(method =>
+            method.GetParameters().Any(parameter =>
+                parameter.Name != null &&
+                parameter.Name.Contains("command", StringComparison.OrdinalIgnoreCase) &&
+                parameter.ParameterType == typeof(string)));
     }
 
     [Fact]
@@ -412,7 +419,7 @@ public class DotnetExecutionValidationRunnerTests : IDisposable
     [Fact]
     public async Task SmokeTest_RealExecutionValidationRunner_AgainstRealGitWorktree()
     {
-        // Setup real Git worktree with real DotnetProcessRunner & GitExecutionWorkspaceManager
+        // Setup real Git worktree with the generic bounded process runner & GitExecutionWorkspaceManager
         var realRepoDir = Path.Combine(_tempDir, "smoke_repo");
         var realWorktreeDir = Path.Combine(_tempDir, "smoke_worktree");
         var branchName = "devpilot/smoke-test";
@@ -438,7 +445,7 @@ public class DotnetExecutionValidationRunnerTests : IDisposable
             Microsoft.Extensions.Options.Options.Create(new DevPilot.Infrastructure.RepositoryClone.RepositoryCloneOptions()),
             NullLogger<GitExecutionWorkspaceManager>.Instance);
 
-        var realProcessRunner = new DotnetProcessRunner(NullLogger<DotnetProcessRunner>.Instance);
+        var realProcessRunner = new BoundedProcessRunner(NullLogger<BoundedProcessRunner>.Instance);
         var runner = new DotnetExecutionValidationRunner(realWorkspaceManager, realProcessRunner, NullLogger<DotnetExecutionValidationRunner>.Instance);
 
         var request = new ExecutionValidationRequest(realWorktreeDir, branchName);

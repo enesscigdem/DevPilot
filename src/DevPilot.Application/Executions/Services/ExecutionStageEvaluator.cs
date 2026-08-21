@@ -86,9 +86,12 @@ public static class ExecutionStageEvaluator
         var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
         var testFailed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Failed);
         var testStarted = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started);
+        var repositoryVerificationReady = activities.Any(a =>
+            a.Status == ExecutionActivityStatus.Completed &&
+            (a.Message == "Repository checks passed." || a.Message == "Tests passed."));
 
         ExecutionStageStepState buildTestState;
-        if (buildPassed && testPassed)
+        if (repositoryVerificationReady || (buildPassed && testPassed))
         {
             buildTestState = ExecutionStageStepState.Done;
         }

@@ -3,20 +3,18 @@ using System.Text;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
-using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
-using DevPilot.Infrastructure.DeveloperAgent;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Infrastructure.Executions;
 
 /// <summary>
-/// Execution processor that orchestrates the real Developer Agent execution pipeline:
-/// Prepare Workspace → Verify Clean → Run Developer Agent → Build Validation (with Compile Repair Loop) → Test Validation (with Test Repair Loop).
+/// Orchestrates the generic execution lifecycle inside an isolated Git worktree. Repository and
+/// language-specific verification knowledge is supplied through repository-check ports.
 /// </summary>
 public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 {
@@ -24,9 +22,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IExecutionRepository _executionRepository;
     private readonly IImpactAnalysisRepository _impactAnalysisRepository;
     private readonly IDeveloperAgent _developerAgent;
-    private readonly IExecutionValidationRunner _validationRunner;
+    private readonly IRepositoryCheckRunner _repositoryCheckRunner;
     private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly IExecutionChangeFingerprintCalculator? _changeFingerprintCalculator;
+    private readonly IRepositoryRepairContextProvider? _repairContextProvider;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
     private readonly int _maxCompileRepairRounds;
     private readonly int _maxTestRepairRounds;
@@ -36,42 +35,33 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IExecutionRepository executionRepository,
         IImpactAnalysisRepository impactAnalysisRepository,
         IDeveloperAgent developerAgent,
-        IExecutionValidationRunner validationRunner,
+        IRepositoryCheckRunner repositoryCheckRunner,
         IExecutionActivityRecorder activityRecorder,
         ILogger<GitWorkspaceExecutionProcessor> logger,
         IConfiguration? configuration = null,
-        IExecutionChangeFingerprintCalculator? changeFingerprintCalculator = null)
+        IExecutionChangeFingerprintCalculator? changeFingerprintCalculator = null,
+        IRepositoryRepairContextProvider? repairContextProvider = null)
     {
         _workspaceManager = workspaceManager;
         _executionRepository = executionRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
         _developerAgent = developerAgent;
-        _validationRunner = validationRunner;
+        _repositoryCheckRunner = repositoryCheckRunner;
         _activityRecorder = activityRecorder;
         _changeFingerprintCalculator = changeFingerprintCalculator;
+        _repairContextProvider = repairContextProvider;
         _logger = logger;
 
-        if (configuration != null &&
-            int.TryParse(configuration["ExecutionReliability:MaxCompileRepairRounds"] ?? configuration["DeveloperAgent:MaxCompileRepairRounds"], out var compileRounds) &&
-            compileRounds >= 0)
-        {
-            _maxCompileRepairRounds = compileRounds;
-        }
-        else
-        {
-            _maxCompileRepairRounds = 3;
-        }
-
-        if (configuration != null &&
-            int.TryParse(configuration["ExecutionReliability:MaxTestRepairRounds"] ?? configuration["DeveloperAgent:MaxTestRepairRounds"], out var testRounds) &&
-            testRounds >= 0)
-        {
-            _maxTestRepairRounds = testRounds;
-        }
-        else
-        {
-            _maxTestRepairRounds = 2;
-        }
+        _maxCompileRepairRounds = TryGetNonNegativeSetting(
+            configuration,
+            "ExecutionReliability:MaxCompileRepairRounds",
+            "DeveloperAgent:MaxCompileRepairRounds",
+            3);
+        _maxTestRepairRounds = TryGetNonNegativeSetting(
+            configuration,
+            "ExecutionReliability:MaxTestRepairRounds",
+            "DeveloperAgent:MaxTestRepairRounds",
+            2);
     }
 
     public async Task ProcessAsync(
@@ -79,12 +69,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         CancellationToken cancellationToken = default)
     {
         _logger.LogInformation(
-            "GitWorkspaceExecutionProcessor: starting execution pipeline for execution {ExecutionId} (Task '{TaskTitle}' - {TaskId}).",
+            "Starting repository-native execution {ExecutionId} for task {TaskId}.",
             context.ExecutionId,
-            context.TaskTitle,
             context.TaskId);
 
-        // ── Stage 1. Prepare isolated workspace & dedicated branch ──────────────────
         await SafeRecordActivityAsync(
             context.ExecutionId,
             ExecutionStage.Workspace,
@@ -93,39 +81,29 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var prepResult = await _workspaceManager.PrepareWorkspaceAsync(
-            executionId: context.ExecutionId,
-            taskId: context.TaskId,
-            sourceRepositoryLocalPath: context.WorkspaceLocalPath,
+            context.ExecutionId,
+            context.TaskId,
+            context.WorkspaceLocalPath,
             sourceBranch: null,
-            cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
+            cancellationToken).ConfigureAwait(false);
 
         if (!prepResult.Success)
         {
-            var errorMessage = $"Execution workspace preparation failed: {prepResult.ErrorMessage}";
-            _logger.LogError(
-                "GitWorkspaceExecutionProcessor: preparation failed for execution {ExecutionId}. Error: {Error}",
-                context.ExecutionId,
-                errorMessage);
-
+            var error = $"Execution workspace preparation failed: {prepResult.ErrorMessage}";
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.Workspace,
                 ExecutionActivityStatus.Failed,
-                errorMessage,
+                error,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException(errorMessage);
+            throw new InvalidOperationException(error);
         }
 
-        // ── Stage 2. Persist workspace path and branch name to TaskExecution record ─
-        await _executionRepository
-            .UpdateWorkspaceDetailsAsync(
-                context.ExecutionId,
-                prepResult.WorkspacePath,
-                prepResult.BranchName,
-                cancellationToken)
-            .ConfigureAwait(false);
+        await _executionRepository.UpdateWorkspaceDetailsAsync(
+            context.ExecutionId,
+            prepResult.WorkspacePath,
+            prepResult.BranchName,
+            cancellationToken).ConfigureAwait(false);
 
         await SafeRecordActivityAsync(
             context.ExecutionId,
@@ -135,95 +113,123 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             new ExecutionActivityMetadata(BranchName: prepResult.BranchName),
             cancellationToken).ConfigureAwait(false);
 
-        // ── Stage 3. Verify workspace state immediately before AI call (clean required)
-        var preAiVerification = await _workspaceManager
-            .VerifyWorkspaceStateAsync(
-                prepResult.WorkspacePath,
-                prepResult.BranchName,
-                requireClean: true,
-                cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
+        var preAiVerification = await _workspaceManager.VerifyWorkspaceStateAsync(
+            prepResult.WorkspacePath,
+            prepResult.BranchName,
+            requireClean: true,
+            cancellationToken).ConfigureAwait(false);
 
         if (!preAiVerification.IsValid)
         {
-            var errorMessage = $"Developer Agent failed: Execution workspace verification failed prior to AI invocation. {preAiVerification.ErrorMessage}";
-            _logger.LogError(
-                "GitWorkspaceExecutionProcessor: pre-AI verification failed for execution {ExecutionId}. Error: {Error}",
-                context.ExecutionId,
-                errorMessage);
-
+            var error = $"Developer Agent failed: Execution workspace verification failed prior to AI invocation. {preAiVerification.ErrorMessage}";
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.DeveloperAgent,
                 ExecutionActivityStatus.Failed,
-                errorMessage,
+                error,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException(errorMessage);
+            throw new InvalidOperationException(error);
         }
 
-        // ── Stage 4. Load completed persisted TaskImpactAnalysis ──────────────────
+        var profile = await _repositoryCheckRunner.DiscoverAsync(
+            new RepositoryPreflightRequest(prepResult.WorkspacePath, prepResult.BranchName),
+            cancellationToken).ConfigureAwait(false);
+
+        var requiredChecks = profile.Checks
+            .Where(check => check.Required)
+            .OrderBy(check => check.Order)
+            .ThenBy(check => check.Id, StringComparer.Ordinal)
+            .ToList();
+
+        if (profile.State != RepositoryVerificationState.Configured || requiredChecks.Count == 0)
+        {
+            var category = profile.State == RepositoryVerificationState.InfrastructureFailure
+                ? RepositoryCheckFailureCategory.InfrastructureFailure.ToString()
+                : "Unconfigured";
+            var error = profile.State == RepositoryVerificationState.InfrastructureFailure
+                ? $"Repository verification preflight failed: {profile.Message ?? "Infrastructure failure."}"
+                : $"Repository verification is unconfigured: {profile.Message ?? "No trustworthy check was discovered."}";
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Execution,
+                ExecutionActivityStatus.Failed,
+                error,
+                new ExecutionActivityMetadata(
+                    EventKind: "StoppedWithEvidence",
+                    DiscoveredCheckCount: requiredChecks.Count,
+                    DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
+                    DiscoveredCheckEvidence: requiredChecks
+                        .Where(check => !string.IsNullOrWhiteSpace(check.DiscoveryEvidence))
+                        .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
+                        .ToList(),
+                    DetectedEcosystems: profile.Ecosystems,
+                    VerificationFailureCategory: category,
+                    DeterministicCheck: true,
+                    VerificationUnresolved: profile.HasUnresolvedVerification),
+                cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(error);
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Workspace,
+            ExecutionActivityStatus.Completed,
+            "Repository verification checks discovered.",
+            new ExecutionActivityMetadata(
+                EventKind: "RepositoryPreflight",
+                DiscoveredCheckCount: requiredChecks.Count,
+                DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
+                DiscoveredCheckEvidence: requiredChecks
+                    .Where(check => !string.IsNullOrWhiteSpace(check.DiscoveryEvidence))
+                    .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
+                    .ToList(),
+                DetectedEcosystems: profile.Ecosystems,
+                DeterministicCheck: true,
+                VerificationUnresolved: profile.HasUnresolvedVerification),
+            cancellationToken).ConfigureAwait(false);
+
         var analysis = await _impactAnalysisRepository
             .GetLatestByTaskIdAsync(context.TaskId, cancellationToken)
             .ConfigureAwait(false);
 
         if (analysis is null || analysis.Status != ImpactAnalysisStatus.Completed)
         {
-            const string analysisError = "Developer Agent failed: A completed TaskImpactAnalysis is required before running the Developer Agent.";
-            _logger.LogError(
-                "GitWorkspaceExecutionProcessor: {Error} ExecutionId={ExecutionId}, TaskId={TaskId}",
-                analysisError,
-                context.ExecutionId,
-                context.TaskId);
-
+            const string error = "Developer Agent failed: A completed TaskImpactAnalysis is required before running the Developer Agent.";
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.DeveloperAgent,
                 ExecutionActivityStatus.Failed,
-                analysisError,
+                error,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException(analysisError);
+            throw new InvalidOperationException(error);
         }
 
-        // ── Stage 5. Build DeveloperAgentRequest & Invoke Developer Agent ─────────
         var summary = !string.IsNullOrWhiteSpace(analysis.StructuredResult?.Summary)
             ? analysis.StructuredResult.Summary
             : context.ImpactAnalysisSummary;
-
-        var proposedPlanText = BuildProposedPlanText(analysis);
-
         var impactedFiles = analysis.StructuredResult?.ImpactedFiles?
-            .Select(f => f.FilePath)
-            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(file => file.FilePath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
             .ToList() ?? new List<string>();
-
         var impactedFileDetails = analysis.StructuredResult?.ImpactedFiles?
-            .Where(f => !string.IsNullOrWhiteSpace(f.FilePath))
-            .Select(f => new ImpactedFileDetail(
-                FilePath: f.FilePath,
-                ChangeType: f.ChangeType.ToString(),
-                Reason: f.Reason))
+            .Where(file => !string.IsNullOrWhiteSpace(file.FilePath))
+            .Select(file => new ImpactedFileDetail(file.FilePath, file.ChangeType.ToString(), file.Reason))
             .ToList() ?? new List<ImpactedFileDetail>();
 
         var agentRequest = new DeveloperAgentRequest(
-            TaskId: context.TaskId,
-            ExecutionId: context.ExecutionId,
-            TaskTitle: context.TaskTitle,
-            TaskDescription: context.TaskDescription,
-            AcceptanceCriteria: context.AcceptanceCriteria,
-            ImpactAnalysisSummary: summary,
-            ProposedPlan: proposedPlanText,
-            ImpactedFilePaths: impactedFiles,
-            WorkspacePath: prepResult.WorkspacePath,
-            BranchName: prepResult.BranchName,
-            ImpactedFiles: impactedFileDetails,
-            Model: analysis.Model);
-
-        _logger.LogInformation(
-            "GitWorkspaceExecutionProcessor: invoking DeveloperAgent for execution {ExecutionId} (Task {TaskId}).",
+            context.TaskId,
             context.ExecutionId,
-            context.TaskId);
+            context.TaskTitle,
+            context.TaskDescription,
+            context.AcceptanceCriteria,
+            summary,
+            BuildProposedPlanText(analysis),
+            impactedFiles,
+            prepResult.WorkspacePath,
+            prepResult.BranchName,
+            impactedFileDetails,
+            analysis.Model);
 
         await SafeRecordActivityAsync(
             context.ExecutionId,
@@ -231,12 +237,9 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             ExecutionActivityStatus.Started,
             "Developer Agent started.",
             new ExecutionActivityMetadata(Model: analysis.Model, EventKind: "GeneratingChange"),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken).ConfigureAwait(false);
 
-        var agentResult = await _developerAgent
-            .GenerateAndApplyEditsAsync(agentRequest, cancellationToken)
-            .ConfigureAwait(false);
-
+        var agentResult = await _developerAgent.GenerateAndApplyEditsAsync(agentRequest, cancellationToken).ConfigureAwait(false);
         var actualModel = agentResult.Model ?? analysis.Model;
         if (!string.IsNullOrWhiteSpace(actualModel))
         {
@@ -245,47 +248,29 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
         if (!agentResult.Success)
         {
-            var agentError = $"Developer Agent failed: {agentResult.ErrorMessage ?? "Developer Agent failed to generate or apply edits."}";
-            _logger.LogError(
-                "GitWorkspaceExecutionProcessor: DeveloperAgent execution failed for {ExecutionId}. Error: {Error}",
-                context.ExecutionId,
-                agentError);
-
+            var error = $"Developer Agent failed: {agentResult.ErrorMessage ?? "Developer Agent failed to generate or apply edits."}";
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.DeveloperAgent,
                 ExecutionActivityStatus.Failed,
-                agentError,
+                error,
                 actualModel != null ? new ExecutionActivityMetadata(Model: actualModel) : null,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException(agentError);
+                cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(error);
         }
 
-        // Zero modified files check (must produce at least one change for coding pipeline MVP)
         if (agentResult.ModifiedFiles == null || agentResult.ModifiedFiles.Count == 0)
         {
-            const string zeroFilesError = "Developer Agent failed: Developer Agent returned success but produced zero modified files.";
-            _logger.LogError(
-                "GitWorkspaceExecutionProcessor: {Error} ExecutionId={ExecutionId}",
-                zeroFilesError,
-                context.ExecutionId);
-
+            const string error = "Developer Agent failed: Developer Agent returned success but produced zero modified files.";
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.DeveloperAgent,
                 ExecutionActivityStatus.Failed,
-                zeroFilesError,
+                error,
                 actualModel != null ? new ExecutionActivityMetadata(Model: actualModel) : null,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-
-            throw new InvalidOperationException(zeroFilesError);
+                cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(error);
         }
-
-        _logger.LogInformation(
-            "GitWorkspaceExecutionProcessor: DeveloperAgent successfully applied {Count} modified files for execution {ExecutionId}.",
-            agentResult.ModifiedFiles.Count,
-            context.ExecutionId);
 
         await SafeRecordActivityAsync(
             context.ExecutionId,
@@ -296,253 +281,209 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ModifiedFileCount: agentResult.ModifiedFiles.Count,
                 Model: actualModel,
                 EventKind: "GeneratingChange"),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken).ConfigureAwait(false);
 
-        // ── Stage 6. Validate Build (with multi-round Compiler-Diagnostic Repair Loop) ──
-        var validationRequest = new ExecutionValidationRequest(
-            WorkspacePath: prepResult.WorkspacePath,
-            BranchName: prepResult.BranchName,
-            TargetPath: null);
+        var modifiedFiles = new HashSet<string>(agentResult.ModifiedFiles, StringComparer.OrdinalIgnoreCase);
+        var prerequisiteChecks = requiredChecks.Where(check => check.Kind != RepositoryCheckKind.Test).ToList();
+        var testChecks = requiredChecks.Where(check => check.Kind == RepositoryCheckKind.Test).ToList();
 
-        _logger.LogInformation(
-            "GitWorkspaceExecutionProcessor: starting build validation for execution {ExecutionId}.",
-            context.ExecutionId);
+        foreach (var check in prerequisiteChecks)
+        {
+            await RunPrerequisiteCheckAsync(
+                context,
+                prepResult,
+                analysis,
+                actualModel,
+                check,
+                modifiedFiles,
+                cancellationToken).ConfigureAwait(false);
+        }
 
+        var confirmedBuild = prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build);
+        for (var index = 0; index < testChecks.Count; index++)
+        {
+            var check = testChecks[index];
+            await RunTestCheckAsync(
+                context,
+                prepResult,
+                analysis,
+                actualModel,
+                check,
+                prerequisiteChecks,
+                confirmedBuild,
+                index == testChecks.Count - 1,
+                modifiedFiles,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (testChecks.Count == 0)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Completed,
+                "Repository checks passed.",
+                new ExecutionActivityMetadata(
+                    BuildPassed: prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build) ? true : null,
+                    EventKind: "ReadyForReview"),
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task RunPrerequisiteCheckAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        TaskImpactAnalysis analysis,
+        string? actualModel,
+        RepositoryCheck check,
+        HashSet<string> modifiedFiles,
+        CancellationToken cancellationToken)
+    {
         await SafeRecordActivityAsync(
             context.ExecutionId,
             ExecutionStage.Build,
             ExecutionActivityStatus.Started,
-            "Build started.",
-            new ExecutionActivityMetadata(EventKind: "VerifyingRepository"),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            check.Kind == RepositoryCheckKind.Build ? "Build started." : $"{check.DisplayName} started.",
+            CheckMetadata(check, eventKind: "VerifyingRepository"),
+            cancellationToken).ConfigureAwait(false);
 
-        var initialBuildStopwatch = Stopwatch.StartNew();
-        var buildResult = await _validationRunner
-            .ValidateBuildAsync(validationRequest, cancellationToken)
-            .ConfigureAwait(false);
-        initialBuildStopwatch.Stop();
+        var stopwatch = Stopwatch.StartNew();
+        var result = await _repositoryCheckRunner.ExecuteAsync(
+            new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, check),
+            cancellationToken).ConfigureAwait(false);
+        stopwatch.Stop();
 
-        int compileRepairRound = 0;
-        var modifiedFiles = new HashSet<string>(agentResult.ModifiedFiles, StringComparer.OrdinalIgnoreCase);
-        string? previousBuildFailureFingerprint = null;
-
-        while (!buildResult.Success && compileRepairRound < _maxCompileRepairRounds)
+        if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
         {
-            compileRepairRound++;
-            var compilerEvidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
-                buildResult.StdOut,
-                buildResult.StdErr,
-                buildResult.ErrorMessage);
-            var rawBuildError = buildResult.ErrorMessage ?? "dotnet build failed.";
-            _logger.LogWarning(
-                "GitWorkspaceExecutionProcessor: build validation failed (round {Round}/{MaxRounds}) for execution {ExecutionId}. Error: {Error}. Checking for repairable compiler diagnostics.",
-                compileRepairRound,
-                _maxCompileRepairRounds,
-                context.ExecutionId,
-                rawBuildError);
+            await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Build, check, result, cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
+        }
 
-            if (string.Equals(previousBuildFailureFingerprint, compilerEvidence.FailureFingerprint, StringComparison.Ordinal))
+        var repairRound = 0;
+        string? previousFailureFingerprint = null;
+
+        while (!result.Success && repairRound < _maxCompileRepairRounds)
+        {
+            repairRound++;
+            var evidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(result.StdOut, result.StdErr, result.ErrorMessage);
+
+            if (string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal))
             {
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
                     ExecutionStage.Build,
                     ExecutionActivityStatus.Failed,
-                    "Stopped with evidence: compile repair made no diagnostic progress.",
-                    new ExecutionActivityMetadata(
-                        EventKind: "StoppedWithEvidence",
-                        RepairKind: "Compile",
-                        RepairRound: compileRepairRound,
-                        FailureFingerprint: compilerEvidence.FailureFingerprint,
-                        ProgressResult: "SameFailure"),
+                    "Stopped with evidence: focused repair made no diagnostic progress.",
+                    CheckMetadata(
+                        check,
+                        "StoppedWithEvidence",
+                        result,
+                        repairKind: "Compile",
+                        repairRound: repairRound,
+                        failureFingerprint: evidence.FailureFingerprint,
+                        progressResult: "SameFailure"),
                     cancellationToken).ConfigureAwait(false);
                 break;
             }
 
-            var compilerErrors = compilerEvidence.DiagnosticLines.ToList();
-            var correlatedFiles = ExecutionDiagnosticEvidence
-                .SelectCompilerRepairFiles(compilerEvidence, modifiedFiles)
-                .ToList();
-
-            if (correlatedFiles.Count == 0)
+            var repairFiles = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, modifiedFiles).ToList();
+            if (repairFiles.Count == 0)
             {
-                _logger.LogWarning("GitWorkspaceExecutionProcessor: no modified files could be exactly correlated to build error for execution {ExecutionId}; broad repair is disabled.", context.ExecutionId);
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
                     ExecutionStage.Build,
                     ExecutionActivityStatus.Failed,
-                    "Stopped with evidence: compiler diagnostics could not be correlated to a touched file.",
-                    new ExecutionActivityMetadata(
-                        EventKind: "StoppedWithEvidence",
-                        RepairKind: "Compile",
-                        RepairRound: compileRepairRound,
-                        FailureFingerprint: compilerEvidence.FailureFingerprint,
-                        ProgressResult: "Uncorrelated"),
+                    "Stopped with evidence: verification diagnostics could not be correlated to a touched file.",
+                    CheckMetadata(
+                        check,
+                        "StoppedWithEvidence",
+                        result,
+                        repairKind: "Compile",
+                        repairRound: repairRound,
+                        failureFingerprint: evidence.FailureFingerprint,
+                        progressResult: "Uncorrelated"),
                     cancellationToken).ConfigureAwait(false);
                 break;
-            }
-
-            var formattedErrors = compilerErrors.Take(5).Select(e =>
-            {
-                var match = System.Text.RegularExpressions.Regex.Match(e, @"(CS\d{4}:\s*[^\[\r\n]+)");
-                return match.Success ? match.Groups[1].Value.Trim() : e.Trim();
-            }).ToList();
-
-            var repairSummary = new System.Text.StringBuilder();
-            repairSummary.AppendLine($"Build failed — {compilerErrors.Count} compiler error(s)");
-            foreach (var err in formattedErrors)
-            {
-                repairSummary.AppendLine(err);
-            }
-            repairSummary.AppendLine($"Repair round {compileRepairRound}/{_maxCompileRepairRounds}");
-            repairSummary.AppendLine("Repairing:");
-            foreach (var file in correlatedFiles)
-            {
-                repairSummary.AppendLine($"- {Path.GetFileName(file)}");
             }
 
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.Build,
                 ExecutionActivityStatus.Started,
-                "Compile repair started.",
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                check.Kind == RepositoryCheckKind.Build
+                    ? "Compile repair started."
+                    : $"Focused verification repair started (round {repairRound}/{_maxCompileRepairRounds}).",
+                CheckMetadata(
+                    check,
+                    "FixingBuildIssue",
+                    result,
+                    repairKind: "Compile",
+                    repairRound: repairRound,
+                    repairFiles: repairFiles,
+                    failureFingerprint: evidence.FailureFingerprint),
+                cancellationToken).ConfigureAwait(false);
 
-            await SafeRecordActivityAsync(
-                context.ExecutionId,
-                ExecutionStage.Build,
-                ExecutionActivityStatus.Started,
-                repairSummary.ToString().TrimEnd(),
-                new ExecutionActivityMetadata(
-                    EventKind: "FixingBuildIssue",
-                    ModifiedFileCount: correlatedFiles.Count,
-                    RepairKind: "Compile",
-                    RepairRound: compileRepairRound,
-                    RepairFiles: correlatedFiles,
-                    FailureFingerprint: compilerEvidence.FailureFingerprint),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-
-            var availablePorts = RoslynContractExtractor.GetAvailablePortDescriptions(prepResult.WorkspacePath, correlatedFiles);
-            var repairPromptDesc = $"Fix the following compilation error(s) in generated files (repair round {compileRepairRound}/{_maxCompileRepairRounds}):\n{string.Join("\n", compilerErrors.Take(10))}";
-            if (!string.IsNullOrWhiteSpace(availablePorts))
+            if (check.Kind == RepositoryCheckKind.Build)
             {
-                repairPromptDesc += $"\n\n=== Available Repository / Port Abstractions in Codebase ===\n{availablePorts}\nCRITICAL DIRECTIVE:\nYou MUST use ONLY existing available abstractions or implement the query using existing ports. Do NOT invent non-existent types.";
+                var repairSummary = new StringBuilder()
+                    .AppendLine($"Build failed — {evidence.DiagnosticLines.Count} compiler error(s)");
+                foreach (var diagnostic in evidence.DiagnosticLines.Take(5))
+                {
+                    repairSummary.AppendLine(diagnostic.Trim());
+                }
+                repairSummary.AppendLine($"Repair round {repairRound}/{_maxCompileRepairRounds}");
+                repairSummary.AppendLine("Repairing:");
+                foreach (var file in repairFiles)
+                {
+                    repairSummary.AppendLine($"- {Path.GetFileName(file)}");
+                }
+
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Build,
+                    ExecutionActivityStatus.Started,
+                    repairSummary.ToString().TrimEnd(),
+                    CheckMetadata(
+                        check,
+                        "FixingBuildIssue",
+                        result,
+                        repairKind: "Compile",
+                        repairRound: repairRound,
+                        repairFiles: repairFiles,
+                        failureFingerprint: evidence.FailureFingerprint),
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var repairDescription = new StringBuilder()
+                .AppendLine($"Fix the following authoritative repository check failure (repair round {repairRound}/{_maxCompileRepairRounds}):")
+                .AppendLine(string.Join("\n", evidence.DiagnosticLines.Take(10)))
+                .ToString();
+            var languageContext = _repairContextProvider?.GetCompileRepairContext(check, prepResult.WorkspacePath, repairFiles);
+            if (!string.IsNullOrWhiteSpace(languageContext))
+            {
+                repairDescription += $"\n=== Available Repository / Port Abstractions ===\n{languageContext}\nUse existing repository abstractions; do not invent unavailable types.";
             }
 
             var repairRequest = new DeveloperAgentRequest(
-                TaskId: context.TaskId,
-                ExecutionId: context.ExecutionId,
-                TaskTitle: $"Repair build errors for {context.TaskTitle} (round {compileRepairRound})",
-                TaskDescription: repairPromptDesc,
-                AcceptanceCriteria: "Resolve all compiler errors in the modified files without inventing non-existent abstractions.",
-                ImpactAnalysisSummary: analysis?.Summary ?? "Compile repair",
-                ProposedPlan: "Repair compilation errors",
-                ImpactedFilePaths: correlatedFiles,
-                WorkspacePath: prepResult.WorkspacePath,
-                BranchName: prepResult.BranchName,
-                ImpactedFiles: correlatedFiles.Select(f => new ImpactedFileDetail(f, "Modify", "Fix compilation error")).ToList(),
-                Model: actualModel);
+                context.TaskId,
+                context.ExecutionId,
+                $"Repair {check.DisplayName} failure for {context.TaskTitle} (round {repairRound})",
+                repairDescription,
+                "Resolve the authoritative repository check failure in the focused files without weakening existing tests or checks.",
+                analysis.Summary ?? "Repository check repair",
+                "Repair repository verification failure",
+                repairFiles,
+                prepResult.WorkspacePath,
+                prepResult.BranchName,
+                repairFiles.Select(file => new ImpactedFileDetail(file, "Modify", "Fix repository verification failure")).ToList(),
+                actualModel);
 
-            var beforeRepairFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+            var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();
-
+            DeveloperAgentResult repairResult;
             try
             {
-                var repairResult = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest, cancellationToken).ConfigureAwait(false);
-                repairStopwatch.Stop();
-                if (repairResult.Success)
-                {
-                    if (repairResult.ModifiedFiles != null)
-                    {
-                        foreach (var mf in repairResult.ModifiedFiles)
-                        {
-                            modifiedFiles.Add(mf);
-                        }
-                    }
-
-                    var afterRepairFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
-                    var noDiff = beforeRepairFingerprint != null &&
-                                 afterRepairFingerprint != null &&
-                                 string.Equals(beforeRepairFingerprint, afterRepairFingerprint, StringComparison.Ordinal);
-
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.Build,
-                        noDiff ? ExecutionActivityStatus.Failed : ExecutionActivityStatus.Completed,
-                        noDiff
-                            ? "Stopped with evidence: compile repair produced no worktree change."
-                            : "Focused compile repair applied.",
-                        new ExecutionActivityMetadata(
-                            EventKind: noDiff ? "StoppedWithEvidence" : "FixingBuildIssue",
-                            StageDurationMs: repairStopwatch.ElapsedMilliseconds,
-                            RepairKind: "Compile",
-                            RepairRound: compileRepairRound,
-                            RepairFiles: correlatedFiles,
-                            FailureFingerprint: compilerEvidence.FailureFingerprint,
-                            BeforeChangeFingerprint: beforeRepairFingerprint,
-                            AfterChangeFingerprint: afterRepairFingerprint,
-                            ProgressResult: noDiff ? "NoDiff" : "Changed"),
-                        cancellationToken).ConfigureAwait(false);
-
-                    if (noDiff)
-                    {
-                        break;
-                    }
-
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.DeveloperAgent,
-                        ExecutionActivityStatus.Completed,
-                        compileRepairRound == 1 ? "Compile repair completed." : $"Compile repair completed (round {compileRepairRound}).",
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.Build,
-                        ExecutionActivityStatus.Started,
-                        compileRepairRound == 1 ? "Build retry started." : $"Build retry started (round {compileRepairRound}).",
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-
-                    _logger.LogInformation(
-                        "GitWorkspaceExecutionProcessor: compile repair round {Round} applied. Re-running build validation for execution {ExecutionId}.",
-                        compileRepairRound,
-                        context.ExecutionId);
-
-                    buildResult = await _validationRunner
-                        .ValidateBuildAsync(validationRequest, cancellationToken)
-                        .ConfigureAwait(false);
-                    previousBuildFailureFingerprint = compilerEvidence.FailureFingerprint;
-
-                    if (buildResult.Success)
-                    {
-                        await SafeRecordActivityAsync(
-                            context.ExecutionId,
-                            ExecutionStage.Build,
-                            ExecutionActivityStatus.Completed,
-                            "Build retry passed.",
-                            new ExecutionActivityMetadata(BuildPassed: true),
-                            cancellationToken: cancellationToken).ConfigureAwait(false);
-                        break;
-                    }
-                    else
-                    {
-                        await SafeRecordActivityAsync(
-                            context.ExecutionId,
-                            ExecutionStage.Build,
-                            ExecutionActivityStatus.Failed,
-                            compileRepairRound == 1 ? "Build retry failed." : $"Build retry failed (round {compileRepairRound}).",
-                            cancellationToken: cancellationToken).ConfigureAwait(false);
-                    }
-                }
-                else
-                {
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.Build,
-                        ExecutionActivityStatus.Failed,
-                        $"Compile repair failed: {repairResult.ErrorMessage}",
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-                    break;
-                }
+                repairResult = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -550,110 +491,198 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "GitWorkspaceExecutionProcessor: compile repair round threw an exception for execution {ExecutionId}.", context.ExecutionId);
+                repairStopwatch.Stop();
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
                     ExecutionStage.Build,
                     ExecutionActivityStatus.Failed,
-                    $"Compile repair failed with exception: {ex.Message}",
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    $"Focused verification repair failed with exception: {ex.Message}",
+                    CheckMetadata(check, "StoppedWithEvidence", result, repairKind: "Compile", repairRound: repairRound),
+                    cancellationToken).ConfigureAwait(false);
                 break;
             }
-        }
+            repairStopwatch.Stop();
 
-        if (!buildResult.Success)
-        {
-            var buildError = $"Build validation failed: {buildResult.ErrorMessage ?? "dotnet build failed."}";
-            _logger.LogError(
-                "GitWorkspaceExecutionProcessor: build validation failed for execution {ExecutionId}. Error: {Error}",
-                context.ExecutionId,
-                buildError);
+            if (!repairResult.Success)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Build,
+                    ExecutionActivityStatus.Failed,
+                    $"Focused verification repair failed: {repairResult.ErrorMessage}",
+                    CheckMetadata(check, "StoppedWithEvidence", result, repairKind: "Compile", repairRound: repairRound),
+                    cancellationToken).ConfigureAwait(false);
+                break;
+            }
+
+            foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
+            {
+                modifiedFiles.Add(file);
+            }
+
+            var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+            var noDiff = beforeFingerprint != null && afterFingerprint != null &&
+                         string.Equals(beforeFingerprint, afterFingerprint, StringComparison.Ordinal);
 
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.Build,
-                ExecutionActivityStatus.Failed,
-                buildError,
-                new ExecutionActivityMetadata(BuildPassed: false),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                noDiff ? ExecutionActivityStatus.Failed : ExecutionActivityStatus.Completed,
+                noDiff
+                    ? "Stopped with evidence: focused repair produced no worktree change."
+                    : check.Kind == RepositoryCheckKind.Build
+                        ? repairRound == 1 ? "Compile repair completed." : $"Compile repair completed (round {repairRound})."
+                        : "Focused verification repair applied.",
+                CheckMetadata(
+                    check,
+                    noDiff ? "StoppedWithEvidence" : "FixingBuildIssue",
+                    result,
+                    repairKind: "Compile",
+                    repairRound: repairRound,
+                    repairFiles: repairFiles,
+                    failureFingerprint: evidence.FailureFingerprint,
+                    beforeFingerprint: beforeFingerprint,
+                    afterFingerprint: afterFingerprint,
+                    progressResult: noDiff ? "NoDiff" : "Changed",
+                    stageDurationMs: repairStopwatch.ElapsedMilliseconds),
+                cancellationToken).ConfigureAwait(false);
 
-            // Halt immediately: DO NOT run test validation if build fails
-            throw new InvalidOperationException(buildError);
+            if (noDiff)
+            {
+                break;
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Started,
+                check.Kind == RepositoryCheckKind.Build
+                    ? repairRound == 1 ? "Build retry started." : $"Build retry started (round {repairRound})."
+                    : $"{check.DisplayName} retry started (round {repairRound}).",
+                CheckMetadata(check, "VerifyingRepository", repairKind: "Compile", repairRound: repairRound),
+                cancellationToken).ConfigureAwait(false);
+
+            result = await _repositoryCheckRunner.ExecuteAsync(
+                new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, check),
+                cancellationToken).ConfigureAwait(false);
+            previousFailureFingerprint = evidence.FailureFingerprint;
+
+            if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
+            {
+                await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Build, check, result, cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                result.Success ? ExecutionActivityStatus.Completed : ExecutionActivityStatus.Failed,
+                check.Kind == RepositoryCheckKind.Build
+                    ? result.Success
+                        ? "Build retry passed."
+                        : repairRound == 1 ? "Build retry failed." : $"Build retry failed (round {repairRound})."
+                    : result.Success
+                        ? $"{check.DisplayName} retry passed."
+                        : $"{check.DisplayName} retry failed (round {repairRound}).",
+                CheckMetadata(check, "VerifyingRepository", result, repairKind: "Compile", repairRound: repairRound),
+                cancellationToken).ConfigureAwait(false);
         }
 
-        _logger.LogInformation(
-            "GitWorkspaceExecutionProcessor: build validation succeeded for execution {ExecutionId}.",
-            context.ExecutionId);
+        if (!result.Success)
+        {
+            var prefix = check.Kind == RepositoryCheckKind.Build ? "Build validation failed" : $"{check.DisplayName} validation failed";
+            var error = $"{prefix}: {result.ErrorMessage ?? "Repository check failed."}";
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                error,
+                CheckMetadata(
+                    check,
+                    "StoppedWithEvidence",
+                    result,
+                    buildPassed: check.Kind == RepositoryCheckKind.Build ? false : null),
+                cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(error);
+        }
 
         await SafeRecordActivityAsync(
             context.ExecutionId,
             ExecutionStage.Build,
             ExecutionActivityStatus.Completed,
-            "Build passed.",
-            new ExecutionActivityMetadata(
-                BuildPassed: true,
-                EventKind: "VerifyingRepository",
-                StageDurationMs: initialBuildStopwatch.ElapsedMilliseconds),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            check.Kind == RepositoryCheckKind.Build ? "Build passed." : $"{check.DisplayName} passed.",
+            CheckMetadata(
+                check,
+                "VerifyingRepository",
+                result,
+                buildPassed: check.Kind == RepositoryCheckKind.Build ? true : null,
+                stageDurationMs: stopwatch.ElapsedMilliseconds),
+            cancellationToken).ConfigureAwait(false);
+    }
 
-        // ── Stage 7. Validate Test (with multi-round Test-Diagnostic Repair Loop) ──
-        _logger.LogInformation(
-            "GitWorkspaceExecutionProcessor: starting test validation for execution {ExecutionId}.",
-            context.ExecutionId);
-
+    private async Task RunTestCheckAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        TaskImpactAnalysis analysis,
+        string? actualModel,
+        RepositoryCheck check,
+        IReadOnlyList<RepositoryCheck> prerequisiteChecks,
+        bool confirmedBuild,
+        bool isFinalTest,
+        HashSet<string> modifiedFiles,
+        CancellationToken cancellationToken)
+    {
         await SafeRecordActivityAsync(
             context.ExecutionId,
             ExecutionStage.Test,
             ExecutionActivityStatus.Started,
             "Test started.",
-            new ExecutionActivityMetadata(EventKind: "VerifyingRepository"),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            CheckMetadata(check, "VerifyingRepository"),
+            cancellationToken).ConfigureAwait(false);
 
-        var initialTestStopwatch = Stopwatch.StartNew();
-        var fullTestRequest = validationRequest with { SkipBuild = true, TestFilter = null };
-        var testResult = await _validationRunner
-            .ValidateTestAsync(fullTestRequest, cancellationToken)
-            .ConfigureAwait(false);
-        initialTestStopwatch.Stop();
+        var useConfirmedBuild = confirmedBuild && check.SupportsSkipBuild;
+        var fullRequest = new RepositoryCheckExecutionRequest(
+            prepResult.WorkspacePath,
+            prepResult.BranchName,
+            check,
+            SkipBuild: useConfirmedBuild);
+        var stopwatch = Stopwatch.StartNew();
+        var result = await _repositoryCheckRunner.ExecuteAsync(fullRequest, cancellationToken).ConfigureAwait(false);
+        stopwatch.Stop();
 
-        int testRepairRound = 0;
-        string? previousTestFailureFingerprint = null;
-        while (!testResult.Success && testRepairRound < _maxTestRepairRounds)
+        if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
         {
-            testRepairRound++;
-            var testEvidence = ExecutionDiagnosticEvidence.ParseTestFailure(
-                testResult.StdOut,
-                testResult.StdErr,
-                testResult.ErrorMessage);
-            var rawTestError = testResult.ErrorMessage ?? "dotnet test failed.";
-            _logger.LogWarning(
-                "GitWorkspaceExecutionProcessor: test validation failed (round {Round}/{MaxRounds}) for execution {ExecutionId}. Error: {Error}. Attempting bounded test repair.",
-                testRepairRound,
-                _maxTestRepairRounds,
-                context.ExecutionId,
-                rawTestError);
+            await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Test, check, result, cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
+        }
 
-            if (string.Equals(previousTestFailureFingerprint, testEvidence.FailureFingerprint, StringComparison.Ordinal))
+        var repairRound = 0;
+        string? previousFailureFingerprint = null;
+        while (!result.Success && repairRound < _maxTestRepairRounds)
+        {
+            repairRound++;
+            var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(result.StdOut, result.StdErr, result.ErrorMessage);
+
+            if (string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal))
             {
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
                     ExecutionStage.Test,
                     ExecutionActivityStatus.Failed,
                     "Stopped with evidence: focused test repair made no diagnostic progress.",
-                    new ExecutionActivityMetadata(
-                        EventKind: "StoppedWithEvidence",
-                        RepairKind: "Test",
-                        RepairRound: testRepairRound,
-                        FailureFingerprint: testEvidence.FailureFingerprint,
-                        ProgressResult: "SameFailure"),
+                    CheckMetadata(
+                        check,
+                        "StoppedWithEvidence",
+                        result,
+                        repairKind: "Test",
+                        repairRound: repairRound,
+                        failureFingerprint: evidence.FailureFingerprint,
+                        progressResult: "SameFailure"),
                     cancellationToken).ConfigureAwait(false);
                 break;
             }
 
-            var testFailures = testEvidence.RelevantLines.ToList();
-            var repairFiles = ExecutionDiagnosticEvidence
-                .SelectTestRepairFiles(testEvidence, modifiedFiles)
-                .ToList();
+            var repairFiles = ExecutionDiagnosticEvidence.SelectTestRepairFiles(evidence, modifiedFiles).ToList();
             if (repairFiles.Count == 0)
             {
                 await SafeRecordActivityAsync(
@@ -661,295 +690,291 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     ExecutionStage.Test,
                     ExecutionActivityStatus.Failed,
                     "Stopped with evidence: failing test could not be correlated to a touched file.",
-                    new ExecutionActivityMetadata(
-                        EventKind: "StoppedWithEvidence",
-                        RepairKind: "Test",
-                        RepairRound: testRepairRound,
-                        FailureFingerprint: testEvidence.FailureFingerprint,
-                        ProgressResult: "Uncorrelated"),
+                    CheckMetadata(
+                        check,
+                        "StoppedWithEvidence",
+                        result,
+                        repairKind: "Test",
+                        repairRound: repairRound,
+                        failureFingerprint: evidence.FailureFingerprint,
+                        progressResult: "Uncorrelated"),
                     cancellationToken).ConfigureAwait(false);
                 break;
             }
 
-            var conciseFailures = testFailures.Take(5).Select(f => f.Trim()).ToList();
-            var testRepairSummary = new System.Text.StringBuilder();
-            testRepairSummary.AppendLine("Failing test evidence:");
-            foreach (var f in conciseFailures)
-            {
-                testRepairSummary.AppendLine(f);
-            }
-            testRepairSummary.AppendLine($"Repair round {testRepairRound}/{_maxTestRepairRounds}");
-
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.Test,
                 ExecutionActivityStatus.Started,
-                $"Test repair started (round {testRepairRound}/{_maxTestRepairRounds}).",
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                $"Test repair started (round {repairRound}/{_maxTestRepairRounds}).",
+                CheckMetadata(
+                    check,
+                    "FixingFailingTest",
+                    result,
+                    repairKind: "Test",
+                    repairRound: repairRound,
+                    repairFiles: repairFiles,
+                    failureFingerprint: evidence.FailureFingerprint),
+                cancellationToken).ConfigureAwait(false);
 
-            await SafeRecordActivityAsync(
+            var repairRequest = new DeveloperAgentRequest(
+                context.TaskId,
                 context.ExecutionId,
-                ExecutionStage.Test,
-                ExecutionActivityStatus.Started,
-                testRepairSummary.ToString().TrimEnd(),
-                new ExecutionActivityMetadata(
-                    EventKind: "FixingFailingTest",
-                    ModifiedFileCount: repairFiles.Count,
-                    RepairKind: "Test",
-                    RepairRound: testRepairRound,
-                    RepairFiles: repairFiles,
-                    FailureFingerprint: testEvidence.FailureFingerprint),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                $"Repair test failures for {context.TaskTitle} (round {repairRound})",
+                $"Fix the authoritative failing test evidence (repair round {repairRound}/{_maxTestRepairRounds}):\n{string.Join("\n", evidence.RelevantLines)}\n\nDo not delete, skip, comment out, or weaken existing tests.",
+                "Resolve the failing test without weakening existing test assertions.",
+                analysis.Summary ?? "Test repair",
+                "Repair test failure",
+                repairFiles,
+                prepResult.WorkspacePath,
+                prepResult.BranchName,
+                repairFiles.Select(file => new ImpactedFileDetail(file, "Modify", "Fix test failure")).ToList(),
+                actualModel);
 
-            var testRepairPromptDesc = $"Fix the failing test(s) or implementation to satisfy requirements (test repair round {testRepairRound}/{_maxTestRepairRounds}):\n{string.Join("\n", testFailures)}\n\nCRITICAL DIRECTIVE:\nExisting repository tests are authoritative safety invariants. You MUST NOT delete, skip, comment out, or weaken existing tests. Fix the implementation or new test code to make all tests pass.";
-
-            var testRepairRequest = new DeveloperAgentRequest(
-                TaskId: context.TaskId,
-                ExecutionId: context.ExecutionId,
-                TaskTitle: $"Repair test failures for {context.TaskTitle} (round {testRepairRound})",
-                TaskDescription: testRepairPromptDesc,
-                AcceptanceCriteria: "Resolve all test failures so all tests pass cleanly without weakening existing test assertions.",
-                ImpactAnalysisSummary: analysis?.Summary ?? "Test repair",
-                ProposedPlan: "Repair test failures",
-                ImpactedFilePaths: repairFiles,
-                WorkspacePath: prepResult.WorkspacePath,
-                BranchName: prepResult.BranchName,
-                ImpactedFiles: repairFiles.Select(f => new ImpactedFileDetail(f, "Modify", "Fix test failure")).ToList(),
-                Model: actualModel);
-
-            var beforeRepairFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+            var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();
-
+            DeveloperAgentResult repairResult;
             try
             {
-                var repairResult = await _developerAgent.GenerateAndApplyEditsAsync(testRepairRequest, cancellationToken).ConfigureAwait(false);
-                repairStopwatch.Stop();
-                if (repairResult.Success)
-                {
-                    if (repairResult.ModifiedFiles != null)
-                    {
-                        foreach (var mf in repairResult.ModifiedFiles)
-                        {
-                            modifiedFiles.Add(mf);
-                        }
-                    }
-
-                    var afterRepairFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
-                    var noDiff = beforeRepairFingerprint != null &&
-                                 afterRepairFingerprint != null &&
-                                 string.Equals(beforeRepairFingerprint, afterRepairFingerprint, StringComparison.Ordinal);
-
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.Test,
-                        noDiff ? ExecutionActivityStatus.Failed : ExecutionActivityStatus.Completed,
-                        noDiff
-                            ? "Stopped with evidence: test repair produced no worktree change."
-                            : "Focused test repair applied.",
-                        new ExecutionActivityMetadata(
-                            EventKind: noDiff ? "StoppedWithEvidence" : "FixingFailingTest",
-                            StageDurationMs: repairStopwatch.ElapsedMilliseconds,
-                            RepairKind: "Test",
-                            RepairRound: testRepairRound,
-                            RepairFiles: repairFiles,
-                            FailureFingerprint: testEvidence.FailureFingerprint,
-                            BeforeChangeFingerprint: beforeRepairFingerprint,
-                            AfterChangeFingerprint: afterRepairFingerprint,
-                            ProgressResult: noDiff ? "NoDiff" : "Changed"),
-                        cancellationToken).ConfigureAwait(false);
-
-                    if (noDiff)
-                    {
-                        break;
-                    }
-
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.DeveloperAgent,
-                        ExecutionActivityStatus.Completed,
-                        $"Test repair completed (round {testRepairRound}).",
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-
-                    // Must verify build passes first after test repair
-                    var postRepairBuild = await _validationRunner.ValidateBuildAsync(validationRequest, cancellationToken).ConfigureAwait(false);
-                    if (!postRepairBuild.Success)
-                    {
-                        _logger.LogWarning("GitWorkspaceExecutionProcessor: build failed after test repair round {Round}.", testRepairRound);
-                        var buildEvidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
-                            postRepairBuild.StdOut,
-                            postRepairBuild.StdErr,
-                            postRepairBuild.ErrorMessage);
-                        await SafeRecordActivityAsync(
-                            context.ExecutionId,
-                            ExecutionStage.Build,
-                            ExecutionActivityStatus.Failed,
-                            "Stopped with evidence: build failed after focused test repair.",
-                            new ExecutionActivityMetadata(
-                                EventKind: "StoppedWithEvidence",
-                                BuildPassed: false,
-                                RepairKind: "Compile",
-                                RepairRound: testRepairRound,
-                                FailureFingerprint: buildEvidence.FailureFingerprint,
-                                ProgressResult: "NewBuildFailure"),
-                            cancellationToken).ConfigureAwait(false);
-
-                        throw new InvalidOperationException(
-                            $"Build validation failed after test repair: {postRepairBuild.ErrorMessage ?? buildEvidence.DiagnosticLines.FirstOrDefault() ?? "dotnet build failed."}");
-                    }
-
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.Test,
-                        ExecutionActivityStatus.Started,
-                        $"Test retry started (round {testRepairRound}).",
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-
-                    _logger.LogInformation(
-                        "GitWorkspaceExecutionProcessor: test repair round {Round} applied. Re-running test validation for execution {ExecutionId}.",
-                        testRepairRound,
-                        context.ExecutionId);
-
-                    if (testEvidence.HasReliableTestName)
-                    {
-                        var targetedRequest = validationRequest with
-                        {
-                            SkipBuild = true,
-                            TestFilter = testEvidence.TestName
-                        };
-                        testResult = await _validationRunner
-                            .ValidateTestAsync(targetedRequest, cancellationToken)
-                            .ConfigureAwait(false);
-
-                        if (testResult.Success)
-                        {
-                            await SafeRecordActivityAsync(
-                                context.ExecutionId,
-                                ExecutionStage.Test,
-                                ExecutionActivityStatus.Completed,
-                                "Targeted failing test passed; running full test suite.",
-                                new ExecutionActivityMetadata(
-                                    EventKind: "VerifyingRepository",
-                                    RepairKind: "Test",
-                                    RepairRound: testRepairRound,
-                                    FailureFingerprint: testEvidence.FailureFingerprint,
-                                    ProgressResult: "TargetPassed"),
-                                cancellationToken).ConfigureAwait(false);
-
-                            testResult = await _validationRunner
-                                .ValidateTestAsync(fullTestRequest, cancellationToken)
-                                .ConfigureAwait(false);
-                        }
-                    }
-                    else
-                    {
-                        testResult = await _validationRunner
-                            .ValidateTestAsync(fullTestRequest, cancellationToken)
-                            .ConfigureAwait(false);
-                    }
-
-                    previousTestFailureFingerprint = testEvidence.FailureFingerprint;
-
-                    if (testResult.Success)
-                    {
-                        await SafeRecordActivityAsync(
-                            context.ExecutionId,
-                            ExecutionStage.Test,
-                            ExecutionActivityStatus.Completed,
-                            "Test retry passed.",
-                            new ExecutionActivityMetadata(TestPassed: true),
-                            cancellationToken: cancellationToken).ConfigureAwait(false);
-                        break;
-                    }
-                    else
-                    {
-                        await SafeRecordActivityAsync(
-                            context.ExecutionId,
-                            ExecutionStage.Test,
-                            ExecutionActivityStatus.Failed,
-                            $"Test retry failed (round {testRepairRound}).",
-                            cancellationToken: cancellationToken).ConfigureAwait(false);
-                    }
-                }
-                else
-                {
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.Test,
-                        ExecutionActivityStatus.Failed,
-                        $"Test repair failed: {repairResult.ErrorMessage}",
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
-                    break;
-                }
+                repairResult = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
-            catch (InvalidOperationException ex) when (ex.Message.StartsWith("Build validation failed after test repair:", StringComparison.Ordinal))
-            {
-                throw;
-            }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "GitWorkspaceExecutionProcessor: test repair round threw an exception for execution {ExecutionId}.", context.ExecutionId);
+                repairStopwatch.Stop();
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
                     ExecutionStage.Test,
                     ExecutionActivityStatus.Failed,
                     $"Test repair failed with exception: {ex.Message}",
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    CheckMetadata(check, "StoppedWithEvidence", result, repairKind: "Test", repairRound: repairRound),
+                    cancellationToken).ConfigureAwait(false);
                 break;
             }
-        }
+            repairStopwatch.Stop();
 
-        if (!testResult.Success)
-        {
-            var testError = $"Test validation failed: {testResult.ErrorMessage ?? "dotnet test failed."}";
-            _logger.LogError(
-                "GitWorkspaceExecutionProcessor: test validation failed for execution {ExecutionId}. Error: {Error}",
-                context.ExecutionId,
-                testError);
+            if (!repairResult.Success)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Test,
+                    ExecutionActivityStatus.Failed,
+                    $"Test repair failed: {repairResult.ErrorMessage}",
+                    CheckMetadata(check, "StoppedWithEvidence", result, repairKind: "Test", repairRound: repairRound),
+                    cancellationToken).ConfigureAwait(false);
+                break;
+            }
+
+            foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
+            {
+                modifiedFiles.Add(file);
+            }
+
+            var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+            var noDiff = beforeFingerprint != null && afterFingerprint != null &&
+                         string.Equals(beforeFingerprint, afterFingerprint, StringComparison.Ordinal);
 
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.Test,
-                ExecutionActivityStatus.Failed,
-                testError,
-                new ExecutionActivityMetadata(TestPassed: false),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                noDiff ? ExecutionActivityStatus.Failed : ExecutionActivityStatus.Completed,
+                noDiff
+                    ? "Stopped with evidence: test repair produced no worktree change."
+                    : $"Test repair completed (round {repairRound}).",
+                CheckMetadata(
+                    check,
+                    noDiff ? "StoppedWithEvidence" : "FixingFailingTest",
+                    result,
+                    repairKind: "Test",
+                    repairRound: repairRound,
+                    repairFiles: repairFiles,
+                    failureFingerprint: evidence.FailureFingerprint,
+                    beforeFingerprint: beforeFingerprint,
+                    afterFingerprint: afterFingerprint,
+                    progressResult: noDiff ? "NoDiff" : "Changed",
+                    stageDurationMs: repairStopwatch.ElapsedMilliseconds),
+                cancellationToken).ConfigureAwait(false);
 
-            throw new InvalidOperationException(testError);
+            if (noDiff)
+            {
+                break;
+            }
+
+            foreach (var prerequisite in prerequisiteChecks)
+            {
+                var prerequisiteResult = await _repositoryCheckRunner.ExecuteAsync(
+                    new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, prerequisite),
+                    cancellationToken).ConfigureAwait(false);
+
+                if (prerequisiteResult.Success)
+                {
+                    continue;
+                }
+
+                var newEvidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
+                    prerequisiteResult.StdOut,
+                    prerequisiteResult.StdErr,
+                    prerequisiteResult.ErrorMessage);
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Build,
+                    ExecutionActivityStatus.Failed,
+                    "Stopped with evidence: repository check failed after focused test repair.",
+                    CheckMetadata(
+                        prerequisite,
+                        "StoppedWithEvidence",
+                        prerequisiteResult,
+                        repairKind: "Compile",
+                        repairRound: repairRound,
+                        failureFingerprint: newEvidence.FailureFingerprint,
+                        progressResult: "NewBuildFailure"),
+                    cancellationToken).ConfigureAwait(false);
+
+                var prefix = prerequisiteResult.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure
+                    ? "Repository check infrastructure failure after test repair"
+                    : "Build validation failed after test repair";
+                throw new InvalidOperationException($"{prefix}: {prerequisiteResult.ErrorMessage ?? newEvidence.DiagnosticLines.FirstOrDefault() ?? "Repository check failed."}");
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Started,
+                $"Test retry started (round {repairRound}).",
+                CheckMetadata(check, "VerifyingRepository", repairKind: "Test", repairRound: repairRound),
+                cancellationToken).ConfigureAwait(false);
+
+            if (check.SupportsTargetedTest && evidence.HasReliableTestName)
+            {
+                var targetedRequest = fullRequest with { TestFilter = evidence.TestName };
+                result = await _repositoryCheckRunner.ExecuteAsync(targetedRequest, cancellationToken).ConfigureAwait(false);
+                if (result.Success)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Test,
+                        ExecutionActivityStatus.Completed,
+                        "Targeted failing test passed; running full test suite.",
+                        CheckMetadata(
+                            check,
+                            "VerifyingRepository",
+                            result,
+                            repairKind: "Test",
+                            repairRound: repairRound,
+                            failureFingerprint: evidence.FailureFingerprint,
+                            progressResult: "TargetPassed"),
+                        cancellationToken).ConfigureAwait(false);
+                    result = await _repositoryCheckRunner.ExecuteAsync(fullRequest, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                result = await _repositoryCheckRunner.ExecuteAsync(fullRequest, cancellationToken).ConfigureAwait(false);
+            }
+
+            previousFailureFingerprint = evidence.FailureFingerprint;
+            if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
+            {
+                await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Test, check, result, cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                result.Success ? ExecutionActivityStatus.Completed : ExecutionActivityStatus.Failed,
+                result.Success ? "Test retry passed." : $"Test retry failed (round {repairRound}).",
+                CheckMetadata(check, "VerifyingRepository", result, repairKind: "Test", repairRound: repairRound),
+                cancellationToken).ConfigureAwait(false);
         }
 
-        _logger.LogInformation(
-            "GitWorkspaceExecutionProcessor: all pipeline stages succeeded for execution {ExecutionId}.",
-            context.ExecutionId);
+        if (!result.Success)
+        {
+            var error = $"Test validation failed: {result.ErrorMessage ?? "Repository test check failed."}";
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Failed,
+                error,
+                CheckMetadata(check, "StoppedWithEvidence", result, testPassed: false),
+                cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(error);
+        }
 
         await SafeRecordActivityAsync(
             context.ExecutionId,
             ExecutionStage.Test,
             ExecutionActivityStatus.Completed,
-            "Tests passed.",
-            new ExecutionActivityMetadata(
-                TestPassed: true,
-                EventKind: "ReadyForReview",
-                StageDurationMs: initialTestStopwatch.ElapsedMilliseconds),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+            isFinalTest ? "Tests passed." : $"{check.DisplayName} passed.",
+            CheckMetadata(
+                check,
+                isFinalTest ? "ReadyForReview" : "VerifyingRepository",
+                result,
+                testPassed: true,
+                stageDurationMs: stopwatch.ElapsedMilliseconds),
+            cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<string?> GetChangeFingerprintAsync(
-        string workspacePath,
+    private async Task RecordInfrastructureFailureAsync(
+        Guid executionId,
+        ExecutionStage stage,
+        RepositoryCheck check,
+        RepositoryCheckResult result,
         CancellationToken cancellationToken)
+    {
+        await SafeRecordActivityAsync(
+            executionId,
+            stage,
+            ExecutionActivityStatus.Failed,
+            $"Repository check infrastructure failure: {result.ErrorMessage}",
+            CheckMetadata(check, "StoppedWithEvidence", result),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static ExecutionActivityMetadata CheckMetadata(
+        RepositoryCheck check,
+        string? eventKind = null,
+        RepositoryCheckResult? result = null,
+        string? repairKind = null,
+        int? repairRound = null,
+        IReadOnlyList<string>? repairFiles = null,
+        string? failureFingerprint = null,
+        string? beforeFingerprint = null,
+        string? afterFingerprint = null,
+        string? progressResult = null,
+        long? stageDurationMs = null,
+        bool? buildPassed = null,
+        bool? testPassed = null) => new(
+            BuildPassed: buildPassed,
+            TestPassed: testPassed,
+            EventKind: eventKind,
+            StageDurationMs: stageDurationMs ?? (result?.Duration is { } duration ? (long)duration.TotalMilliseconds : null),
+            RepairKind: repairKind,
+            RepairRound: repairRound,
+            RepairFiles: repairFiles,
+            FailureFingerprint: failureFingerprint,
+            BeforeChangeFingerprint: beforeFingerprint,
+            AfterChangeFingerprint: afterFingerprint,
+            ProgressResult: progressResult,
+            RepositoryCheckId: check.Id,
+            RepositoryCheckKind: check.Kind.ToString(),
+            RepositoryCheckSource: check.Source.ToString(),
+            ProcessExitCode: result?.ExitCode,
+            VerificationFailureCategory: result?.FailureCategory.ToString(),
+            DeterministicCheck: true,
+            RepositoryCheckEvidence: check.DiscoveryEvidence);
+
+    private async Task<string?> GetChangeFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
     {
         if (_changeFingerprintCalculator == null)
         {
             return null;
         }
 
-        var result = await _changeFingerprintCalculator
-            .ComputeFingerprintAsync(workspacePath, cancellationToken)
-            .ConfigureAwait(false);
-
+        var result = await _changeFingerprintCalculator.ComputeFingerprintAsync(workspacePath, cancellationToken).ConfigureAwait(false);
         return result.Success ? result.Fingerprint : null;
     }
 
@@ -957,16 +982,27 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     {
         if (analysis.StructuredResult?.ProposedPlan != null && analysis.StructuredResult.ProposedPlan.Count > 0)
         {
-            var sb = new StringBuilder();
+            var builder = new StringBuilder();
             foreach (var step in analysis.StructuredResult.ProposedPlan)
             {
-                sb.AppendLine($"Step {step.Order}: {step.Title} - {step.Description}");
+                builder.AppendLine($"Step {step.Order}: {step.Title} - {step.Description}");
             }
-            return sb.ToString().TrimEnd();
+            return builder.ToString().TrimEnd();
         }
 
         return !string.IsNullOrWhiteSpace(analysis.Summary) ? analysis.Summary : "No detailed proposed plan provided.";
     }
+
+    private static int TryGetNonNegativeSetting(
+        IConfiguration? configuration,
+        string primaryKey,
+        string legacyKey,
+        int defaultValue) =>
+        configuration != null &&
+        int.TryParse(configuration[primaryKey] ?? configuration[legacyKey], out var value) &&
+        value >= 0
+            ? value
+            : defaultValue;
 
     private async Task SafeRecordActivityAsync(
         Guid executionId,
@@ -978,9 +1014,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     {
         try
         {
-            await _activityRecorder.RecordActivityAsync(
-                executionId, stage, status, message, metadata, cancellationToken)
-                .ConfigureAwait(false);
+            await _activityRecorder.RecordActivityAsync(executionId, stage, status, message, metadata, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -988,10 +1022,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(
-                ex,
-                "GitWorkspaceExecutionProcessor: unexpected error recording activity for execution {ExecutionId}.",
-                executionId);
+            _logger.LogWarning(ex, "Unexpected error recording activity for execution {ExecutionId}.", executionId);
         }
     }
 }

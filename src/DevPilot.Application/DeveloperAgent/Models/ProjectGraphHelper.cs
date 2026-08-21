@@ -83,8 +83,13 @@ public static class ProjectGraphHelper
                fileName.EndsWith("test.cs", StringComparison.OrdinalIgnoreCase) ||
                fileName.EndsWith("spec.cs", StringComparison.OrdinalIgnoreCase) ||
                fileName.EndsWith("specs.cs", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Contains(".test.", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Contains(".spec.", StringComparison.OrdinalIgnoreCase) ||
+               fileName.StartsWith("test_", StringComparison.OrdinalIgnoreCase) ||
+               fileName.EndsWith("_test.py", StringComparison.OrdinalIgnoreCase) ||
                normalized.Contains("/tests/", StringComparison.OrdinalIgnoreCase) ||
                normalized.Contains("/test/", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("/__tests__/", StringComparison.OrdinalIgnoreCase) ||
                normalized.StartsWith("tests/", StringComparison.OrdinalIgnoreCase) ||
                normalized.StartsWith("test/", StringComparison.OrdinalIgnoreCase);
     }

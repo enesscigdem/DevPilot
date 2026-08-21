@@ -257,9 +257,12 @@ public class EditApplicabilityAndRepairTests : IDisposable
         repairPrompt.Should().Contain("Failed Edit Block: 2 of 2");
         repairPrompt.Should().Contain("zero matches (the search text was not found in the current target file)");
         repairPrompt.Should().Contain("public int MissingField = 0;");
-        repairPrompt.Should().Contain("=== CRITICAL REPAIR INSTRUCTIONS (MODIFY) ===");
-        repairPrompt.Should().Contain("VERBATIM SEARCH");
-        repairPrompt.Should().Contain("EXACT ONCE MATCH");
+        repairPrompt.Should().Contain(
+            "Edit Strategy: hash-guarded small-file replacement.");
+        repairPrompt.Should().Contain(
+            "Return complete resulting content once in newContent.");
+        repairPrompt.Should().Contain(
+            "Output ONLY the corrected small-file replacement JSON for 'Service.cs'.");
         repairPrompt.Should().Contain("=== Current Content of Target File ===");
         repairPrompt.Should().Contain("public class Service\n{\n    public int Value = 42;\n}");
     }

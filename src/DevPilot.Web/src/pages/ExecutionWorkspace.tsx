@@ -102,11 +102,23 @@ function getMetadataDisplay(act: ExecutionActivityItem): string | null {
     if (m.eventKind === "GenerationSummary") {
       return `${m.logicalProviderCallCount ?? 0} calls · ${m.compactRetryCount ?? 0} compact · ${m.applicabilityRepairCount ?? 0} applicability · ${m.totalGenerationTimeMs ?? 0}ms`
     }
+    if (m.eventKind === "RepositoryPreflight") {
+      const ecosystems = m.detectedEcosystems?.join(", ") || "unknown ecosystem"
+      const unresolved = m.verificationUnresolved ? " · partial discovery" : ""
+      return `${m.discoveredCheckCount ?? 0} checks · ${ecosystems}${unresolved}`
+    }
+    if (m.repositoryCheckId && !(m.repairKind && m.repairRound)) {
+      const duration = m.stageDurationMs !== undefined && m.stageDurationMs !== null ? ` · ${m.stageDurationMs}ms` : ""
+      const exitCode = m.processExitCode !== undefined && m.processExitCode !== null ? ` · exit ${m.processExitCode}` : ""
+      const failure = m.verificationFailureCategory ? ` · ${m.verificationFailureCategory}` : ""
+      return `${m.repositoryCheckKind ?? "Check"} · ${m.repositoryCheckId}${exitCode}${failure}${duration}`
+    }
     if (m.repairKind && m.repairRound) {
       const fileCount = m.repairFiles?.length ?? m.modifiedFileCount
       const scope = fileCount ? ` · ${fileCount} ${fileCount === 1 ? "file" : "files"}` : ""
       const progress = m.progressResult ? ` · ${m.progressResult}` : ""
-      return `${m.repairKind} repair ${m.repairRound}${scope}${progress}`
+      const check = m.repositoryCheckKind ? ` · ${m.repositoryCheckKind}` : ""
+      return `${m.repairKind} repair ${m.repairRound}${scope}${progress}${check}`
     }
     if (m.modifiedFileCount !== undefined && m.modifiedFileCount !== null) {
       return `${m.modifiedFileCount} ${m.modifiedFileCount === 1 ? "file" : "files"} modified`
@@ -126,6 +138,8 @@ function getPrimaryActivityLabel(act: ExecutionActivityItem): string {
     case "GeneratingChange":
       return act.status === "Completed" ? "Generating change completed" : "Generating change"
     case "VerifyingRepository":
+      return "Verifying repository"
+    case "RepositoryPreflight":
       return "Verifying repository"
     case "FixingBuildIssue":
       return "Fixing build issue"
@@ -832,11 +846,11 @@ export function ExecutionWorkspace() {
             </Panel>
           </div>
 
-          <div className="tech-label mb-2 mt-5">Build &amp; test</div>
+          <div className="tech-label mb-2 mt-5">Repository checks</div>
           <Panel className="p-3.5">
             <div className="flex items-center gap-2 text-[12.5px]">
               <Hammer className="h-3.5 w-3.5 text-subtle-foreground" />
-              <span className="text-foreground">Build</span>
+              <span className="text-foreground">Prerequisites</span>
               <Badge
                 tone={buildPassed ? "green" : buildFailed ? "red" : "neutral"}
                 className="ml-auto"

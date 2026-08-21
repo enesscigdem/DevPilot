@@ -3,8 +3,8 @@ using DevPilot.Application.Executions.Models;
 namespace DevPilot.Application.Executions.Ports;
 
 /// <summary>
-/// Execution validation runner interface for running approved build and test operations
-/// exclusively inside an execution Git worktree.
+/// Legacy .NET validation contract retained for the existing .NET-specific adapter and tests.
+/// The generic execution processor depends on <see cref="IRepositoryCheckRunner"/> instead.
 /// </summary>
 /// <remarks>
 /// TRUST BOUNDARY NOTICE: MSBuild project files (.csproj / .sln) can execute custom build logic
@@ -13,16 +13,10 @@ namespace DevPilot.Application.Executions.Ports;
 /// </remarks>
 public interface IExecutionValidationRunner
 {
-    /// <summary>
-    /// Validates and executes a build operation inside the specified execution workspace.
-    /// </summary>
     Task<BuildValidationResult> ValidateBuildAsync(
         ExecutionValidationRequest request,
         CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Validates and executes a test operation inside the specified execution workspace.
-    /// </summary>
     Task<TestValidationResult> ValidateTestAsync(
         ExecutionValidationRequest request,
         CancellationToken cancellationToken = default);

@@ -45,7 +45,7 @@ public class GitWorkspaceExecutionProcessorTests
             executionRepo,
             impactRepo,
             agent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -69,32 +69,70 @@ public class GitWorkspaceExecutionProcessorTests
         validationRunner.BuildCallCount.Should().Be(1);
         validationRunner.TestCallCount.Should().Be(1);
 
-        // Verify chronological stage events recorded:
-        // Workspace Started -> Workspace Completed -> DeveloperAgent Started -> DeveloperAgent Completed -> Build Started -> Build Completed -> Test Started -> Test Completed
-        recorder.RecordedActivities.Should().HaveCount(8);
+        // Verify chronological stage events recorded, including deterministic repository preflight.
+        recorder.RecordedActivities.Should().HaveCount(9);
         recorder.RecordedActivities[0].stage.Should().Be(ExecutionStage.Workspace);
         recorder.RecordedActivities[0].status.Should().Be(ExecutionActivityStatus.Started);
         recorder.RecordedActivities[1].stage.Should().Be(ExecutionStage.Workspace);
         recorder.RecordedActivities[1].status.Should().Be(ExecutionActivityStatus.Completed);
         recorder.RecordedActivities[1].metadata?.BranchName.Should().Be("devpilot/branch");
 
-        recorder.RecordedActivities[2].stage.Should().Be(ExecutionStage.DeveloperAgent);
-        recorder.RecordedActivities[2].status.Should().Be(ExecutionActivityStatus.Started);
+        recorder.RecordedActivities[2].stage.Should().Be(ExecutionStage.Workspace);
+        recorder.RecordedActivities[2].metadata?.EventKind.Should().Be("RepositoryPreflight");
+        recorder.RecordedActivities[2].metadata?.DiscoveredCheckCount.Should().Be(2);
+
         recorder.RecordedActivities[3].stage.Should().Be(ExecutionStage.DeveloperAgent);
-        recorder.RecordedActivities[3].status.Should().Be(ExecutionActivityStatus.Completed);
-        recorder.RecordedActivities[3].metadata?.ModifiedFileCount.Should().Be(1);
+        recorder.RecordedActivities[3].status.Should().Be(ExecutionActivityStatus.Started);
+        recorder.RecordedActivities[4].stage.Should().Be(ExecutionStage.DeveloperAgent);
+        recorder.RecordedActivities[4].status.Should().Be(ExecutionActivityStatus.Completed);
+        recorder.RecordedActivities[4].metadata?.ModifiedFileCount.Should().Be(1);
 
-        recorder.RecordedActivities[4].stage.Should().Be(ExecutionStage.Build);
-        recorder.RecordedActivities[4].status.Should().Be(ExecutionActivityStatus.Started);
         recorder.RecordedActivities[5].stage.Should().Be(ExecutionStage.Build);
-        recorder.RecordedActivities[5].status.Should().Be(ExecutionActivityStatus.Completed);
-        recorder.RecordedActivities[5].metadata?.BuildPassed.Should().BeTrue();
+        recorder.RecordedActivities[5].status.Should().Be(ExecutionActivityStatus.Started);
+        recorder.RecordedActivities[6].stage.Should().Be(ExecutionStage.Build);
+        recorder.RecordedActivities[6].status.Should().Be(ExecutionActivityStatus.Completed);
+        recorder.RecordedActivities[6].metadata?.BuildPassed.Should().BeTrue();
+        recorder.RecordedActivities[6].metadata?.RepositoryCheckId.Should().Be("dotnet:build:test");
 
-        recorder.RecordedActivities[6].stage.Should().Be(ExecutionStage.Test);
-        recorder.RecordedActivities[6].status.Should().Be(ExecutionActivityStatus.Started);
         recorder.RecordedActivities[7].stage.Should().Be(ExecutionStage.Test);
-        recorder.RecordedActivities[7].status.Should().Be(ExecutionActivityStatus.Completed);
-        recorder.RecordedActivities[7].metadata?.TestPassed.Should().BeTrue();
+        recorder.RecordedActivities[7].status.Should().Be(ExecutionActivityStatus.Started);
+        recorder.RecordedActivities[8].stage.Should().Be(ExecutionStage.Test);
+        recorder.RecordedActivities[8].status.Should().Be(ExecutionActivityStatus.Completed);
+        recorder.RecordedActivities[8].metadata?.TestPassed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_UnconfiguredRepositoryVerification_StopsBeforeProviderGeneration()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent();
+        var recorder = new TestActivityRecorder();
+        var processor = new GitWorkspaceExecutionProcessor(
+            new TestWorkspaceManager(),
+            new TestExecutionRepository(),
+            new TestImpactAnalysisRepository
+            {
+                AnalysisToReturn = new TaskImpactAnalysis
+                {
+                    Id = Guid.NewGuid(),
+                    DevelopmentTaskId = taskId,
+                    Status = ImpactAnalysisStatus.Completed
+                }
+            },
+            agent,
+            new UnconfiguredRepositoryCheckRunner(),
+            recorder,
+            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
+
+        var act = () => processor.ProcessAsync(CreateContext(taskId));
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Repository verification is unconfigured:*");
+        agent.CallCount.Should().Be(0);
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.metadata != null &&
+            activity.metadata.VerificationFailureCategory == "Unconfigured" &&
+            activity.metadata.EventKind == "StoppedWithEvidence");
     }
 
     [Fact]
@@ -118,7 +156,7 @@ public class GitWorkspaceExecutionProcessorTests
             executionRepo,
             impactRepo,
             agent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -169,7 +207,7 @@ public class GitWorkspaceExecutionProcessorTests
             executionRepo,
             impactRepo,
             agent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -223,7 +261,7 @@ public class GitWorkspaceExecutionProcessorTests
             executionRepo,
             impactRepo,
             agent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -273,7 +311,7 @@ public class GitWorkspaceExecutionProcessorTests
             executionRepo,
             impactRepo,
             agent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -328,7 +366,7 @@ public class GitWorkspaceExecutionProcessorTests
             executionRepo,
             impactRepo,
             agent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -490,7 +528,7 @@ public class GitWorkspaceExecutionProcessorTests
             executionRepo,
             impactRepo,
             agent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -561,7 +599,7 @@ public class GitWorkspaceExecutionProcessorTests
             executionRepo,
             impactRepo,
             agent,
-            validationRunner,
+            new TestRepositoryCheckRunnerAdapter(validationRunner),
             recorder,
             NullLogger<GitWorkspaceExecutionProcessor>.Instance);
 
@@ -803,7 +841,7 @@ public class GitWorkspaceExecutionProcessorTests
                 }
             },
             agent,
-            runner,
+            new TestRepositoryCheckRunnerAdapter(runner),
             recorder ?? new TestActivityRecorder(),
             NullLogger<GitWorkspaceExecutionProcessor>.Instance,
             configuration: null,
@@ -895,6 +933,23 @@ public class GitWorkspaceExecutionProcessorTests
             string baseHeadSha,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new ExecutionFingerprintResult(true, Fingerprint: treeSha, BaseHeadSha: baseHeadSha));
+    }
+
+    private sealed class UnconfiguredRepositoryCheckRunner : IRepositoryCheckRunner
+    {
+        public Task<RepositoryProfile> DiscoverAsync(
+            RepositoryPreflightRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new RepositoryProfile(
+                RepositoryVerificationState.Unconfigured,
+                Array.Empty<string>(),
+                Array.Empty<RepositoryCheck>(),
+                "No supported manifest was found."));
+
+        public Task<RepositoryCheckResult> ExecuteAsync(
+            RepositoryCheckExecutionRequest request,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("No check should execute for an unconfigured profile.");
     }
 
     private class QueuedValidationRunner : IExecutionValidationRunner
