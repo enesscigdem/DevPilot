@@ -204,6 +204,9 @@ export interface ChangeBrief {
   runtimeSummary?: string | null;
   testsSummary?: string | null;
   verificationSummary?: string | null;
+  isGroundingUnresolved?: boolean;
+  unresolvedSubject?: string | null;
+  unresolvedReason?: string | null;
   expectedChecks: ExpectedVerificationCheck[];
   databaseImpact?: DatabaseImpact | null;
   unknowns: string[];
@@ -220,6 +223,9 @@ export interface ChangeDimensionImpact {
 export interface StructuredResult {
   summary: string;
   confidence: number;
+  isGroundingUnresolved?: boolean;
+  unresolvedSubject?: string | null;
+  unresolvedReason?: string | null;
   impactedFiles: ImpactedFile[];
   proposedPlan: ProposedPlanStep[];
   systemImpacts: SystemImpact[];

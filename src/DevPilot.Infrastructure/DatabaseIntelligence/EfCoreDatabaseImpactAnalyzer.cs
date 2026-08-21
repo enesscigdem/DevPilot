@@ -256,13 +256,16 @@ public sealed class EfCoreDatabaseImpactAnalyzer : IDatabaseImpactAnalyzer
             evidenceList.Add($"Detected property addition '{propName}' on '{targetEntity}' in task prompt");
         }
 
-        // Pattern 4: Make property required / non-nullable
-        // Example: "Make Customer.Email required" or "Make Customer Email required" or "Make Email required"
+        // Pattern 4: Make property required / non-nullable (English & Turkish)
+        // Example: "Make Customer.Email required" or "Customer entity’sindeki Email alanını zorunlu hale getirelim"
         var reqMatch = Regex.Match(prompt, @"make (?:(\w+)[.\s])?(\w+) (?:required|non-nullable|not null)", RegexOptions.IgnoreCase);
-        if (reqMatch.Success && !addReqMatch.Success)
+        var trReqMatch = Regex.Match(prompt, @"(?:(\w+)\s*(?:entity['’]sindeki|entity['’]si|varlığı|tablosu)?\s+)?(\w+)\s+(?:alanını|alanı|property)?\s*(?:zorunlu|zorunlu hale)", RegexOptions.IgnoreCase);
+
+        if ((reqMatch.Success || trReqMatch.Success) && !addReqMatch.Success)
         {
-            var entityName = !string.IsNullOrWhiteSpace(reqMatch.Groups[1].Value) ? reqMatch.Groups[1].Value : (DetectTargetEntity(prompt, files) ?? "Customer");
-            var propName = reqMatch.Groups[2].Value;
+            var match = reqMatch.Success ? reqMatch : trReqMatch;
+            var entityName = !string.IsNullOrWhiteSpace(match.Groups[1].Value) ? match.Groups[1].Value : (DetectTargetEntity(prompt, files) ?? "Customer");
+            var propName = match.Groups[2].Value;
 
             changes.Add(new DatabaseChange
             {
@@ -277,15 +280,32 @@ public sealed class EfCoreDatabaseImpactAnalyzer : IDatabaseImpactAnalyzer
             unknowns.Add($"Existing rows in {entityName} may have null values for {propName}; review default/backfill strategy");
         }
 
-        // Pattern 5: Reduce max length
-        // Example: "reduce max length from 500 to 200" or "reduce length from 100 to 50"
+        // Pattern 5: Reduce max length (English & Turkish)
+        // Example: "reduce max length from 500 to 200" or "maksimum uzunluğunu 500’den 200’e düşürelim"
         var lenMatch = Regex.Match(prompt, @"reduce (?:max )?length (?:of (?:(\w+)[.\s])?(\w+) )?from (\d+) to (\d+)", RegexOptions.IgnoreCase);
-        if (lenMatch.Success)
+        var trLenMatch = Regex.Match(prompt, @"(?:maksimum\s+)?uzunlu[ğg]unu\s+(\d+)[’']?d[ea]n\s+(\d+)[’']?[yea]?\s*(?:düşür|indir)", RegexOptions.IgnoreCase);
+
+        if (lenMatch.Success || trLenMatch.Success)
         {
-            var fromLen = int.Parse(lenMatch.Groups[3].Value);
-            var toLen = int.Parse(lenMatch.Groups[4].Value);
-            var entityName = !string.IsNullOrWhiteSpace(lenMatch.Groups[1].Value) ? lenMatch.Groups[1].Value : (DetectTargetEntity(prompt, files) ?? "Entity");
-            var propName = !string.IsNullOrWhiteSpace(lenMatch.Groups[2].Value) ? lenMatch.Groups[2].Value : "Property";
+            int fromLen, toLen;
+            string? entityName = null;
+            string? propName = null;
+
+            if (lenMatch.Success)
+            {
+                fromLen = int.Parse(lenMatch.Groups[3].Value);
+                toLen = int.Parse(lenMatch.Groups[4].Value);
+                entityName = !string.IsNullOrWhiteSpace(lenMatch.Groups[1].Value) ? lenMatch.Groups[1].Value : null;
+                propName = !string.IsNullOrWhiteSpace(lenMatch.Groups[2].Value) ? lenMatch.Groups[2].Value : null;
+            }
+            else
+            {
+                fromLen = int.Parse(trLenMatch.Groups[1].Value);
+                toLen = int.Parse(trLenMatch.Groups[2].Value);
+            }
+
+            entityName ??= DetectTargetEntity(prompt, files) ?? "Entity";
+            propName ??= changes.FirstOrDefault(c => c.ObjectType == DatabaseObjectType.Column)?.ObjectName ?? "Property";
 
             evidenceList.Add($"Detected max length reduction ({fromLen} -> {toLen}) for '{entityName}.{propName}'");
 

@@ -41,5 +41,11 @@ public sealed class ChangeBrief
 
     public DatabaseImpact? DatabaseImpact { get; set; }
 
+    public bool IsGroundingUnresolved { get; set; }
+
+    public string? UnresolvedSubject { get; set; }
+
+    public string? UnresolvedReason { get; set; }
+
     public List<string> Unknowns { get; set; } = new();
 }

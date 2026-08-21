@@ -131,6 +131,12 @@ public sealed class ChangeBriefDto
 
     public DatabaseImpactDto? DatabaseImpact { get; set; }
 
+    public bool IsGroundingUnresolved { get; set; }
+
+    public string? UnresolvedSubject { get; set; }
+
+    public string? UnresolvedReason { get; set; }
+
     public IReadOnlyList<string> Unknowns { get; set; } = Array.Empty<string>();
 }
 
@@ -152,6 +158,12 @@ public sealed class StructuredResultDto
     public string Summary { get; set; } = string.Empty;
 
     public int Confidence { get; set; }
+
+    public bool IsGroundingUnresolved { get; set; }
+
+    public string? UnresolvedSubject { get; set; }
+
+    public string? UnresolvedReason { get; set; }
 
     public IReadOnlyList<ImpactedFileDto> ImpactedFiles { get; set; } = Array.Empty<ImpactedFileDto>();
 

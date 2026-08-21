@@ -476,7 +476,15 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 .UpdateAsync(analysis, executionToken)
                 .ConfigureAwait(false);
 
-            task.Status = DevelopmentTaskStatus.AwaitingApproval;
+            if (structuredResult.IsGroundingUnresolved)
+            {
+                // Approval is disabled when central task subject is ungrounded
+                task.Status = DevelopmentTaskStatus.ReadyForAnalysis;
+            }
+            else
+            {
+                task.Status = DevelopmentTaskStatus.AwaitingApproval;
+            }
             task.UpdatedAt = completedAt;
             await _taskRepository.UpdateAsync(task, executionToken).ConfigureAwait(false);
 
@@ -1548,6 +1556,52 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         resultData.ChangeBrief = changeBrief;
         resultData.RiskReasons = changeBrief.RiskReasons;
 
+        // Deterministic Task-Subject Grounding Validation
+        var subjectGrounding = TaskSubjectGroundingValidator.Validate(taskPrompt, evidence, workspaceLocalPath);
+        if (!subjectGrounding.IsGrounded)
+        {
+            resultData.IsGroundingUnresolved = true;
+            resultData.UnresolvedSubject = subjectGrounding.TargetSubject;
+            resultData.UnresolvedReason = subjectGrounding.UnresolvedReason;
+            resultData.Confidence = 0; // Unresolved central subject cannot produce normal executable confidence
+
+            // Do NOT present unrelated substitute entities as an executable plan
+            resultData.ImpactedFiles = new List<ImpactedFile>();
+            resultData.ProposedPlan = new List<ProposedPlanStep>();
+
+            // Surface concise blocking message
+            var blockMsg = subjectGrounding.UnresolvedReason ?? $"{subjectGrounding.TargetSubject} could not be resolved in repository evidence.";
+            
+            if (!resultData.RiskReasons.Contains(blockMsg, StringComparer.OrdinalIgnoreCase))
+            {
+                resultData.RiskReasons.Insert(0, blockMsg);
+            }
+            if (!resultData.Unknowns.Contains(blockMsg, StringComparer.OrdinalIgnoreCase))
+            {
+                resultData.Unknowns.Insert(0, blockMsg);
+            }
+
+            resultData.Summary = $"Grounding unresolved: {blockMsg}";
+
+            if (changeBrief != null)
+            {
+                changeBrief.IsGroundingUnresolved = true;
+                changeBrief.UnresolvedSubject = subjectGrounding.TargetSubject;
+                changeBrief.UnresolvedReason = subjectGrounding.UnresolvedReason;
+                changeBrief.FileCount = 0;
+                changeBrief.ProjectCount = 0;
+                changeBrief.RiskLevel = RiskLevel.High;
+                if (!changeBrief.RiskReasons.Contains(blockMsg, StringComparer.OrdinalIgnoreCase))
+                {
+                    changeBrief.RiskReasons.Insert(0, blockMsg);
+                }
+                if (!changeBrief.Unknowns.Contains(blockMsg, StringComparer.OrdinalIgnoreCase))
+                {
+                    changeBrief.Unknowns.Insert(0, blockMsg);
+                }
+            }
+        }
+
         return ParseResult.Succeeded(resultData);
     }
 
@@ -1683,6 +1737,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         {
             Summary = data.Summary,
             Confidence = data.Confidence,
+            IsGroundingUnresolved = data.IsGroundingUnresolved,
+            UnresolvedSubject = data.UnresolvedSubject,
+            UnresolvedReason = data.UnresolvedReason,
             ImpactedFiles = data.ImpactedFiles
                 .Select(f => new ImpactedFileDto
                 {
@@ -1733,6 +1790,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     RuntimeSummary = data.ChangeBrief.RuntimeSummary,
                     TestsSummary = data.ChangeBrief.TestsSummary,
                     VerificationSummary = data.ChangeBrief.VerificationSummary,
+                    IsGroundingUnresolved = data.ChangeBrief.IsGroundingUnresolved,
+                    UnresolvedSubject = data.ChangeBrief.UnresolvedSubject,
+                    UnresolvedReason = data.ChangeBrief.UnresolvedReason,
                     ExpectedChecks = data.ChangeBrief.ExpectedChecks
                         .Select(c => new ExpectedVerificationCheckDto
                         {

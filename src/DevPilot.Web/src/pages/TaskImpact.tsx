@@ -624,6 +624,20 @@ export function TaskImpact() {
             </div>
           ) : (
             <>
+              {/* Grounding Unresolved Banner */}
+              {structured?.isGroundingUnresolved && (
+                <div className="mb-4 flex items-start gap-2.5 rounded-[var(--radius-md)] border border-red-500/40 bg-red-500/10 p-3.5 text-[12.5px] text-red-400">
+                  <AlertCircle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
+                  <div className="min-w-0">
+                    <strong className="font-semibold text-red-300">Grounding Unresolved:</strong>{" "}
+                    {structured.unresolvedReason || "Central task subject could not be resolved in repository evidence."}
+                    <p className="mt-1 text-[11.5px] text-red-400/80">
+                      Executable plan and approval are blocked because the target entity or member does not exist in the repository. Advisory risk analysis is retained below.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Change Brief */}
               {structured?.changeBrief && (
                 <div className="mb-4 rounded-[var(--radius-lg)] border border-primary/25 bg-surface p-4 shadow-sm">

@@ -76,6 +76,21 @@ public sealed class ApproveTaskCommandHandler : IApproveTaskCommandHandler
             };
         }
 
+        if (analysis.StructuredResult?.IsGroundingUnresolved == true ||
+            analysis.StructuredResult?.ChangeBrief?.IsGroundingUnresolved == true)
+        {
+            var unresolvedReason = analysis.StructuredResult?.UnresolvedReason ??
+                                   analysis.StructuredResult?.ChangeBrief?.UnresolvedReason ??
+                                   "Cannot approve task: central task subject could not be resolved in repository evidence.";
+
+            return new ApproveTaskResult
+            {
+                Success = false,
+                Conflict = true,
+                ErrorMessage = unresolvedReason,
+            };
+        }
+
         if (analysis.StructuredResult?.ImpactedFiles is not null &&
             analysis.StructuredResult.ImpactedFiles.Count > ExecutionCapacityPolicy.MaxImpactedFiles)
         {

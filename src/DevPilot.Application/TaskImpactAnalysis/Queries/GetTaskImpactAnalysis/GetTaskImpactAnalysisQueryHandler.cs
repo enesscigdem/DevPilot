@@ -93,6 +93,9 @@ public sealed class GetTaskImpactAnalysisQueryHandler : IGetTaskImpactAnalysisQu
         {
             Summary = data.Summary,
             Confidence = data.Confidence,
+            IsGroundingUnresolved = data.IsGroundingUnresolved,
+            UnresolvedSubject = data.UnresolvedSubject,
+            UnresolvedReason = data.UnresolvedReason,
             ImpactedFiles = data.ImpactedFiles
                 .Select(f => new ImpactedFileDto
                 {
@@ -143,6 +146,9 @@ public sealed class GetTaskImpactAnalysisQueryHandler : IGetTaskImpactAnalysisQu
                     RuntimeSummary = data.ChangeBrief.RuntimeSummary,
                     TestsSummary = data.ChangeBrief.TestsSummary,
                     VerificationSummary = data.ChangeBrief.VerificationSummary,
+                    IsGroundingUnresolved = data.ChangeBrief.IsGroundingUnresolved,
+                    UnresolvedSubject = data.ChangeBrief.UnresolvedSubject,
+                    UnresolvedReason = data.ChangeBrief.UnresolvedReason,
                     ExpectedChecks = data.ChangeBrief.ExpectedChecks
                         .Select(c => new ExpectedVerificationCheckDto
                         {

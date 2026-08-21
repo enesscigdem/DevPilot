@@ -159,7 +159,14 @@ export function deriveTaskImpactLifecycle(
 
     let statusLabel = "Awaiting approval"
     let statusTone: Tone = "amber"
-    if (task?.status === TaskStatus.Approved) {
+    const isGroundingUnresolved =
+      analysis?.structuredResult?.isGroundingUnresolved === true ||
+      analysis?.structuredResult?.changeBrief?.isGroundingUnresolved === true
+
+    if (isGroundingUnresolved) {
+      statusLabel = "Grounding unresolved"
+      statusTone = "red"
+    } else if (task?.status === TaskStatus.Approved) {
       statusLabel = "Approved"
       statusTone = "blue"
     } else if (task?.status === TaskStatus.Executing) {
@@ -182,7 +189,7 @@ export function deriveTaskImpactLifecycle(
       statusLabel,
       canRun: false,
       canRetry: false,
-      canApprove: task?.status === TaskStatus.AwaitingApproval,
+      canApprove: !isGroundingUnresolved && task?.status === TaskStatus.AwaitingApproval,
       isAnalyzing: false,
       isSucceeded: true,
       isFailed: false,

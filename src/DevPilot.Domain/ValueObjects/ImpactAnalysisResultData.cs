@@ -26,5 +26,11 @@ public sealed class ImpactAnalysisResultData
 
     public DatabaseImpact? DatabaseImpact { get; set; }
 
+    public bool IsGroundingUnresolved { get; set; }
+
+    public string? UnresolvedSubject { get; set; }
+
+    public string? UnresolvedReason { get; set; }
+
     public Dictionary<string, JsonElement>? Metadata { get; set; }
 }
