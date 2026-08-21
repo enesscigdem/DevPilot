@@ -325,19 +325,19 @@ public sealed class ChangeIntelligenceEvidenceTests
           "summary": "Add order cancellation endpoint with inventory restock and EF Core update.",
           "confidence": 90,
           "impactedFiles": [
-            { "filePath": "src/DevPilot.Api/Controllers/OrdersController.cs", "changeType": "Modify", "reason": "Add CancelOrder action" },
-            { "filePath": "src/DevPilot.Domain/Entities/Order.cs", "changeType": "Modify", "reason": "Add Cancel domain logic" },
-            { "filePath": "src/DevPilot.Application/Orders/Commands/CancelOrderCommand.cs", "changeType": "Add", "reason": "Handler for cancellation" },
-            { "filePath": "src/DevPilot.Infrastructure/Persistence/Migrations/20260821_CancelOrder.cs", "changeType": "Add", "reason": "Migration for cancellation timestamp" },
+            { "filePath": "src/DevPilot.Api/Controllers/OrdersController.cs", "changeType": "Modify", "reason": "CancelOrder action" },
+            { "filePath": "src/DevPilot.Domain/Entities/Order.cs", "changeType": "Modify", "reason": "Cancel domain logic" },
+            { "filePath": "src/DevPilot.Application/Orders/Commands/CancelOrderCommand.cs", "changeType": "Add", "reason": "Handler" },
+            { "filePath": "src/DevPilot.Infrastructure/Persistence/Migrations/20260821_CancelOrder.cs", "changeType": "Add", "reason": "Migration" },
             { "filePath": "tests/DevPilot.Tests/Orders/CancelOrderTests.cs", "changeType": "Add", "reason": "Unit tests" }
           ],
           "dimensions": [
             { "area": "API", "impactLevel": "Medium", "summary": "New cancellation endpoint" },
-            { "area": "DATA", "impactLevel": "Medium", "summary": "Add status field to Orders table" }
+            { "area": "DATA", "impactLevel": "Medium", "summary": "Add status field" }
           ],
           "proposedPlan": [
-            { "order": 1, "title": "Implement domain and command", "description": "Add Cancel logic to Order entity and implement handler" },
-            { "order": 2, "title": "Add controller endpoint and tests", "description": "Expose POST /api/orders/{id}/cancel and write tests" }
+            { "order": 1, "title": "Domain and command", "description": "Add Cancel logic to Order entity" },
+            { "order": 2, "title": "Endpoint and tests", "description": "Expose POST endpoint and tests" }
           ],
           "risks": [
             { "level": "Medium", "description": "Concurrent cancellation race condition" }

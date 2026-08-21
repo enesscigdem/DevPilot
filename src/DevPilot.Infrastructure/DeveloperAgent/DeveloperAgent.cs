@@ -1421,32 +1421,43 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (string.IsNullOrWhiteSpace(targetContent)) return targetContent;
 
         var lines = targetContent.Split('\n');
-        if (lines.Length <= 100 || targetContent.Length <= 4000)
-        {
-            return targetContent;
-        }
 
-        var sb = new System.Text.StringBuilder();
-
-        // 1. Header (usings, namespace, class declaration)
-        int headerLinesCount = Math.Min(30, lines.Length);
-        for (int i = 0; i < headerLinesCount; i++)
+        // 1. If applicability failure context is present for a large file (> 100 lines / 4000 chars),
+        // window specifically around the failure point to highlight the exact mismatch anchor.
+        if (applicabilityFailure != null && !string.IsNullOrWhiteSpace(applicabilityFailure.SurroundingContext) && (lines.Length > 100 || targetContent.Length > 4000))
         {
-            sb.AppendLine(lines[i]);
-        }
-
-        // 2. Context around failure or representative test method
-        if (applicabilityFailure != null && !string.IsNullOrWhiteSpace(applicabilityFailure.SurroundingContext))
-        {
-            sb.AppendLine("\n// ... [lines omitted for brevity] ...\n");
+            var sb = new System.Text.StringBuilder();
+            int headerLinesCount = Math.Min(30, lines.Length);
+            for (int i = 0; i < headerLinesCount; i++)
+            {
+                sb.AppendLine(lines[i]);
+            }
+            sb.AppendLine("\n// ... [prior methods omitted for brevity] ...\n");
             sb.AppendLine("// === Context Around Target Edit / Failure Point ===");
             sb.AppendLine(applicabilityFailure.SurroundingContext.Trim());
             sb.AppendLine("// === End Context Around Target Edit ===\n");
+
+            int footerStart = Math.Max(headerLinesCount, lines.Length - 25);
+            for (int i = footerStart; i < lines.Length; i++)
+            {
+                sb.AppendLine(lines[i]);
+            }
+            return sb.ToString();
         }
-        else if (isTestFile)
+
+        // 2. For test files with repetitive suites (> 100 lines / 4000 chars),
+        // window to fixture header, representative test convention, and class insertion anchor.
+        if (isTestFile && (lines.Length > 100 || targetContent.Length > 4000))
         {
+            var sb = new System.Text.StringBuilder();
+            int headerCount = Math.Min(30, lines.Length);
+            for (int i = 0; i < headerCount; i++)
+            {
+                sb.AppendLine(lines[i]);
+            }
+
             int factIndex = -1;
-            for (int i = headerLinesCount; i < lines.Length - 30; i++)
+            for (int i = headerCount; i < lines.Length - 30; i++)
             {
                 if (lines[i].Contains("[Fact]") || lines[i].Contains("[Theory]"))
                 {
@@ -1466,18 +1477,41 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 }
                 sb.AppendLine("// === End Representative Neighboring Test Method ===\n");
             }
+
+            sb.AppendLine("\n// ... [subsequent existing methods omitted for brevity] ...\n");
+            sb.AppendLine("// === Insertion Anchor (End of Class) ===");
+            int footStart = Math.Max(headerCount, lines.Length - 25);
+            for (int i = footStart; i < lines.Length; i++)
+            {
+                sb.AppendLine(lines[i]);
+            }
+
+            return sb.ToString();
         }
 
-        // 3. Footer / Insertion Anchor (last 25 lines of the class)
-        sb.AppendLine("\n// ... [subsequent existing methods omitted for brevity] ...\n");
-        sb.AppendLine("// === Insertion Anchor (End of Class) ===");
-        int footerStart = Math.Max(headerLinesCount, lines.Length - 25);
-        for (int i = footerStart; i < lines.Length; i++)
+        // 3. For production source files up to 600 lines / 25,000 chars,
+        // provide complete content so the model can inspect all methods and produce exact verbatim search anchors.
+        if (lines.Length <= 600 && targetContent.Length <= 25000)
         {
-            sb.AppendLine(lines[i]);
+            return targetContent;
         }
 
-        return sb.ToString();
+        // 4. Extremely large files (> 600 lines / 25,000 chars)
+        var sbLarge = new System.Text.StringBuilder();
+        int hCount = Math.Min(30, lines.Length);
+        for (int i = 0; i < hCount; i++)
+        {
+            sbLarge.AppendLine(lines[i]);
+        }
+        sbLarge.AppendLine("\n// ... [subsequent existing methods omitted for brevity] ...\n");
+        sbLarge.AppendLine("// === Insertion Anchor (End of Class) ===");
+        int fStart = Math.Max(hCount, lines.Length - 25);
+        for (int i = fStart; i < lines.Length; i++)
+        {
+            sbLarge.AppendLine(lines[i]);
+        }
+
+        return sbLarge.ToString();
     }
 
     public static string BuildSingleFileSystemPrompt(
@@ -1522,7 +1556,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "Provide complete file content in 'newContent'."
             : useFullFileReplacement
                 ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
-                : "Provide only minimal 'searchReplaceEdits' with the smallest exact unique anchors; omit 'newContent'.";
+                : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods. Omit 'newContent'.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
@@ -1543,7 +1577,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
             : useFullFileReplacement
                 ? "Return the complete resulting small file in 'newContent'; omit 'searchReplaceEdits'."
-                : "Return only compact 'searchReplaceEdits'. Copy each small search anchor verbatim from the current target and make it match once; omit 'newContent'.";
+                : "Return only compact 'searchReplaceEdits'. Copy each small search anchor (2-5 lines) verbatim from the current target and make it match once; omit 'newContent'.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""

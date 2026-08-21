@@ -99,64 +99,89 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             throw new InvalidOperationException(error);
         }
 
-        await _executionRepository.UpdateWorkspaceDetailsAsync(
-            context.ExecutionId,
-            prepResult.WorkspacePath,
-            prepResult.BranchName,
-            cancellationToken).ConfigureAwait(false);
+        var modifiedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        await SafeRecordActivityAsync(
-            context.ExecutionId,
-            ExecutionStage.Workspace,
-            ExecutionActivityStatus.Completed,
-            "Workspace prepared.",
-            new ExecutionActivityMetadata(BranchName: prepResult.BranchName),
-            cancellationToken).ConfigureAwait(false);
-
-        var preAiVerification = await _workspaceManager.VerifyWorkspaceStateAsync(
-            prepResult.WorkspacePath,
-            prepResult.BranchName,
-            requireClean: true,
-            cancellationToken).ConfigureAwait(false);
-
-        if (!preAiVerification.IsValid)
+        try
         {
-            var error = $"Developer Agent failed: Execution workspace verification failed prior to AI invocation. {preAiVerification.ErrorMessage}";
-            await SafeRecordActivityAsync(
+            await _executionRepository.UpdateWorkspaceDetailsAsync(
                 context.ExecutionId,
-                ExecutionStage.DeveloperAgent,
-                ExecutionActivityStatus.Failed,
-                error,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException(error);
-        }
-
-        var profile = await _repositoryCheckRunner.DiscoverAsync(
-            new RepositoryPreflightRequest(prepResult.WorkspacePath, prepResult.BranchName),
-            cancellationToken).ConfigureAwait(false);
-
-        var requiredChecks = profile.Checks
-            .Where(check => check.Required)
-            .OrderBy(check => check.Order)
-            .ThenBy(check => check.Id, StringComparer.Ordinal)
-            .ToList();
-
-        if (profile.State != RepositoryVerificationState.Configured || requiredChecks.Count == 0)
-        {
-            var category = profile.State == RepositoryVerificationState.InfrastructureFailure
-                ? RepositoryCheckFailureCategory.InfrastructureFailure.ToString()
-                : "Unconfigured";
-            var error = profile.State == RepositoryVerificationState.InfrastructureFailure
-                ? $"Repository verification preflight failed: {profile.Message ?? "Infrastructure failure."}"
-                : $"Repository verification is unconfigured: {profile.Message ?? "No trustworthy check was discovered."}";
+                prepResult.WorkspacePath,
+                prepResult.BranchName,
+                cancellationToken).ConfigureAwait(false);
 
             await SafeRecordActivityAsync(
                 context.ExecutionId,
-                ExecutionStage.Execution,
-                ExecutionActivityStatus.Failed,
-                error,
+                ExecutionStage.Workspace,
+                ExecutionActivityStatus.Completed,
+                "Workspace prepared.",
+                new ExecutionActivityMetadata(BranchName: prepResult.BranchName),
+                cancellationToken).ConfigureAwait(false);
+
+            var preAiVerification = await _workspaceManager.VerifyWorkspaceStateAsync(
+                prepResult.WorkspacePath,
+                prepResult.BranchName,
+                requireClean: true,
+                cancellationToken).ConfigureAwait(false);
+
+            if (!preAiVerification.IsValid)
+            {
+                var error = $"Developer Agent failed: Execution workspace verification failed prior to AI invocation. {preAiVerification.ErrorMessage}";
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.DeveloperAgent,
+                    ExecutionActivityStatus.Failed,
+                    error,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException(error);
+            }
+
+            var profile = await _repositoryCheckRunner.DiscoverAsync(
+                new RepositoryPreflightRequest(prepResult.WorkspacePath, prepResult.BranchName),
+                cancellationToken).ConfigureAwait(false);
+
+            var requiredChecks = profile.Checks
+                .Where(check => check.Required)
+                .OrderBy(check => check.Order)
+                .ThenBy(check => check.Id, StringComparer.Ordinal)
+                .ToList();
+
+            if (profile.State != RepositoryVerificationState.Configured || requiredChecks.Count == 0)
+            {
+                var category = profile.State == RepositoryVerificationState.InfrastructureFailure
+                    ? RepositoryCheckFailureCategory.InfrastructureFailure.ToString()
+                    : "Unconfigured";
+                var error = profile.State == RepositoryVerificationState.InfrastructureFailure
+                    ? $"Repository verification preflight failed: {profile.Message ?? "Infrastructure failure."}"
+                    : $"Repository verification is unconfigured: {profile.Message ?? "No trustworthy check was discovered."}";
+
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Execution,
+                    ExecutionActivityStatus.Failed,
+                    error,
+                    new ExecutionActivityMetadata(
+                        EventKind: "StoppedWithEvidence",
+                        DiscoveredCheckCount: requiredChecks.Count,
+                        DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
+                        DiscoveredCheckEvidence: requiredChecks
+                            .Where(check => !string.IsNullOrWhiteSpace(check.DiscoveryEvidence))
+                            .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
+                            .ToList(),
+                        DetectedEcosystems: profile.Ecosystems,
+                        VerificationFailureCategory: category,
+                        DeterministicCheck: true,
+                        VerificationUnresolved: profile.HasUnresolvedVerification),
+                    cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException(error);
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Workspace,
+                ExecutionActivityStatus.Completed,
+                "Repository verification checks discovered.",
                 new ExecutionActivityMetadata(
-                    EventKind: "StoppedWithEvidence",
+                    EventKind: "RepositoryPreflight",
                     DiscoveredCheckCount: requiredChecks.Count,
                     DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
                     DiscoveredCheckEvidence: requiredChecks
@@ -164,213 +189,203 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
                         .ToList(),
                     DetectedEcosystems: profile.Ecosystems,
-                    VerificationFailureCategory: category,
                     DeterministicCheck: true,
                     VerificationUnresolved: profile.HasUnresolvedVerification),
                 cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException(error);
-        }
 
-        await SafeRecordActivityAsync(
-            context.ExecutionId,
-            ExecutionStage.Workspace,
-            ExecutionActivityStatus.Completed,
-            "Repository verification checks discovered.",
-            new ExecutionActivityMetadata(
-                EventKind: "RepositoryPreflight",
-                DiscoveredCheckCount: requiredChecks.Count,
-                DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
-                DiscoveredCheckEvidence: requiredChecks
-                    .Where(check => !string.IsNullOrWhiteSpace(check.DiscoveryEvidence))
-                    .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
-                    .ToList(),
-                DetectedEcosystems: profile.Ecosystems,
-                DeterministicCheck: true,
-                VerificationUnresolved: profile.HasUnresolvedVerification),
-            cancellationToken).ConfigureAwait(false);
+            var analysis = await _impactAnalysisRepository
+                .GetLatestByTaskIdAsync(context.TaskId, cancellationToken)
+                .ConfigureAwait(false);
 
-        var analysis = await _impactAnalysisRepository
-            .GetLatestByTaskIdAsync(context.TaskId, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (analysis is null || analysis.Status != ImpactAnalysisStatus.Completed)
-        {
-            const string error = "Developer Agent failed: A completed TaskImpactAnalysis is required before running the Developer Agent.";
-            await SafeRecordActivityAsync(
-                context.ExecutionId,
-                ExecutionStage.DeveloperAgent,
-                ExecutionActivityStatus.Failed,
-                error,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException(error);
-        }
-
-        var summary = !string.IsNullOrWhiteSpace(analysis.StructuredResult?.Summary)
-            ? analysis.StructuredResult.Summary
-            : context.ImpactAnalysisSummary;
-        var impactedFiles = analysis.StructuredResult?.ImpactedFiles?
-            .Select(file => file.FilePath)
-            .Where(path => !string.IsNullOrWhiteSpace(path))
-            .ToList() ?? new List<string>();
-        var impactedFileDetails = analysis.StructuredResult?.ImpactedFiles?
-            .Where(file => !string.IsNullOrWhiteSpace(file.FilePath))
-            .Select(file => new ImpactedFileDetail(
-                file.FilePath,
-                file.ChangeType.ToString(),
-                file.Reason,
-                file.EvidenceType,
-                file.IsUncertain))
-            .ToList() ?? new List<ImpactedFileDetail>();
-
-        var changeDimensions = analysis.StructuredResult?.Dimensions?
-            .Select(d => $"{d.Area}: {d.Summary}")
-            .Take(5)
-            .ToList();
-
-        var expectedChecks = analysis.StructuredResult?.ChangeBrief?.ExpectedChecks?
-            .Select(c => c.DisplayName)
-            .Take(5)
-            .ToList();
-
-        var criticalUnknowns = analysis.StructuredResult?.Unknowns?
-            .Take(3)
-            .ToList();
-
-        var agentRequest = new DeveloperAgentRequest(
-            context.TaskId,
-            context.ExecutionId,
-            context.TaskTitle,
-            context.TaskDescription,
-            context.AcceptanceCriteria,
-            summary,
-            BuildProposedPlanText(analysis),
-            impactedFiles,
-            prepResult.WorkspacePath,
-            prepResult.BranchName,
-            impactedFileDetails,
-            analysis.Model,
-            ChangeDimensions: changeDimensions,
-            ExpectedChecks: expectedChecks,
-            Unknowns: criticalUnknowns);
-
-        await SafeRecordActivityAsync(
-            context.ExecutionId,
-            ExecutionStage.DeveloperAgent,
-            ExecutionActivityStatus.Started,
-            "Developer Agent started.",
-            new ExecutionActivityMetadata(Model: analysis.Model, EventKind: "GeneratingChange"),
-            cancellationToken).ConfigureAwait(false);
-
-        var agentResult = await _developerAgent.GenerateAndApplyEditsAsync(agentRequest, cancellationToken).ConfigureAwait(false);
-        var actualModel = agentResult.Model ?? analysis.Model;
-        if (!string.IsNullOrWhiteSpace(actualModel))
-        {
-            await _executionRepository.SetModelAsync(context.ExecutionId, actualModel, cancellationToken).ConfigureAwait(false);
-        }
-
-        if (!agentResult.Success)
-        {
-            var error = $"Developer Agent failed: {agentResult.ErrorMessage ?? "Developer Agent failed to generate or apply edits."}";
-            await SafeRecordActivityAsync(
-                context.ExecutionId,
-                ExecutionStage.DeveloperAgent,
-                ExecutionActivityStatus.Failed,
-                error,
-                actualModel != null ? new ExecutionActivityMetadata(Model: actualModel) : null,
-                cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException(error);
-        }
-
-        if (agentResult.ModifiedFiles == null || agentResult.ModifiedFiles.Count == 0)
-        {
-            const string error = "Developer Agent failed: Developer Agent returned success but produced zero modified files.";
-            await SafeRecordActivityAsync(
-                context.ExecutionId,
-                ExecutionStage.DeveloperAgent,
-                ExecutionActivityStatus.Failed,
-                error,
-                actualModel != null ? new ExecutionActivityMetadata(Model: actualModel) : null,
-                cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException(error);
-        }
-
-        await SafeRecordActivityAsync(
-            context.ExecutionId,
-            ExecutionStage.DeveloperAgent,
-            ExecutionActivityStatus.Completed,
-            "Developer Agent completed.",
-            new ExecutionActivityMetadata(
-                ModifiedFileCount: agentResult.ModifiedFiles.Count,
-                Model: actualModel,
-                EventKind: "GeneratingChange"),
-            cancellationToken).ConfigureAwait(false);
-
-        var modifiedFiles = new HashSet<string>(agentResult.ModifiedFiles, StringComparer.OrdinalIgnoreCase);
-        var prerequisiteChecks = requiredChecks.Where(check => check.Kind != RepositoryCheckKind.Test).ToList();
-        var testChecks = requiredChecks.Where(check => check.Kind == RepositoryCheckKind.Test).ToList();
-
-        foreach (var check in prerequisiteChecks)
-        {
-            await RunPrerequisiteCheckAsync(
-                context,
-                prepResult,
-                analysis,
-                actualModel,
-                check,
-                modifiedFiles,
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        var confirmedBuild = prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build);
-        for (var index = 0; index < testChecks.Count; index++)
-        {
-            var check = testChecks[index];
-            await RunTestCheckAsync(
-                context,
-                prepResult,
-                analysis,
-                actualModel,
-                check,
-                prerequisiteChecks,
-                confirmedBuild,
-                index == testChecks.Count - 1,
-                modifiedFiles,
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        // Purge verification-produced side effects (bin/obj/cache/test artifacts)
-        // keeping only the authoritative task changes (initial edits + repair edits).
-        try
-        {
-            var purged = await VerificationSideEffectCleaner.PurgeSideEffectsAsync(
-                prepResult.WorkspacePath,
-                modifiedFiles,
-                cancellationToken).ConfigureAwait(false);
-
-            if (purged.Count > 0)
+            if (analysis is null || analysis.Status != ImpactAnalysisStatus.Completed)
             {
-                _logger.LogInformation(
-                    "Purged {Count} verification side-effect artifact(s) from execution workspace {WorkspacePath}.",
-                    purged.Count,
-                    prepResult.WorkspacePath);
+                const string error = "Developer Agent failed: A completed TaskImpactAnalysis is required before running the Developer Agent.";
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.DeveloperAgent,
+                    ExecutionActivityStatus.Failed,
+                    error,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException(error);
+            }
+
+            var summary = !string.IsNullOrWhiteSpace(analysis.StructuredResult?.Summary)
+                ? analysis.StructuredResult.Summary
+                : context.ImpactAnalysisSummary;
+            var impactedFiles = analysis.StructuredResult?.ImpactedFiles?
+                .Select(file => file.FilePath)
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .ToList() ?? new List<string>();
+            var impactedFileDetails = analysis.StructuredResult?.ImpactedFiles?
+                .Where(file => !string.IsNullOrWhiteSpace(file.FilePath))
+                .Select(file => new ImpactedFileDetail(
+                    file.FilePath,
+                    file.ChangeType.ToString(),
+                    file.Reason,
+                    file.EvidenceType,
+                    file.IsUncertain))
+                .ToList() ?? new List<ImpactedFileDetail>();
+
+            var changeDimensions = analysis.StructuredResult?.Dimensions?
+                .Select(d => $"{d.Area}: {d.Summary}")
+                .Take(5)
+                .ToList();
+
+            var expectedChecks = analysis.StructuredResult?.ChangeBrief?.ExpectedChecks?
+                .Select(c => c.DisplayName)
+                .Take(5)
+                .ToList();
+
+            var criticalUnknowns = analysis.StructuredResult?.Unknowns?
+                .Take(3)
+                .ToList();
+
+            var agentRequest = new DeveloperAgentRequest(
+                context.TaskId,
+                context.ExecutionId,
+                context.TaskTitle,
+                context.TaskDescription,
+                context.AcceptanceCriteria,
+                summary,
+                BuildProposedPlanText(analysis),
+                impactedFiles,
+                prepResult.WorkspacePath,
+                prepResult.BranchName,
+                impactedFileDetails,
+                analysis.Model,
+                ChangeDimensions: changeDimensions,
+                ExpectedChecks: expectedChecks,
+                Unknowns: criticalUnknowns);
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Started,
+                "Developer Agent started.",
+                new ExecutionActivityMetadata(Model: analysis.Model, EventKind: "GeneratingChange"),
+                cancellationToken).ConfigureAwait(false);
+
+            var agentResult = await _developerAgent.GenerateAndApplyEditsAsync(agentRequest, cancellationToken).ConfigureAwait(false);
+            var actualModel = agentResult.Model ?? analysis.Model;
+            if (!string.IsNullOrWhiteSpace(actualModel))
+            {
+                await _executionRepository.SetModelAsync(context.ExecutionId, actualModel, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!agentResult.Success)
+            {
+                var error = $"Developer Agent failed: {agentResult.ErrorMessage ?? "Developer Agent failed to generate or apply edits."}";
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.DeveloperAgent,
+                    ExecutionActivityStatus.Failed,
+                    error,
+                    actualModel != null ? new ExecutionActivityMetadata(Model: actualModel) : null,
+                    cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException(error);
+            }
+
+            if (agentResult.ModifiedFiles == null || agentResult.ModifiedFiles.Count == 0)
+            {
+                const string error = "Developer Agent failed: Developer Agent returned success but produced zero modified files.";
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.DeveloperAgent,
+                    ExecutionActivityStatus.Failed,
+                    error,
+                    actualModel != null ? new ExecutionActivityMetadata(Model: actualModel) : null,
+                    cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException(error);
+            }
+
+            foreach (var file in agentResult.ModifiedFiles)
+            {
+                modifiedFiles.Add(file);
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Completed,
+                "Developer Agent completed.",
+                new ExecutionActivityMetadata(
+                    ModifiedFileCount: agentResult.ModifiedFiles.Count,
+                    Model: actualModel,
+                    EventKind: "GeneratingChange"),
+                cancellationToken).ConfigureAwait(false);
+
+            var prerequisiteChecks = requiredChecks.Where(check => check.Kind != RepositoryCheckKind.Test).ToList();
+            var testChecks = requiredChecks.Where(check => check.Kind == RepositoryCheckKind.Test).ToList();
+
+            foreach (var check in prerequisiteChecks)
+            {
+                await RunPrerequisiteCheckAsync(
+                    context,
+                    prepResult,
+                    analysis,
+                    actualModel,
+                    check,
+                    modifiedFiles,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var confirmedBuild = prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build);
+            for (var index = 0; index < testChecks.Count; index++)
+            {
+                var check = testChecks[index];
+                await RunTestCheckAsync(
+                    context,
+                    prepResult,
+                    analysis,
+                    actualModel,
+                    check,
+                    prerequisiteChecks,
+                    confirmedBuild,
+                    index == testChecks.Count - 1,
+                    modifiedFiles,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            if (testChecks.Count == 0)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Build,
+                    ExecutionActivityStatus.Completed,
+                    "Repository checks passed.",
+                    new ExecutionActivityMetadata(
+                        BuildPassed: prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build) ? true : null,
+                        EventKind: "ReadyForReview"),
+                    cancellationToken).ConfigureAwait(false);
             }
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogWarning(ex, "Failed to purge verification side-effects for execution {ExecutionId}", context.ExecutionId);
-        }
+            // GUARANTEED CLEANUP: Purge verification side-effects (bin/obj/cache/test outputs)
+            // before ANY terminal result (success, build failure, test failure, repair failure, no-progress, cancellation)
+            // while strictly preserving authoritative files (initial edits + repair edits).
+            if (prepResult != null && !string.IsNullOrWhiteSpace(prepResult.WorkspacePath))
+            {
+                try
+                {
+                    var purged = await VerificationSideEffectCleaner.PurgeSideEffectsAsync(
+                        prepResult.WorkspacePath,
+                        modifiedFiles,
+                        CancellationToken.None).ConfigureAwait(false);
 
-        if (testChecks.Count == 0)
-        {
-            await SafeRecordActivityAsync(
-                context.ExecutionId,
-                ExecutionStage.Build,
-                ExecutionActivityStatus.Completed,
-                "Repository checks passed.",
-                new ExecutionActivityMetadata(
-                    BuildPassed: prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build) ? true : null,
-                    EventKind: "ReadyForReview"),
-                cancellationToken).ConfigureAwait(false);
+                    if (purged.Count > 0)
+                    {
+                        _logger.LogInformation(
+                            "Purged {Count} verification side-effect artifact(s) from execution workspace {WorkspacePath}.",
+                            purged.Count,
+                            prepResult.WorkspacePath);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to purge verification side-effects in finally block for execution {ExecutionId}", context.ExecutionId);
+                }
+            }
         }
     }
 
