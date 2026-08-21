@@ -107,11 +107,54 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         return sb.ToString();
     }
 
+    private static string CreateExtremelyLargeProductsApiTestsContent()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("using System.Net;");
+        sb.AppendLine("using System.Net.Http.Json;");
+        sb.AppendLine("using FluentAssertions;");
+        sb.AppendLine("using Microsoft.AspNetCore.Mvc.Testing;");
+        sb.AppendLine("using Xunit;");
+        sb.AppendLine();
+        sb.AppendLine("namespace NetCaseStudy.Tests.Api;");
+        sb.AppendLine();
+        sb.AppendLine("public class ProductsApiTests : IClassFixture<WebApplicationFactory<Program>>");
+        sb.AppendLine("{");
+        sb.AppendLine("    private readonly HttpClient _client;");
+        sb.AppendLine();
+        sb.AppendLine("    public ProductsApiTests(WebApplicationFactory<Program> factory)");
+        sb.AppendLine("    {");
+        sb.AppendLine("        _client = factory.CreateClient();");
+        sb.AppendLine("    }");
+        sb.AppendLine();
+
+        for (int i = 1; i <= 100; i++)
+        {
+            sb.AppendLine($"    [Fact]");
+            sb.AppendLine($"    public async Task GetProduct_{i}_ReturnsOk()");
+            sb.AppendLine("    {");
+            sb.AppendLine($"        var response = await _client.GetAsync(\"/api/products/{i}\");");
+            sb.AppendLine("        response.StatusCode.Should().Be(HttpStatusCode.OK);");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("    [Fact]");
+        sb.AppendLine("    public async Task ExistingLastTest_ReturnsOk()");
+        sb.AppendLine("    {");
+        sb.AppendLine("        var response = await _client.GetAsync(\"/api/products/last\");");
+        sb.AppendLine("        response.StatusCode.Should().Be(HttpStatusCode.OK);");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+
+        return sb.ToString();
+    }
+
     [Fact]
     public void RepairPrompt_WhenTargetFileIsLarge_BoundsSourceWindowToFixtureAndInsertionAnchor()
     {
-        var largeContent = CreateLargeProductsApiTestsContent();
-        largeContent.Split('\n').Length.Should().BeGreaterThan(100);
+        var largeContent = CreateExtremelyLargeProductsApiTestsContent();
+        largeContent.Split('\n').Length.Should().BeGreaterThan(600);
 
         var entry = new ManifestFileEntry("NetCaseStudy.Tests/Api/ProductsApiTests.cs", FileEditAction.Modify, "Add low-stock endpoint tests", null);
 
@@ -129,14 +172,12 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         prompt.Should().Contain("public ProductsApiTests(WebApplicationFactory<Program> factory)");
 
         // Prompt must contain insertion anchor footer
-        prompt.Should().Contain("=== Insertion Anchor (End of Class) ===");
+        prompt.Should().Contain("=== Insertion / End of Class Anchor ===");
         prompt.Should().Contain("ExistingLastTest_ReturnsOk");
 
-        // Prompt must NOT dump all 20 existing tests verbatim
-        prompt.Should().Contain("// ... [prior existing test methods omitted for brevity] ...");
-        prompt.Should().Contain("// ... [subsequent existing methods omitted for brevity] ...");
-        prompt.Should().NotContain("GetProduct_10_ReturnsOk");
-        prompt.Should().NotContain("GetProduct_15_ReturnsOk");
+        // Prompt must NOT dump intermediate test methods verbatim
+        prompt.Should().Contain("// ... [intermediate existing methods omitted for brevity] ...");
+        prompt.Should().NotContain("GetProduct_40_ReturnsOk");
     }
 
     [Fact]
@@ -1072,6 +1113,86 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         prompt.Should().Contain("ARCHITECTURAL DEPENDENCY REPAIR GUIDANCE");
         prompt.Should().Contain("Queries, Commands, and DTOs");
         prompt.Should().Contain("must ONLY contain query parameters and filter data");
+    }
+
+    [Theory]
+    [InlineData(4096, 8192)]
+    [InlineData(8192, 8192)]
+    [InlineData(16384, 8192)]
+    public void DetermineCompactRetryBudget_ModifyAction_HardCappedAt8192EvenWithLargeFileOrHighConfig(int initialBudget, int expectedMax)
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DeveloperAgent:MaxCompactRetryOutputTokens"] = "32768",
+                ["DeveloperAgent:MaxOutputTokens"] = "32768"
+            })
+            .Build();
+
+        var agent = new DeveloperAgent(
+            _fakeAiProvider,
+            _editApplier,
+            NullLogger<DeveloperAgent>.Instance,
+            configuration: config,
+            activityRecorder: _activityRecorder);
+
+        var largeContent = string.Join("\n", Enumerable.Range(1, 300).Select(i => $"// Line {i} of code"));
+        var fileEntry = new ManifestFileEntry("src/App/LargeController.cs", FileEditAction.Modify, "Add method");
+
+        var budget = agent.DetermineCompactRetryBudget(initialBudget, largeContent, fileEntry, isRepair: false);
+        budget.Should().BeLessOrEqualTo(8192);
+        budget.Should().Be(expectedMax);
+    }
+
+    [Fact]
+    public void DetermineCompactRetryBudget_ModifyRepair_NeverExceedsInitialBudgetOr8192()
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["DeveloperAgent:MaxCompactRetryOutputTokens"] = "32768"
+            })
+            .Build();
+
+        var agent = new DeveloperAgent(
+            _fakeAiProvider,
+            _editApplier,
+            NullLogger<DeveloperAgent>.Instance,
+            configuration: config,
+            activityRecorder: _activityRecorder);
+
+        var fileEntry = new ManifestFileEntry("src/App/TestFile.cs", FileEditAction.Modify, "Fix bug");
+
+        var budget = agent.DetermineCompactRetryBudget(4096, "content", fileEntry, isRepair: true);
+        budget.Should().Be(4096);
+    }
+
+    [Fact]
+    public void BuildBoundedTargetSourceWindow_TestFilesUnder600Lines_RetainsFullContext()
+    {
+        var testContent = CreateLargeProductsApiTestsContent(); // ~100 lines
+        var window = DeveloperAgent.BuildBoundedTargetSourceWindow(testContent, applicabilityFailure: null, isTestFile: true);
+
+        // Entire file is preserved without cutting out intermediate test methods
+        window.Should().Be(testContent);
+        window.Should().Contain("GetProduct_1_ReturnsOk");
+        window.Should().Contain("GetProduct_10_ReturnsOk");
+        window.Should().Contain("GetProduct_20_ReturnsOk");
+        window.Should().Contain("ExistingLastTest_ReturnsOk");
+    }
+
+    [Fact]
+    public void PromptTemplates_InstructMinimalEdits_AndProhibitDuplicatingUnrelatedTests()
+    {
+        var testEntry = new ManifestFileEntry("tests/App.Tests/Controllers/TodosControllerTests.cs", FileEditAction.Modify, "Add test");
+        var prompt = DeveloperAgent.BuildSingleFileSystemPrompt(testEntry, useFullFileReplacement: false);
+
+        prompt.Should().Contain("MINIMAL TESTS");
+        prompt.Should().Contain("DO NOT reproduce or copy unrelated existing test methods from the file");
+
+        var compactPrompt = DeveloperAgent.BuildCompactSingleFileSystemPrompt(testEntry, useFullFileReplacement: false);
+        compactPrompt.Should().Contain("smallest valid surgical 'searchReplaceEdits'");
+        compactPrompt.Should().Contain("NEVER repeat unchanged methods or unrelated test cases");
     }
 
     private static void InitGitRepo(string path)

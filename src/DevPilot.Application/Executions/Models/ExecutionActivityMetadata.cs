@@ -40,4 +40,11 @@ public sealed record ExecutionActivityMetadata(
     bool? DeterministicCheck = null,
     bool? VerificationUnresolved = null,
     IReadOnlyList<string>? DiscoveredCheckEvidence = null,
-    string? RepositoryCheckEvidence = null);
+    string? RepositoryCheckEvidence = null,
+    string? BaselineClassification = null,
+    string? BaseCommitSha = null,
+    bool? BaselineCacheHit = null,
+    int? PreExistingFailureCount = null,
+    int? NewRegressionCount = null,
+    string? TargetedTestFilter = null,
+    string? VerificationOutcome = null);

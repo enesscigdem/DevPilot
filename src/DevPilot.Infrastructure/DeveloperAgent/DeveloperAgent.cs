@@ -171,12 +171,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             // A Modify retry remains a compact edit response. It never needs a full-file/test-file
             // budget, and an applicability repair does not own an additional token retry.
+            // HARD CEILING: Modify retry can NEVER request > 8192 tokens under any configuration.
             if (isRepair)
             {
-                return initialBudget;
+                return Math.Min(initialBudget, 8192);
             }
 
-            return Math.Min(Math.Max(initialBudget * 2, 4096), Math.Min(8192, _maxCompactRetryOutputTokens));
+            return Math.Min(Math.Max(initialBudget * 2, 4096), 8192);
         }
 
         int targetLines = targetContent != null ? targetContent.Split('\n').Length : 0;
@@ -670,6 +671,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
             {
                 recoveryUsed = true;
                 callCounter.RecordCompactRetry();
+
+                if (fileEntry.Action == FileEditAction.Modify)
+                {
+                    var currentTarget = await ReadCurrentTargetContentAsync(
+                        request.WorkspacePath,
+                        fileEntry.FilePath,
+                        cancellationToken).ConfigureAwait(false);
+                    targetContent = currentTarget.Content;
+                    targetContentHash = currentTarget.Hash;
+                    useFullFileReplacement = WorktreeEditApplier.IsSmallTextFile(targetContent);
+                }
+
                 await SafeRecordActivityAsync(
                     request.ExecutionId,
                     $"Performing compact generation retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit.",
@@ -1446,67 +1459,24 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return sb.ToString();
         }
 
-        // 2. For test files with repetitive suites (> 100 lines / 4000 chars),
-        // window to fixture header, representative test convention, and class insertion anchor.
-        if (isTestFile && (lines.Length > 100 || targetContent.Length > 4000))
-        {
-            var sb = new System.Text.StringBuilder();
-            int headerCount = Math.Min(30, lines.Length);
-            for (int i = 0; i < headerCount; i++)
-            {
-                sb.AppendLine(lines[i]);
-            }
-
-            int factIndex = -1;
-            for (int i = headerCount; i < lines.Length - 30; i++)
-            {
-                if (lines[i].Contains("[Fact]") || lines[i].Contains("[Theory]"))
-                {
-                    factIndex = i;
-                    break;
-                }
-            }
-
-            if (factIndex > 0)
-            {
-                sb.AppendLine("\n// ... [prior existing test methods omitted for brevity] ...\n");
-                sb.AppendLine("// === Representative Neighboring Test Method (Convention Example) ===");
-                int sampleEnd = Math.Min(factIndex + 25, lines.Length - 30);
-                for (int i = factIndex; i < sampleEnd; i++)
-                {
-                    sb.AppendLine(lines[i]);
-                }
-                sb.AppendLine("// === End Representative Neighboring Test Method ===\n");
-            }
-
-            sb.AppendLine("\n// ... [subsequent existing methods omitted for brevity] ...\n");
-            sb.AppendLine("// === Insertion Anchor (End of Class) ===");
-            int footStart = Math.Max(headerCount, lines.Length - 25);
-            for (int i = footStart; i < lines.Length; i++)
-            {
-                sb.AppendLine(lines[i]);
-            }
-
-            return sb.ToString();
-        }
-
-        // 3. For production source files up to 600 lines / 25,000 chars,
-        // provide complete content so the model can inspect all methods and produce exact verbatim search anchors.
+        // 2. For source and test files up to 600 lines / 25,000 chars,
+        // provide complete content so all methods, fixtures, and exact verbatim search anchors are grounded and available.
         if (lines.Length <= 600 && targetContent.Length <= 25000)
         {
             return targetContent;
         }
 
-        // 4. Extremely large files (> 600 lines / 25,000 chars)
+        // 3. For extremely large files (> 600 lines / 25,000 chars),
+        // provide fixture/class header and end anchor while preserving grounded context.
         var sbLarge = new System.Text.StringBuilder();
-        int hCount = Math.Min(30, lines.Length);
+        int hCount = Math.Min(50, lines.Length);
         for (int i = 0; i < hCount; i++)
         {
             sbLarge.AppendLine(lines[i]);
         }
-        sbLarge.AppendLine("\n// ... [subsequent existing methods omitted for brevity] ...\n");
-        sbLarge.AppendLine("// === Insertion Anchor (End of Class) ===");
-        int fStart = Math.Max(hCount, lines.Length - 25);
+        sbLarge.AppendLine("\n// ... [intermediate existing methods omitted for brevity] ...\n");
+        sbLarge.AppendLine("// === Insertion / End of Class Anchor ===");
+        int fStart = Math.Max(hCount, lines.Length - 35);
         for (int i = fStart; i < lines.Length; i++)
         {
             sbLarge.AppendLine(lines[i]);
@@ -1527,7 +1497,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
         var testGuidance = isTest
-            ? "\n6. MINIMAL TESTS: Implement only the focused tests required by the acceptance criteria and follow existing test conventions."
+            ? "\n6. MINIMAL TESTS: Implement only the focused tests required by the acceptance criteria and follow existing test conventions. DO NOT reproduce or copy unrelated existing test methods from the file."
             : "";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
@@ -1557,7 +1527,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "Provide complete file content in 'newContent'."
             : useFullFileReplacement
                 ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
-                : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods. Omit 'newContent'.";
+                : "Output was previously truncated because too much code was emitted. Return ONLY the smallest valid surgical 'searchReplaceEdits' targeting specific modified statements or methods. NEVER repeat unchanged methods or unrelated test cases. Omit 'newContent'.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
@@ -1578,7 +1548,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
             : useFullFileReplacement
                 ? "Return the complete resulting small file in 'newContent'; omit 'searchReplaceEdits'."
-                : "Return only compact 'searchReplaceEdits'. Copy each small search anchor (2-5 lines) verbatim from the current target and make it match once; omit 'newContent'.";
+                : "Return only compact 'searchReplaceEdits'. Copy each search anchor verbatim from the current target and make it match once; omit 'newContent'.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""

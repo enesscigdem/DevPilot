@@ -490,7 +490,7 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         messages.Should().Contain(m => m.Contains("Build failed — 2 compiler error(s)"));
         messages.Should().Contain(m => m.Contains("CS1729"));
         messages.Should().Contain(m => m.Contains("CS1061"));
-        messages.Should().Contain(m => m.Contains("Repair round 1/3"));
+        messages.Should().Contain(m => m.Contains("Repair round 1/2"));
         messages.Should().Contain(m => m.Contains("Repairing:"));
     }
 

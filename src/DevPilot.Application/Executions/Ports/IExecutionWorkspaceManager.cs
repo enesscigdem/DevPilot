@@ -4,7 +4,8 @@ public sealed record ExecutionWorkspaceResult(
     string WorkspacePath,
     string BranchName,
     bool Success,
-    string? ErrorMessage = null);
+    string? ErrorMessage = null,
+    string? BaseCommitSha = null);
 
 public sealed record WorkspaceVerificationResult(
     bool IsValid,

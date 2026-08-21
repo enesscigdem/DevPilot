@@ -142,6 +142,8 @@ public static class DependencyInjection
         services.AddScoped<ISyncPullRequestCommandHandler, SyncPullRequestCommandHandler>();
         services.AddSingleton<IExecutionCancellationRegistry, ExecutionCancellationRegistry>();
         services.AddSingleton<IExecutionHeartbeatService, ExecutionHeartbeatService>();
+        services.AddSingleton<IBaselineVerificationCoordinator, BaselineVerificationCoordinator>();
+        services.AddScoped<IBaselineVerificationService, BaselineVerificationService>();
         services.AddHostedService<ExecutionStartupReconciler>();
         services.AddScoped<DevPilot.Application.Executions.Commands.CancelExecution.ICancelExecutionCommandHandler, DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionCommandHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();

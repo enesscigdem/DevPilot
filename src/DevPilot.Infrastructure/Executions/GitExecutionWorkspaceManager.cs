@@ -131,10 +131,15 @@ public sealed class GitExecutionWorkspaceManager : IExecutionWorkspaceManager
             sourcePath,
             initialBranch);
 
+        // Determine exact base commit SHA of the newly created worktree
+        var (_, baseShaOut, _) = await RunGitCommandAsync(targetWorkspacePath, cancellationToken, "rev-parse", "HEAD").ConfigureAwait(false);
+        var baseCommitSha = baseShaOut?.Trim();
+
         return new ExecutionWorkspaceResult(
             WorkspacePath: targetWorkspacePath,
             BranchName: targetBranchName,
-            Success: true);
+            Success: true,
+            BaseCommitSha: baseCommitSha);
     }
 
     public async Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(

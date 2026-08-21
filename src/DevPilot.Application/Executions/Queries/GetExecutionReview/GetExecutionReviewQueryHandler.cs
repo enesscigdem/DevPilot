@@ -1,4 +1,5 @@
 using DevPilot.Application.Executions.Dtos;
+using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.Executions.Services;
@@ -87,11 +88,11 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         }
 
         var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
-        var buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
-        var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
+        var (buildDto, testDto) = DetermineStageStatuses(execution, activities);
+        var buildPassed = buildDto.Status == "Passed";
+        var testPassed = testDto.Status is "Passed" or "NoNewRegressions";
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
         var (canRequestMerge, mergeBlockedReason) = ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks, buildPassed, testPassed);
-        var (buildStatus, testStatus) = DetermineStageStatuses(execution, activities);
 
         if (execution.CommitStatus == ExecutionCommitStatus.Committed)
         {
@@ -129,8 +130,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 ChangedFiles: committedDiffResult.ChangedFiles ?? Array.Empty<ExecutionReviewFileDto>(),
                 Diff: committedDiffResult.DiffText,
                 DiffTruncated: committedDiffResult.DiffTruncated,
-                Build: new ExecutionReviewStageStatusDto(buildStatus),
-                Test: new ExecutionReviewStageStatusDto(testStatus),
+                Build: buildDto,
+                Test: testDto,
                 ReviewStatus: execution.ReviewStatus.ToString(),
                 DecidedAt: execution.ReviewDecidedAt,
                 RejectionReason: execution.ReviewRejectionReason,
@@ -261,8 +262,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             ChangedFiles: diffResult.ChangedFiles ?? Array.Empty<ExecutionReviewFileDto>(),
             Diff: diffResult.DiffText,
             DiffTruncated: diffResult.DiffTruncated,
-            Build: new ExecutionReviewStageStatusDto(buildStatus),
-            Test: new ExecutionReviewStageStatusDto(testStatus),
+            Build: buildDto,
+            Test: testDto,
             ReviewStatus: execution.ReviewStatus.ToString(),
             DecidedAt: execution.ReviewDecidedAt,
             RejectionReason: execution.ReviewRejectionReason,
@@ -311,7 +312,25 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         return GetExecutionReviewResult.Ok(review);
     }
 
-    private static (string BuildStatus, string TestStatus) DetermineStageStatuses(
+    private static readonly System.Text.Json.JsonSerializerOptions MetadataJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    private static ExecutionActivityMetadata? ParseActivityMetadata(Domain.Entities.ExecutionActivity? activity)
+    {
+        if (activity == null || string.IsNullOrWhiteSpace(activity.MetadataJson)) return null;
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<ExecutionActivityMetadata>(activity.MetadataJson, MetadataJsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static (ExecutionReviewStageStatusDto Build, ExecutionReviewStageStatusDto Test) DetermineStageStatuses(
         Domain.Entities.TaskExecution execution,
         IReadOnlyList<ExecutionActivity> activities)
     {
@@ -322,6 +341,27 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
         var testFailed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Failed);
         var testStarted = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started);
+
+        var testCompletedActivity = activities
+            .Where(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed)
+            .OrderByDescending(a => a.CreatedAt)
+            .FirstOrDefault();
+
+        var testCompletedMeta = ParseActivityMetadata(testCompletedActivity);
+
+        var isNoNewRegressions = activities.Any(a =>
+            a.Stage == ExecutionStage.Test &&
+            a.Status == ExecutionActivityStatus.Completed &&
+            (ParseActivityMetadata(a)?.VerificationOutcome == "NoNewRegressions" ||
+             ParseActivityMetadata(a)?.BaselineClassification == "PreExisting" ||
+             a.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase)));
+
+        var preExistingCount = testCompletedMeta?.PreExistingFailureCount ?? 0;
+        var newRegressionCount = activities
+            .Where(a => a.Stage == ExecutionStage.Test)
+            .OrderByDescending(a => a.CreatedAt)
+            .Select(a => ParseActivityMetadata(a)?.NewRegressionCount)
+            .FirstOrDefault(c => c != null) ?? 0;
 
         string buildStatus;
         if (buildPassed || (execution.Status == TaskExecutionStatus.Completed && !buildFailed))
@@ -342,13 +382,26 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         }
 
         string testStatus;
-        if (testPassed || (execution.Status == TaskExecutionStatus.Completed && !testFailed))
+        string? testDetailSummary = null;
+
+        if (isNoNewRegressions)
+        {
+            testStatus = "NoNewRegressions";
+            testDetailSummary = preExistingCount > 0
+                ? $"{preExistingCount} pre-existing repository failure(s) remain"
+                : "No new regressions";
+        }
+        else if (testPassed || (execution.Status == TaskExecutionStatus.Completed && !testFailed))
         {
             testStatus = "Passed";
+            testDetailSummary = "All tests passed";
         }
         else if (testFailed)
         {
             testStatus = "Failed";
+            testDetailSummary = newRegressionCount > 0
+                ? $"{newRegressionCount} new regression(s) introduced"
+                : "Tests failed";
         }
         else if (testStarted)
         {
@@ -359,7 +412,14 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             testStatus = "Unknown";
         }
 
-        return (buildStatus, testStatus);
+        var buildDto = new ExecutionReviewStageStatusDto(buildStatus);
+        var testDto = new ExecutionReviewStageStatusDto(
+            testStatus,
+            PreExistingFailureCount: preExistingCount,
+            NewRegressionCount: newRegressionCount,
+            DetailSummary: testDetailSummary);
+
+        return (buildDto, testDto);
     }
 
     private static bool CalculateCanRequestPush(Domain.Entities.TaskExecution execution)
