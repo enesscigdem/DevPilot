@@ -1,4 +1,6 @@
 using DevPilot.Application.Executions.Dtos;
+using DevPilot.Application.TaskImpactAnalysis.Dtos;
+using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Domain.ValueObjects;
@@ -11,7 +13,10 @@ public static class PredictedVsActualEvaluator
     public static PredictedVsActualComparisonDto Evaluate(
         TaskImpactAnalysisEntity? impactAnalysis,
         IReadOnlyList<ExecutionReviewFileDto> actualChangedFiles,
-        IReadOnlyList<ExecutionActivity> activities)
+        IReadOnlyList<ExecutionActivity> activities,
+        string? workspaceRoot = null,
+        IDatabaseMigrationOperationParser? migrationParser = null,
+        string? diff = null)
     {
         var predictedItems = new List<PredictedFileActionItemDto>();
         var expectedChecksList = new List<string>();
@@ -138,6 +143,25 @@ public static class PredictedVsActualEvaluator
             observations.Add("All actual file modifications matched the predicted scope without unexpected side-effects");
         }
 
+        // Database / Migration Intelligence V2: Predicted vs Actual DB comparison
+        var dbComparison = EvaluateDatabaseImpact(
+            impactAnalysis?.StructuredResult?.DatabaseImpact ?? impactAnalysis?.StructuredResult?.ChangeBrief?.DatabaseImpact,
+            actualChangedFiles,
+            workspaceRoot,
+            migrationParser,
+            diff);
+
+        if (dbComparison != null && dbComparison.Observations.Count > 0)
+        {
+            foreach (var obs in dbComparison.Observations)
+            {
+                if (!observations.Contains(obs, StringComparer.OrdinalIgnoreCase))
+                {
+                    observations.Add(obs);
+                }
+            }
+        }
+
         return new PredictedVsActualComparisonDto(
             PredictedFiles: predictedItems,
             ActualFiles: actualItems,
@@ -147,11 +171,253 @@ public static class PredictedVsActualEvaluator
             ExpectedChecks: expectedChecksList,
             ExecutedChecks: executedChecksList,
             AllExpectedChecksExecuted: allExpectedChecksExecuted,
-            DimensionObservations: observations);
+            DimensionObservations: observations,
+            DatabaseImpact: dbComparison);
+    }
+
+    public static DatabasePredictedVsActualComparisonDto? EvaluateDatabaseImpact(
+        DatabaseImpact? predictedDbImpact,
+        IReadOnlyList<ExecutionReviewFileDto> actualChangedFiles,
+        string? workspaceRoot = null,
+        IDatabaseMigrationOperationParser? migrationParser = null,
+        string? diff = null)
+    {
+        var predictedChanges = predictedDbImpact?.Changes ?? new List<DatabaseChange>();
+        var predictedMigrationExpected = predictedDbImpact?.RequiresSchemaMigration == true ||
+                                         predictedDbImpact?.MigrationRequirement == DatabaseMigrationRequirement.Expected;
+
+        var actualMigrationFiles = actualChangedFiles
+            .Where(f => f.Path.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase) &&
+                        !f.Path.EndsWith(".Designer.cs", StringComparison.OrdinalIgnoreCase) &&
+                        !f.Path.EndsWith("ModelSnapshot.cs", StringComparison.OrdinalIgnoreCase) &&
+                        (f.ChangeType.Equals("Add", StringComparison.OrdinalIgnoreCase) ||
+                         f.ChangeType.Equals("Create", StringComparison.OrdinalIgnoreCase) ||
+                         f.ChangeType.Equals("Added", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        var actualSnapshotFiles = actualChangedFiles
+            .Where(f => f.Path.EndsWith("ModelSnapshot.cs", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var actualMigrationCreated = actualMigrationFiles.Count > 0;
+
+        // Parse actual database changes strictly from migration Up() operations
+        var actualChanges = new List<DatabaseChange>();
+        if (migrationParser != null)
+        {
+            foreach (var migFile in actualMigrationFiles)
+            {
+                string? content = null;
+                if (!string.IsNullOrWhiteSpace(workspaceRoot))
+                {
+                    var fullPath = Path.Combine(workspaceRoot, migFile.Path);
+                    if (File.Exists(fullPath))
+                    {
+                        try { content = File.ReadAllText(fullPath); } catch { /* Ignore read errors */ }
+                    }
+                }
+
+                if (content == null && !string.IsNullOrWhiteSpace(diff))
+                {
+                    content = ExtractFileContentFromDiff(diff, migFile.Path);
+                }
+
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    var parsed = migrationParser.ParseMigrationFile(migFile.Path, content);
+                    actualChanges.AddRange(parsed);
+                }
+            }
+        }
+
+        // If no migration file was parsed into operations, but migration files or entity changes exist, infer basic operations
+        if (actualChanges.Count == 0 && actualMigrationCreated)
+        {
+            foreach (var migFile in actualMigrationFiles)
+            {
+                actualChanges.Add(new DatabaseChange
+                {
+                    ObjectType = DatabaseObjectType.Unknown,
+                    ObjectName = Path.GetFileNameWithoutExtension(migFile.Path),
+                    Operation = DatabaseChangeOperation.Add,
+                    Risk = RiskLevel.Low,
+                    Evidence = $"New migration file '{Path.GetFileName(migFile.Path)}' created"
+                });
+            }
+        }
+
+        // If neither predicted nor actual has any database relevance, return null
+        if (predictedDbImpact == null && !predictedMigrationExpected && predictedChanges.Count == 0 && !actualMigrationCreated && actualChanges.Count == 0 && actualSnapshotFiles.Count == 0)
+        {
+            return null;
+        }
+
+        // Perform structured matching
+        var matchedChanges = new List<DatabaseChange>();
+        var unmatchedActual = new List<DatabaseChange>(actualChanges);
+        var unmatchedPredicted = new List<DatabaseChange>(predictedChanges);
+
+        foreach (var pred in predictedChanges)
+        {
+            var match = unmatchedActual.FirstOrDefault(act => pred.Matches(act) || act.Matches(pred));
+            if (match != null)
+            {
+                matchedChanges.Add(match);
+                unmatchedActual.Remove(match);
+                unmatchedPredicted.Remove(pred);
+            }
+        }
+
+        var unexpectedChanges = unmatchedActual;
+        var missingPredictedChanges = unmatchedPredicted;
+
+        var destructiveWarnings = new List<string>();
+        var dbObservations = new List<string>();
+
+        // Check for destructive actual operations
+        var hasDestructiveOperations = actualChanges.Any(c =>
+            c.Risk >= RiskLevel.High ||
+            c.Operation == DatabaseChangeOperation.Remove ||
+            c.Evidence.Contains("DropColumn", StringComparison.OrdinalIgnoreCase) ||
+            c.Evidence.Contains("DropTable", StringComparison.OrdinalIgnoreCase) ||
+            c.Evidence.Contains("DropForeignKey", StringComparison.OrdinalIgnoreCase) ||
+            c.Evidence.Contains("Custom SQL", StringComparison.OrdinalIgnoreCase));
+
+        foreach (var unexp in unexpectedChanges.Where(c => c.Risk >= RiskLevel.High || c.Operation == DatabaseChangeOperation.Remove))
+        {
+            destructiveWarnings.Add($"Unexpected destructive actual database change: {unexp.Evidence}");
+        }
+
+        // Generate observations
+        if (actualMigrationCreated)
+        {
+            dbObservations.Add($"Actual migration file created: {string.Join(", ", actualMigrationFiles.Select(f => Path.GetFileName(f.Path)))}");
+        }
+
+        if (actualSnapshotFiles.Count > 0)
+        {
+            dbObservations.Add($"EF Core ModelSnapshot updated as expected consequence of migration");
+        }
+
+        if (matchedChanges.Count > 0)
+        {
+            dbObservations.Add($"Database operations matched predicted schema changes ({matchedChanges.Count} matched)");
+        }
+
+        if (unexpectedChanges.Count > 0)
+        {
+            dbObservations.Add($"{unexpectedChanges.Count} unexpected database operation(s) executed in migration");
+        }
+
+        if (missingPredictedChanges.Count > 0)
+        {
+            dbObservations.Add($"{missingPredictedChanges.Count} predicted database change(s) not found in actual migration");
+        }
+
+        // Status derivation
+        string status;
+        if (destructiveWarnings.Count > 0)
+        {
+            status = "Unexpected";
+        }
+        else if (unexpectedChanges.Count > 0)
+        {
+            status = "Unexpected";
+        }
+        else if (missingPredictedChanges.Count == 0 && (predictedMigrationExpected == actualMigrationCreated || (predictedMigrationExpected && actualChanges.Count > 0)))
+        {
+            status = "Matched";
+        }
+        else if (matchedChanges.Count > 0 || (predictedMigrationExpected && actualMigrationCreated))
+        {
+            status = "Partial";
+        }
+        else if (predictedChanges.Count > 0 && actualChanges.Count == 0)
+        {
+            status = "Partial";
+        }
+        else
+        {
+            status = "Unknown";
+        }
+
+        return new DatabasePredictedVsActualComparisonDto(
+            Status: status,
+            PredictedMigrationExpected: predictedMigrationExpected,
+            ActualMigrationCreated: actualMigrationCreated,
+            PredictedChanges: predictedChanges.Select(MapChangeToDto).ToList(),
+            ActualChanges: actualChanges.Select(MapChangeToDto).ToList(),
+            MatchedChanges: matchedChanges.Select(MapChangeToDto).ToList(),
+            UnexpectedChanges: unexpectedChanges.Select(MapChangeToDto).ToList(),
+            MissingPredictedChanges: missingPredictedChanges.Select(MapChangeToDto).ToList(),
+            Observations: dbObservations,
+            HasDestructiveOperations: hasDestructiveOperations,
+            DestructiveWarnings: destructiveWarnings);
+    }
+
+    private static DatabaseChangeDto MapChangeToDto(DatabaseChange change)
+    {
+        return new DatabaseChangeDto
+        {
+            ObjectType = change.ObjectType,
+            ObjectName = change.ObjectName,
+            ParentObjectName = change.ParentObjectName,
+            Operation = change.Operation,
+            Before = change.Before,
+            After = change.After,
+            Risk = change.Risk,
+            Evidence = change.Evidence
+        };
     }
 
     private static string NormalizePath(string path)
     {
         return path.Replace('\\', '/').TrimStart('/');
+    }
+
+    private static string? ExtractFileContentFromDiff(string diff, string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(diff)) return null;
+
+        if (!diff.Contains("diff --git") && (diff.Contains("class ") || diff.Contains("MigrationBuilder") || diff.Contains("namespace ") || diff.Contains("migrationBuilder.")))
+        {
+            return diff;
+        }
+
+        var normPath = NormalizePath(filePath);
+        var lines = diff.Split('\n');
+        var inTargetFile = false;
+        var sb = new System.Text.StringBuilder();
+
+        foreach (var line in lines)
+        {
+            if (line.StartsWith("+++ b/", StringComparison.Ordinal) || line.StartsWith("+++ ", StringComparison.Ordinal))
+            {
+                var p = NormalizePath(line.Replace("+++ b/", "").Replace("+++ ", "").Trim());
+                inTargetFile = string.Equals(p, normPath, StringComparison.OrdinalIgnoreCase);
+                continue;
+            }
+
+            if (line.StartsWith("diff --git", StringComparison.Ordinal))
+            {
+                inTargetFile = false;
+                continue;
+            }
+
+            if (inTargetFile)
+            {
+                if (line.StartsWith("+", StringComparison.Ordinal) && !line.StartsWith("+++", StringComparison.Ordinal))
+                {
+                    sb.AppendLine(line.Substring(1));
+                }
+                else if (!line.StartsWith("-", StringComparison.Ordinal) && !line.StartsWith("@@", StringComparison.Ordinal))
+                {
+                    sb.AppendLine(line);
+                }
+            }
+        }
+
+        var res = sb.ToString();
+        return string.IsNullOrWhiteSpace(res) ? null : res;
     }
 }

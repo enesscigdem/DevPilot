@@ -100,6 +100,9 @@ public sealed class GetTaskImpactAnalysisQueryHandler : IGetTaskImpactAnalysisQu
                     ChangeType = f.ChangeType,
                     Reason = f.Reason,
                     Confidence = f.Confidence,
+                    EvidenceType = f.EvidenceType,
+                    EvidenceDetails = f.EvidenceDetails,
+                    IsUncertain = f.IsUncertain,
                 })
                 .ToList(),
             ProposedPlan = data.ProposedPlan
@@ -127,6 +130,75 @@ public sealed class GetTaskImpactAnalysisQueryHandler : IGetTaskImpactAnalysisQu
                     Mitigation = r.Mitigation,
                 })
                 .ToList(),
+            ChangeBrief = data.ChangeBrief is null
+                ? null
+                : new ChangeBriefDto
+                {
+                    FileCount = data.ChangeBrief.FileCount,
+                    ProjectCount = data.ChangeBrief.ProjectCount,
+                    RiskLevel = data.ChangeBrief.RiskLevel,
+                    RiskReasons = data.ChangeBrief.RiskReasons,
+                    ApiSummary = data.ChangeBrief.ApiSummary,
+                    DataSummary = data.ChangeBrief.DataSummary,
+                    RuntimeSummary = data.ChangeBrief.RuntimeSummary,
+                    TestsSummary = data.ChangeBrief.TestsSummary,
+                    VerificationSummary = data.ChangeBrief.VerificationSummary,
+                    ExpectedChecks = data.ChangeBrief.ExpectedChecks
+                        .Select(c => new ExpectedVerificationCheckDto
+                        {
+                            CheckId = c.CheckId,
+                            DisplayName = c.DisplayName,
+                            Kind = c.Kind,
+                            Required = c.Required,
+                            Source = c.Source,
+                            DiscoveryEvidence = c.DiscoveryEvidence,
+                        })
+                        .ToList(),
+                    Unknowns = data.ChangeBrief.Unknowns,
+                    DatabaseImpact = MapDatabaseImpact(data.ChangeBrief.DatabaseImpact),
+                },
+            DatabaseImpact = MapDatabaseImpact(data.DatabaseImpact),
+            Dimensions = data.Dimensions
+                .Select(d => new ChangeDimensionImpactDto
+                {
+                    Area = d.Area,
+                    ImpactLevel = d.ImpactLevel,
+                    Summary = d.Summary,
+                    Details = d.Details,
+                    Evidence = d.Evidence,
+                })
+                .ToList(),
+            Unknowns = data.Unknowns,
+            RiskReasons = data.RiskReasons,
+        };
+    }
+
+    private static DatabaseImpactDto? MapDatabaseImpact(DatabaseImpact? impact)
+    {
+        if (impact is null) return null;
+        return new DatabaseImpactDto
+        {
+            RequiresSchemaMigration = impact.RequiresSchemaMigration,
+            MigrationRequirement = impact.MigrationRequirement,
+            MigrationConfidence = impact.MigrationConfidence,
+            ChangeKind = impact.ChangeKind,
+            DataRiskLevel = impact.DataRiskLevel,
+            RequiresDataMigration = impact.RequiresDataMigration,
+            DataMigrationRequirement = impact.DataMigrationRequirement,
+            Summary = impact.Summary,
+            Changes = impact.Changes.Select(c => new DatabaseChangeDto
+            {
+                ObjectType = c.ObjectType,
+                ObjectName = c.ObjectName,
+                ParentObjectName = c.ParentObjectName,
+                Operation = c.Operation,
+                Before = c.Before,
+                After = c.After,
+                Risk = c.Risk,
+                Evidence = c.Evidence,
+            }).ToList(),
+            Evidence = impact.Evidence,
+            Unknowns = impact.Unknowns,
         };
     }
 }

@@ -18,6 +18,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
     private readonly IExecutionChangeFingerprintCalculator _fingerprintCalculator;
     private readonly IExecutionActivityRepository _activityRepository;
     private readonly IImpactAnalysisRepository? _impactAnalysisRepository;
+    private readonly IDatabaseMigrationOperationParser? _migrationParser;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
     private readonly ILogger<GetExecutionReviewQueryHandler> _logger;
 
@@ -29,7 +30,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         IExecutionActivityRepository activityRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions,
         ILogger<GetExecutionReviewQueryHandler> logger,
-        IImpactAnalysisRepository? impactAnalysisRepository = null)
+        IImpactAnalysisRepository? impactAnalysisRepository = null,
+        IDatabaseMigrationOperationParser? migrationParser = null)
     {
         _executionRepository = executionRepository;
         _workspaceManager = workspaceManager;
@@ -39,6 +41,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         _mergePolicyOptions = mergePolicyOptions;
         _logger = logger;
         _impactAnalysisRepository = impactAnalysisRepository;
+        _migrationParser = migrationParser;
     }
 
     public async Task<GetExecutionReviewResult> HandleAsync(
@@ -243,7 +246,10 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 predictedVsActual = PredictedVsActualEvaluator.Evaluate(
                     latestImpact,
                     diffResult.ChangedFiles ?? Array.Empty<ExecutionReviewFileDto>(),
-                    activities);
+                    activities,
+                    execution.WorkspacePath,
+                    migrationParser: _migrationParser,
+                    diff: diffResult.DiffText);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

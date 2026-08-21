@@ -39,5 +39,7 @@ public sealed class ChangeBrief
 
     public List<ExpectedVerificationCheck> ExpectedChecks { get; set; } = new();
 
+    public DatabaseImpact? DatabaseImpact { get; set; }
+
     public List<string> Unknowns { get; set; } = new();
 }

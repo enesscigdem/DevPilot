@@ -169,6 +169,31 @@ export interface ExpectedVerificationCheck {
   discoveryEvidence?: string;
 }
 
+export interface DatabaseChange {
+  objectType: string;
+  objectName: string;
+  parentObjectName?: string | null;
+  operation: string;
+  before?: string | null;
+  after?: string | null;
+  risk: string;
+  evidence: string;
+}
+
+export interface DatabaseImpact {
+  requiresSchemaMigration: boolean;
+  migrationRequirement: string;
+  migrationConfidence: number;
+  changeKind: string;
+  dataRiskLevel: string;
+  requiresDataMigration: boolean;
+  dataMigrationRequirement: string;
+  summary: string;
+  changes: DatabaseChange[];
+  evidence: string[];
+  unknowns: string[];
+}
+
 export interface ChangeBrief {
   fileCount: number;
   projectCount: number;
@@ -180,6 +205,7 @@ export interface ChangeBrief {
   testsSummary?: string | null;
   verificationSummary?: string | null;
   expectedChecks: ExpectedVerificationCheck[];
+  databaseImpact?: DatabaseImpact | null;
   unknowns: string[];
 }
 
@@ -199,6 +225,7 @@ export interface StructuredResult {
   systemImpacts: SystemImpact[];
   risks: Risk[];
   changeBrief?: ChangeBrief | null;
+  databaseImpact?: DatabaseImpact | null;
   dimensions?: ChangeDimensionImpact[];
   unknowns?: string[];
   riskReasons?: string[];
@@ -414,6 +441,20 @@ export interface ActualFileActionItem {
   action: string;
 }
 
+export interface DatabasePredictedVsActualComparison {
+  status: string;
+  predictedMigrationExpected: boolean;
+  actualMigrationCreated: boolean;
+  predictedChanges: DatabaseChange[];
+  actualChanges: DatabaseChange[];
+  matchedChanges: DatabaseChange[];
+  unexpectedChanges: DatabaseChange[];
+  missingPredictedChanges: DatabaseChange[];
+  observations: string[];
+  hasDestructiveOperations: boolean;
+  destructiveWarnings: string[];
+}
+
 export interface PredictedVsActualComparison {
   predictedFiles: PredictedFileActionItem[];
   actualFiles: ActualFileActionItem[];
@@ -424,6 +465,7 @@ export interface PredictedVsActualComparison {
   executedChecks: string[];
   allExpectedChecksExecuted: boolean;
   dimensionObservations: string[];
+  databaseImpact?: DatabasePredictedVsActualComparison | null;
 }
 
 export interface ExecutionReview {

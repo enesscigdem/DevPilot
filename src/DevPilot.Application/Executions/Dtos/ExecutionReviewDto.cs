@@ -1,3 +1,4 @@
+using DevPilot.Application.TaskImpactAnalysis.Dtos;
 using DevPilot.Domain.Enums;
 
 namespace DevPilot.Application.Executions.Dtos;
@@ -21,6 +22,19 @@ public sealed record ActualFileActionItemDto(
     string FilePath,
     string Action);
 
+public sealed record DatabasePredictedVsActualComparisonDto(
+    string Status,
+    bool PredictedMigrationExpected,
+    bool ActualMigrationCreated,
+    IReadOnlyList<DatabaseChangeDto> PredictedChanges,
+    IReadOnlyList<DatabaseChangeDto> ActualChanges,
+    IReadOnlyList<DatabaseChangeDto> MatchedChanges,
+    IReadOnlyList<DatabaseChangeDto> UnexpectedChanges,
+    IReadOnlyList<DatabaseChangeDto> MissingPredictedChanges,
+    IReadOnlyList<string> Observations,
+    bool HasDestructiveOperations,
+    IReadOnlyList<string> DestructiveWarnings);
+
 public sealed record PredictedVsActualComparisonDto(
     IReadOnlyList<PredictedFileActionItemDto> PredictedFiles,
     IReadOnlyList<ActualFileActionItemDto> ActualFiles,
@@ -30,7 +44,8 @@ public sealed record PredictedVsActualComparisonDto(
     IReadOnlyList<string> ExpectedChecks,
     IReadOnlyList<string> ExecutedChecks,
     bool AllExpectedChecksExecuted,
-    IReadOnlyList<string> DimensionObservations);
+    IReadOnlyList<string> DimensionObservations,
+    DatabasePredictedVsActualComparisonDto? DatabaseImpact = null);
 
 public sealed record ExecutionReviewDto(
     Guid ExecutionId,

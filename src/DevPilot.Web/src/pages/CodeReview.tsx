@@ -16,6 +16,7 @@ import {
   UploadCloud,
   RotateCw,
   Sparkles,
+  Database,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
@@ -718,6 +719,89 @@ export function CodeReview() {
                 </div>
               )}
             </div>
+
+            {/* Database Impact Predicted vs Actual */}
+            {review.predictedVsActual.databaseImpact && (
+              <div className="mt-3 border-t border-border/40 pt-2.5">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <Database className="h-3.5 w-3.5 text-primary" />
+                    <span className="text-[11px] font-semibold text-foreground">Database Changes</span>
+                  </div>
+                  <Badge
+                    tone={
+                      review.predictedVsActual.databaseImpact.status === "Matched"
+                        ? "green"
+                        : review.predictedVsActual.databaseImpact.status === "Partial"
+                        ? "amber"
+                        : review.predictedVsActual.databaseImpact.status === "Unexpected"
+                        ? "red"
+                        : "neutral"
+                    }
+                    className="px-1.5 py-0 text-[10px]"
+                  >
+                    {review.predictedVsActual.databaseImpact.status}
+                  </Badge>
+                </div>
+
+                {review.predictedVsActual.databaseImpact.destructiveWarnings.length > 0 && (
+                  <div className="mb-2 rounded bg-amber-500/10 border border-amber-500/30 p-2 text-[11px] text-amber-500 flex items-start gap-1.5">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5">
+                      {review.predictedVsActual.databaseImpact.destructiveWarnings.map((w, idx) => (
+                        <div key={idx}>{w}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid gap-2 sm:grid-cols-2 text-[11px]">
+                  <div>
+                    <span className="tech-label text-[9.5px]">Predicted Schema Operations</span>
+                    <ul className="mt-1 space-y-0.5 font-mono text-[10.5px] text-muted-foreground">
+                      {review.predictedVsActual.databaseImpact.predictedChanges.length === 0 ? (
+                        <li className="text-[11px] italic">
+                          {review.predictedVsActual.databaseImpact.predictedMigrationExpected
+                            ? "New migration expected"
+                            : "No schema operations predicted"}
+                        </li>
+                      ) : (
+                        review.predictedVsActual.databaseImpact.predictedChanges.map((c, idx) => (
+                          <li key={idx} className="flex items-center gap-1">
+                            <span className="text-primary">•</span>
+                            <span className="text-foreground">{c.parentObjectName ? `${c.parentObjectName}.${c.objectName}` : c.objectName}</span>
+                            <span className="text-[10px]">({c.operation} {c.objectType})</span>
+                          </li>
+                        ))
+                      )}
+                    </ul>
+                  </div>
+
+                  <div>
+                    <span className="tech-label text-[9.5px]">Actual Migration Operations</span>
+                    <ul className="mt-1 space-y-0.5 font-mono text-[10.5px] text-muted-foreground">
+                      {review.predictedVsActual.databaseImpact.actualChanges.length === 0 ? (
+                        <li className="text-[11px] italic">
+                          {review.predictedVsActual.databaseImpact.actualMigrationCreated
+                            ? "Migration file created (no parsed Up() operations)"
+                            : "No migration operations detected"}
+                        </li>
+                      ) : (
+                        review.predictedVsActual.databaseImpact.actualChanges.map((c, idx) => (
+                          <li key={idx} className="flex items-center gap-1">
+                            <span className={c.operation === "Remove" ? "text-destructive font-bold" : c.operation === "Add" ? "text-success font-bold" : "text-amber-500 font-bold"}>
+                              {c.operation === "Remove" ? "-" : c.operation === "Add" ? "+" : "~"}
+                            </span>
+                            <span className="text-foreground">{c.parentObjectName ? `${c.parentObjectName}.${c.objectName}` : c.objectName}</span>
+                            <span className="text-[10px]">({c.operation} {c.objectType})</span>
+                          </li>
+                        ))
+                      )}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

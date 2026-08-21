@@ -679,6 +679,77 @@ export function TaskImpact() {
                 </div>
               )}
 
+              {/* Database Impact */}
+              {((structured?.databaseImpact && (structured.databaseImpact.requiresSchemaMigration || structured.databaseImpact.changes.length > 0 || structured.databaseImpact.requiresDataMigration)) ||
+                (structured?.changeBrief?.databaseImpact && (structured.changeBrief.databaseImpact.requiresSchemaMigration || structured.changeBrief.databaseImpact.changes.length > 0))) && (() => {
+                const db = structured?.databaseImpact || structured?.changeBrief?.databaseImpact;
+                if (!db) return null;
+                const isDestructive = db.changeKind === "Destructive" || db.dataRiskLevel === "High" || db.dataRiskLevel === "Critical";
+                return (
+                  <div className={`mb-4 rounded-[var(--radius-lg)] border ${isDestructive ? "border-amber-500/40 bg-amber-500/5" : "border-border/60 bg-surface"} p-4 shadow-sm`}>
+                    <div className="flex items-center justify-between gap-2 border-b border-border/40 pb-2.5 mb-3">
+                      <div className="flex items-center gap-2">
+                        <Database className={`h-4 w-4 ${isDestructive ? "text-amber-500" : "text-primary"}`} />
+                        <span className="text-[13px] font-semibold text-foreground">Database Impact</span>
+                      </div>
+                      <div className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                        <span>Schema migration: <strong className="text-foreground">{db.requiresSchemaMigration ? (db.migrationRequirement || "Expected") : "None"}</strong></span>
+                        <span>·</span>
+                        <span>Data risk: <strong className={db.dataRiskLevel === "High" || db.dataRiskLevel === "Critical" ? "text-amber-500" : "text-foreground"}>{db.dataRiskLevel || "Low"}</strong></span>
+                        {db.requiresDataMigration && (
+                          <>
+                            <span>·</span>
+                            <Badge tone="amber" className="px-1.5 py-0 text-[10.5px]">
+                              Data migration: {db.dataMigrationRequirement === "ReviewRequired" ? "Review required" : db.dataMigrationRequirement}
+                            </Badge>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {db.changes.length > 0 && (
+                      <div className="mb-3">
+                        <span className="tech-label text-[10.5px]">Changes</span>
+                        <div className="mt-1 space-y-1 font-mono text-[11.5px]">
+                          {db.changes.map((change, idx) => (
+                            <div key={idx} className="flex items-center gap-2">
+                              <span className={`font-bold ${change.operation === "Remove" ? "text-destructive" : change.operation === "Add" ? "text-success" : "text-amber-500"}`}>
+                                {change.operation === "Remove" ? "-" : change.operation === "Add" ? "+" : "~"}
+                              </span>
+                              <span className="font-semibold text-foreground">
+                                {change.parentObjectName ? `${change.parentObjectName}.${change.objectName}` : change.objectName}
+                              </span>
+                              <span className="text-muted-foreground text-[11px]">{change.evidence}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {db.summary && (
+                      <div className="mb-2 text-[12px]">
+                        <span className="tech-label text-[10.5px]">Risk & Strategy</span>
+                        <p className="mt-1 text-[11.5px] text-muted-foreground break-words">{db.summary}</p>
+                      </div>
+                    )}
+
+                    {db.unknowns.length > 0 && (
+                      <div className="mt-2 text-[12px]">
+                        <span className="tech-label text-[10.5px]">Unknowns</span>
+                        <ul className="mt-1 space-y-0.5 text-[11.5px] text-muted-foreground">
+                          {db.unknowns.map((u, idx) => (
+                            <li key={idx} className="flex items-start gap-1.5">
+                              <span className="text-muted-foreground">•</span>
+                              <span className="break-words">{u}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div className="mb-3 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <h2 className="text-[13px] font-semibold text-foreground">Impacted files</h2>

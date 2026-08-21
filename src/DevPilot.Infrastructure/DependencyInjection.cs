@@ -99,6 +99,8 @@ public static class DependencyInjection
         services.AddScoped<ITaskRepository, EfTaskRepository>();
         services.AddScoped<IRepositoryWorkspaceQuery, RepositoryWorkspaceQuery>();
         services.AddScoped<IImpactAnalysisRepository, EfImpactAnalysisRepository>();
+        services.AddScoped<IDatabaseImpactAnalyzer, DevPilot.Infrastructure.DatabaseIntelligence.EfCoreDatabaseImpactAnalyzer>();
+        services.AddScoped<IDatabaseMigrationOperationParser, DevPilot.Infrastructure.DatabaseIntelligence.EfMigrationOperationParser>();
         services.AddScoped<ICreateTaskCommandHandler, CreateTaskCommandHandler>();
         services.AddScoped<IUpdateTaskCommandHandler, UpdateTaskCommandHandler>();
         services.AddScoped<IUpdateTaskStatusCommandHandler, UpdateTaskStatusCommandHandler>();

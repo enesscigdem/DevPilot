@@ -99,6 +99,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private readonly IEmbeddingProvider _embeddingProvider;
     private readonly ISemanticSearchService _semanticSearchService;
     private readonly IRepositoryCheckRunner? _repositoryCheckRunner;
+    private readonly IDatabaseImpactAnalyzer? _databaseImpactAnalyzer;
     private readonly ILogger<AnalyzeTaskImpactCommandHandler> _logger;
 
     public AnalyzeTaskImpactCommandHandler(
@@ -110,7 +111,8 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         IEmbeddingProvider embeddingProvider,
         ISemanticSearchService semanticSearchService,
         ILogger<AnalyzeTaskImpactCommandHandler> logger,
-        IRepositoryCheckRunner? repositoryCheckRunner = null)
+        IRepositoryCheckRunner? repositoryCheckRunner = null,
+        IDatabaseImpactAnalyzer? databaseImpactAnalyzer = null)
     {
         _taskRepository = taskRepository;
         _workspaceQuery = workspaceQuery;
@@ -121,6 +123,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         _semanticSearchService = semanticSearchService;
         _logger = logger;
         _repositoryCheckRunner = repositoryCheckRunner;
+        _databaseImpactAnalyzer = databaseImpactAnalyzer;
     }
 
     public async Task<AnalyzeTaskImpactResult> HandleAsync(
@@ -393,7 +396,8 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     executionToken).ConfigureAwait(false);
             }
 
-            var parseResult = TryParseStructuredResult(rawResponse, evidenceProfile, workspace.LocalPath);
+            var taskPromptText = $"{task.Title} {task.Description} {task.AcceptanceCriteria}".Trim();
+            var parseResult = TryParseStructuredResult(rawResponse, evidenceProfile, workspace.LocalPath, taskPromptText, _databaseImpactAnalyzer);
 
             // Bounded single repair attempt if deterministic grounding failure occurs (ONLY if truncation recovery was not used)
             if (!parseResult.Success && parseResult.IsGroundingError && parseResult.GroundingErrorDetails != null && compactRecoveryCount == 0)
@@ -432,7 +436,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     model = repairAiResponse.Model ?? model;
                     providerName = string.IsNullOrWhiteSpace(repairAiResponse.Provider) ? providerName : repairAiResponse.Provider;
 
-                    parseResult = TryParseStructuredResult(rawResponse, evidenceProfile, workspace.LocalPath);
+                    parseResult = TryParseStructuredResult(rawResponse, evidenceProfile, workspace.LocalPath, taskPromptText, _databaseImpactAnalyzer);
                 }
                 else
                 {
@@ -1031,7 +1035,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     public static ParseResult TryParseStructuredResult(
         string rawResponse,
         RepositoryEvidenceProfile evidence,
-        string workspaceLocalPath)
+        string workspaceLocalPath,
+        string? taskPrompt = null,
+        IDatabaseImpactAnalyzer? databaseImpactAnalyzer = null)
     {
         var json = ExtractJson(rawResponse);
 
@@ -1055,7 +1061,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             return ParseResult.Failure("The AI response deserialized to null.");
         }
 
-        return MapToResultData(response, evidence, workspaceLocalPath);
+        return MapToResultData(response, evidence, workspaceLocalPath, taskPrompt, databaseImpactAnalyzer);
     }
 
     private static string ExtractJson(string content)
@@ -1075,7 +1081,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private static ParseResult MapToResultData(
         ImpactAnalysisResponse response,
         RepositoryEvidenceProfile evidence,
-        string workspaceLocalPath)
+        string workspaceLocalPath,
+        string? taskPrompt = null,
+        IDatabaseImpactAnalyzer? databaseImpactAnalyzer = null)
     {
         if (string.IsNullOrWhiteSpace(response.Summary))
         {
@@ -1468,10 +1476,30 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         resultData.Dimensions = dimensions;
 
+        var databaseImpact = databaseImpactAnalyzer != null
+            ? databaseImpactAnalyzer.AnalyzeImpact(
+                impactedFiles,
+                dimensions,
+                risks,
+                evidence,
+                taskPrompt,
+                workspaceLocalPath)
+            : new DatabaseImpact
+            {
+                RequiresSchemaMigration = false,
+                MigrationRequirement = DatabaseMigrationRequirement.None,
+                DataRiskLevel = RiskLevel.Low,
+                ChangeKind = DatabaseChangeKind.None,
+                Summary = "No database impact analyzer configured."
+            };
+
+        resultData.DatabaseImpact = databaseImpact;
+
         // Unknowns synthesis
         var rawUnknowns = new List<string>();
         if (response.Unknowns != null) rawUnknowns.AddRange(response.Unknowns);
         if (response.ChangeBrief?.Unknowns != null) rawUnknowns.AddRange(response.ChangeBrief.Unknowns);
+        if (databaseImpact.Unknowns != null) rawUnknowns.AddRange(databaseImpact.Unknowns);
 
         var synthesizedUnknowns = ChangeIntelligenceEvidenceCollector.SynthesizeUnknowns(
             rawUnknowns,
@@ -1488,7 +1516,8 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             systemImpacts,
             dimensions,
             synthesizedUnknowns,
-            evidence);
+            evidence,
+            databaseImpact);
 
         if (resultData.SystemImpacts.Count == 0 && dimensions.Count > 0)
         {
@@ -1716,7 +1745,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                         })
                         .ToList(),
                     Unknowns = data.ChangeBrief.Unknowns,
+                    DatabaseImpact = MapDatabaseImpact(data.ChangeBrief.DatabaseImpact),
                 },
+            DatabaseImpact = MapDatabaseImpact(data.DatabaseImpact),
             Dimensions = data.Dimensions
                 .Select(d => new ChangeDimensionImpactDto
                 {
@@ -1729,6 +1760,35 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 .ToList(),
             Unknowns = data.Unknowns,
             RiskReasons = data.RiskReasons,
+        };
+    }
+
+    public static DatabaseImpactDto? MapDatabaseImpact(DatabaseImpact? impact)
+    {
+        if (impact is null) return null;
+        return new DatabaseImpactDto
+        {
+            RequiresSchemaMigration = impact.RequiresSchemaMigration,
+            MigrationRequirement = impact.MigrationRequirement,
+            MigrationConfidence = impact.MigrationConfidence,
+            ChangeKind = impact.ChangeKind,
+            DataRiskLevel = impact.DataRiskLevel,
+            RequiresDataMigration = impact.RequiresDataMigration,
+            DataMigrationRequirement = impact.DataMigrationRequirement,
+            Summary = impact.Summary,
+            Changes = impact.Changes.Select(c => new DatabaseChangeDto
+            {
+                ObjectType = c.ObjectType,
+                ObjectName = c.ObjectName,
+                ParentObjectName = c.ParentObjectName,
+                Operation = c.Operation,
+                Before = c.Before,
+                After = c.After,
+                Risk = c.Risk,
+                Evidence = c.Evidence,
+            }).ToList(),
+            Evidence = impact.Evidence,
+            Unknowns = impact.Unknowns,
         };
     }
 

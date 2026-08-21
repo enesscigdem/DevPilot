@@ -63,6 +63,50 @@ public sealed class ExpectedVerificationCheckDto
     public string? DiscoveryEvidence { get; set; }
 }
 
+public sealed class DatabaseChangeDto
+{
+    public DatabaseObjectType ObjectType { get; set; } = DatabaseObjectType.Unknown;
+
+    public string ObjectName { get; set; } = string.Empty;
+
+    public string? ParentObjectName { get; set; }
+
+    public DatabaseChangeOperation Operation { get; set; } = DatabaseChangeOperation.Unknown;
+
+    public string? Before { get; set; }
+
+    public string? After { get; set; }
+
+    public RiskLevel Risk { get; set; } = RiskLevel.Low;
+
+    public string Evidence { get; set; } = string.Empty;
+}
+
+public sealed class DatabaseImpactDto
+{
+    public bool RequiresSchemaMigration { get; set; }
+
+    public DatabaseMigrationRequirement MigrationRequirement { get; set; } = DatabaseMigrationRequirement.None;
+
+    public int MigrationConfidence { get; set; }
+
+    public DatabaseChangeKind ChangeKind { get; set; } = DatabaseChangeKind.None;
+
+    public RiskLevel DataRiskLevel { get; set; } = RiskLevel.Low;
+
+    public bool RequiresDataMigration { get; set; }
+
+    public DataMigrationRequirement DataMigrationRequirement { get; set; } = DataMigrationRequirement.None;
+
+    public string Summary { get; set; } = string.Empty;
+
+    public IReadOnlyList<DatabaseChangeDto> Changes { get; set; } = Array.Empty<DatabaseChangeDto>();
+
+    public IReadOnlyList<string> Evidence { get; set; } = Array.Empty<string>();
+
+    public IReadOnlyList<string> Unknowns { get; set; } = Array.Empty<string>();
+}
+
 public sealed class ChangeBriefDto
 {
     public int FileCount { get; set; }
@@ -84,6 +128,8 @@ public sealed class ChangeBriefDto
     public string? VerificationSummary { get; set; }
 
     public IReadOnlyList<ExpectedVerificationCheckDto> ExpectedChecks { get; set; } = Array.Empty<ExpectedVerificationCheckDto>();
+
+    public DatabaseImpactDto? DatabaseImpact { get; set; }
 
     public IReadOnlyList<string> Unknowns { get; set; } = Array.Empty<string>();
 }
@@ -116,6 +162,8 @@ public sealed class StructuredResultDto
     public IReadOnlyList<RiskDto> Risks { get; set; } = Array.Empty<RiskDto>();
 
     public ChangeBriefDto? ChangeBrief { get; set; }
+
+    public DatabaseImpactDto? DatabaseImpact { get; set; }
 
     public IReadOnlyList<ChangeDimensionImpactDto> Dimensions { get; set; } = Array.Empty<ChangeDimensionImpactDto>();
 

@@ -24,5 +24,7 @@ public sealed class ImpactAnalysisResultData
 
     public List<string> RiskReasons { get; set; } = new();
 
+    public DatabaseImpact? DatabaseImpact { get; set; }
+
     public Dictionary<string, JsonElement>? Metadata { get; set; }
 }

@@ -267,7 +267,8 @@ public static class ChangeIntelligenceEvidenceCollector
         IReadOnlyList<SystemImpact> systemImpacts,
         IReadOnlyList<ChangeDimensionImpact> dimensions,
         IReadOnlyList<string> unknowns,
-        RepositoryEvidenceProfile evidence)
+        RepositoryEvidenceProfile evidence,
+        DatabaseImpact? databaseImpact = null)
     {
         var distinctProjects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in impactedFiles)
@@ -285,8 +286,8 @@ public static class ChangeIntelligenceEvidenceCollector
             }
         }
 
-        var riskLevel = EvaluateOverallRiskLevel(impactedFiles, risks, dimensions, evidence);
-        var riskReasons = BuildRiskReasons(impactedFiles, distinctProjects.Count, risks, dimensions, evidence);
+        var riskLevel = EvaluateOverallRiskLevel(impactedFiles, risks, dimensions, evidence, databaseImpact);
+        var riskReasons = BuildRiskReasons(impactedFiles, distinctProjects.Count, risks, dimensions, evidence, databaseImpact);
 
         var apiDim = dimensions.FirstOrDefault(d => string.Equals(d.Area, ChangeDimensionArea.Api, StringComparison.OrdinalIgnoreCase));
         var dataDim = dimensions.FirstOrDefault(d => string.Equals(d.Area, ChangeDimensionArea.Data, StringComparison.OrdinalIgnoreCase));
@@ -323,7 +324,7 @@ public static class ChangeIntelligenceEvidenceCollector
         var apiSummary = apiDim?.Summary ??
             (impactedFiles.Any(f => f.EvidenceType == "ControllerUsage") ? "API surface modified: controller endpoint affected" : null);
 
-        var dataSummary = dataDim?.Summary ??
+        var dataSummary = databaseImpact?.Summary ?? dataDim?.Summary ??
             (evidence.HasEfCore && impactedFiles.Any(f => f.EvidenceType is "PersistenceRelationship" or "MigrationRelationship")
                 ? "Database schema/entity impacted; migration likely/expected"
                 : impactedFiles.Any(f => f.EvidenceType is "PersistenceRelationship" or "MigrationRelationship")
@@ -351,6 +352,7 @@ public static class ChangeIntelligenceEvidenceCollector
             TestsSummary = testsSummary,
             VerificationSummary = verificationSummary,
             ExpectedChecks = expectedChecks,
+            DatabaseImpact = databaseImpact,
             Unknowns = unknowns.ToList()
         };
     }
@@ -360,7 +362,8 @@ public static class ChangeIntelligenceEvidenceCollector
         int projectCount,
         IReadOnlyList<Risk> risks,
         IReadOnlyList<ChangeDimensionImpact> dimensions,
-        RepositoryEvidenceProfile evidence)
+        RepositoryEvidenceProfile evidence,
+        DatabaseImpact? databaseImpact = null)
     {
         var reasons = new List<string>();
 
@@ -380,7 +383,25 @@ public static class ChangeIntelligenceEvidenceCollector
             reasons.Add("API surface modified: controller / endpoint changes");
         }
 
-        if (dimensions.Any(d => string.Equals(d.Area, ChangeDimensionArea.Data, StringComparison.OrdinalIgnoreCase)) ||
+        if (databaseImpact != null && databaseImpact.Changes.Count > 0)
+        {
+            if (databaseImpact.DataRiskLevel >= RiskLevel.High)
+            {
+                if (databaseImpact.RequiresDataMigration)
+                {
+                    reasons.Add("Persistent schema changes require data migration / backfill review for existing rows");
+                }
+                else
+                {
+                    reasons.Add("High-risk or destructive database schema modification detected");
+                }
+            }
+            else
+            {
+                reasons.Add("Database schema or persistence entity impacted");
+            }
+        }
+        else if (dimensions.Any(d => string.Equals(d.Area, ChangeDimensionArea.Data, StringComparison.OrdinalIgnoreCase)) ||
             files.Any(f => f.EvidenceType is "PersistenceRelationship" or "MigrationRelationship"))
         {
             reasons.Add("Database schema or persistence entity impacted");
@@ -426,12 +447,18 @@ public static class ChangeIntelligenceEvidenceCollector
         IReadOnlyList<ImpactedFile> files,
         IReadOnlyList<Risk> risks,
         IReadOnlyList<ChangeDimensionImpact> dimensions,
-        RepositoryEvidenceProfile evidence)
+        RepositoryEvidenceProfile evidence,
+        DatabaseImpact? databaseImpact = null)
     {
         if (risks.Any(r => r.Level == RiskLevel.Critical) ||
             dimensions.Any(d => d.ImpactLevel == SystemImpactLevel.Critical))
         {
             return RiskLevel.Critical;
+        }
+
+        if (databaseImpact != null && databaseImpact.DataRiskLevel >= RiskLevel.High)
+        {
+            return RiskLevel.High;
         }
 
         if (risks.Any(r => r.Level == RiskLevel.High) ||
@@ -444,6 +471,7 @@ public static class ChangeIntelligenceEvidenceCollector
 
         if (files.Count >= 5 ||
             dimensions.Any(d => d.ImpactLevel == SystemImpactLevel.Medium) ||
+            (databaseImpact != null && databaseImpact.DataRiskLevel == RiskLevel.Medium) ||
             evidence.VerificationProfile.State == RepositoryVerificationState.Unconfigured)
         {
             return RiskLevel.Medium;
