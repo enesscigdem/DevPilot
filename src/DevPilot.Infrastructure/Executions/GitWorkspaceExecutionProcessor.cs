@@ -338,6 +338,28 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 cancellationToken).ConfigureAwait(false);
         }
 
+        // Purge verification-produced side effects (bin/obj/cache/test artifacts)
+        // keeping only the authoritative task changes (initial edits + repair edits).
+        try
+        {
+            var purged = await VerificationSideEffectCleaner.PurgeSideEffectsAsync(
+                prepResult.WorkspacePath,
+                modifiedFiles,
+                cancellationToken).ConfigureAwait(false);
+
+            if (purged.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Purged {Count} verification side-effect artifact(s) from execution workspace {WorkspacePath}.",
+                    purged.Count,
+                    prepResult.WorkspacePath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to purge verification side-effects for execution {ExecutionId}", context.ExecutionId);
+        }
+
         if (testChecks.Count == 0)
         {
             await SafeRecordActivityAsync(
