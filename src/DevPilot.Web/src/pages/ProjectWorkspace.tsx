@@ -96,8 +96,10 @@ export function ProjectWorkspace() {
       setCachedWorkspaceAnalysis(workspaceId, data)
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load workspace analysis."
-      setError(msg)
-      setAnalysis((prev) => prev)
+      const currentCache = getCachedWorkspaceAnalysis(workspaceId)
+      if (!currentCache.data && !analysis) {
+        setError(msg)
+      }
     } finally {
       setIsLoading(false)
       setIsRefreshing(false)

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
 using Microsoft.Extensions.Logging;
@@ -6,6 +7,9 @@ namespace DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspa
 
 public sealed class GetRepositoryWorkspaceArchitectureQueryHandler : IGetRepositoryWorkspaceArchitectureQueryHandler
 {
+    private static readonly ConcurrentDictionary<string, WorkspaceArchitectureDto> ArchitectureCache = new();
+    private static readonly ConcurrentDictionary<Guid, WorkspaceArchitectureDto> LastKnownGoodCache = new();
+
     private readonly IGetRepositoryWorkspaceAnalysisQueryHandler _analysisQueryHandler;
     private readonly ILogger<GetRepositoryWorkspaceArchitectureQueryHandler> _logger;
 
@@ -15,6 +19,12 @@ public sealed class GetRepositoryWorkspaceArchitectureQueryHandler : IGetReposit
     {
         _analysisQueryHandler = analysisQueryHandler;
         _logger = logger;
+    }
+
+    public static void ClearCache()
+    {
+        ArchitectureCache.Clear();
+        LastKnownGoodCache.Clear();
     }
 
     public async Task<GetRepositoryWorkspaceArchitectureResult> HandleAsync(
@@ -31,7 +41,7 @@ public sealed class GetRepositoryWorkspaceArchitectureQueryHandler : IGetReposit
         }
 
         var analysisResult = await _analysisQueryHandler
-            .HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(query.WorkspaceId), cancellationToken)
+            .HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(query.WorkspaceId, query.ForceRecompute), cancellationToken)
             .ConfigureAwait(false);
 
         if (analysisResult.NotFound)
@@ -56,6 +66,16 @@ public sealed class GetRepositoryWorkspaceArchitectureQueryHandler : IGetReposit
 
         if (!analysisResult.Success || analysisResult.Analysis is null)
         {
+            if (LastKnownGoodCache.TryGetValue(query.WorkspaceId, out var lkg))
+            {
+                _logger.LogWarning("Architecture analysis failed for workspace {WorkspaceId}, returning last-known-good cached architecture.", query.WorkspaceId);
+                return new GetRepositoryWorkspaceArchitectureResult
+                {
+                    Success = true,
+                    Architecture = lkg,
+                };
+            }
+
             return new GetRepositoryWorkspaceArchitectureResult
             {
                 Success = false,
@@ -64,7 +84,37 @@ public sealed class GetRepositoryWorkspaceArchitectureQueryHandler : IGetReposit
         }
 
         var analysis = analysisResult.Analysis;
+        var cacheKey = $"{query.WorkspaceId}:{analysis.Repository.CommitSha ?? "head"}:v1";
+
+        if (!query.ForceRecompute && ArchitectureCache.TryGetValue(cacheKey, out var cachedArch))
+        {
+            _logger.LogInformation("Repository workspace architecture cache HIT for workspace {WorkspaceId}, commit {CommitSha}.", query.WorkspaceId, analysis.Repository.CommitSha);
+            return new GetRepositoryWorkspaceArchitectureResult
+            {
+                Success = true,
+                Architecture = cachedArch,
+            };
+        }
+
+        var recomputeReason = query.ForceRecompute
+            ? "force recompute requested"
+            : (!ArchitectureCache.ContainsKey(cacheKey) ? "not in cache" : "commit changed");
+
+        _logger.LogInformation("Repository workspace architecture cache MISS for workspace {WorkspaceId}, commit {CommitSha}. Recompute reason: {Reason}.", query.WorkspaceId, analysis.Repository.CommitSha, recomputeReason);
+
         var architecture = BuildArchitectureGraph(analysis);
+
+        ArchitectureCache[cacheKey] = architecture;
+        LastKnownGoodCache[query.WorkspaceId] = architecture;
+
+        // Clean up older stale commit entries for this workspace
+        foreach (var key in ArchitectureCache.Keys)
+        {
+            if (key.StartsWith($"{query.WorkspaceId}:", StringComparison.Ordinal) && key != cacheKey)
+            {
+                ArchitectureCache.TryRemove(key, out _);
+            }
+        }
 
         return new GetRepositoryWorkspaceArchitectureResult
         {

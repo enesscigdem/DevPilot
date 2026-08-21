@@ -174,6 +174,17 @@ export function ExecutionWorkspace() {
   const [isCanceling, setIsCanceling] = useState(false)
   const [cancelError, setCancelError] = useState<string | null>(null)
   const [showGenDetails, setShowGenDetails] = useState(false)
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  const isRunningExecution = execution?.status === TaskExecutionStatus.Running
+
+  useEffect(() => {
+    if (!isRunningExecution) return
+    const timer = setInterval(() => {
+      setNowMs(Date.now())
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [isRunningExecution])
 
   const handleRetryExecution = async () => {
     if (!execution || isRetrying) return
@@ -574,98 +585,177 @@ export function ExecutionWorkspace() {
                 </div>
               )
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-4">
                 {(() => {
-                  const genActivities = activities.filter(
-                    (a) =>
-                      a.metadata?.eventKind === "ProviderCall" ||
-                      a.metadata?.eventKind === "GenerationSummary" ||
-                      (a.stage === "DeveloperAgent" &&
-                       (a.message.startsWith("Generating edit") ||
-                        a.message.startsWith("Generated edit") ||
-                        a.message.startsWith("Escalating token budget") ||
-                        a.message.startsWith("Performing compact") ||
-                        a.message.startsWith("AI provider") ||
-                        a.message.startsWith("Repair triggered") ||
-                        a.message.startsWith("Preparing") ||
-                        a.message.startsWith("Validating") ||
-                        a.message.startsWith("Applying")))
-                  )
+                  // Structured execution viewer state derivation
+                  let totalPlannedFiles = 0
+                  const fileMap = new Map<string, {
+                    fileName: string
+                    status: "running" | "completed" | "repairing" | "retrying" | "failed"
+                    durationSec?: number
+                    badge?: string
+                    startedAtMs: number
+                    completedAtMs?: number
+                  }>()
 
-                  const nonGenActivities = activities.filter(
-                    (a) => !genActivities.includes(a)
-                  )
+                  const repairItems: Array<{
+                    id: string
+                    message: string
+                    detail?: string
+                    status: "running" | "completed" | "failed"
+                  }> = []
 
-                  // Split primary generation activities from compile repair activities
-                  const compileRepairIdx = activities.findIndex(
-                    (a) => a.message.includes("Compile repair started")
-                  )
+                  let buildState: "idle" | "running" | "passed" | "failed" = "idle"
+                  let buildLabel = "Build"
+                  let buildDuration = ""
 
-                  const primaryGenActivities = compileRepairIdx >= 0
-                    ? genActivities.filter((a) => activities.indexOf(a) < compileRepairIdx)
-                    : genActivities
+                  let testState: "idle" | "running" | "passed" | "failed" = "idle"
+                  let testLabel = "Tests"
+                  let testDuration = ""
 
-                  const repairGenActivities = compileRepairIdx >= 0
-                    ? genActivities.filter((a) => activities.indexOf(a) >= compileRepairIdx)
-                    : []
+                  // Single pass over activities in chronological order
+                  for (const act of activities) {
+                    const msg = act.message || ""
+                    const actTime = new Date(act.createdAt).getTime()
 
-                  // Compute primary generation progress (capped to planned totalFiles)
-                  let totalFiles = 0
-                  let completedFiles = 0
-
-                  for (const a of primaryGenActivities) {
-                    const prepMatch = a.message.match(/Preparing\s+(\d+)\s+file/i)
+                    // 1. Total files planned
+                    const prepMatch = msg.match(/Preparing\s+(\d+)\s+file/i)
                     if (prepMatch) {
-                      totalFiles = Math.max(totalFiles, parseInt(prepMatch[1], 10))
+                      totalPlannedFiles = Math.max(totalPlannedFiles, parseInt(prepMatch[1], 10))
                     }
-                    const genMatch = a.message.match(/Generated edit\s+(\d+)\/(\d+)/i)
-                    if (genMatch) {
-                      completedFiles++
-                      totalFiles = Math.max(totalFiles, parseInt(genMatch[2], 10))
+
+                    // 2. File generation started
+                    const genStartMatch = msg.match(/Generating edit\s+(\d+)\/(\d+)\s*·\s*([^\s·]+)/i)
+                    if (genStartMatch) {
+                      totalPlannedFiles = Math.max(totalPlannedFiles, parseInt(genStartMatch[2], 10))
+                      const fileName = genStartMatch[3]
+                      if (!fileMap.has(fileName) || fileMap.get(fileName)?.status !== "completed") {
+                        fileMap.set(fileName, {
+                          fileName,
+                          status: "running",
+                          startedAtMs: actTime,
+                        })
+                      }
                     }
-                    const generatingMatch = a.message.match(/Generating edit\s+(\d+)\/(\d+)/i)
-                    if (generatingMatch) {
-                      totalFiles = Math.max(totalFiles, parseInt(generatingMatch[2], 10))
+
+                    // 3. Compact retry
+                    const compactMatch = msg.match(/Performing compact generation retry for\s+([^\s·]+)/i)
+                    if (compactMatch) {
+                      const fileName = compactMatch[1]
+                      const existing = fileMap.get(fileName)
+                      if (existing) {
+                        existing.status = "retrying"
+                        existing.badge = "compact retry"
+                      }
+                    }
+
+                    // 4. Applicability repair
+                    const repairMatch = msg.match(/Repair triggered for\s+([^\s·:]+)/i)
+                    if (repairMatch) {
+                      const fileName = repairMatch[1]
+                      const existing = fileMap.get(fileName)
+                      if (existing) {
+                        existing.status = "repairing"
+                        existing.badge = "applicability repair"
+                      }
+                    }
+
+                    // 5. File generation completed
+                    const genDoneMatch = msg.match(/Generated edit\s+(\d+)\/(\d+)\s*·\s*([^\s·]+)(?:\s*·\s*(\d+)s)?/i)
+                    if (genDoneMatch) {
+                      totalPlannedFiles = Math.max(totalPlannedFiles, parseInt(genDoneMatch[2], 10))
+                      const fileName = genDoneMatch[3]
+                      const durSec = genDoneMatch[4] ? parseInt(genDoneMatch[4], 10) : undefined
+                      const existing = fileMap.get(fileName)
+                      fileMap.set(fileName, {
+                        fileName,
+                        status: "completed",
+                        durationSec: durSec ?? (existing ? Math.max(1, Math.round((actTime - existing.startedAtMs) / 1000)) : undefined),
+                        badge: existing?.badge,
+                        startedAtMs: existing?.startedAtMs ?? actTime,
+                        completedAtMs: actTime,
+                      })
+                    }
+
+                    // 6. Compile repair / Stage repair
+                    if (act.metadata?.repairKind && act.metadata?.repairRound) {
+                      const fileCount = act.metadata.repairFiles?.length ?? act.metadata.modifiedFileCount
+                      const scope = fileCount ? ` · ${fileCount} ${fileCount === 1 ? "file" : "files"}` : ""
+                      const fileNames = act.metadata.repairFiles?.map(f => f.split("/").pop()).filter(Boolean).join(", ")
+                      repairItems.push({
+                        id: act.id,
+                        message: `${act.metadata.repairKind} repair ${act.metadata.repairRound}${scope}`,
+                        detail: fileNames || undefined,
+                        status: act.status === "Completed" ? "completed" : act.status === "Failed" ? "failed" : "running",
+                      })
+                    } else if (msg.includes("Compile repair started")) {
+                      repairItems.push({
+                        id: act.id,
+                        message: "Compile repair",
+                        detail: msg.replace("Compile repair started", "").trim() || undefined,
+                        status: "running",
+                      })
+                    }
+
+                    // 7. Verification: Build & Test
+                    if (act.stage === "Build") {
+                      if (act.status === "Started") {
+                        buildState = "running"
+                        buildLabel = "Build running"
+                      } else if (act.status === "Completed") {
+                        buildState = "passed"
+                        buildLabel = "Build passed"
+                        if (act.metadata?.stageDurationMs) {
+                          buildDuration = `${Math.round(act.metadata.stageDurationMs / 1000)}s`
+                        }
+                      } else if (act.status === "Failed") {
+                        buildState = "failed"
+                        buildLabel = "Build failed"
+                      }
+                    }
+
+                    if (act.stage === "Test") {
+                      if (act.status === "Started") {
+                        testState = "running"
+                        testLabel = "Tests running"
+                      } else if (act.status === "Completed") {
+                        testState = "passed"
+                        testLabel = "Tests passed"
+                        if (act.metadata?.stageDurationMs) {
+                          testDuration = `${Math.round(act.metadata.stageDurationMs / 1000)}s`
+                        }
+                      } else if (act.status === "Failed") {
+                        testState = "failed"
+                        testLabel = "Tests failed"
+                      }
                     }
                   }
 
-                  if (totalFiles > 0) {
-                    completedFiles = Math.min(completedFiles, totalFiles)
-                  }
-
-                  let repairTotalFiles = 0
-                  for (const a of repairGenActivities) {
-                    const prepMatch = a.message.match(/Preparing\s+(\d+)\s+file/i)
-                    if (prepMatch) {
-                      repairTotalFiles = Math.max(repairTotalFiles, parseInt(prepMatch[1], 10))
-                    }
-                    const genMatch = a.message.match(/Generated edit\s+(\d+)\/(\d+)/i)
-                    if (genMatch) {
-                      repairTotalFiles = Math.max(repairTotalFiles, parseInt(genMatch[2], 10))
-                    }
-                  }
-
-                  const percent = totalFiles > 0 ? Math.min(100, Math.round((completedFiles / totalFiles) * 100)) : 0
-                  const isGenDone = primaryGenActivities.some((a) => a.message.startsWith("Validating") || a.status === "Completed")
+                  const allFilesList = Array.from(fileMap.values())
+                  const runningFiles = allFilesList.filter(f => (f.status === "running" || f.status === "retrying" || f.status === "repairing") && isRunning)
+                  const completedFiles = allFilesList.filter(f => f.status === "completed" || (!isRunning && f.status !== "failed"))
+                  const totalFiles = Math.max(totalPlannedFiles, allFilesList.length)
+                  const completedCount = Math.min(completedFiles.length, totalFiles > 0 ? totalFiles : completedFiles.length)
+                  const percent = totalFiles > 0 ? Math.min(100, Math.round((completedCount / totalFiles) * 100)) : 0
+                  const isGenComplete = completedCount === totalFiles && totalFiles > 0
 
                   return (
                     <>
-                      {primaryGenActivities.length > 0 && (
-                        <div className="rounded-[var(--radius-md)] border border-primary/20 bg-surface p-3.5 shadow-sm">
+                      {/* PRIMARY STRUCTURED TECHNICAL EXECUTION VIEWER */}
+                      <div className="rounded-[var(--radius-lg)] border border-border bg-surface p-4 shadow-sm space-y-4">
+                        {/* Generation Header & Progress */}
+                        <div>
                           <div className="flex items-center justify-between gap-2">
                             <div className="flex items-center gap-2">
-                              <Cpu className="h-4 w-4 text-primary" />
-                              <span className="text-[13px] font-semibold text-foreground">
-                                Generation technical details
+                              <Cpu className="h-4 w-4 text-primary shrink-0" />
+                              <span className="text-[13.5px] font-semibold text-foreground">
+                                {isGenComplete
+                                  ? `Changes generated · ${completedCount}/${totalFiles} complete`
+                                  : `Generating changes · ${completedCount}/${totalFiles || "…"} complete`}
                               </span>
-                              {repairGenActivities.length > 0 && (
-                                <span className="rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">
-                                  Compile repair · {repairTotalFiles || repairGenActivities.length} files
-                                </span>
-                              )}
                             </div>
-                            <span className="font-mono text-[11px] text-muted-foreground">
-                              {completedFiles}/{totalFiles || primaryGenActivities.length} files ({percent}%)
+                            <span className="font-mono text-[11.5px] font-medium text-muted-foreground">
+                              {percent}%
                             </span>
                           </div>
 
@@ -673,99 +763,218 @@ export function ExecutionWorkspace() {
                             <div
                               className={cn(
                                 "h-full transition-all duration-300",
-                                isGenDone ? "bg-success" : "bg-primary animate-pulse"
+                                isGenComplete ? "bg-success" : "bg-primary motion-reduce:animate-none animate-pulse"
                               )}
                               style={{ width: `${Math.max(5, percent)}%` }}
                             />
                           </div>
+                        </div>
 
-                          <div className="mt-2.5 flex items-center justify-between border-t border-border/40 pt-2">
-                            <span className="text-[11px] text-subtle-foreground">
-                              {isGenDone
-                                ? "All planned files generated and validated."
-                                : genActivities[genActivities.length - 1]?.message ?? "Generating..."}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => setShowGenDetails(!showGenDetails)}
-                              className="flex items-center gap-1 font-mono text-[10.5px] text-primary hover:underline"
-                            >
-                              {showGenDetails ? (
-                                <>
-                                  Hide details <ChevronUp className="h-3 w-3" />
-                                </>
-                              ) : (
-                                <>
-                                  Show {genActivities.length} details <ChevronDown className="h-3 w-3" />
-                                </>
-                              )}
-                            </button>
+                        {/* Currently Running Files */}
+                        {runningFiles.length > 0 && (
+                          <div className="rounded-[var(--radius-md)] border border-primary/20 bg-primary-soft/30 p-3">
+                            <div className="tech-label text-[10.5px] text-primary mb-2 flex items-center gap-1.5">
+                              <CircleDot className="h-3 w-3 animate-pulse-dot text-primary motion-reduce:animate-none" />
+                              Currently running ({runningFiles.length})
+                            </div>
+                            <div className="space-y-1.5">
+                              {runningFiles.map((rf) => {
+                                const liveSeconds = Math.max(1, Math.floor((nowMs - rf.startedAtMs) / 1000))
+                                return (
+                                  <div
+                                    key={rf.fileName}
+                                    className="flex items-center justify-between text-[12px] min-w-0"
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-primary motion-reduce:animate-none animate-ping" />
+                                      <span className="font-mono font-medium text-foreground truncate" title={rf.fileName}>
+                                        {rf.fileName}
+                                      </span>
+                                      {rf.badge && (
+                                        <Badge tone="amber" className="text-[10px] px-1 py-0 font-mono">
+                                          {rf.badge}
+                                        </Badge>
+                                      )}
+                                    </div>
+                                    <span className="font-mono text-[11px] text-primary shrink-0 ml-2">
+                                      {liveSeconds}s
+                                    </span>
+                                  </div>
+                                )
+                              })}
+                            </div>
                           </div>
+                        )}
 
-                          {showGenDetails && (
-                            <div className="mt-2.5 space-y-1.5 border-t border-border/40 pt-2.5">
-                              {genActivities.map((act) => (
+                        {/* Completed Files */}
+                        {completedFiles.length > 0 && (
+                          <div className="space-y-2">
+                            <div className="tech-label text-[10.5px] text-subtle-foreground flex items-center justify-between">
+                              <span>Completed files ({completedFiles.length})</span>
+                            </div>
+                            <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
+                              {completedFiles.map((cf) => (
                                 <div
-                                  key={act.id}
-                                  className="flex items-center justify-between text-[11.5px] text-muted-foreground"
+                                  key={cf.fileName}
+                                  className="flex items-center justify-between rounded-[var(--radius-sm)] border border-border/40 bg-surface-2/60 px-2.5 py-1.5 text-[12px]"
                                 >
-                                  <span className="font-mono">{act.message}</span>
-                                  <span className="font-mono text-[10px] text-subtle-foreground">
-                                    {formatTimeOnly(act.createdAt)}
-                                  </span>
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <Check className="h-3.5 w-3.5 text-success shrink-0" />
+                                    <span className="font-mono text-foreground truncate" title={cf.fileName}>
+                                      {cf.fileName}
+                                    </span>
+                                    {cf.badge && (
+                                      <Badge tone="neutral" className="text-[9.5px] px-1 py-0 font-mono text-subtle-foreground">
+                                        {cf.badge}
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  {cf.durationSec !== undefined && (
+                                    <span className="font-mono text-[10.5px] text-subtle-foreground shrink-0 ml-2">
+                                      {cf.durationSec}s
+                                    </span>
+                                  )}
                                 </div>
                               ))}
                             </div>
-                          )}
-                        </div>
-                      )}
+                          </div>
+                        )}
 
-                      {nonGenActivities.map((act) => {
-                        const isDone = act.status === "Completed"
-                        const isFailedStatus = act.status === "Failed"
-                        const isRejectedStatus = act.status === "Rejected"
-                        const formattedTime = formatTimeOnly(act.createdAt)
-                        const metaText = getMetadataDisplay(act)
-
-                        return (
-                          <div
-                            key={act.id}
-                            className="flex items-start gap-3 rounded-[var(--radius-md)] border border-border/60 bg-surface p-3 transition-colors"
-                          >
-                            <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full">
-                              {isDone ? (
-                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-success/15 text-success">
-                                  <Check className="h-3 w-3" />
-                                </span>
-                              ) : isFailedStatus || isRejectedStatus ? (
-                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-danger/15 text-danger">
-                                  <X className="h-3 w-3" />
-                                </span>
-                              ) : (
-                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/15 text-primary">
-                                  <CircleDot className="h-3 w-3 animate-pulse-dot" />
-                                </span>
-                              )}
+                        {/* Repair Section */}
+                        {repairItems.length > 0 && (
+                          <div className="rounded-[var(--radius-md)] border border-accent-line/40 bg-accent-soft/30 p-3 space-y-1.5">
+                            <div className="tech-label text-[10.5px] text-accent flex items-center gap-1.5">
+                              <RotateCcw className="h-3 w-3" />
+                              Repair & convergence
                             </div>
-
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-[13px] font-medium text-foreground">
-                                  {getPrimaryActivityLabel(act)}
-                                </span>
-                                <span className="font-mono text-[11px] text-subtle-foreground">
-                                  {formattedTime}
-                                </span>
-                              </div>
-                              {metaText && (
-                                <div className="mt-1 font-mono text-[11px] text-muted-foreground">
-                                  {metaText}
+                            <div className="space-y-1">
+                              {repairItems.map((item) => (
+                                <div
+                                  key={item.id}
+                                  className="flex items-center justify-between text-[12px] font-mono text-foreground"
+                                >
+                                  <div className="flex items-center gap-1.5 truncate">
+                                    <span className="text-accent">↻</span>
+                                    <span className="truncate">{item.message}</span>
+                                    {item.detail && (
+                                      <span className="text-muted-foreground text-[11px] truncate">({item.detail})</span>
+                                    )}
+                                  </div>
+                                  <Badge tone={item.status === "completed" ? "green" : item.status === "failed" ? "red" : "amber"} className="text-[10px] px-1 py-0">
+                                    {item.status}
+                                  </Badge>
                                 </div>
-                              )}
+                              ))}
                             </div>
                           </div>
-                        )
-                      })}
+                        )}
+
+                        {/* Verification Section */}
+                        {(buildState !== "idle" || testState !== "idle") && (
+                          <div className="border-t border-border/50 pt-3 space-y-2">
+                            <div className="tech-label text-[10.5px]">Verification</div>
+                            <div className="grid grid-cols-2 gap-2 text-[12px]">
+                              {/* Build check */}
+                              <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2.5 py-1.5">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  {buildState === "passed" ? (
+                                    <Check className="h-3.5 w-3.5 text-success shrink-0" />
+                                  ) : buildState === "failed" ? (
+                                    <X className="h-3.5 w-3.5 text-danger shrink-0" />
+                                  ) : (
+                                    <CircleDot className="h-3.5 w-3.5 text-primary animate-pulse-dot motion-reduce:animate-none shrink-0" />
+                                  )}
+                                  <span className="font-medium text-foreground truncate">{buildLabel}</span>
+                                </div>
+                                {buildDuration && (
+                                  <span className="font-mono text-[10.5px] text-subtle-foreground shrink-0 ml-1">{buildDuration}</span>
+                                )}
+                              </div>
+
+                              {/* Test check */}
+                              <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2.5 py-1.5">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  {testState === "passed" ? (
+                                    <Check className="h-3.5 w-3.5 text-success shrink-0" />
+                                  ) : testState === "failed" ? (
+                                    <X className="h-3.5 w-3.5 text-danger shrink-0" />
+                                  ) : testState === "running" ? (
+                                    <CircleDot className="h-3.5 w-3.5 text-primary animate-pulse-dot motion-reduce:animate-none shrink-0" />
+                                  ) : (
+                                    <span className="h-1.5 w-1.5 rounded-full bg-subtle-foreground shrink-0" />
+                                  )}
+                                  <span className="font-medium text-foreground truncate">{testLabel}</span>
+                                </div>
+                                {testDuration && (
+                                  <span className="font-mono text-[10.5px] text-subtle-foreground shrink-0 ml-1">{testDuration}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* SECONDARY DISCLOSURE: RAW TECHNICAL LOG */}
+                      <div className="rounded-[var(--radius-md)] border border-border bg-surface overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => setShowGenDetails(!showGenDetails)}
+                          className="flex w-full items-center justify-between px-4 py-2.5 text-left text-[12.5px] font-medium text-muted-foreground hover:bg-surface-2 transition-colors"
+                        >
+                          <div className="flex items-center gap-2">
+                            <Terminal className="h-3.5 w-3.5 text-subtle-foreground" />
+                            <span>Raw technical log</span>
+                            <span className="font-mono text-[11px] text-subtle-foreground">
+                              ({activities.length} {activities.length === 1 ? "event" : "events"})
+                            </span>
+                          </div>
+                          {showGenDetails ? (
+                            <ChevronUp className="h-4 w-4 text-subtle-foreground" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4 text-subtle-foreground" />
+                          )}
+                        </button>
+
+                        {showGenDetails && (
+                          <div className="max-h-80 overflow-y-auto border-t border-border p-3 space-y-2 divide-y divide-border/30">
+                            {activities.map((act) => {
+                              const isDone = act.status === "Completed"
+                              const isFailedStatus = act.status === "Failed"
+                              const isRejectedStatus = act.status === "Rejected"
+                              const formattedTime = formatTimeOnly(act.createdAt)
+                              const metaText = getMetadataDisplay(act)
+
+                              return (
+                                <div
+                                  key={act.id}
+                                  className="pt-2 first:pt-0 flex items-start gap-2.5 text-[11.5px]"
+                                >
+                                  <div className="mt-0.5 shrink-0">
+                                    {isDone ? (
+                                      <Check className="h-3 w-3 text-success" />
+                                    ) : isFailedStatus || isRejectedStatus ? (
+                                      <X className="h-3 w-3 text-danger" />
+                                    ) : (
+                                      <CircleDot className="h-3 w-3 text-primary animate-pulse-dot motion-reduce:animate-none" />
+                                    )}
+                                  </div>
+                                  <div className="min-w-0 flex-1 font-mono">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-foreground truncate">{act.message}</span>
+                                      <span className="text-[10px] text-subtle-foreground shrink-0">{formattedTime}</span>
+                                    </div>
+                                    {metaText && (
+                                      <div className="text-[10.5px] text-muted-foreground mt-0.5">
+                                        {metaText}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
                     </>
                   )
                 })()}

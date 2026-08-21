@@ -104,7 +104,22 @@ public static class ChangeIntelligenceEvidenceCollector
     public static (string EvidenceType, string EvidenceDetails, bool IsUncertain) ClassifyFileEvidence(
         string normalizedPath,
         ImpactFileChangeType changeType,
-        int confidence,
+        int? modelConfidence,
+        RepositoryEvidenceProfile evidence)
+    {
+        var (evType, evDetails, isUncertain, _) = ClassifyAndCalibrateFileEvidence(
+            normalizedPath,
+            changeType,
+            modelConfidence,
+            evidence);
+
+        return (evType, evDetails, isUncertain);
+    }
+
+    public static (string EvidenceType, string EvidenceDetails, bool IsUncertain, int CalibratedConfidence) ClassifyAndCalibrateFileEvidence(
+        string normalizedPath,
+        ImpactFileChangeType changeType,
+        int? modelConfidence,
         RepositoryEvidenceProfile evidence)
     {
         var isInventoryMatch = evidence.InventoryCsFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
@@ -113,65 +128,114 @@ public static class ChangeIntelligenceEvidenceCollector
                                evidence.MigrationFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
                                evidence.TestFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase);
 
+        string evType;
+        string evDetails;
+        bool isUncertain;
+
         // 1. Controller / API Surface
         if (evidence.ControllerFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
             normalizedPath.Contains("/Controllers/", StringComparison.OrdinalIgnoreCase) ||
             normalizedPath.EndsWith("Controller.cs", StringComparison.OrdinalIgnoreCase))
         {
-            var isUncertain = confidence < 70 || (!isInventoryMatch && changeType != ImpactFileChangeType.Add);
-            return ("ControllerUsage", "Controller endpoint definition in API layer", isUncertain);
+            isUncertain = !isInventoryMatch && changeType != ImpactFileChangeType.Add;
+            evType = "ControllerUsage";
+            evDetails = "Controller endpoint definition in API layer";
         }
-
         // 2. Migration
-        if (evidence.MigrationFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
-            normalizedPath.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase))
+        else if (evidence.MigrationFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
+                 normalizedPath.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase))
         {
-            var isUncertain = confidence < 70 || (!isInventoryMatch && changeType != ImpactFileChangeType.Add);
-            return ("MigrationRelationship", "Database migration history or model snapshot", isUncertain);
+            isUncertain = !isInventoryMatch && changeType != ImpactFileChangeType.Add;
+            evType = "MigrationRelationship";
+            evDetails = "Database migration history or model snapshot";
         }
-
         // 3. Persistence / Entity
-        if (evidence.PersistenceFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
-            normalizedPath.Contains("/Entities/", StringComparison.OrdinalIgnoreCase) ||
-            normalizedPath.Contains("DbContext", StringComparison.OrdinalIgnoreCase))
+        else if (evidence.PersistenceFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
+                 normalizedPath.Contains("/Entities/", StringComparison.OrdinalIgnoreCase) ||
+                 normalizedPath.Contains("DbContext", StringComparison.OrdinalIgnoreCase))
         {
-            var isUncertain = confidence < 70 || (!isInventoryMatch && changeType != ImpactFileChangeType.Add);
-            return ("PersistenceRelationship", "Entity, DbContext, or database configuration", isUncertain);
+            isUncertain = !isInventoryMatch && changeType != ImpactFileChangeType.Add;
+            evType = "PersistenceRelationship";
+            evDetails = "Entity, DbContext, or database configuration";
         }
-
         // 4. Test File
-        if (evidence.TestFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
-            ProjectGraphHelper.IsTestFileCandidate(normalizedPath))
+        else if (evidence.TestFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
+                 ProjectGraphHelper.IsTestFileCandidate(normalizedPath))
         {
-            var isUncertain = confidence < 70 || (!isInventoryMatch && changeType != ImpactFileChangeType.Add);
-            return ("RelevantTest", "Automated test suite component", isUncertain);
+            isUncertain = !isInventoryMatch && changeType != ImpactFileChangeType.Add;
+            evType = "RelevantTest";
+            evDetails = "Automated test suite component";
         }
-
         // 5. Interface
-        if (Path.GetFileName(normalizedPath).StartsWith("I", StringComparison.Ordinal) &&
-            Path.GetFileName(normalizedPath).Length > 2 &&
-            char.IsUpper(Path.GetFileName(normalizedPath)[1]))
+        else if (Path.GetFileName(normalizedPath).StartsWith("I", StringComparison.Ordinal) &&
+                 Path.GetFileName(normalizedPath).Length > 2 &&
+                 char.IsUpper(Path.GetFileName(normalizedPath)[1]))
         {
-            var isUncertain = confidence < 75 || (!isInventoryMatch && changeType != ImpactFileChangeType.Add);
-            return ("InterfaceImplementation", "Interface contract abstraction", isUncertain);
+            isUncertain = !isInventoryMatch && changeType != ImpactFileChangeType.Add;
+            evType = "InterfaceImplementation";
+            evDetails = "Interface contract abstraction";
         }
-
         // 6. Existing Repository Inventory File
-        if (isInventoryMatch)
+        else if (isInventoryMatch)
         {
-            var isUncertain = confidence < 70;
-            return ("SymbolReference", "Existing repository component match", isUncertain);
+            isUncertain = false;
+            evType = "SymbolReference";
+            evDetails = "Existing repository component match";
         }
-
-        // 7. Newly Added File
-        if (changeType == ImpactFileChangeType.Add)
+        // 7. Newly Added File in Discovered Project Root
+        else if (changeType == ImpactFileChangeType.Add)
         {
-            var isUncertain = confidence < 80;
-            return ("Inferred", "New component proposed for implementation", isUncertain);
+            isUncertain = false;
+            evType = "Inferred";
+            evDetails = "New component proposed for implementation";
         }
-
         // 8. Weak/Speculative
-        return ("Inferred", "Speculative component reference", true);
+        else
+        {
+            isUncertain = true;
+            evType = "Inferred";
+            evDetails = "Speculative component reference";
+        }
+
+        var calibratedConfidence = CalibrateFileConfidence(modelConfidence, evType, isUncertain, changeType);
+
+        return (evType, evDetails, isUncertain, calibratedConfidence);
+    }
+
+    public static int CalibrateFileConfidence(
+        int? modelConfidence,
+        string evidenceType,
+        bool isUncertain,
+        ImpactFileChangeType changeType)
+    {
+        // 1. Determine explainable deterministic baseline by evidence strength
+        var baseline = evidenceType switch
+        {
+            "ControllerUsage" => 90,
+            "MigrationRelationship" => 90,
+            "PersistenceRelationship" => 90,
+            "InterfaceImplementation" => 85,
+            "RelevantTest" => 85,
+            "SymbolReference" => 75,
+            _ => changeType == ImpactFileChangeType.Add && !isUncertain ? 60 : 40
+        };
+
+        // 2. If model confidence is present and valid (1..100)
+        if (modelConfidence.HasValue && modelConfidence.Value >= 1 && modelConfidence.Value <= 100)
+        {
+            var clampedModel = Math.Clamp(modelConfidence.Value, 1, 100);
+
+            // If grounding proved the reference is uncertain or weak inferred, cap model confidence to lower range
+            if (isUncertain || evidenceType == "Inferred")
+            {
+                return Math.Min(clampedModel, changeType == ImpactFileChangeType.Add ? 60 : 40);
+            }
+
+            return clampedModel;
+        }
+
+        // 3. If model confidence is absent (null/0) or out-of-range, use deterministic baseline
+        return Math.Clamp(baseline, 0, 100);
     }
 
     public static ChangeBrief BuildChangeBrief(

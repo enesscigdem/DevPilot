@@ -1210,11 +1210,10 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     }
                 }
 
-                var normalizedConfidence = NormalizeConfidence(f.Confidence);
-                var (evType, evDetails, isUncertain) = ChangeIntelligenceEvidenceCollector.ClassifyFileEvidence(
+                var (evType, evDetails, isUncertain, calibratedConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
                     normalizedPath,
                     changeType,
-                    normalizedConfidence,
+                    f.Confidence,
                     evidence);
 
                 var finalEvType = !string.IsNullOrWhiteSpace(f.EvidenceType) ? f.EvidenceType.Trim() : evType;
@@ -1225,7 +1224,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     FilePath = normalizedPath,
                     ChangeType = changeType,
                     Reason = Truncate(f.Reason?.Trim() ?? string.Empty, 200),
-                    Confidence = normalizedConfidence,
+                    Confidence = calibratedConfidence,
                     EvidenceType = finalEvType,
                     EvidenceDetails = Truncate(finalEvDetails, 200),
                     IsUncertain = isUncertain,
@@ -1233,6 +1232,11 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             }
 
             resultData.ImpactedFiles = impactedFiles;
+            resultData.Confidence = CalibrateOverallConfidence(response.Confidence, impactedFiles);
+        }
+        else
+        {
+            resultData.Confidence = CalibrateOverallConfidence(response.Confidence, impactedFiles);
         }
 
         if (response.ProposedPlan is not null && response.ProposedPlan.Count > 0)
@@ -1497,6 +1501,21 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private static int NormalizeConfidence(int? confidence)
     {
         return confidence.HasValue ? Math.Clamp(confidence.Value, 0, 100) : 0;
+    }
+
+    private static int CalibrateOverallConfidence(int? modelConfidence, IReadOnlyList<ImpactedFile> files)
+    {
+        if (modelConfidence.HasValue && modelConfidence.Value >= 1 && modelConfidence.Value <= 100)
+        {
+            return Math.Clamp(modelConfidence.Value, 1, 100);
+        }
+
+        if (files != null && files.Count > 0)
+        {
+            return (int)Math.Round(files.Average(f => f.Confidence));
+        }
+
+        return 75;
     }
 
     private static ImpactFileChangeType ParseChangeType(string? value)

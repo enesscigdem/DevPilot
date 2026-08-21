@@ -452,4 +452,207 @@ public sealed class ChangeIntelligenceEvidenceTests
         Assert.NotEmpty(data.Unknowns);
         Assert.Contains(data.Unknowns, u => u.Contains("unconfigured", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public void ConfidenceCalibration_StrongGroundedEvidenceWithoutModelConfidence_DoesNotBecomeZero()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ControllerFiles = new[] { "src/DevPilot.Api/Controllers/UsersController.cs" },
+            PersistenceFiles = new[] { "src/DevPilot.Domain/Entities/User.cs" },
+            MigrationFiles = new[] { "src/DevPilot.Infrastructure/Migrations/20260821_AddUser.cs" },
+            TestFiles = new[] { "tests/DevPilot.Tests/UserTests.cs" },
+            InventoryCsFiles = new[]
+            {
+                "src/DevPilot.Api/Controllers/UsersController.cs",
+                "src/DevPilot.Domain/Entities/User.cs",
+                "src/DevPilot.Domain/Contracts/IUserRepository.cs",
+                "src/DevPilot.Infrastructure/Migrations/20260821_AddUser.cs",
+                "tests/DevPilot.Tests/UserTests.cs",
+                "src/DevPilot.Application/Common/StringExtensions.cs"
+            }
+        };
+
+        // 1. ControllerUsage without model confidence
+        var (_, _, _, ctrlConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Api/Controllers/UsersController.cs",
+            ImpactFileChangeType.Modify,
+            null,
+            evidence);
+        Assert.Equal(90, ctrlConfidence);
+
+        // 2. PersistenceRelationship without model confidence
+        var (_, _, _, persistConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Domain/Entities/User.cs",
+            ImpactFileChangeType.Modify,
+            0,
+            evidence);
+        Assert.Equal(90, persistConfidence);
+
+        // 3. MigrationRelationship without model confidence
+        var (_, _, _, migConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Infrastructure/Migrations/20260821_AddUser.cs",
+            ImpactFileChangeType.Modify,
+            null,
+            evidence);
+        Assert.Equal(90, migConfidence);
+
+        // 4. InterfaceImplementation without model confidence
+        var (_, _, _, ifaceConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Domain/Contracts/IUserRepository.cs",
+            ImpactFileChangeType.Modify,
+            null,
+            evidence);
+        Assert.Equal(85, ifaceConfidence);
+
+        // 5. RelevantTest without model confidence
+        var (_, _, _, testConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "tests/DevPilot.Tests/UserTests.cs",
+            ImpactFileChangeType.Modify,
+            null,
+            evidence);
+        Assert.Equal(85, testConfidence);
+
+        // 6. SymbolReference without model confidence
+        var (_, _, _, symConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Application/Common/StringExtensions.cs",
+            ImpactFileChangeType.Modify,
+            null,
+            evidence);
+        Assert.Equal(75, symConfidence);
+    }
+
+    [Fact]
+    public void ConfidenceCalibration_InferredAndSpeculativeEvidence_RemainsLower()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ProjectRoots = new[] { "src/DevPilot.Application" }
+        };
+
+        // Newly added file in valid project root -> medium range (60%)
+        var (newType, _, newUncertain, newConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Application/Orders/NewCommand.cs",
+            ImpactFileChangeType.Add,
+            null,
+            evidence);
+        Assert.Equal("Inferred", newType);
+        Assert.False(newUncertain);
+        Assert.Equal(60, newConfidence);
+
+        // Speculative file not found in inventory for Modify -> low range (40%) and uncertain
+        var (specType, _, specUncertain, specConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Application/Services/NonExistentService.cs",
+            ImpactFileChangeType.Modify,
+            null,
+            evidence);
+        Assert.Equal("Inferred", specType);
+        Assert.True(specUncertain);
+        Assert.Equal(40, specConfidence);
+    }
+
+    [Fact]
+    public void ConfidenceCalibration_ValidModelConfidence_IsPreservedWhenGrounded()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ControllerFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs" },
+            InventoryCsFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs" }
+        };
+
+        var (_, _, _, preservedConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Api/Controllers/OrdersController.cs",
+            ImpactFileChangeType.Modify,
+            95,
+            evidence);
+
+        Assert.Equal(95, preservedConfidence);
+    }
+
+    [Fact]
+    public void ConfidenceCalibration_InvalidOrOutOfRangeConfidence_IsNormalized()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ControllerFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs" },
+            InventoryCsFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs" }
+        };
+
+        // Out of range > 100 -> clamped to deterministic baseline or 100
+        var (_, _, _, highClamped) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Api/Controllers/OrdersController.cs",
+            ImpactFileChangeType.Modify,
+            180,
+            evidence);
+        Assert.True(highClamped <= 100 && highClamped >= 0);
+
+        // Out of range < 0 -> normalized to baseline
+        var (_, _, _, lowNormalized) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Api/Controllers/OrdersController.cs",
+            ImpactFileChangeType.Modify,
+            -50,
+            evidence);
+        Assert.Equal(90, lowNormalized);
+    }
+
+    [Fact]
+    public void ConfidenceCalibration_IsUncertain_RemainsIndependentFromConfidence()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            PersistenceFiles = new[] { "src/DevPilot.Domain/Entities/Order.cs" },
+            InventoryCsFiles = new[] { "src/DevPilot.Domain/Entities/Order.cs" }
+        };
+
+        // Grounded persistence file has IsUncertain = false regardless of confidence
+        var (_, _, isUncertain, _) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Domain/Entities/Order.cs",
+            ImpactFileChangeType.Modify,
+            50,
+            evidence);
+        Assert.False(isUncertain);
+
+        // Speculative file without inventory match has IsUncertain = true even if model claims high confidence
+        var (_, _, specUncertain, specConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+            "src/DevPilot.Domain/Entities/NonExistent.cs",
+            ImpactFileChangeType.Modify,
+            99,
+            new RepositoryEvidenceProfile());
+        Assert.True(specUncertain);
+        Assert.True(specConfidence <= 50, "Speculative file confidence must be bounded even if model claimed 99%");
+    }
+
+    [Fact]
+    public void TryParseStructuredResult_GroundedFilesWithoutModelConfidence_HaveNonZeroConfidence()
+    {
+        var jsonWithoutFileConfidence = """
+        {
+          "summary": "Update order status handling",
+          "impactedFiles": [
+            { "filePath": "src/DevPilot.Api/Controllers/OrdersController.cs", "changeType": "Modify", "reason": "Update status endpoint" },
+            { "filePath": "src/DevPilot.Domain/Entities/Order.cs", "changeType": "Modify", "reason": "Add state transition" }
+          ]
+        }
+        """;
+
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ProjectRoots = new[] { "src/DevPilot.Api", "src/DevPilot.Domain" },
+            ControllerFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs" },
+            PersistenceFiles = new[] { "src/DevPilot.Domain/Entities/Order.cs" },
+            InventoryCsFiles = new[] { "src/DevPilot.Api/Controllers/OrdersController.cs", "src/DevPilot.Domain/Entities/Order.cs" }
+        };
+
+        var parseResult = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(
+            jsonWithoutFileConfidence,
+            evidence,
+            workspaceLocalPath: "");
+
+        Assert.True(parseResult.Success);
+        var data = parseResult.ResultData!;
+        Assert.Equal(2, data.ImpactedFiles.Count);
+        Assert.Equal(90, data.ImpactedFiles[0].Confidence);
+        Assert.Equal(90, data.ImpactedFiles[1].Confidence);
+        Assert.Equal(90, data.Confidence);
+    }
 }
