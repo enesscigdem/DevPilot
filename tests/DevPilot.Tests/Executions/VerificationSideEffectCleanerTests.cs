@@ -236,4 +236,206 @@ public sealed class VerificationSideEffectCleanerTests
             try { Directory.Delete(tempDir, recursive: true); } catch { }
         }
     }
+
+    #region Regression Tests — 10 Verification Side-Effect Scenarios
+
+    [Fact]
+    public void Scenario1_InitialBuildFails_CleanupClassifiesArtifactsAsSideEffects_ReviewIsClean()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src/OrderService.cs" };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("src/obj/Debug/net10.0/build.log", null, "??", "Added"),
+            new("src/obj/Debug/net10.0/OrderSystem.dll", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Single(preserved);
+        Assert.Equal("src/OrderService.cs", preserved[0].Path);
+        Assert.Equal(2, sideEffects.Count);
+    }
+
+    [Fact]
+    public void Scenario2_InitialBuildPasses_TestsFail_CleanupClassifiesTrxAndBinariesAsSideEffects()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src/OrderService.cs", "tests/OrderServiceTests.cs" };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("tests/OrderServiceTests.cs", null, "??", "Added"),
+            new("TestResults/testrun.trx", null, "??", "Added"),
+            new("tests/bin/Debug/net10.0/tests.dll", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Equal(2, preserved.Count);
+        Assert.Equal(2, sideEffects.Count);
+        Assert.Contains(sideEffects, s => s.Path.Contains(".trx"));
+    }
+
+    [Fact]
+    public void Scenario3_CompileRepairFails_CleanupPreservesOriginalAndRepairEdits_PurgesBuildSideEffects()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "src/OrderService.cs", // initial edit
+            "src/IOrderService.cs" // repair edit
+        };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("src/IOrderService.cs", null, " M", "Modified"),
+            new("src/obj/Debug/net10.0/project.assets.json", null, "??", "Added"),
+            new("src/obj/Debug/net10.0/project.nuget.cache", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Equal(2, preserved.Count);
+        Assert.Equal(2, sideEffects.Count);
+    }
+
+    [Fact]
+    public void Scenario4_TestRepairFails_CleanupPreservesEdits_PurgesTestSideEffects()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "src/OrderService.cs",
+            "tests/OrderServiceTests.cs"
+        };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("tests/OrderServiceTests.cs", null, " M", "Modified"),
+            new("TestResults/failed_run.trx", null, "??", "Added"),
+            new(".vs/test.db", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Equal(2, preserved.Count);
+        Assert.Equal(2, sideEffects.Count);
+    }
+
+    [Fact]
+    public void Scenario5_NoProgressThresholdHit_CleanupPreservesEdits_SanitizesWorkspaceForReview()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src/OrderService.cs" };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("src/bin/Debug/net10.0/app.pdb", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Single(preserved);
+        Assert.Single(sideEffects);
+        Assert.Equal("src/bin/Debug/net10.0/app.pdb", sideEffects[0].Path);
+    }
+
+    [Fact]
+    public void Scenario6_BuildToolErrorOrProcessCrash_CleanupIsDeterministic()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src/OrderService.cs" };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("temp_crash_dump.dmp", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Single(preserved);
+        Assert.Single(sideEffects);
+        Assert.Equal("temp_crash_dump.dmp", sideEffects[0].Path);
+    }
+
+    [Fact]
+    public void Scenario7_CancellationDuringTestExecution_CleanupClassifiesRunningArtifacts()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src/OrderService.cs" };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("TestResults/in_progress.trx", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Single(preserved);
+        Assert.Single(sideEffects);
+    }
+
+    [Fact]
+    public void Scenario8_MultiProjectSolution_ObjIn3Projects_All3ProjectsCleaned()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "src/Api/Controllers/OrderController.cs",
+            "src/Domain/Order.cs"
+        };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/Api/Controllers/OrderController.cs", null, " M", "Modified"),
+            new("src/Domain/Order.cs", null, " M", "Modified"),
+            new("src/Api/obj/Debug/net10.0/project.assets.json", null, "??", "Added"),
+            new("src/Domain/obj/Debug/net10.0/project.assets.json", null, "??", "Added"),
+            new("src/Infrastructure/obj/Debug/net10.0/project.assets.json", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Equal(2, preserved.Count);
+        Assert.Equal(3, sideEffects.Count);
+        Assert.All(sideEffects, s => Assert.Contains("project.assets.json", s.Path));
+    }
+
+    [Fact]
+    public void Scenario9_GeneratedSourceFileOutsideTrackedGitSet_ClassifiedAsSideEffect()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "src/OrderService.cs" };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("src/obj/Debug/net10.0/GlobalUsings.g.cs", null, "??", "Added"),
+            new("src/obj/Debug/net10.0/AssemblyAttributes.g.cs", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Single(preserved);
+        Assert.Equal(2, sideEffects.Count);
+        Assert.Contains(sideEffects, s => s.Path.Contains("GlobalUsings.g.cs"));
+        Assert.Contains(sideEffects, s => s.Path.Contains("AssemblyAttributes.g.cs"));
+    }
+
+    [Fact]
+    public void Scenario10_ModifiedTrackedSourceFileCreatedByTaskOrRepair_StrictlyPreserved()
+    {
+        var authoritative = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "src/OrderService.cs",
+            "src/SpecialGeneratedFile.cs"
+        };
+        var status = new List<VerificationSideEffectCleaner.StatusEntry>
+        {
+            new("src/OrderService.cs", null, " M", "Modified"),
+            new("src/SpecialGeneratedFile.cs", null, "??", "Added"),
+            new("src/bin/Debug/app.dll", null, "??", "Added")
+        };
+
+        var (preserved, sideEffects) = VerificationSideEffectCleaner.ClassifyStatusEntries(status, authoritative);
+
+        Assert.Equal(2, preserved.Count);
+        Assert.Contains(preserved, p => p.Path == "src/OrderService.cs");
+        Assert.Contains(preserved, p => p.Path == "src/SpecialGeneratedFile.cs");
+        Assert.Single(sideEffects);
+        Assert.Equal("src/bin/Debug/app.dll", sideEffects[0].Path);
+    }
+
+    #endregion
 }

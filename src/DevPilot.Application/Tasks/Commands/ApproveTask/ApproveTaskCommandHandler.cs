@@ -1,6 +1,7 @@
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.Tasks.Dtos;
 using DevPilot.Application.Tasks.Ports;
+using DevPilot.Domain.Constants;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Logging;
 
@@ -72,6 +73,18 @@ public sealed class ApproveTaskCommandHandler : IApproveTaskCommandHandler
                 Conflict = true,
                 ErrorMessage =
                     "A completed impact analysis is required before a task can be approved.",
+            };
+        }
+
+        if (analysis.StructuredResult?.ImpactedFiles is not null &&
+            analysis.StructuredResult.ImpactedFiles.Count > ExecutionCapacityPolicy.MaxImpactedFiles)
+        {
+            return new ApproveTaskResult
+            {
+                Success = false,
+                Conflict = true,
+                ErrorMessage =
+                    $"Cannot approve plan: impacted file count ({analysis.StructuredResult.ImpactedFiles.Count}) exceeds maximum executable capacity of {ExecutionCapacityPolicy.MaxImpactedFiles} files. Please decompose the task into smaller focused tasks.",
             };
         }
 

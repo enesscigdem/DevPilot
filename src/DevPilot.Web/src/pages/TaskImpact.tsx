@@ -1033,6 +1033,15 @@ export function TaskImpact() {
                     diff back for review. Nothing merges without you.
                   </p>
 
+                  {realFiles.length > 20 && (
+                    <div className="mt-3 flex items-start gap-2 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 p-2.5 text-[12px] text-danger leading-relaxed">
+                      <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span>
+                        Plan proposes <strong>{realFiles.length} files</strong>, exceeding maximum executable capacity (20 files). Please decompose the task into smaller focused tasks before executing.
+                      </span>
+                    </div>
+                  )}
+
                   {approvalError && (
                     <div className="mt-3 flex items-center gap-1.5 text-[12px] text-danger font-medium">
                       <AlertCircle className="h-3.5 w-3.5 shrink-0" />
@@ -1045,7 +1054,7 @@ export function TaskImpact() {
                       variant="primary"
                       size="lg"
                       className="w-full"
-                      disabled={isApproving || isRejecting}
+                      disabled={isApproving || isRejecting || realFiles.length > 20}
                       onClick={handleApprove}
                     >
                       {isApproving ? (

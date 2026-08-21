@@ -2,13 +2,18 @@ using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
+using DevPilot.Application.Executions.Commands.StartExecution;
 using DevPilot.Application.ProjectBrain.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
+using DevPilot.Application.TaskImpactAnalysis.Services;
+using DevPilot.Application.Tasks.Commands.ApproveTask;
 using DevPilot.Application.Tasks.Ports;
+using DevPilot.Domain.Constants;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Domain.ProjectBrain;
+using DevPilot.Domain.ValueObjects;
 using DevPilot.Infrastructure.DeveloperAgent;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -576,6 +581,236 @@ public class TaskImpactAnalysisGroundingTests
         aiProvider.SendAsyncCallCount.Should().Be(2);
         aiProvider.ReceivedRequests[1].UserPrompt.Should().Contain("already exists in the repository");
         task.Status.Should().Be(DevelopmentTaskStatus.AwaitingApproval);
+    }
+
+    [Fact]
+    public void CapacityBoundary_12FileApprovedPlan_SuccessfullyConstructsManifest()
+    {
+        var projectRoots = ProjectGraphHelper.DiscoverProjectRoots(_repoRoot);
+        var projectGraph = ProjectGraphHelper.DiscoverProjectGraph(_repoRoot);
+
+        // 12 files representing a realistic multi-project feature plan
+        var twelveFiles = new List<ImpactedFileDetail>
+        {
+            new("src/DevPilot.Domain/Entities/DevelopmentTask.cs", "Modify", "Add properties"),
+            new("src/DevPilot.Domain/Enums/DevelopmentTaskStatus.cs", "Modify", "Add enum values"),
+            new("src/DevPilot.Application/Tasks/Dtos/TaskDto.cs", "Modify", "Update DTO"),
+            new("src/DevPilot.Application/Tasks/Commands/ApproveTask/ApproveTaskCommand.cs", "Modify", "Update command"),
+            new("src/DevPilot.Application/Tasks/Commands/ApproveTask/ApproveTaskCommandHandler.cs", "Modify", "Update handler"),
+            new("src/DevPilot.Application/Tasks/Ports/ITaskRepository.cs", "Modify", "Update interface"),
+            new("src/DevPilot.Infrastructure/Tasks/EfTaskRepository.cs", "Modify", "Update repo"),
+            new("src/DevPilot.Infrastructure/Persistence/DevPilotDbContext.cs", "Modify", "Update DbContext"),
+            new("src/DevPilot.Infrastructure/Migrations/20260821_UpdateTask.cs", "Add", "New migration"),
+            new("src/DevPilot.Api/Controllers/TasksController.cs", "Modify", "Update API controller"),
+            new("tests/DevPilot.Tests/TaskTests.cs", "Add", "Unit tests"),
+            new("tests/DevPilot.Tests/TaskIntegrationTests.cs", "Add", "Integration tests")
+        };
+
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Twelve File Feature Plan",
+            TaskDescription: "Add complete 12-file feature",
+            AcceptanceCriteria: null,
+            ImpactAnalysisSummary: "12-file plan",
+            ProposedPlan: "Plan steps",
+            ImpactedFilePaths: twelveFiles.Select(f => f.FilePath).ToList(),
+            WorkspacePath: _repoRoot,
+            BranchName: "main",
+            ImpactedFiles: twelveFiles);
+
+        // Max limit is ExecutionCapacityPolicy.MaxImpactedFiles (20)
+        var manifest = DeveloperAgent.BuildManifestFromImpactAnalysis(
+            request,
+            _repoRoot,
+            projectRoots,
+            ExecutionCapacityPolicy.MaxImpactedFiles,
+            projectGraph);
+
+        manifest.Should().NotBeNull();
+        manifest.Files.Count.Should().Be(12);
+    }
+
+    [Fact]
+    public void CapacityBoundary_Exactly20Files_AllowedAndConstructsManifest()
+    {
+        var projectRoots = ProjectGraphHelper.DiscoverProjectRoots(_repoRoot);
+        var projectGraph = ProjectGraphHelper.DiscoverProjectGraph(_repoRoot);
+
+        var twentyFiles = Enumerable.Range(1, 20)
+            .Select(i => new ImpactedFileDetail($"src/DevPilot.Domain/Entities/Entity{i}.cs", "Add", $"Add entity {i}"))
+            .ToList();
+
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Twenty File Plan",
+            TaskDescription: "Add 20 entities",
+            AcceptanceCriteria: null,
+            ImpactAnalysisSummary: "20-file plan",
+            ProposedPlan: "Plan steps",
+            ImpactedFilePaths: twentyFiles.Select(f => f.FilePath).ToList(),
+            WorkspacePath: _repoRoot,
+            BranchName: "main",
+            ImpactedFiles: twentyFiles);
+
+        var manifest = DeveloperAgent.BuildManifestFromImpactAnalysis(
+            request,
+            _repoRoot,
+            projectRoots,
+            ExecutionCapacityPolicy.MaxImpactedFiles,
+            projectGraph);
+
+        manifest.Should().NotBeNull();
+        manifest.Files.Count.Should().Be(20);
+    }
+
+    [Fact]
+    public void CapacityBoundary_OverLimit21Files_RejectedInManifestConstruction()
+    {
+        var projectRoots = ProjectGraphHelper.DiscoverProjectRoots(_repoRoot);
+        var projectGraph = ProjectGraphHelper.DiscoverProjectGraph(_repoRoot);
+
+        var twentyOneFiles = Enumerable.Range(1, 21)
+            .Select(i => new ImpactedFileDetail($"src/DevPilot.Domain/Entities/Entity{i}.cs", "Add", $"Add entity {i}"))
+            .ToList();
+
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Twenty One File Plan",
+            TaskDescription: "Add 21 entities",
+            AcceptanceCriteria: null,
+            ImpactAnalysisSummary: "21-file plan",
+            ProposedPlan: "Plan steps",
+            ImpactedFilePaths: twentyOneFiles.Select(f => f.FilePath).ToList(),
+            WorkspacePath: _repoRoot,
+            BranchName: "main",
+            ImpactedFiles: twentyOneFiles);
+
+        Action act = () => DeveloperAgent.BuildManifestFromImpactAnalysis(
+            request,
+            _repoRoot,
+            projectRoots,
+            ExecutionCapacityPolicy.MaxImpactedFiles,
+            projectGraph);
+
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*Approved impact analysis contains 21 impacted files, exceeding maximum allowed limit of 20*");
+    }
+
+    [Fact]
+    public void CapacityBoundary_OverLimit21Files_RejectedInChangeIntelligenceParsingWithoutSilentTruncation()
+    {
+        var evidence = new RepositoryEvidenceProfile();
+        var filesJson = string.Join(",", Enumerable.Range(1, 21).Select(i => $"{{\"filePath\":\"src/DevPilot.Domain/Entities/Entity{i}.cs\",\"changeType\":\"Add\",\"reason\":\"Add entity {i}\"}}"));
+        var rawJson = $"{{\"summary\":\"Large plan\",\"confidence\":90,\"impactedFiles\":[{filesJson}]}}";
+
+        var parseResult = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, _repoRoot);
+
+        parseResult.Success.Should().BeFalse("21 files must be rejected during Change Intelligence parsing");
+        parseResult.ErrorMessage.Should().Contain("exceeds maximum executable capacity (21 impacted files > 20 limit)");
+    }
+
+    [Fact]
+    public async Task CapacityBoundary_OverLimit21Files_RejectedInApproveTaskCommandHandler()
+    {
+        var taskRepo = new FakeTaskRepository();
+        var analysisRepo = new FakeAnalysisRepository();
+        var handler = new ApproveTaskCommandHandler(taskRepo, analysisRepo, NullLogger<ApproveTaskCommandHandler>.Instance);
+
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(),
+            RepositoryWorkspaceId = Guid.NewGuid(),
+            Title = "Task Title",
+            Description = "Task Desc",
+            Status = DevelopmentTaskStatus.AwaitingApproval
+        };
+        taskRepo.Tasks[task.Id] = task;
+
+        var analysis = new Domain.Entities.TaskImpactAnalysis
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = task.Id,
+            Status = ImpactAnalysisStatus.Completed,
+            Summary = "Large Plan",
+            StructuredResult = new ImpactAnalysisResultData
+            {
+                Summary = "Large Plan",
+                ImpactedFiles = Enumerable.Range(1, 21)
+                    .Select(i => new ImpactedFile { FilePath = $"src/DevPilot.Domain/Entity{i}.cs", ChangeType = ImpactFileChangeType.Add })
+                    .ToList()
+            }
+        };
+        analysisRepo.Analyses[analysis.Id] = analysis;
+
+        var result = await handler.HandleAsync(new ApproveTaskCommand(task.Id));
+
+        result.Success.Should().BeFalse();
+        result.Conflict.Should().BeTrue();
+        result.ErrorMessage.Should().Contain("exceeds maximum executable capacity of 20 files");
+        task.Status.Should().Be(DevelopmentTaskStatus.AwaitingApproval);
+    }
+
+    [Fact]
+    public void HistoricalMigrationFile_ProposingModify_IsRejectedWithGroundingFailure()
+    {
+        var evidence = new RepositoryEvidenceProfile(
+            MigrationFiles: new[] { "src/DevPilot.Infrastructure/Migrations/20260815201916_AddRepositoryWorkspace.cs" },
+            InventoryCsFiles: new[] { "src/DevPilot.Infrastructure/Migrations/20260815201916_AddRepositoryWorkspace.cs" });
+
+        var rawJson = """
+        {
+          "summary": "Update database schema",
+          "confidence": 85,
+          "impactedFiles": [
+            {
+              "filePath": "src/DevPilot.Infrastructure/Migrations/20260815201916_AddRepositoryWorkspace.cs",
+              "changeType": "Modify",
+              "reason": "Modify historical migration"
+            }
+          ]
+        }
+        """;
+
+        var parseResult = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, _repoRoot);
+
+        parseResult.Success.Should().BeFalse();
+        parseResult.ErrorMessage.Should().Contain("existing historical migration");
+        parseResult.ErrorMessage.Should().Contain("propose a new migration file with changeType 'Add'");
+    }
+
+    [Fact]
+    public void NewMigrationRequirement_ProposingAdd_IsAcceptedWithMigrationRelationship()
+    {
+        var evidence = new RepositoryEvidenceProfile(
+            ProjectRoots: new[] { "src/DevPilot.Infrastructure" },
+            MigrationFiles: new[] { "src/DevPilot.Infrastructure/Migrations/20260815201916_AddRepositoryWorkspace.cs" },
+            HasEfCore: true);
+
+        var rawJson = """
+        {
+          "summary": "Add order filter migration",
+          "confidence": 90,
+          "impactedFiles": [
+            {
+              "filePath": "src/DevPilot.Infrastructure/Migrations/20260821_AddOrderFilter.cs",
+              "changeType": "Add",
+              "reason": "New EF Core migration for order filters"
+            }
+          ]
+        }
+        """;
+
+        var parseResult = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, _repoRoot);
+
+        parseResult.Success.Should().BeTrue();
+        parseResult.ResultData.Should().NotBeNull();
+        parseResult.ResultData!.ImpactedFiles.Should().HaveCount(1);
+        parseResult.ResultData.ImpactedFiles[0].ChangeType.Should().Be(ImpactFileChangeType.Add);
+        parseResult.ResultData.ImpactedFiles[0].EvidenceType.Should().Be("MigrationRelationship");
+        parseResult.ResultData.ImpactedFiles[0].Confidence.Should().Be(90);
     }
 
     private class FakeTaskRepository : ITaskRepository

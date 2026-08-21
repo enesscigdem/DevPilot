@@ -639,24 +639,26 @@ export function ExecutionWorkspace() {
                     }
 
                     // 3. Compact retry
-                    const compactMatch = msg.match(/Performing compact generation retry for\s+([^\s·]+)/i)
+                    const compactMatch = msg.match(/Performing compact generation retry for\s+([^\s·]+)(?:\s*\(budget\s*(\d+\s*->\s*\d+)\))?/i)
                     if (compactMatch) {
                       const fileName = compactMatch[1]
+                      const budgetTransition = compactMatch[2] ? ` · ${compactMatch[2]}` : ""
                       const existing = fileMap.get(fileName)
                       if (existing) {
                         existing.status = "retrying"
-                        existing.badge = "compact retry"
+                        existing.badge = `compact retry${budgetTransition} · output limit`
                       }
                     }
 
                     // 4. Applicability repair
-                    const repairMatch = msg.match(/Repair triggered for\s+([^\s·:]+)/i)
+                    const repairMatch = msg.match(/Repair triggered for\s+([^\s·:]+)(?::\s*([^\n]+))?/i)
                     if (repairMatch) {
                       const fileName = repairMatch[1]
+                      const reason = repairMatch[2] ? ` · ${repairMatch[2].substring(0, 30)}` : ""
                       const existing = fileMap.get(fileName)
                       if (existing) {
                         existing.status = "repairing"
-                        existing.badge = "applicability repair"
+                        existing.badge = `applicability repair${reason}`
                       }
                     }
 
@@ -701,32 +703,32 @@ export function ExecutionWorkspace() {
                     if (act.stage === "Build") {
                       if (act.status === "Started") {
                         buildState = "running"
-                        buildLabel = "Build running"
+                        buildLabel = "Build"
                       } else if (act.status === "Completed") {
                         buildState = "passed"
-                        buildLabel = "Build passed"
+                        buildLabel = "Build"
                         if (act.metadata?.stageDurationMs) {
                           buildDuration = `${Math.round(act.metadata.stageDurationMs / 1000)}s`
                         }
                       } else if (act.status === "Failed") {
                         buildState = "failed"
-                        buildLabel = "Build failed"
+                        buildLabel = "Build"
                       }
                     }
 
                     if (act.stage === "Test") {
                       if (act.status === "Started") {
                         testState = "running"
-                        testLabel = "Tests running"
+                        testLabel = "Tests"
                       } else if (act.status === "Completed") {
                         testState = "passed"
-                        testLabel = "Tests passed"
+                        testLabel = "Tests"
                         if (act.metadata?.stageDurationMs) {
                           testDuration = `${Math.round(act.metadata.stageDurationMs / 1000)}s`
                         }
                       } else if (act.status === "Failed") {
                         testState = "failed"
-                        testLabel = "Tests failed"
+                        testLabel = "Tests"
                       }
                     }
                   }
@@ -739,6 +741,19 @@ export function ExecutionWorkspace() {
                   const percent = totalFiles > 0 ? Math.min(100, Math.round((completedCount / totalFiles) * 100)) : 0
                   const isGenComplete = completedCount === totalFiles && totalFiles > 0
 
+                  const startedAtMs = execution.startedAt ? new Date(execution.startedAt).getTime() : 0
+                  const completedAtMs = execution.completedAt ? new Date(execution.completedAt).getTime() : nowMs
+                  const elapsedSec = startedAtMs > 0 ? Math.max(1, Math.floor(((execution.completedAt ? completedAtMs : nowMs) - startedAtMs) / 1000)) : undefined
+                  const elapsedFormatted = elapsedSec !== undefined ? (elapsedSec >= 60 ? `${Math.floor(elapsedSec / 60)}m ${elapsedSec % 60}s` : `${elapsedSec}s`) : "0s"
+
+                  const nextStageHint = !isGenComplete
+                    ? "Apply → Build → Tests"
+                    : buildState === "idle" || buildState === "running"
+                      ? "Build → Tests"
+                      : testState === "idle" || testState === "running"
+                        ? "Tests → Code review"
+                        : "Code review"
+
                   return (
                     <>
                       {/* PRIMARY STRUCTURED TECHNICAL EXECUTION VIEWER */}
@@ -750,8 +765,8 @@ export function ExecutionWorkspace() {
                               <Cpu className="h-4 w-4 text-primary shrink-0" />
                               <span className="text-[13.5px] font-semibold text-foreground">
                                 {isGenComplete
-                                  ? `Changes generated · ${completedCount}/${totalFiles} complete`
-                                  : `Generating changes · ${completedCount}/${totalFiles || "…"} complete`}
+                                  ? `Changes generated · ${completedCount}/${totalFiles} complete · ${elapsedFormatted}`
+                                  : `Generating changes · ${completedCount}/${totalFiles || "…"} complete · ${elapsedFormatted}`}
                               </span>
                             </div>
                             <span className="font-mono text-[11.5px] font-medium text-muted-foreground">
@@ -768,6 +783,11 @@ export function ExecutionWorkspace() {
                               style={{ width: `${Math.max(5, percent)}%` }}
                             />
                           </div>
+
+                          <div className="mt-2 flex items-center justify-between text-[11px] text-subtle-foreground font-mono">
+                            <span>Stage: {isGenComplete ? (buildState === "running" || testState === "running" ? "Verification" : "Complete") : "Developer Agent"}</span>
+                            <span>Next: {nextStageHint}</span>
+                          </div>
                         </div>
 
                         {/* Currently Running Files */}
@@ -775,30 +795,34 @@ export function ExecutionWorkspace() {
                           <div className="rounded-[var(--radius-md)] border border-primary/20 bg-primary-soft/30 p-3">
                             <div className="tech-label text-[10.5px] text-primary mb-2 flex items-center gap-1.5">
                               <CircleDot className="h-3 w-3 animate-pulse-dot text-primary motion-reduce:animate-none" />
-                              Currently running ({runningFiles.length})
+                              Active file ({runningFiles.length})
                             </div>
-                            <div className="space-y-1.5">
+                            <div className="space-y-2">
                               {runningFiles.map((rf) => {
                                 const liveSeconds = Math.max(1, Math.floor((nowMs - rf.startedAtMs) / 1000))
                                 return (
                                   <div
                                     key={rf.fileName}
-                                    className="flex items-center justify-between text-[12px] min-w-0"
+                                    className="flex flex-col gap-1 text-[12px] min-w-0"
                                   >
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <span className="h-1.5 w-1.5 rounded-full bg-primary motion-reduce:animate-none animate-ping" />
-                                      <span className="font-mono font-medium text-foreground truncate" title={rf.fileName}>
-                                        {rf.fileName}
+                                    <div className="flex items-center justify-between min-w-0">
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <span className="h-1.5 w-1.5 rounded-full bg-primary motion-reduce:animate-none animate-ping" />
+                                        <span className="font-mono font-medium text-foreground truncate" title={rf.fileName}>
+                                          {rf.fileName}
+                                        </span>
+                                      </div>
+                                      <span className="font-mono text-[11px] text-primary shrink-0 ml-2">
+                                        {liveSeconds}s
                                       </span>
-                                      {rf.badge && (
-                                        <Badge tone="amber" className="text-[10px] px-1 py-0 font-mono">
+                                    </div>
+                                    {rf.badge && (
+                                      <div className="pl-3.5">
+                                        <Badge tone="amber" className="text-[9.5px] px-1.5 py-0.5 font-mono">
                                           {rf.badge}
                                         </Badge>
-                                      )}
-                                    </div>
-                                    <span className="font-mono text-[11px] text-primary shrink-0 ml-2">
-                                      {liveSeconds}s
-                                    </span>
+                                      </div>
+                                    )}
                                   </div>
                                 )
                               })}
@@ -869,49 +893,59 @@ export function ExecutionWorkspace() {
                           </div>
                         )}
 
-                        {/* Verification Section */}
-                        {(buildState !== "idle" || testState !== "idle") && (
-                          <div className="border-t border-border/50 pt-3 space-y-2">
-                            <div className="tech-label text-[10.5px]">Verification</div>
-                            <div className="grid grid-cols-2 gap-2 text-[12px]">
-                              {/* Build check */}
-                              <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2.5 py-1.5">
-                                <div className="flex items-center gap-1.5 min-w-0">
-                                  {buildState === "passed" ? (
-                                    <Check className="h-3.5 w-3.5 text-success shrink-0" />
-                                  ) : buildState === "failed" ? (
-                                    <X className="h-3.5 w-3.5 text-danger shrink-0" />
-                                  ) : (
-                                    <CircleDot className="h-3.5 w-3.5 text-primary animate-pulse-dot motion-reduce:animate-none shrink-0" />
-                                  )}
-                                  <span className="font-medium text-foreground truncate">{buildLabel}</span>
-                                </div>
-                                {buildDuration && (
-                                  <span className="font-mono text-[10.5px] text-subtle-foreground shrink-0 ml-1">{buildDuration}</span>
+                        {/* Verification Repository Checks Section */}
+                        <div className="border-t border-border/50 pt-3 space-y-2">
+                          <div className="tech-label text-[10.5px]">Repository Checks</div>
+                          <div className="grid grid-cols-2 gap-2 text-[12px]">
+                            {/* Build check */}
+                            <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2.5 py-1.5">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                {buildState === "passed" ? (
+                                  <Check className="h-3.5 w-3.5 text-success shrink-0" />
+                                ) : buildState === "failed" ? (
+                                  <X className="h-3.5 w-3.5 text-danger shrink-0" />
+                                ) : buildState === "running" ? (
+                                  <CircleDot className="h-3.5 w-3.5 text-primary animate-pulse-dot motion-reduce:animate-none shrink-0" />
+                                ) : (
+                                  <span className="h-1.5 w-1.5 rounded-full bg-subtle-foreground shrink-0" />
                                 )}
+                                <span className="font-medium text-foreground truncate">{buildLabel}</span>
                               </div>
-
-                              {/* Test check */}
-                              <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2.5 py-1.5">
-                                <div className="flex items-center gap-1.5 min-w-0">
-                                  {testState === "passed" ? (
-                                    <Check className="h-3.5 w-3.5 text-success shrink-0" />
-                                  ) : testState === "failed" ? (
-                                    <X className="h-3.5 w-3.5 text-danger shrink-0" />
-                                  ) : testState === "running" ? (
-                                    <CircleDot className="h-3.5 w-3.5 text-primary animate-pulse-dot motion-reduce:animate-none shrink-0" />
-                                  ) : (
-                                    <span className="h-1.5 w-1.5 rounded-full bg-subtle-foreground shrink-0" />
-                                  )}
-                                  <span className="font-medium text-foreground truncate">{testLabel}</span>
-                                </div>
-                                {testDuration && (
-                                  <span className="font-mono text-[10.5px] text-subtle-foreground shrink-0 ml-1">{testDuration}</span>
+                              <div className="flex items-center gap-1.5 shrink-0 ml-1">
+                                {buildDuration && (
+                                  <span className="font-mono text-[10.5px] text-subtle-foreground">{buildDuration}</span>
                                 )}
+                                <Badge tone={buildState === "passed" ? "green" : buildState === "failed" ? "red" : buildState === "running" ? "blue" : "neutral"} className="text-[9.5px] px-1 py-0 font-mono">
+                                  {buildState === "passed" ? "Passed" : buildState === "failed" ? "Failed" : buildState === "running" ? "Running" : "Waiting"}
+                                </Badge>
+                              </div>
+                            </div>
+
+                            {/* Test check */}
+                            <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2.5 py-1.5">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                {testState === "passed" ? (
+                                  <Check className="h-3.5 w-3.5 text-success shrink-0" />
+                                ) : testState === "failed" ? (
+                                  <X className="h-3.5 w-3.5 text-danger shrink-0" />
+                                ) : testState === "running" ? (
+                                  <CircleDot className="h-3.5 w-3.5 text-primary animate-pulse-dot motion-reduce:animate-none shrink-0" />
+                                ) : (
+                                  <span className="h-1.5 w-1.5 rounded-full bg-subtle-foreground shrink-0" />
+                                )}
+                                <span className="font-medium text-foreground truncate">{testLabel}</span>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0 ml-1">
+                                {testDuration && (
+                                  <span className="font-mono text-[10.5px] text-subtle-foreground">{testDuration}</span>
+                                )}
+                                <Badge tone={testState === "passed" ? "green" : testState === "failed" ? "red" : testState === "running" ? "blue" : "neutral"} className="text-[9.5px] px-1 py-0 font-mono">
+                                  {testState === "passed" ? "Passed" : testState === "failed" ? "Failed" : testState === "running" ? "Running" : "Waiting"}
+                                </Badge>
                               </div>
                             </div>
                           </div>
-                        )}
+                        </div>
                       </div>
 
                       {/* SECONDARY DISCLOSURE: RAW TECHNICAL LOG */}

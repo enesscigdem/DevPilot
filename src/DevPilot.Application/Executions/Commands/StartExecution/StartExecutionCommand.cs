@@ -2,6 +2,7 @@ using DevPilot.Application.Executions.Dtos;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.Tasks.Ports;
+using DevPilot.Domain.Constants;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Logging;
@@ -97,6 +98,17 @@ public sealed class StartExecutionCommandHandler : IStartExecutionCommandHandler
                 Success = false,
                 Conflict = true,
                 ErrorMessage = "A completed impact analysis is required before a task can be executed.",
+            };
+        }
+
+        if (analysis.StructuredResult?.ImpactedFiles is not null &&
+            analysis.StructuredResult.ImpactedFiles.Count > ExecutionCapacityPolicy.MaxImpactedFiles)
+        {
+            return new StartExecutionResult
+            {
+                Success = false,
+                Conflict = true,
+                ErrorMessage = $"Cannot execute task: approved plan contains {analysis.StructuredResult.ImpactedFiles.Count} files, exceeding maximum executable capacity of {ExecutionCapacityPolicy.MaxImpactedFiles} files.",
             };
         }
 
