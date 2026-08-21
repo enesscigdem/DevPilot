@@ -101,6 +101,29 @@ public static class ChangeIntelligenceEvidenceCollector
             HasTestProjects: hasTestProjects);
     }
 
+    public static bool IsHistoricalMigrationFile(string filePath, RepositoryEvidenceProfile evidence)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) return false;
+        var norm = filePath.Replace('\\', '/');
+
+        // ModelSnapshot is the cumulative schema snapshot, not an individual historical migration step
+        if (norm.EndsWith("ModelSnapshot.cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // An existing file in repository inventory that belongs to Migrations folder or has migration designer extension
+        if (evidence.MigrationFiles.Contains(norm, StringComparer.OrdinalIgnoreCase) ||
+            (evidence.InventoryCsFiles.Contains(norm, StringComparer.OrdinalIgnoreCase) &&
+             (norm.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase) ||
+              norm.EndsWith(".Designer.cs", StringComparison.OrdinalIgnoreCase))))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
     public static (string EvidenceType, string EvidenceDetails, bool IsUncertain) ClassifyFileEvidence(
         string normalizedPath,
         ImpactFileChangeType changeType,

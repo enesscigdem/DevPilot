@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.DeveloperAgent.Models;
+using DevPilot.Domain.Constants;
 using DevPilot.Infrastructure.DeveloperAgent;
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
@@ -353,7 +354,7 @@ public class DeveloperAgentTests : IDisposable
     [Fact]
     public async Task GenerateAndApplyEditsAsync_MaxManifestFilesExceeded_FailsFast()
     {
-        var fileList = Enumerable.Range(1, 15).Select(i => $"File{i}.cs").ToList();
+        var fileList = Enumerable.Range(1, 25).Select(i => $"File{i}.cs").ToList();
 
         var request = new DeveloperAgentRequest(
             TaskId: Guid.NewGuid(),
@@ -370,7 +371,7 @@ public class DeveloperAgentTests : IDisposable
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
         result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("exceeding maximum allowed limit of 10");
+        result.ErrorMessage.Should().Contain($"{ExecutionCapacityPolicy.MaxImpactedFiles}");
         _fakeAiProvider.SendAsyncCallCount.Should().Be(0, "Should fail fast before making any AI calls");
     }
 

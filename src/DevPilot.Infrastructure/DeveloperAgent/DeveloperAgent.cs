@@ -7,6 +7,7 @@ using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Domain.Constants;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -96,7 +97,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
         else
         {
-            _maxManifestFiles = 10;
+            _maxManifestFiles = ExecutionCapacityPolicy.MaxImpactedFiles;
         }
 
         if (configuration != null &&
@@ -107,7 +108,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
         else
         {
-            _maxGenerationCalls = 15;
+            _maxGenerationCalls = ExecutionCapacityPolicy.MaxGenerationCalls;
         }
 
         if (configuration != null &&

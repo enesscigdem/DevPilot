@@ -11,6 +11,7 @@ using DevPilot.Application.TaskImpactAnalysis.Dtos;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Services;
 using DevPilot.Application.Tasks.Ports;
+using DevPilot.Domain.Constants;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Domain.ProjectBrain;
@@ -981,12 +982,13 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             builder.AppendLine("- Migration Mechanism: EF Core Migrations detected in package references.");
             if (evidence.MigrationFiles.Count > 0)
             {
-                builder.AppendLine($"- Existing Migrations: {evidence.MigrationFiles.Count} migration/snapshot file(s) found in repository.");
+                builder.AppendLine($"- Existing Migrations: {evidence.MigrationFiles.Count} historical migration/snapshot file(s) found in repository (historical evidence only; NEVER propose modifying existing historical migrations).");
             }
             if (evidence.PersistenceFiles.Count > 0)
             {
                 builder.AppendLine($"- Persistence Entities & DbContext: {evidence.PersistenceFiles.Count} file(s) found.");
             }
+            builder.AppendLine("- For schema changes: represent a NEW migration as a Create/Add candidate (e.g. 'src/Project/Migrations/2026XXXX_Description.cs' with changeType 'Add'). Never modify historical migration files.");
         }
         else
         {
@@ -1014,11 +1016,12 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             "2. For changeType 'Modify' or 'Delete': The file path MUST EXACTLY match an existing file from the 'Existing Repository Files' inventory above. Never invent a file path for Modify or Delete.\n" +
             "3. For changeType 'Add' (or 'Create'): Use Add ONLY for genuinely NEW files that do not currently exist in the repository inventory.\n" +
             "4. Unit and integration test files MUST be placed in an existing discovered test project.\n" +
-            "5. Keep all strings short (1-2 sentences max). Do not duplicate file lists inside plan or dimensions.\n" +
-            "6. Database/migration statements must remain probabilistic ('migration likely/expected') unless deterministic repository evidence proves otherwise.\n" +
-            "7. Supported dimensions: CODE, API, DATA, TESTS, RUNTIME, DEPENDENCIES, INFRASTRUCTURE. Emit ONLY dimensions supported by repository evidence.\n" +
-            "8. Unknowns must be explicit first-class outputs (e.g. unconfigured tests, deployment sequencing, external contracts).\n" +
-            "9. STRICT ARCHITECTURAL GROUNDING: Strictly adhere to existing architectural patterns, interfaces, and libraries referenced in the project graph.\n" +
+            "5. Historical migration files are immutable historical records; NEVER propose modifying existing historical migrations for new schema changes. For new schema changes, propose a NEW migration file with changeType 'Add'.\n" +
+            "6. Keep all strings short (1-2 sentences max). Do not duplicate file lists inside plan or dimensions.\n" +
+            "7. Database/migration statements must remain probabilistic ('migration likely/expected') unless deterministic repository evidence proves otherwise.\n" +
+            "8. Supported dimensions: CODE, API, DATA, TESTS, RUNTIME, DEPENDENCIES, INFRASTRUCTURE. Emit ONLY dimensions supported by repository evidence.\n" +
+            "9. Unknowns must be explicit first-class outputs (e.g. unconfigured tests, deployment sequencing, external contracts).\n" +
+            "10. STRICT ARCHITECTURAL GROUNDING: Strictly adhere to existing architectural patterns, interfaces, and libraries referenced in the project graph.\n" +
             "Confidence must be an integer 0-100. Use the following schema:");
         builder.AppendLine(JsonSchema);
 
@@ -1107,7 +1110,13 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         if (response.ImpactedFiles is not null)
         {
-            foreach (var f in response.ImpactedFiles.Take(30))
+            if (response.ImpactedFiles.Count > ExecutionCapacityPolicy.MaxImpactedFiles)
+            {
+                return ParseResult.Failure(
+                    $"Change Intelligence plan exceeds maximum executable capacity ({response.ImpactedFiles.Count} impacted files > {ExecutionCapacityPolicy.MaxImpactedFiles} limit). Please refine or decompose the task into smaller focused tasks.");
+            }
+
+            foreach (var f in response.ImpactedFiles)
             {
                 if (f is null || string.IsNullOrWhiteSpace(f.FilePath)) continue;
 
@@ -1169,6 +1178,21 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 // Deterministic Modify/Refactor/Delete Grounding Check
                 if (changeType is ImpactFileChangeType.Modify or ImpactFileChangeType.Refactor or ImpactFileChangeType.Delete)
                 {
+                    if (ChangeIntelligenceEvidenceCollector.IsHistoricalMigrationFile(normalizedPath, evidence))
+                    {
+                        var migrationErr = $"Impacted file '{rawPath}' is an existing historical migration. Historical migrations must not be modified for new schema changes; propose a new migration file with changeType 'Add' in the Migrations folder instead.";
+                        return ParseResult.GroundingFailure(
+                            migrationErr,
+                            new ImpactGroundingErrorDetails
+                            {
+                                InvalidFilePath = rawPath,
+                                InvalidChangeType = changeType.ToString(),
+                                ExactError = migrationErr,
+                                ValidImpactedFiles = impactedFiles.ToList(),
+                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                            });
+                    }
+
                     if (!ProjectGraphHelper.TryResolveModifyTarget(
                         normalizedPath,
                         workspaceLocalPath,
