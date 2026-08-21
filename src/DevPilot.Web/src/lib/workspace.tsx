@@ -13,6 +13,10 @@ import {
   getWorkspaceOverview,
 } from "@/api"
 import {
+  getCachedWorkspaceOverview,
+  setCachedWorkspaceOverview,
+} from "@/lib/workspaceCache"
+import {
   RepositoryWorkspaceStatus,
   type RepositoryWorkspace,
   type CreateRepositoryWorkspaceRequest,
@@ -41,11 +45,6 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null)
 
 const STORAGE_KEY = "devpilot-active-workspace-id"
 
-import {
-  getCachedWorkspaceOverview,
-  setCachedWorkspaceOverview,
-} from "@/lib/workspaceCache"
-
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<RepositoryWorkspace[]>([])
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(() => {
@@ -63,9 +62,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null)
   const [overviewError, setOverviewError] = useState<string | null>(null)
 
+  const overviewRef = useRef<WorkspaceOverview | null>(overview)
   const activeReqOverviewWorkspaceIdRef = useRef<string | null>(null)
   const inFlightOverviewPromiseRef = useRef<{ workspaceId: string; promise: Promise<WorkspaceOverview> } | null>(null)
   const abortOverviewControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    overviewRef.current = overview
+  }, [overview])
 
   const resolveActiveWorkspace = useCallback(
     (
@@ -191,7 +195,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
         if (activeReqOverviewWorkspaceIdRef.current === targetWorkspaceId) {
           // If we already have last-known-good cached data for this workspace, keep it without showing red error
-          const hasLkg = Boolean(cached.data || overview)
+          const hasLkg = Boolean(cached.data || overviewRef.current)
           if (!hasLkg && !isBackground) {
             setOverviewError(
               err instanceof Error ? err.message : "Failed to load workspace overview.",
@@ -210,23 +214,27 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [activeWorkspaceId, overview],
+    [activeWorkspaceId],
   )
 
-  // Trigger overview fetch when active workspace changes
+  // Trigger overview fetch ONLY when active workspace ID changes
   useEffect(() => {
-    if (activeWorkspaceId) {
-      const cached = getCachedWorkspaceOverview(activeWorkspaceId)
-      if (cached.data) {
-        setOverview(cached.data)
-        setOverviewError(null)
-      } else {
-        setOverview(null)
-        setOverviewError(null)
-      }
+    if (!activeWorkspaceId) {
+      setOverview(null)
+      setOverviewError(null)
+      setIsLoadingOverview(false)
+      return
+    }
+
+    const cached = getCachedWorkspaceOverview(activeWorkspaceId)
+    if (cached.data) {
+      setOverview(cached.data)
+      setOverviewError(null)
+      setIsLoadingOverview(false)
     } else {
       setOverview(null)
       setOverviewError(null)
+      setIsLoadingOverview(true)
     }
 
     fetchOverview(false)
@@ -238,22 +246,24 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, [activeWorkspaceId, fetchOverview])
 
-  // Single global overview polling owner: 3.5s when active execution running, 15s when idle
+  const hasActiveExecution = Boolean(
+    (overview?.activeAgentExecution && !overview.activeAgentExecution.completedAt) ||
+    (overview?.activeExecution && !overview.activeExecution.completedAt),
+  )
+
+  // Only poll when an execution is genuinely active/running. No idle background polling.
   useEffect(() => {
-    if (!activeWorkspaceId) return
+    if (!activeWorkspaceId || !hasActiveExecution) {
+      return
+    }
 
-    const hasActiveExecution = Boolean(
-      (overview?.activeAgentExecution && !overview.activeAgentExecution.completedAt) ||
-      (overview?.activeExecution && !overview.activeExecution.completedAt),
-    )
-    const intervalMs = hasActiveExecution ? 3500 : 15000
-
+    const intervalMs = 3500
     const timer = setInterval(() => {
       fetchOverview(true)
     }, intervalMs)
 
     return () => clearInterval(timer)
-  }, [activeWorkspaceId, overview?.activeAgentExecution, overview?.activeExecution, fetchOverview])
+  }, [activeWorkspaceId, hasActiveExecution, fetchOverview])
 
   const selectWorkspace = useCallback(
     (id: string) => {
