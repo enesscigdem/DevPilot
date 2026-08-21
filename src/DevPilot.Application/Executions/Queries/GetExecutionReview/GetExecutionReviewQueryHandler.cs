@@ -2,6 +2,7 @@ using DevPilot.Application.Executions.Dtos;
 using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.Executions.Services;
+using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Logging;
@@ -16,6 +17,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
     private readonly IExecutionGitDiffReader _gitDiffReader;
     private readonly IExecutionChangeFingerprintCalculator _fingerprintCalculator;
     private readonly IExecutionActivityRepository _activityRepository;
+    private readonly IImpactAnalysisRepository? _impactAnalysisRepository;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
     private readonly ILogger<GetExecutionReviewQueryHandler> _logger;
 
@@ -26,7 +28,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         IExecutionChangeFingerprintCalculator fingerprintCalculator,
         IExecutionActivityRepository activityRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions,
-        ILogger<GetExecutionReviewQueryHandler> logger)
+        ILogger<GetExecutionReviewQueryHandler> logger,
+        IImpactAnalysisRepository? impactAnalysisRepository = null)
     {
         _executionRepository = executionRepository;
         _workspaceManager = workspaceManager;
@@ -35,6 +38,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         _activityRepository = activityRepository;
         _mergePolicyOptions = mergePolicyOptions;
         _logger = logger;
+        _impactAnalysisRepository = impactAnalysisRepository;
     }
 
     public async Task<GetExecutionReviewResult> HandleAsync(
@@ -227,6 +231,26 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                              && !fingerprintResult.HasSensitiveFiles
                              && (diffResult.ChangedFiles?.Count ?? 0) > 0;
 
+        PredictedVsActualComparisonDto? predictedVsActual = null;
+        if (_impactAnalysisRepository != null)
+        {
+            try
+            {
+                var latestImpact = await _impactAnalysisRepository
+                    .GetLatestByTaskIdAsync(execution.DevelopmentTaskId, cancellationToken)
+                    .ConfigureAwait(false);
+
+                predictedVsActual = PredictedVsActualEvaluator.Evaluate(
+                    latestImpact,
+                    diffResult.ChangedFiles ?? Array.Empty<ExecutionReviewFileDto>(),
+                    activities);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Failed to evaluate PredictedVsActual comparison for execution {ExecutionId}", execution.Id);
+            }
+        }
+
         var review = new ExecutionReviewDto(
             ExecutionId: execution.Id,
             TaskId: execution.DevelopmentTaskId,
@@ -281,7 +305,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             MergeBlockedReason: mergeBlockedReason,
             RepositoryWorkspaceId: execution.DevelopmentTask?.RepositoryWorkspaceId,
             RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
-            RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository);
+            RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository,
+            PredictedVsActual: predictedVsActual);
 
         return GetExecutionReviewResult.Ok(review);
     }

@@ -11,6 +11,12 @@ public sealed class ImpactedFileDto
     public string Reason { get; set; } = string.Empty;
 
     public int Confidence { get; set; }
+
+    public string EvidenceType { get; set; } = "Inferred";
+
+    public string? EvidenceDetails { get; set; }
+
+    public bool IsUncertain { get; set; }
 }
 
 public sealed class ProposedPlanStepDto
@@ -42,6 +48,59 @@ public sealed class RiskDto
     public string Mitigation { get; set; } = string.Empty;
 }
 
+public sealed class ExpectedVerificationCheckDto
+{
+    public string CheckId { get; set; } = string.Empty;
+
+    public string DisplayName { get; set; } = string.Empty;
+
+    public string Kind { get; set; } = string.Empty;
+
+    public bool Required { get; set; }
+
+    public string Source { get; set; } = string.Empty;
+
+    public string? DiscoveryEvidence { get; set; }
+}
+
+public sealed class ChangeBriefDto
+{
+    public int FileCount { get; set; }
+
+    public int ProjectCount { get; set; }
+
+    public RiskLevel RiskLevel { get; set; } = RiskLevel.Low;
+
+    public IReadOnlyList<string> RiskReasons { get; set; } = Array.Empty<string>();
+
+    public string? ApiSummary { get; set; }
+
+    public string? DataSummary { get; set; }
+
+    public string? RuntimeSummary { get; set; }
+
+    public string? TestsSummary { get; set; }
+
+    public string? VerificationSummary { get; set; }
+
+    public IReadOnlyList<ExpectedVerificationCheckDto> ExpectedChecks { get; set; } = Array.Empty<ExpectedVerificationCheckDto>();
+
+    public IReadOnlyList<string> Unknowns { get; set; } = Array.Empty<string>();
+}
+
+public sealed class ChangeDimensionImpactDto
+{
+    public string Area { get; set; } = string.Empty;
+
+    public SystemImpactLevel ImpactLevel { get; set; }
+
+    public string Summary { get; set; } = string.Empty;
+
+    public IReadOnlyList<string> Details { get; set; } = Array.Empty<string>();
+
+    public IReadOnlyList<string> Evidence { get; set; } = Array.Empty<string>();
+}
+
 public sealed class StructuredResultDto
 {
     public string Summary { get; set; } = string.Empty;
@@ -55,6 +114,14 @@ public sealed class StructuredResultDto
     public IReadOnlyList<SystemImpactDto> SystemImpacts { get; set; } = Array.Empty<SystemImpactDto>();
 
     public IReadOnlyList<RiskDto> Risks { get; set; } = Array.Empty<RiskDto>();
+
+    public ChangeBriefDto? ChangeBrief { get; set; }
+
+    public IReadOnlyList<ChangeDimensionImpactDto> Dimensions { get; set; } = Array.Empty<ChangeDimensionImpactDto>();
+
+    public IReadOnlyList<string> Unknowns { get; set; } = Array.Empty<string>();
+
+    public IReadOnlyList<string> RiskReasons { get; set; } = Array.Empty<string>();
 
     public Dictionary<string, object>? Metadata { get; set; }
 }

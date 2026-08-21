@@ -362,6 +362,150 @@ public class GetRepositoryWorkspaceArchitectureQueryHandlerTests : IDisposable
         result.Architecture.Edges.Should().BeEmpty();
     }
 
+    [Fact]
+    public async Task HandleAsync_SameWorkspaceSameFingerprint_ReusesCachedArchitecture()
+    {
+        GetRepositoryWorkspaceAnalysisQueryHandler.ClearCache();
+        GetRepositoryWorkspaceArchitectureQueryHandler.ClearCache();
+
+        var id = Guid.NewGuid();
+        _workspaceQuery.Workspaces[id] = new RepositoryWorkspace
+        {
+            Id = id,
+            Owner = "enesscigdem",
+            Repository = "DevPilot",
+            Branch = "master",
+            CommitSha = "commit-arch-1",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = _tempDirectory,
+        };
+
+        var analyzer = new CountingRepositoryAnalyzer();
+        var analysisHandler = new GetRepositoryWorkspaceAnalysisQueryHandler(
+            _workspaceQuery,
+            analyzer,
+            _structureScanner,
+            NullLogger<GetRepositoryWorkspaceAnalysisQueryHandler>.Instance);
+
+        var archHandler = new GetRepositoryWorkspaceArchitectureQueryHandler(
+            analysisHandler,
+            NullLogger<GetRepositoryWorkspaceArchitectureQueryHandler>.Instance);
+
+        var result1 = await archHandler.HandleAsync(new GetRepositoryWorkspaceArchitectureQuery(id), CancellationToken.None);
+        result1.Success.Should().BeTrue();
+        analyzer.CallCount.Should().Be(1);
+
+        var result2 = await archHandler.HandleAsync(new GetRepositoryWorkspaceArchitectureQuery(id), CancellationToken.None);
+        result2.Success.Should().BeTrue();
+        analyzer.CallCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task HandleAsync_ChangedFingerprint_InvalidatesCachedArchitectureAndRecomputes()
+    {
+        GetRepositoryWorkspaceAnalysisQueryHandler.ClearCache();
+        GetRepositoryWorkspaceArchitectureQueryHandler.ClearCache();
+
+        var id = Guid.NewGuid();
+        _workspaceQuery.Workspaces[id] = new RepositoryWorkspace
+        {
+            Id = id,
+            Owner = "enesscigdem",
+            Repository = "DevPilot",
+            Branch = "master",
+            CommitSha = "commit-arch-1",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = _tempDirectory,
+        };
+
+        var analyzer = new CountingRepositoryAnalyzer();
+        var analysisHandler = new GetRepositoryWorkspaceAnalysisQueryHandler(
+            _workspaceQuery,
+            analyzer,
+            _structureScanner,
+            NullLogger<GetRepositoryWorkspaceAnalysisQueryHandler>.Instance);
+
+        var archHandler = new GetRepositoryWorkspaceArchitectureQueryHandler(
+            analysisHandler,
+            NullLogger<GetRepositoryWorkspaceArchitectureQueryHandler>.Instance);
+
+        var result1 = await archHandler.HandleAsync(new GetRepositoryWorkspaceArchitectureQuery(id), CancellationToken.None);
+        result1.Success.Should().BeTrue();
+        analyzer.CallCount.Should().Be(1);
+
+        // Advance commit
+        _workspaceQuery.Workspaces[id].CommitSha = "commit-arch-2";
+        var result2 = await archHandler.HandleAsync(new GetRepositoryWorkspaceArchitectureQuery(id), CancellationToken.None);
+        result2.Success.Should().BeTrue();
+        analyzer.CallCount.Should().Be(2);
+        result2.Architecture!.Repository.CommitSha.Should().Be("commit-arch-2");
+    }
+
+    [Fact]
+    public async Task HandleAsync_TransientFailure_ReturnsLastKnownGoodArchitecture()
+    {
+        GetRepositoryWorkspaceAnalysisQueryHandler.ClearCache();
+        GetRepositoryWorkspaceArchitectureQueryHandler.ClearCache();
+
+        var id = Guid.NewGuid();
+        _workspaceQuery.Workspaces[id] = new RepositoryWorkspace
+        {
+            Id = id,
+            Owner = "enesscigdem",
+            Repository = "DevPilot",
+            Branch = "master",
+            CommitSha = "commit-good",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = _tempDirectory,
+        };
+
+        var analyzer = new FlakyRepositoryAnalyzer();
+        var analysisHandler = new GetRepositoryWorkspaceAnalysisQueryHandler(
+            _workspaceQuery,
+            analyzer,
+            _structureScanner,
+            NullLogger<GetRepositoryWorkspaceAnalysisQueryHandler>.Instance);
+
+        var archHandler = new GetRepositoryWorkspaceArchitectureQueryHandler(
+            analysisHandler,
+            NullLogger<GetRepositoryWorkspaceArchitectureQueryHandler>.Instance);
+
+        // 1. Initial success -> warms LKG
+        var result1 = await archHandler.HandleAsync(new GetRepositoryWorkspaceArchitectureQuery(id), CancellationToken.None);
+        result1.Success.Should().BeTrue();
+        result1.Architecture.Should().NotBeNull();
+
+        // 2. Force recompute with transient failure -> survives with LKG
+        analyzer.ShouldThrow = true;
+        var result2 = await archHandler.HandleAsync(new GetRepositoryWorkspaceArchitectureQuery(id, ForceRecompute: true), CancellationToken.None);
+        result2.Success.Should().BeTrue();
+        result2.Architecture.Should().NotBeNull();
+        result2.Architecture!.Repository.CommitSha.Should().Be("commit-good");
+    }
+
+    private sealed class CountingRepositoryAnalyzer : IRepositoryAnalyzer
+    {
+        public int CallCount { get; private set; }
+        public Task<RepositoryAnalysisResult> AnalyzeAsync(RepositoryAnalysisRequest request, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult(new RepositoryAnalysisResult { Success = true });
+        }
+    }
+
+    private sealed class FlakyRepositoryAnalyzer : IRepositoryAnalyzer
+    {
+        public bool ShouldThrow { get; set; }
+        public Task<RepositoryAnalysisResult> AnalyzeAsync(RepositoryAnalysisRequest request, CancellationToken cancellationToken = default)
+        {
+            if (ShouldThrow)
+            {
+                throw new InvalidOperationException("Transient compilation / network failure.");
+            }
+            return Task.FromResult(new RepositoryAnalysisResult { Success = true });
+        }
+    }
+
     private sealed class FakeRepositoryWorkspaceQuery : IRepositoryWorkspaceQuery
     {
         public Dictionary<Guid, RepositoryWorkspace> Workspaces { get; } = new();

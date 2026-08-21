@@ -136,6 +136,9 @@ export interface ImpactedFile {
   changeType: ImpactFileChangeType;
   reason: string;
   confidence: number;
+  evidenceType?: string;
+  evidenceDetails?: string;
+  isUncertain?: boolean;
 }
 
 export interface ProposedPlanStep {
@@ -157,6 +160,37 @@ export interface Risk {
   mitigation: string;
 }
 
+export interface ExpectedVerificationCheck {
+  checkId: string;
+  displayName: string;
+  kind: string;
+  required: boolean;
+  source: string;
+  discoveryEvidence?: string;
+}
+
+export interface ChangeBrief {
+  fileCount: number;
+  projectCount: number;
+  riskLevel: RiskLevelValue;
+  riskReasons: string[];
+  apiSummary?: string | null;
+  dataSummary?: string | null;
+  runtimeSummary?: string | null;
+  testsSummary?: string | null;
+  verificationSummary?: string | null;
+  expectedChecks: ExpectedVerificationCheck[];
+  unknowns: string[];
+}
+
+export interface ChangeDimensionImpact {
+  area: string;
+  impactLevel: SystemImpactLevelValue;
+  summary: string;
+  details: string[];
+  evidence: string[];
+}
+
 export interface StructuredResult {
   summary: string;
   confidence: number;
@@ -164,6 +198,10 @@ export interface StructuredResult {
   proposedPlan: ProposedPlanStep[];
   systemImpacts: SystemImpact[];
   risks: Risk[];
+  changeBrief?: ChangeBrief | null;
+  dimensions?: ChangeDimensionImpact[];
+  unknowns?: string[];
+  riskReasons?: string[];
   metadata?: Record<string, unknown>;
 }
 
@@ -364,6 +402,30 @@ export interface ExecutionCiCheck {
   completedAt?: string | null;
 }
 
+export interface PredictedFileActionItem {
+  filePath: string;
+  action: string;
+  evidenceType?: string;
+  isUncertain?: boolean;
+}
+
+export interface ActualFileActionItem {
+  filePath: string;
+  action: string;
+}
+
+export interface PredictedVsActualComparison {
+  predictedFiles: PredictedFileActionItem[];
+  actualFiles: ActualFileActionItem[];
+  matchedFiles: string[];
+  unexpectedFiles: string[];
+  missingPredictedFiles: string[];
+  expectedChecks: string[];
+  executedChecks: string[];
+  allExpectedChecksExecuted: boolean;
+  dimensionObservations: string[];
+}
+
 export interface ExecutionReview {
   executionId: string;
   taskId: string;
@@ -409,6 +471,7 @@ export interface ExecutionReview {
   repositoryWorkspaceId?: string;
   repositoryOwner?: string;
   repositoryName?: string;
+  predictedVsActual?: PredictedVsActualComparison | null;
 }
 
 export interface ExecutionReviewDecision {

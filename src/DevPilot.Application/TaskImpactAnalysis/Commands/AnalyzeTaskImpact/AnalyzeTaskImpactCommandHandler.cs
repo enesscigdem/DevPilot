@@ -4,9 +4,12 @@ using System.Text.Json;
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.DeveloperAgent.Models;
+using DevPilot.Application.Executions.Models;
+using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.ProjectBrain.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Dtos;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
+using DevPilot.Application.TaskImpactAnalysis.Services;
 using DevPilot.Application.Tasks.Ports;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
@@ -14,6 +17,7 @@ using DevPilot.Domain.ProjectBrain;
 using DevPilot.Domain.ValueObjects;
 using Microsoft.Extensions.Logging;
 using TaskImpactAnalysisEntity = DevPilot.Domain.Entities.TaskImpactAnalysis;
+
 namespace DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 
 public interface IAnalyzeTaskImpactCommandHandler
@@ -34,47 +38,49 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private const int MaxCompilationErrors = 5;
 
     private const string SystemPrompt =
-        "You are DevPilot's impact analysis engine. " +
-        "Analyze the impact of a software change request against a repository context. " +
-        "Respond with a single JSON object only. Do not wrap it in markdown code fences and do not add commentary. " +
+        "You are DevPilot's Change Intelligence and impact analysis engine. " +
+        "Analyze the impact of a software change request against actual repository evidence. " +
+        "Respond with a single compact JSON object only. Do not wrap it in markdown code fences and do not add commentary. " +
+        "Keep all descriptions concise (1-2 sentences max). Do not duplicate file lists or descriptions across sections. " +
         "All confidence values are integers between 0 and 100. " +
-        "Use PascalCase enum string values: changeType can be Unknown, Add, Modify, Delete or Refactor; " +
-        "impactLevel and risk level can be Low, Medium, High or Critical.";
+        "changeType: Add, Modify, Delete, or Refactor; impactLevel and risk level: Low, Medium, High, or Critical. " +
+        "Supported change dimension areas: CODE, API, DATA, TESTS, RUNTIME, DEPENDENCIES, INFRASTRUCTURE. " +
+        "Emit a dimension ONLY when supported by repository evidence. " +
+        "Unknowns must be first-class output — never guess unknown deployment, database rollback, or external contracts.";
 
     private const string JsonSchema = @"{
-  ""summary"": ""A concise impact summary for a technical audience (string, required)."",
-  ""confidence"": 0,
+  ""summary"": ""Concise 1-2 sentence technical summary (max 200 chars)."",
+  ""confidence"": 85,
   ""impactedFiles"": [
     {
       ""filePath"": ""relative/path/to/file.cs"",
       ""changeType"": ""Modify"",
-      ""reason"": ""Why this file is impacted"",
-      ""confidence"": 0
+      ""reason"": ""Concise 1-sentence reason (max 100 chars)""
+    }
+  ],
+  ""dimensions"": [
+    {
+      ""area"": ""API / DATA / TESTS / RUNTIME / DEPENDENCIES / INFRASTRUCTURE"",
+      ""impactLevel"": ""Low / Medium / High / Critical"",
+      ""summary"": ""Concise 1-sentence summary (max 120 chars)""
     }
   ],
   ""proposedPlan"": [
     {
       ""order"": 1,
-      ""title"": ""Step title"",
-      ""description"": ""What should be done in this step"",
-      ""relatedFiles"": [""relative/path.cs""]
-    }
-  ],
-  ""systemImpacts"": [
-    {
-      ""area"": ""API / Database / UI / Tests / Infrastructure"",
-      ""impactLevel"": ""Low"",
-      ""description"": ""Description of the impact""
+      ""title"": ""Concise step title (max 50 chars)"",
+      ""description"": ""Concise step description (max 120 chars)""
     }
   ],
   ""risks"": [
     {
-      ""level"": ""Medium"",
-      ""description"": ""Risk description"",
-      ""mitigation"": ""How to mitigate it""
+      ""level"": ""Low / Medium / High / Critical"",
+      ""description"": ""Concise risk description (max 120 chars)""
     }
   ],
-      ""metadata"": {}
+  ""unknowns"": [
+    ""Concise unknown item (max 100 chars)""
+  ]
 }";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -91,6 +97,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private readonly IAiProvider _aiProvider;
     private readonly IEmbeddingProvider _embeddingProvider;
     private readonly ISemanticSearchService _semanticSearchService;
+    private readonly IRepositoryCheckRunner? _repositoryCheckRunner;
     private readonly ILogger<AnalyzeTaskImpactCommandHandler> _logger;
 
     public AnalyzeTaskImpactCommandHandler(
@@ -101,7 +108,8 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         IAiProvider aiProvider,
         IEmbeddingProvider embeddingProvider,
         ISemanticSearchService semanticSearchService,
-        ILogger<AnalyzeTaskImpactCommandHandler> logger)
+        ILogger<AnalyzeTaskImpactCommandHandler> logger,
+        IRepositoryCheckRunner? repositoryCheckRunner = null)
     {
         _taskRepository = taskRepository;
         _workspaceQuery = workspaceQuery;
@@ -111,7 +119,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         _embeddingProvider = embeddingProvider;
         _semanticSearchService = semanticSearchService;
         _logger = logger;
+        _repositoryCheckRunner = repositoryCheckRunner;
     }
+
     public async Task<AnalyzeTaskImpactResult> HandleAsync(
         AnalyzeTaskImpactCommand command,
         CancellationToken cancellationToken = default)
@@ -259,14 +269,47 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         try
         {
-            var projectGraph = ProjectGraphHelper.DiscoverProjectGraph(workspace.LocalPath);
-            var projectRoots = ProjectGraphHelper.DiscoverProjectRoots(workspace.LocalPath);
+            // Discover preflight repository verification profile (reuses PR #15 discovery logic)
+            RepositoryProfile verificationProfile;
+            if (_repositoryCheckRunner != null && !string.IsNullOrWhiteSpace(workspace.LocalPath) && Directory.Exists(workspace.LocalPath))
+            {
+                try
+                {
+                    verificationProfile = await _repositoryCheckRunner.DiscoverAsync(
+                        new RepositoryPreflightRequest(workspace.LocalPath, workspace.Branch),
+                        executionToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Preflight verification discovery failed for workspace {WorkspaceId}", workspace.Id);
+                    verificationProfile = new RepositoryProfile(
+                        State: RepositoryVerificationState.InfrastructureFailure,
+                        Ecosystems: Array.Empty<string>(),
+                        Checks: Array.Empty<RepositoryCheck>(),
+                        Message: "Preflight verification discovery encountered an error.");
+                }
+            }
+            else
+            {
+                verificationProfile = new RepositoryProfile(
+                    State: RepositoryVerificationState.Unconfigured,
+                    Ecosystems: Array.Empty<string>(),
+                    Checks: Array.Empty<RepositoryCheck>(),
+                    Message: "Verification runner not configured.");
+            }
 
-            var context = await BuildContextAsync(task, workspace, executionToken).ConfigureAwait(false);
+            var (context, roslynResult) = await BuildContextWithRoslynAsync(task, workspace, executionToken).ConfigureAwait(false);
+            var evidenceProfile = ChangeIntelligenceEvidenceCollector.CollectEvidence(workspace.LocalPath, verificationProfile, roslynResult);
+
+            const int defaultImpactMaxTokens = 2048;
+            var totalProviderCalls = 1;
+            var compactRecoveryCount = 0;
+
             var aiRequest = new AiRequest
             {
                 SystemPrompt = SystemPrompt,
-                UserPrompt = BuildUserPrompt(task, workspace, context, projectGraph, projectRoots),
+                UserPrompt = BuildUserPrompt(task, workspace, context, evidenceProfile),
+                MaxTokens = defaultImpactMaxTokens,
             };
 
             var stopwatch = Stopwatch.StartNew();
@@ -281,7 +324,63 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 ? _aiProvider.ProviderName
                 : aiResponse.Provider;
 
-            if (!aiResponse.IsSuccess)
+            var isTruncated = aiResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
+                              string.Equals(aiResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
+                              (aiResponse.ErrorMessage != null && aiResponse.ErrorMessage.Contains("exhausted the configured output token limit", StringComparison.OrdinalIgnoreCase));
+
+            if (isTruncated)
+            {
+                _logger.LogWarning(
+                    "Impact analysis for task {TaskId} truncated on initial attempt (FinishReason: {FinishReason}). Initiating single compact recovery (budget: {Budget} tokens).",
+                    task.Id,
+                    aiResponse.FinishReason ?? "length",
+                    defaultImpactMaxTokens);
+
+                compactRecoveryCount = 1;
+                totalProviderCalls++;
+
+                var recoveryPrompt = BuildImpactTruncationRecoveryPrompt(task, workspace, context, evidenceProfile);
+                var recoveryRequest = new AiRequest
+                {
+                    SystemPrompt =
+                        "You are DevPilot's compact impact analysis recovery engine. " +
+                        "The previous response was truncated because it exceeded output token limits. " +
+                        "Output ONLY the minimal, ultra-compact JSON object matching the required schema. " +
+                        "No explanations, no markdown fences, no conversational text. " +
+                        "Keep summaries and reasons to 1 concise sentence. Output valid JSON only.",
+                    UserPrompt = recoveryPrompt,
+                    MaxTokens = defaultImpactMaxTokens,
+                };
+
+                var recoveryResponse = await _aiProvider
+                    .SendAsync(recoveryRequest, executionToken)
+                    .ConfigureAwait(false);
+
+                if (!recoveryResponse.IsSuccess)
+                {
+                    var isRecoveryTruncated = recoveryResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
+                                              string.Equals(recoveryResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
+                                              (recoveryResponse.ErrorMessage != null && recoveryResponse.ErrorMessage.Contains("exhausted the configured output token limit", StringComparison.OrdinalIgnoreCase));
+
+                    var errorMsg = isRecoveryTruncated
+                        ? "Impact analysis failed: AI response exhausted token limit on initial call and compact recovery also truncated."
+                        : $"Impact analysis failed: Compact truncation recovery failed: {recoveryResponse.ErrorMessage ?? "Unknown provider error."}";
+
+                    return await FailAnalysisAsync(
+                        analysis,
+                        task,
+                        errorMsg,
+                        recoveryResponse.Content,
+                        recoveryResponse.Model ?? model,
+                        recoveryResponse.Provider ?? providerName,
+                        executionToken).ConfigureAwait(false);
+                }
+
+                rawResponse = recoveryResponse.Content;
+                model = recoveryResponse.Model ?? model;
+                providerName = string.IsNullOrWhiteSpace(recoveryResponse.Provider) ? providerName : recoveryResponse.Provider;
+            }
+            else if (!aiResponse.IsSuccess)
             {
                 return await FailAnalysisAsync(
                     analysis,
@@ -293,22 +392,22 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     executionToken).ConfigureAwait(false);
             }
 
-            var parseResult = TryParseStructuredResult(rawResponse, projectGraph, projectRoots, workspace.LocalPath);
+            var parseResult = TryParseStructuredResult(rawResponse, evidenceProfile, workspace.LocalPath);
 
-            // Bounded single repair attempt if deterministic grounding failure occurs
-            if (!parseResult.Success && parseResult.IsGroundingError && parseResult.GroundingErrorDetails != null)
+            // Bounded single repair attempt if deterministic grounding failure occurs (ONLY if truncation recovery was not used)
+            if (!parseResult.Success && parseResult.IsGroundingError && parseResult.GroundingErrorDetails != null && compactRecoveryCount == 0)
             {
                 _logger.LogWarning(
                     "Impact analysis for task {TaskId} encountered grounding error: {Error}. Initiating bounded 1-attempt impact plan repair.",
                     task.Id,
                     parseResult.ErrorMessage);
 
+                totalProviderCalls++;
                 var repairPrompt = BuildImpactPlanRepairPrompt(
                     task,
                     workspace,
                     parseResult.GroundingErrorDetails,
-                    projectGraph,
-                    projectRoots);
+                    evidenceProfile);
 
                 var repairAiRequest = new AiRequest
                 {
@@ -319,6 +418,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                         "Use Create/Add ONLY for new files that do not currently exist in the repository. " +
                         "Respond with a single JSON object only matching the required schema. Do not wrap in markdown fences or commentary.",
                     UserPrompt = repairPrompt,
+                    MaxTokens = defaultImpactMaxTokens,
                 };
 
                 var repairAiResponse = await _aiProvider
@@ -331,7 +431,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     model = repairAiResponse.Model ?? model;
                     providerName = string.IsNullOrWhiteSpace(repairAiResponse.Provider) ? providerName : repairAiResponse.Provider;
 
-                    parseResult = TryParseStructuredResult(rawResponse, projectGraph, projectRoots, workspace.LocalPath);
+                    parseResult = TryParseStructuredResult(rawResponse, evidenceProfile, workspace.LocalPath);
                 }
                 else
                 {
@@ -375,11 +475,20 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             task.UpdatedAt = completedAt;
             await _taskRepository.UpdateAsync(task, executionToken).ConfigureAwait(false);
 
+            var finishReason = aiResponse.FinishReason ?? "stop";
+            var actualOutputTokens = aiResponse.OutputTokens;
+
             _logger.LogInformation(
-                "Impact analysis {AnalysisId} completed for task {TaskId} in {ElapsedMs}ms.",
+                "Change intelligence impact analysis {AnalysisId} completed for task {TaskId} in {ElapsedMs}ms. " +
+                "ProviderCalls: {ProviderCalls}, CompactRecoveries: {CompactRecoveries}, RequestedBudget: {RequestedBudget}, OutputTokens: {OutputTokens}, FinishReason: {FinishReason}.",
                 analysis.Id,
                 task.Id,
-                stopwatch.ElapsedMilliseconds);
+                stopwatch.ElapsedMilliseconds,
+                totalProviderCalls,
+                compactRecoveryCount,
+                defaultImpactMaxTokens,
+                actualOutputTokens?.ToString() ?? "unknown",
+                finishReason);
 
             return new AnalyzeTaskImpactResult
             {
@@ -433,7 +542,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         return null;
     }
 
-    private async Task<string> BuildContextAsync(
+    private async Task<(string ContextText, RepositoryAnalysisResult? RoslynResult)> BuildContextWithRoslynAsync(
         DevelopmentTask task,
         RepositoryWorkspace workspace,
         CancellationToken cancellationToken)
@@ -472,7 +581,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             builder.AppendLine("No structural or semantic context was available for this workspace.");
         }
 
-        return builder.ToString();
+        return (builder.ToString(), roslynResult);
     }
 
     private static void AppendRoslynContext(
@@ -715,8 +824,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         DevelopmentTask task,
         RepositoryWorkspace workspace,
         ImpactGroundingErrorDetails errorDetails,
-        IReadOnlyList<DiscoveredProjectNode> projectGraph,
-        IReadOnlyList<string> projectRoots)
+        RepositoryEvidenceProfile evidence)
     {
         var builder = new StringBuilder();
         builder.AppendLine("# Task");
@@ -760,12 +868,56 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         return builder.ToString();
     }
 
+    private static string BuildImpactTruncationRecoveryPrompt(
+        DevelopmentTask task,
+        RepositoryWorkspace workspace,
+        string context,
+        RepositoryEvidenceProfile evidence)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("# Task");
+        builder.AppendLine($"Title: {task.Title}");
+        if (!string.IsNullOrWhiteSpace(task.Description))
+        {
+            builder.AppendLine($"Description: {task.Description}");
+        }
+        if (!string.IsNullOrWhiteSpace(task.AcceptanceCriteria))
+        {
+            builder.AppendLine($"Acceptance Criteria: {task.AcceptanceCriteria}");
+        }
+        builder.AppendLine();
+
+        builder.AppendLine("# Candidate Repository Files");
+        if (evidence.InventoryCsFiles.Count > 0)
+        {
+            foreach (var f in evidence.InventoryCsFiles.Take(25))
+            {
+                builder.AppendLine($"- {f}");
+            }
+            builder.AppendLine();
+        }
+
+        builder.AppendLine("# Minimal Compact Output Instructions");
+        builder.AppendLine(
+            "CRITICAL: The previous response was truncated because it exceeded output token limits.\n" +
+            "Provide ONLY the minimal, ultra-compact JSON impact analysis without extra prose or nested duplicate fields.\n" +
+            "- Output valid JSON only, no markdown code blocks.\n" +
+            "- Max 200 chars for summary.\n" +
+            "- Max 100 chars per file reason.\n" +
+            "- Max 100 chars per plan step description.\n" +
+            "- Do NOT repeat change briefs, expected checks, or file evidence details (DevPilot computes them deterministically).");
+        builder.AppendLine();
+        builder.AppendLine("Required JSON Schema:");
+        builder.AppendLine(JsonSchema);
+
+        return builder.ToString();
+    }
+
     private static string BuildUserPrompt(
         DevelopmentTask task,
         RepositoryWorkspace workspace,
         string context,
-        IReadOnlyList<DiscoveredProjectNode> projectGraph,
-        IReadOnlyList<string> projectRoots)
+        RepositoryEvidenceProfile evidence)
     {
         var builder = new StringBuilder();
 
@@ -787,9 +939,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         builder.AppendLine();
 
         builder.AppendLine("# Discovered .NET Project Graph");
-        if (projectGraph != null && projectGraph.Count > 0)
+        if (evidence.ProjectGraph != null && evidence.ProjectGraph.Count > 0)
         {
-            foreach (var proj in projectGraph)
+            foreach (var proj in evidence.ProjectGraph)
             {
                 var pkgList = proj.PackageReferences.Count > 0 ? string.Join(", ", proj.PackageReferences) : "none";
                 var projRefList = proj.ProjectReferences.Count > 0 ? string.Join(", ", proj.ProjectReferences) : "none";
@@ -801,6 +953,44 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         else
         {
             builder.AppendLine("- No projects were discovered in the workspace.");
+        }
+        builder.AppendLine();
+
+        builder.AppendLine("# Repository Verification Preflight");
+        if (evidence.VerificationProfile.State == RepositoryVerificationState.Configured && evidence.VerificationProfile.Checks.Count > 0)
+        {
+            builder.AppendLine($"- State: Configured ({evidence.VerificationProfile.Checks.Count} checks)");
+            foreach (var check in evidence.VerificationProfile.Checks)
+            {
+                builder.AppendLine($"  - [{check.Kind}] {check.DisplayName} (Required: {check.Required}, Source: {check.Source})");
+            }
+        }
+        else if (evidence.VerificationProfile.State == RepositoryVerificationState.Unconfigured)
+        {
+            builder.AppendLine($"- State: Unconfigured ({evidence.VerificationProfile.Message ?? "No trustworthy verification checks discovered in repository"})");
+        }
+        else
+        {
+            builder.AppendLine($"- State: Infrastructure Failure ({evidence.VerificationProfile.Message ?? "Preflight error"})");
+        }
+        builder.AppendLine();
+
+        builder.AppendLine("# Database & Migration Intelligence");
+        if (evidence.HasEfCore)
+        {
+            builder.AppendLine("- Migration Mechanism: EF Core Migrations detected in package references.");
+            if (evidence.MigrationFiles.Count > 0)
+            {
+                builder.AppendLine($"- Existing Migrations: {evidence.MigrationFiles.Count} migration/snapshot file(s) found in repository.");
+            }
+            if (evidence.PersistenceFiles.Count > 0)
+            {
+                builder.AppendLine($"- Persistence Entities & DbContext: {evidence.PersistenceFiles.Count} file(s) found.");
+            }
+        }
+        else
+        {
+            builder.AppendLine("- No EF Core migration framework detected in project references.");
         }
         builder.AppendLine();
 
@@ -817,25 +1007,27 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         builder.AppendLine("# Instructions");
         builder.AppendLine(
-            "Analyze the impact of implementing this task on the repository. " +
-            "Respond with a single JSON object only, no markdown fences, no extra commentary. " +
-            "CRITICAL GROUNDING & INVENTORY RULES:\n" +
+            "Analyze the impact of implementing this task on the repository and produce evidence-backed Change Intelligence. " +
+            "Respond with a single compact JSON object only, no markdown fences, no extra commentary.\n" +
+            "CRITICAL CHANGE INTELLIGENCE RULES:\n" +
             "1. All proposed C# (*.cs) file paths MUST be located within one of the discovered .NET project directories listed above.\n" +
             "2. For changeType 'Modify' or 'Delete': The file path MUST EXACTLY match an existing file from the 'Existing Repository Files' inventory above. Never invent a file path for Modify or Delete.\n" +
             "3. For changeType 'Add' (or 'Create'): Use Add ONLY for genuinely NEW files that do not currently exist in the repository inventory.\n" +
             "4. Unit and integration test files MUST be placed in an existing discovered test project.\n" +
-            "5. STRICT ARCHITECTURAL GROUNDING: You MUST strictly adhere to the existing architectural patterns, interfaces, abstractions, and libraries referenced in the project graph.\n" +
-            "6. DO NOT INVENT FRAMEWORKS OR PATTERNS: Do NOT introduce or propose third-party packages, libraries, or architectural patterns (such as MediatR, direct Entity Framework Core access in Application layer, or nonexistent DbContext interfaces) that are not referenced in the target project.\n" +
+            "5. Keep all strings short (1-2 sentences max). Do not duplicate file lists inside plan or dimensions.\n" +
+            "6. Database/migration statements must remain probabilistic ('migration likely/expected') unless deterministic repository evidence proves otherwise.\n" +
+            "7. Supported dimensions: CODE, API, DATA, TESTS, RUNTIME, DEPENDENCIES, INFRASTRUCTURE. Emit ONLY dimensions supported by repository evidence.\n" +
+            "8. Unknowns must be explicit first-class outputs (e.g. unconfigured tests, deployment sequencing, external contracts).\n" +
+            "9. STRICT ARCHITECTURAL GROUNDING: Strictly adhere to existing architectural patterns, interfaces, and libraries referenced in the project graph.\n" +
             "Confidence must be an integer 0-100. Use the following schema:");
         builder.AppendLine(JsonSchema);
 
         return builder.ToString();
     }
 
-    private static ParseResult TryParseStructuredResult(
+    public static ParseResult TryParseStructuredResult(
         string rawResponse,
-        IReadOnlyList<DiscoveredProjectNode> projectGraph,
-        IReadOnlyList<string> projectRoots,
+        RepositoryEvidenceProfile evidence,
         string workspaceLocalPath)
     {
         var json = ExtractJson(rawResponse);
@@ -860,7 +1052,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             return ParseResult.Failure("The AI response deserialized to null.");
         }
 
-        return MapToResultData(response, projectGraph, projectRoots, workspaceLocalPath);
+        return MapToResultData(response, evidence, workspaceLocalPath);
     }
 
     private static string ExtractJson(string content)
@@ -879,8 +1071,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
     private static ParseResult MapToResultData(
         ImpactAnalysisResponse response,
-        IReadOnlyList<DiscoveredProjectNode> projectGraph,
-        IReadOnlyList<string> projectRoots,
+        RepositoryEvidenceProfile evidence,
         string workspaceLocalPath)
     {
         if (string.IsNullOrWhiteSpace(response.Summary))
@@ -888,8 +1079,8 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             return ParseResult.Failure("The AI response is missing a summary.");
         }
 
-        var effectiveGraph = projectGraph ?? Array.Empty<DiscoveredProjectNode>();
-        var effectiveRoots = projectRoots ?? Array.Empty<string>();
+        var effectiveGraph = evidence.ProjectGraph ?? Array.Empty<DiscoveredProjectNode>();
+        var effectiveRoots = evidence.ProjectRoots ?? Array.Empty<string>();
 
         // Check for unsupported framework hallucination in plan/summary
         var allPackageRefs = effectiveGraph
@@ -907,15 +1098,16 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         var resultData = new ImpactAnalysisResultData
         {
-            Summary = response.Summary.Trim(),
+            Summary = Truncate(response.Summary.Trim(), 400),
             Confidence = NormalizeConfidence(response.Confidence),
             Metadata = response.Metadata,
         };
 
+        var impactedFiles = new List<ImpactedFile>();
+
         if (response.ImpactedFiles is not null)
         {
-            var impactedFiles = new List<ImpactedFile>();
-            foreach (var f in response.ImpactedFiles)
+            foreach (var f in response.ImpactedFiles.Take(30))
             {
                 if (f is null || string.IsNullOrWhiteSpace(f.FilePath)) continue;
 
@@ -1018,30 +1210,47 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     }
                 }
 
+                var (evType, evDetails, isUncertain, calibratedConfidence) = ChangeIntelligenceEvidenceCollector.ClassifyAndCalibrateFileEvidence(
+                    normalizedPath,
+                    changeType,
+                    f.Confidence,
+                    evidence);
+
+                var finalEvType = !string.IsNullOrWhiteSpace(f.EvidenceType) ? f.EvidenceType.Trim() : evType;
+                var finalEvDetails = !string.IsNullOrWhiteSpace(f.EvidenceDetails) ? f.EvidenceDetails.Trim() : evDetails;
+
                 impactedFiles.Add(new ImpactedFile
                 {
                     FilePath = normalizedPath,
                     ChangeType = changeType,
-                    Reason = f.Reason?.Trim() ?? string.Empty,
-                    Confidence = NormalizeConfidence(f.Confidence),
+                    Reason = Truncate(f.Reason?.Trim() ?? string.Empty, 200),
+                    Confidence = calibratedConfidence,
+                    EvidenceType = finalEvType,
+                    EvidenceDetails = Truncate(finalEvDetails, 200),
+                    IsUncertain = isUncertain,
                 });
             }
 
             resultData.ImpactedFiles = impactedFiles;
+            resultData.Confidence = CalibrateOverallConfidence(response.Confidence, impactedFiles);
+        }
+        else
+        {
+            resultData.Confidence = CalibrateOverallConfidence(response.Confidence, impactedFiles);
         }
 
-        if (response.ProposedPlan is not null)
+        if (response.ProposedPlan is not null && response.ProposedPlan.Count > 0)
         {
             var order = 1;
             var planSteps = new List<ProposedPlanStep>();
-            foreach (var s in response.ProposedPlan)
+            foreach (var s in response.ProposedPlan.Take(8))
             {
                 if (s is null || string.IsNullOrWhiteSpace(s.Title)) continue;
 
                 var related = new List<string>();
                 if (s.RelatedFiles != null)
                 {
-                    foreach (var rf in s.RelatedFiles)
+                    foreach (var rf in s.RelatedFiles.Take(10))
                     {
                         if (string.IsNullOrWhiteSpace(rf)) continue;
                         var raw = rf.Trim();
@@ -1078,39 +1287,213 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 planSteps.Add(new ProposedPlanStep
                 {
                     Order = s.Order is > 0 ? s.Order.Value : order++,
-                    Title = s.Title.Trim(),
-                    Description = s.Description?.Trim() ?? string.Empty,
+                    Title = Truncate(s.Title.Trim(), 100),
+                    Description = Truncate(s.Description?.Trim() ?? string.Empty, 250),
                     RelatedFiles = related,
                 });
             }
             resultData.ProposedPlan = planSteps;
         }
+        else if (impactedFiles.Count > 0)
+        {
+            var planSteps = new List<ProposedPlanStep>();
+            var nonTestFiles = impactedFiles.Where(f => f.EvidenceType != "RelevantTest").Select(f => f.FilePath).Take(5).ToList();
+            var testFiles = impactedFiles.Where(f => f.EvidenceType == "RelevantTest").Select(f => f.FilePath).Take(5).ToList();
 
+            planSteps.Add(new ProposedPlanStep
+            {
+                Order = 1,
+                Title = "Implement changes across domain and application layers",
+                Description = "Implement core logic, entities, and services per requirements.",
+                RelatedFiles = nonTestFiles
+            });
+
+            if (testFiles.Count > 0)
+            {
+                planSteps.Add(new ProposedPlanStep
+                {
+                    Order = 2,
+                    Title = "Update test suite and verify changes",
+                    Description = "Add and update unit/integration tests to cover modified functionality.",
+                    RelatedFiles = testFiles
+                });
+            }
+
+            resultData.ProposedPlan = planSteps;
+        }
+
+        var systemImpacts = new List<SystemImpact>();
         if (response.SystemImpacts is not null)
         {
-            resultData.SystemImpacts = response.SystemImpacts
+            systemImpacts = response.SystemImpacts
                 .Where(i => i is not null && !string.IsNullOrWhiteSpace(i.Area))
+                .Take(6)
                 .Select(i => new SystemImpact
                 {
                     Area = i!.Area!.Trim(),
                     ImpactLevel = ParseSystemImpactLevel(i.ImpactLevel),
-                    Description = i.Description?.Trim() ?? string.Empty,
+                    Description = Truncate(i.Description?.Trim() ?? string.Empty, 200),
                 })
                 .ToList();
+            resultData.SystemImpacts = systemImpacts;
         }
 
+        var risks = new List<Risk>();
         if (response.Risks is not null)
         {
-            resultData.Risks = response.Risks
+            risks = response.Risks
                 .Where(r => r is not null && !string.IsNullOrWhiteSpace(r.Description))
+                .Take(5)
                 .Select(r => new Risk
                 {
                     Level = ParseRiskLevel(r!.Level),
-                    Description = r.Description!.Trim(),
-                    Mitigation = r.Mitigation?.Trim() ?? string.Empty,
+                    Description = Truncate(r.Description!.Trim(), 200),
+                    Mitigation = Truncate(r.Mitigation?.Trim() ?? string.Empty, 200),
                 })
                 .ToList();
+            resultData.Risks = risks;
         }
+
+        // Change Dimensions
+        var dimensions = new List<ChangeDimensionImpact>();
+        if (response.Dimensions != null && response.Dimensions.Count > 0)
+        {
+            foreach (var dim in response.Dimensions.Take(7))
+            {
+                if (dim == null || string.IsNullOrWhiteSpace(dim.Area)) continue;
+                var normArea = ChangeDimensionArea.Normalize(dim.Area);
+                dimensions.Add(new ChangeDimensionImpact
+                {
+                    Area = normArea,
+                    ImpactLevel = ParseSystemImpactLevel(dim.ImpactLevel),
+                    Summary = Truncate(dim.Summary?.Trim() ?? dim.Description?.Trim() ?? string.Empty, 200),
+                    Details = dim.Details?.Where(d => !string.IsNullOrWhiteSpace(d)).Take(3).Select(d => Truncate(d.Trim(), 150)).ToList() ?? new List<string>(),
+                    Evidence = dim.Evidence?.Where(e => !string.IsNullOrWhiteSpace(e)).Take(5).Select(e => Truncate(e.Trim(), 200)).ToList() ?? new List<string>()
+                });
+            }
+        }
+        else if (systemImpacts.Count > 0)
+        {
+            // Map legacy system impacts to change dimensions
+            foreach (var si in systemImpacts)
+            {
+                var area = ChangeDimensionArea.Normalize(si.Area);
+                dimensions.Add(new ChangeDimensionImpact
+                {
+                    Area = area,
+                    ImpactLevel = si.ImpactLevel,
+                    Summary = si.Description,
+                    Details = new List<string> { si.Description },
+                    Evidence = new List<string>()
+                });
+            }
+        }
+
+        // Ensure grounded dimensions are populated if repository evidence supports them
+        if (!dimensions.Any(d => string.Equals(d.Area, ChangeDimensionArea.Api, StringComparison.OrdinalIgnoreCase)) &&
+            impactedFiles.Any(f => f.EvidenceType == "ControllerUsage"))
+        {
+            dimensions.Add(new ChangeDimensionImpact
+            {
+                Area = ChangeDimensionArea.Api,
+                ImpactLevel = SystemImpactLevel.Medium,
+                Summary = "API surface modified: controller endpoint affected",
+                Details = new List<string> { "Controller endpoint definition updated" },
+                Evidence = impactedFiles.Where(f => f.EvidenceType == "ControllerUsage").Select(f => f.FilePath).ToList()
+            });
+        }
+
+        if (!dimensions.Any(d => string.Equals(d.Area, ChangeDimensionArea.Data, StringComparison.OrdinalIgnoreCase)) &&
+            impactedFiles.Any(f => f.EvidenceType == "PersistenceRelationship" || f.EvidenceType == "MigrationRelationship"))
+        {
+            dimensions.Add(new ChangeDimensionImpact
+            {
+                Area = ChangeDimensionArea.Data,
+                ImpactLevel = SystemImpactLevel.Medium,
+                Summary = "Database schema/persistence affected; migration likely/expected",
+                Details = new List<string> { "Persistence entity, DbContext, or configuration touched" },
+                Evidence = impactedFiles.Where(f => f.EvidenceType is "PersistenceRelationship" or "MigrationRelationship").Select(f => f.FilePath).ToList()
+            });
+        }
+
+        if (!dimensions.Any(d => string.Equals(d.Area, ChangeDimensionArea.Tests, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (!evidence.HasTestProjects)
+            {
+                dimensions.Add(new ChangeDimensionImpact
+                {
+                    Area = ChangeDimensionArea.Tests,
+                    ImpactLevel = SystemImpactLevel.Medium,
+                    Summary = "Missing test coverage: no automated test project discovered",
+                    Details = new List<string> { "No test project found in repository" },
+                    Evidence = new List<string>()
+                });
+            }
+            else if (impactedFiles.Any(f => f.EvidenceType == "RelevantTest"))
+            {
+                dimensions.Add(new ChangeDimensionImpact
+                {
+                    Area = ChangeDimensionArea.Tests,
+                    ImpactLevel = SystemImpactLevel.Low,
+                    Summary = "Test suite updated with relevant test coverage",
+                    Details = new List<string> { "Automated test files touched" },
+                    Evidence = impactedFiles.Where(f => f.EvidenceType == "RelevantTest").Select(f => f.FilePath).ToList()
+                });
+            }
+        }
+
+        resultData.Dimensions = dimensions;
+
+        // Unknowns synthesis
+        var rawUnknowns = new List<string>();
+        if (response.Unknowns != null) rawUnknowns.AddRange(response.Unknowns);
+        if (response.ChangeBrief?.Unknowns != null) rawUnknowns.AddRange(response.ChangeBrief.Unknowns);
+
+        var synthesizedUnknowns = ChangeIntelligenceEvidenceCollector.SynthesizeUnknowns(
+            rawUnknowns,
+            impactedFiles,
+            dimensions,
+            evidence);
+
+        resultData.Unknowns = synthesizedUnknowns;
+
+        // Change Brief synthesis
+        var changeBrief = ChangeIntelligenceEvidenceCollector.BuildChangeBrief(
+            impactedFiles,
+            risks,
+            systemImpacts,
+            dimensions,
+            synthesizedUnknowns,
+            evidence);
+
+        if (resultData.SystemImpacts.Count == 0 && dimensions.Count > 0)
+        {
+            systemImpacts = dimensions
+                .Select(d => new SystemImpact
+                {
+                    Area = d.Area,
+                    ImpactLevel = d.ImpactLevel,
+                    Description = d.Summary
+                })
+                .ToList();
+            resultData.SystemImpacts = systemImpacts;
+        }
+
+        if (resultData.Risks.Count == 0 && changeBrief.RiskReasons.Count > 0)
+        {
+            risks = changeBrief.RiskReasons.Take(3)
+                .Select(r => new Risk
+                {
+                    Level = changeBrief.RiskLevel,
+                    Description = r,
+                    Mitigation = "Execute configured verification checks and review changes."
+                })
+                .ToList();
+            resultData.Risks = risks;
+        }
+
+        resultData.ChangeBrief = changeBrief;
+        resultData.RiskReasons = changeBrief.RiskReasons;
 
         return ParseResult.Succeeded(resultData);
     }
@@ -1118,6 +1501,21 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private static int NormalizeConfidence(int? confidence)
     {
         return confidence.HasValue ? Math.Clamp(confidence.Value, 0, 100) : 0;
+    }
+
+    private static int CalibrateOverallConfidence(int? modelConfidence, IReadOnlyList<ImpactedFile> files)
+    {
+        if (modelConfidence.HasValue && modelConfidence.Value >= 1 && modelConfidence.Value <= 100)
+        {
+            return Math.Clamp(modelConfidence.Value, 1, 100);
+        }
+
+        if (files != null && files.Count > 0)
+        {
+            return (int)Math.Round(files.Average(f => f.Confidence));
+        }
+
+        return 75;
     }
 
     private static ImpactFileChangeType ParseChangeType(string? value)
@@ -1239,6 +1637,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     ChangeType = f.ChangeType,
                     Reason = f.Reason,
                     Confidence = f.Confidence,
+                    EvidenceType = f.EvidenceType,
+                    EvidenceDetails = f.EvidenceDetails,
+                    IsUncertain = f.IsUncertain,
                 })
                 .ToList(),
             ProposedPlan = data.ProposedPlan
@@ -1266,6 +1667,44 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     Mitigation = r.Mitigation,
                 })
                 .ToList(),
+            ChangeBrief = data.ChangeBrief is null
+                ? null
+                : new ChangeBriefDto
+                {
+                    FileCount = data.ChangeBrief.FileCount,
+                    ProjectCount = data.ChangeBrief.ProjectCount,
+                    RiskLevel = data.ChangeBrief.RiskLevel,
+                    RiskReasons = data.ChangeBrief.RiskReasons,
+                    ApiSummary = data.ChangeBrief.ApiSummary,
+                    DataSummary = data.ChangeBrief.DataSummary,
+                    RuntimeSummary = data.ChangeBrief.RuntimeSummary,
+                    TestsSummary = data.ChangeBrief.TestsSummary,
+                    VerificationSummary = data.ChangeBrief.VerificationSummary,
+                    ExpectedChecks = data.ChangeBrief.ExpectedChecks
+                        .Select(c => new ExpectedVerificationCheckDto
+                        {
+                            CheckId = c.CheckId,
+                            DisplayName = c.DisplayName,
+                            Kind = c.Kind,
+                            Required = c.Required,
+                            Source = c.Source,
+                            DiscoveryEvidence = c.DiscoveryEvidence,
+                        })
+                        .ToList(),
+                    Unknowns = data.ChangeBrief.Unknowns,
+                },
+            Dimensions = data.Dimensions
+                .Select(d => new ChangeDimensionImpactDto
+                {
+                    Area = d.Area,
+                    ImpactLevel = d.ImpactLevel,
+                    Summary = d.Summary,
+                    Details = d.Details,
+                    Evidence = d.Evidence,
+                })
+                .ToList(),
+            Unknowns = data.Unknowns,
+            RiskReasons = data.RiskReasons,
         };
     }
 
@@ -1279,7 +1718,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         return value[..maxLength] + "...";
     }
 
-    private sealed class ImpactGroundingErrorDetails
+    public sealed class ImpactGroundingErrorDetails
     {
         public string InvalidFilePath { get; init; } = string.Empty;
         public string InvalidChangeType { get; init; } = string.Empty;
@@ -1288,7 +1727,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         public List<string> CandidateRepositoryPaths { get; init; } = new();
     }
 
-    private sealed class ParseResult
+    public sealed class ParseResult
     {
         public bool Success { get; private init; }
 
@@ -1342,9 +1781,43 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         public List<SystemImpactResponse>? SystemImpacts { get; set; }
 
+        public List<ChangeDimensionResponse>? Dimensions { get; set; }
+
+        public ChangeBriefResponse? ChangeBrief { get; set; }
+
+        public List<string>? Unknowns { get; set; }
+
         public List<RiskResponse>? Risks { get; set; }
 
         public Dictionary<string, JsonElement>? Metadata { get; set; }
+    }
+
+    private sealed class ChangeBriefResponse
+    {
+        public string? ApiSummary { get; set; }
+
+        public string? DataSummary { get; set; }
+
+        public string? RuntimeSummary { get; set; }
+
+        public string? TestsSummary { get; set; }
+
+        public List<string>? Unknowns { get; set; }
+    }
+
+    private sealed class ChangeDimensionResponse
+    {
+        public string? Area { get; set; }
+
+        public string? ImpactLevel { get; set; }
+
+        public string? Summary { get; set; }
+
+        public string? Description { get; set; }
+
+        public List<string>? Details { get; set; }
+
+        public List<string>? Evidence { get; set; }
     }
 
     private sealed class ImpactedFileResponse
@@ -1356,6 +1829,10 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         public string? Reason { get; set; }
 
         public int? Confidence { get; set; }
+
+        public string? EvidenceType { get; set; }
+
+        public string? EvidenceDetails { get; set; }
     }
 
     private sealed class ProposedPlanStepResponse
@@ -1387,4 +1864,3 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         public string? Mitigation { get; set; }
     }
 }
-

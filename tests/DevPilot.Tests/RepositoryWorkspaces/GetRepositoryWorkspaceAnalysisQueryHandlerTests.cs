@@ -350,6 +350,201 @@ public class GetRepositoryWorkspaceAnalysisQueryHandlerTests : IDisposable
         return paths;
     }
 
+    [Fact]
+    public async Task HandleAsync_SameWorkspaceSameFingerprint_ReusesCachedResult()
+    {
+        GetRepositoryWorkspaceAnalysisQueryHandler.ClearCache();
+
+        var id = Guid.NewGuid();
+        _workspaceQuery.WorkspaceToReturn = new RepositoryWorkspace
+        {
+            Id = id,
+            Owner = "enesscigdem",
+            Repository = "DevPilot",
+            Branch = "master",
+            CommitSha = "commit-111",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = _tempDirectory,
+        };
+
+        var analyzer = new CountingRepositoryAnalyzer();
+        var handler = new GetRepositoryWorkspaceAnalysisQueryHandler(
+            _workspaceQuery,
+            analyzer,
+            _structureScanner,
+            NullLogger<GetRepositoryWorkspaceAnalysisQueryHandler>.Instance);
+
+        // First call -> Cache MISS -> analyzer called
+        var result1 = await handler.HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(id), CancellationToken.None);
+        result1.Success.Should().BeTrue();
+        analyzer.CallCount.Should().Be(1);
+
+        // Second call with same commit -> Cache HIT -> analyzer NOT called again
+        var result2 = await handler.HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(id), CancellationToken.None);
+        result2.Success.Should().BeTrue();
+        analyzer.CallCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task HandleAsync_ChangedFingerprint_InvalidatesCachedResultAndRecomputes()
+    {
+        GetRepositoryWorkspaceAnalysisQueryHandler.ClearCache();
+
+        var id = Guid.NewGuid();
+        _workspaceQuery.WorkspaceToReturn = new RepositoryWorkspace
+        {
+            Id = id,
+            Owner = "enesscigdem",
+            Repository = "DevPilot",
+            Branch = "master",
+            CommitSha = "commit-111",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = _tempDirectory,
+        };
+
+        var analyzer = new CountingRepositoryAnalyzer();
+        var handler = new GetRepositoryWorkspaceAnalysisQueryHandler(
+            _workspaceQuery,
+            analyzer,
+            _structureScanner,
+            NullLogger<GetRepositoryWorkspaceAnalysisQueryHandler>.Instance);
+
+        var result1 = await handler.HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(id), CancellationToken.None);
+        result1.Success.Should().BeTrue();
+        analyzer.CallCount.Should().Be(1);
+
+        // Commit changed -> Cache MISS -> Recomputes
+        _workspaceQuery.WorkspaceToReturn.CommitSha = "commit-222";
+        var result2 = await handler.HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(id), CancellationToken.None);
+        result2.Success.Should().BeTrue();
+        analyzer.CallCount.Should().Be(2);
+        result2.Analysis!.Repository.CommitSha.Should().Be("commit-222");
+    }
+
+    [Fact]
+    public async Task HandleAsync_TransientFailure_ReturnsLastKnownGood()
+    {
+        GetRepositoryWorkspaceAnalysisQueryHandler.ClearCache();
+
+        var id = Guid.NewGuid();
+        _workspaceQuery.WorkspaceToReturn = new RepositoryWorkspace
+        {
+            Id = id,
+            Owner = "enesscigdem",
+            Repository = "DevPilot",
+            Branch = "master",
+            CommitSha = "commit-good",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = _tempDirectory,
+        };
+
+        var analyzer = new FlakyRepositoryAnalyzer();
+        var handler = new GetRepositoryWorkspaceAnalysisQueryHandler(
+            _workspaceQuery,
+            analyzer,
+            _structureScanner,
+            NullLogger<GetRepositoryWorkspaceAnalysisQueryHandler>.Instance);
+
+        // 1. Initial success -> warms LKG
+        var result1 = await handler.HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(id), CancellationToken.None);
+        result1.Success.Should().BeTrue();
+        result1.Analysis.Should().NotBeNull();
+
+        // 2. Force recompute with flaky failure -> survives with LKG
+        analyzer.ShouldThrow = true;
+        var result2 = await handler.HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(id, ForceRecompute: true), CancellationToken.None);
+        result2.Success.Should().BeTrue();
+        result2.Analysis.Should().NotBeNull();
+        result2.Analysis!.Repository.CommitSha.Should().Be("commit-good");
+    }
+
+    [Fact]
+    public async Task HandleAsync_WorkspaceIsolation_SeparateCachesForDifferentWorkspaces()
+    {
+        GetRepositoryWorkspaceAnalysisQueryHandler.ClearCache();
+
+        var ws1 = Guid.NewGuid();
+        var ws2 = Guid.NewGuid();
+
+        var queryMock = new MultiWorkspaceQuery();
+        queryMock.Workspaces[ws1] = new RepositoryWorkspace
+        {
+            Id = ws1,
+            Owner = "owner1",
+            Repository = "repo1",
+            Branch = "main",
+            CommitSha = "sha1",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = _tempDirectory,
+        };
+        queryMock.Workspaces[ws2] = new RepositoryWorkspace
+        {
+            Id = ws2,
+            Owner = "owner2",
+            Repository = "repo2",
+            Branch = "main",
+            CommitSha = "sha2",
+            Status = RepositoryWorkspaceStatus.Completed,
+            LocalPath = _tempDirectory,
+        };
+
+        var analyzer = new CountingRepositoryAnalyzer();
+        var handler = new GetRepositoryWorkspaceAnalysisQueryHandler(
+            queryMock,
+            analyzer,
+            _structureScanner,
+            NullLogger<GetRepositoryWorkspaceAnalysisQueryHandler>.Instance);
+
+        var r1 = await handler.HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(ws1), CancellationToken.None);
+        var r2 = await handler.HandleAsync(new GetRepositoryWorkspaceAnalysisQuery(ws2), CancellationToken.None);
+
+        r1.Analysis!.Repository.FullName.Should().Be("owner1/repo1");
+        r2.Analysis!.Repository.FullName.Should().Be("owner2/repo2");
+        analyzer.CallCount.Should().Be(2);
+    }
+
+    private sealed class CountingRepositoryAnalyzer : IRepositoryAnalyzer
+    {
+        public int CallCount { get; private set; }
+        public Task<RepositoryAnalysisResult> AnalyzeAsync(RepositoryAnalysisRequest request, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult(new RepositoryAnalysisResult { Success = true });
+        }
+    }
+
+    private sealed class FlakyRepositoryAnalyzer : IRepositoryAnalyzer
+    {
+        public bool ShouldThrow { get; set; }
+        public Task<RepositoryAnalysisResult> AnalyzeAsync(RepositoryAnalysisRequest request, CancellationToken cancellationToken = default)
+        {
+            if (ShouldThrow)
+            {
+                throw new InvalidOperationException("Transient network / compilation error.");
+            }
+            return Task.FromResult(new RepositoryAnalysisResult { Success = true });
+        }
+    }
+
+    private sealed class MultiWorkspaceQuery : IRepositoryWorkspaceQuery
+    {
+        public Dictionary<Guid, RepositoryWorkspace> Workspaces { get; } = new();
+        public Task<RepositoryWorkspace?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            Workspaces.TryGetValue(id, out var ws);
+            return Task.FromResult(ws);
+        }
+        public Task<RepositoryWorkspace?> GetByOwnerAndRepositoryAndBranchAsync(string owner, string repository, string branch, CancellationToken cancellationToken = default)
+        {
+            var ws = Workspaces.Values.FirstOrDefault(w => w.Owner == owner && w.Repository == repository && w.Branch == branch);
+            return Task.FromResult(ws);
+        }
+        public Task<List<RepositoryWorkspace>> GetAllAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(Workspaces.Values.ToList());
+        }
+    }
+
     private sealed class FakeRepositoryWorkspaceQuery : IRepositoryWorkspaceQuery
     {
         public RepositoryWorkspace? WorkspaceToReturn { get; set; }

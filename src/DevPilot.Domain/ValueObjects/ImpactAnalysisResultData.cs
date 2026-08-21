@@ -16,5 +16,13 @@ public sealed class ImpactAnalysisResultData
 
     public List<Risk> Risks { get; set; } = new();
 
+    public ChangeBrief? ChangeBrief { get; set; }
+
+    public List<ChangeDimensionImpact> Dimensions { get; set; } = new();
+
+    public List<string> Unknowns { get; set; } = new();
+
+    public List<string> RiskReasons { get; set; } = new();
+
     public Dictionary<string, JsonElement>? Metadata { get; set; }
 }

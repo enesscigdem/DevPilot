@@ -282,6 +282,215 @@ public sealed class TaskImpactAnalysisLifecycleTests
         persisted.ErrorMessage.Should().Be("AI quota exceeded");
     }
 
+    [Fact]
+    public async Task HandleAsync_InitialCallTruncated_ExactlyOneCompactRecoverySucceeds()
+    {
+        // Arrange
+        var taskId = Guid.NewGuid();
+        var task = new DevelopmentTask
+        {
+            Id = taskId,
+            RepositoryWorkspaceId = _workspaceId,
+            Title = "Siparişlere tahmini teslim tarihi ekleyelim",
+            Description = "Order estimated delivery date feature",
+            Status = DevelopmentTaskStatus.Draft,
+            Priority = DevelopmentTaskPriority.Medium,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+
+        var taskRepo = new ConcurrentInMemoryTaskRepository();
+        taskRepo.Add(task);
+        var analysisRepo = new ConcurrentInMemoryAnalysisRepository();
+
+        var sequentialAi = new SequentialAiProvider(
+            // Call 1: Truncated response
+            new AiResponse
+            {
+                IsSuccess = false,
+                FailureKind = AiFailureKind.TokenLimitExceeded,
+                FinishReason = "length",
+                ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result.",
+                OutputTokens = 2048,
+            },
+            // Call 2: Recovery response
+            new AiResponse
+            {
+                IsSuccess = true,
+                Content = "{\"Summary\":\"Add estimated delivery date to orders\",\"Confidence\":92,\"ImpactedFiles\":[{\"FilePath\":\"src/DevPilot.Domain/Entities/DevelopmentTask.cs\",\"ChangeType\":\"Modify\",\"Reason\":\"Add field\"}],\"Dimensions\":[{\"Area\":\"DATA\",\"ImpactLevel\":\"Medium\",\"Summary\":\"Order schema update\"}],\"ProposedPlan\":[{\"Order\":1,\"Title\":\"Update entity\",\"Description\":\"Add EstimatedDeliveryDate\"}],\"Risks\":[{\"Level\":\"Low\",\"Description\":\"Minor migration\"}]}",
+                Model = "kimi-k3",
+                Provider = "Kimi",
+                OutputTokens = 240,
+                FinishReason = "stop"
+            });
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            new FakeWorkspaceQuery { WorkspaceToReturn = _workspace },
+            analysisRepo,
+            new FakeRepositoryAnalyzer(),
+            sequentialAi,
+            new FakeEmbeddingProvider(),
+            new FakeSearchService(),
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(taskId), CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeTrue();
+        result.Analysis.Should().NotBeNull();
+        result.Analysis!.Summary.Should().Be("Add estimated delivery date to orders");
+        result.Analysis.StructuredResult.Should().NotBeNull();
+        result.Analysis.StructuredResult!.ImpactedFiles.Should().HaveCount(1);
+        result.Analysis.StructuredResult.ImpactedFiles[0].FilePath.Should().Be("src/DevPilot.Domain/Entities/DevelopmentTask.cs");
+
+        // Exactly two provider calls were made
+        sequentialAi.CallCount.Should().Be(2);
+        sequentialAi.RecordedRequests[0].MaxTokens.Should().Be(2048);
+        sequentialAi.RecordedRequests[1].MaxTokens.Should().Be(2048);
+        sequentialAi.RecordedRequests[1].UserPrompt.Should().Contain("CRITICAL: The previous response was truncated");
+
+        task.Status.Should().Be(DevelopmentTaskStatus.AwaitingApproval);
+    }
+
+    [Fact]
+    public async Task HandleAsync_RecoveryCallAlsoTruncated_FailsClearlyWithoutLooping()
+    {
+        // Arrange
+        var taskId = Guid.NewGuid();
+        var task = new DevelopmentTask
+        {
+            Id = taskId,
+            RepositoryWorkspaceId = _workspaceId,
+            Title = "Heavy task that exceeds limits twice",
+            Description = "Requirement description",
+            Status = DevelopmentTaskStatus.Draft,
+            Priority = DevelopmentTaskPriority.High,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+
+        var taskRepo = new ConcurrentInMemoryTaskRepository();
+        taskRepo.Add(task);
+        var analysisRepo = new ConcurrentInMemoryAnalysisRepository();
+
+        var sequentialAi = new SequentialAiProvider(
+            // Call 1: Truncated response
+            new AiResponse
+            {
+                IsSuccess = false,
+                FailureKind = AiFailureKind.TokenLimitExceeded,
+                FinishReason = "length",
+                ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result.",
+            },
+            // Call 2: Recovery also truncated
+            new AiResponse
+            {
+                IsSuccess = false,
+                FailureKind = AiFailureKind.TokenLimitExceeded,
+                FinishReason = "length",
+                ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result.",
+            });
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            new FakeWorkspaceQuery { WorkspaceToReturn = _workspace },
+            analysisRepo,
+            new FakeRepositoryAnalyzer(),
+            sequentialAi,
+            new FakeEmbeddingProvider(),
+            new FakeSearchService(),
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(taskId), CancellationToken.None);
+
+        // Assert: Stops after exactly 2 calls, fails cleanly
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("exhausted token limit on initial call and compact recovery also truncated");
+        sequentialAi.CallCount.Should().Be(2);
+
+        task.Status.Should().Be(DevelopmentTaskStatus.Failed);
+    }
+
+    [Fact]
+    public async Task HandleAsync_NormalOneCallPath_Passes2048TokenBudget()
+    {
+        // Arrange
+        var taskId = Guid.NewGuid();
+        var task = new DevelopmentTask
+        {
+            Id = taskId,
+            RepositoryWorkspaceId = _workspaceId,
+            Title = "Normal task",
+            Description = "Normal description",
+            Status = DevelopmentTaskStatus.Draft,
+            Priority = DevelopmentTaskPriority.Medium,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+
+        var taskRepo = new ConcurrentInMemoryTaskRepository();
+        taskRepo.Add(task);
+        var analysisRepo = new ConcurrentInMemoryAnalysisRepository();
+
+        var sequentialAi = new SequentialAiProvider(
+            new AiResponse
+            {
+                IsSuccess = true,
+                Content = "{\"Summary\":\"Normal summary\",\"Confidence\":90,\"ImpactedFiles\":[{\"FilePath\":\"src/DevPilot.Domain/Entities/DevelopmentTask.cs\",\"ChangeType\":\"Modify\",\"Reason\":\"Update field\"}],\"Dimensions\":[{\"Area\":\"DOMAIN\",\"ImpactLevel\":\"Low\",\"Summary\":\"Entity update\"}],\"ProposedPlan\":[{\"Order\":1,\"Title\":\"Update\",\"Description\":\"Update entity\"}],\"Risks\":[{\"Level\":\"Low\",\"Description\":\"None\"}]}",
+                Model = "kimi-k3",
+                Provider = "Kimi",
+                OutputTokens = 180,
+                FinishReason = "stop"
+            });
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            new FakeWorkspaceQuery { WorkspaceToReturn = _workspace },
+            analysisRepo,
+            new FakeRepositoryAnalyzer(),
+            sequentialAi,
+            new FakeEmbeddingProvider(),
+            new FakeSearchService(),
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(taskId), CancellationToken.None);
+
+        // Assert
+        result.Success.Should().BeTrue();
+        sequentialAi.CallCount.Should().Be(1);
+        sequentialAi.RecordedRequests[0].MaxTokens.Should().Be(2048);
+    }
+
+    private class SequentialAiProvider : IAiProvider
+    {
+        private readonly List<AiResponse> _responses;
+        private int _index;
+
+        public List<AiRequest> RecordedRequests { get; } = new();
+        public int CallCount => RecordedRequests.Count;
+        public string ProviderName => "SequentialAi";
+
+        public SequentialAiProvider(params AiResponse[] responses)
+        {
+            _responses = responses.ToList();
+        }
+
+        public Task<AiResponse> SendAsync(AiRequest request, CancellationToken cancellationToken = default)
+        {
+            RecordedRequests.Add(request);
+            if (_index < _responses.Count)
+            {
+                var resp = _responses[_index++];
+                return Task.FromResult(resp);
+            }
+            return Task.FromResult(new AiResponse { IsSuccess = false, ErrorMessage = "No more responses configured." });
+        }
+    }
+
     private AnalyzeTaskImpactCommandHandler CreateHandler(
         ITaskRepository taskRepository,
         IImpactAnalysisRepository analysisRepository)

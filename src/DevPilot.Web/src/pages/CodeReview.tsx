@@ -15,6 +15,7 @@ import {
   XCircle,
   UploadCloud,
   RotateCw,
+  Sparkles,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
@@ -666,6 +667,56 @@ export function CodeReview() {
               <button onClick={() => setDecisionError(null)} className="text-subtle-foreground hover:text-foreground">
                 &times;
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {review.predictedVsActual && (
+        <div className="mx-auto max-w-[1600px] px-6 pt-3">
+          <div className="rounded-[var(--radius-lg)] border border-border bg-surface p-3.5 shadow-sm">
+            <div className="flex items-center justify-between gap-2 border-b border-border/40 pb-2 mb-2">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-primary" />
+                <span className="text-[12.5px] font-semibold text-foreground">Predicted vs Actual Execution</span>
+              </div>
+              <div className="flex items-center gap-2 font-mono text-[11px]">
+                <span className="text-success font-medium">{review.predictedVsActual.matchedFiles.length} matched</span>
+                {review.predictedVsActual.unexpectedFiles.length > 0 && (
+                  <span className="text-amber-500 font-medium">· {review.predictedVsActual.unexpectedFiles.length} unexpected</span>
+                )}
+                {review.predictedVsActual.missingPredictedFiles.length > 0 && (
+                  <span className="text-muted-foreground">· {review.predictedVsActual.missingPredictedFiles.length} untouched</span>
+                )}
+              </div>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2 text-[11.5px]">
+              <div>
+                <span className="tech-label text-[10px]">Verification & Checks</span>
+                <div className="mt-1 flex items-center gap-1.5 text-muted-foreground">
+                  <CheckCircle2 className="h-3.5 w-3.5 text-success shrink-0" />
+                  <span>
+                    {review.predictedVsActual.allExpectedChecksExecuted
+                      ? `All ${review.predictedVsActual.expectedChecks.length || review.predictedVsActual.executedChecks.length} expected checks executed`
+                      : `${review.predictedVsActual.executedChecks.length} check(s) executed`}
+                  </span>
+                </div>
+              </div>
+
+              {review.predictedVsActual.dimensionObservations.length > 0 && (
+                <div>
+                  <span className="tech-label text-[10px]">Grounding Observations</span>
+                  <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                    {review.predictedVsActual.dimensionObservations.map((obs, idx) => (
+                      <li key={idx} className="flex items-start gap-1">
+                        <span className="text-primary mt-0.5">•</span>
+                        <span className="break-words">{obs}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
 using DevPilot.Application.RepositoryWorkspaces.Ports;
@@ -9,6 +10,9 @@ namespace DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspa
 
 public sealed class GetRepositoryWorkspaceAnalysisQueryHandler : IGetRepositoryWorkspaceAnalysisQueryHandler
 {
+    private static readonly ConcurrentDictionary<string, WorkspaceAnalysisDto> AnalysisCache = new();
+    private static readonly ConcurrentDictionary<Guid, WorkspaceAnalysisDto> LastKnownGoodCache = new();
+
     private readonly IRepositoryWorkspaceQuery _workspaceQuery;
     private readonly IRepositoryAnalyzer _analyzer;
     private readonly IRepositoryStructureScanner _structureScanner;
@@ -24,6 +28,12 @@ public sealed class GetRepositoryWorkspaceAnalysisQueryHandler : IGetRepositoryW
         _analyzer = analyzer;
         _structureScanner = structureScanner;
         _logger = logger;
+    }
+
+    public static void ClearCache()
+    {
+        AnalysisCache.Clear();
+        LastKnownGoodCache.Clear();
     }
 
     public async Task<GetRepositoryWorkspaceAnalysisResult> HandleAsync(
@@ -73,6 +83,24 @@ public sealed class GetRepositoryWorkspaceAnalysisQueryHandler : IGetRepositoryW
             };
         }
 
+        var cacheKey = $"{workspace.Id}:{workspace.CommitSha ?? "head"}:v1";
+
+        if (!query.ForceRecompute && AnalysisCache.TryGetValue(cacheKey, out var cachedAnalysis))
+        {
+            _logger.LogInformation("Repository workspace analysis cache HIT for workspace {WorkspaceId}, commit {CommitSha}.", workspace.Id, workspace.CommitSha);
+            return new GetRepositoryWorkspaceAnalysisResult
+            {
+                Success = true,
+                Analysis = cachedAnalysis,
+            };
+        }
+
+        var recomputeReason = query.ForceRecompute
+            ? "force recompute requested"
+            : (!AnalysisCache.ContainsKey(cacheKey) ? "not in cache" : "commit changed");
+
+        _logger.LogInformation("Repository workspace analysis cache MISS for workspace {WorkspaceId}, commit {CommitSha}. Recompute reason: {Reason}.", workspace.Id, workspace.CommitSha, recomputeReason);
+
         var rootPath = Path.GetFullPath(workspace.LocalPath);
 
         RepositoryAnalysisResult roslynResult;
@@ -84,6 +112,16 @@ public sealed class GetRepositoryWorkspaceAnalysisQueryHandler : IGetRepositoryW
         }
         catch (Exception ex)
         {
+            if (LastKnownGoodCache.TryGetValue(workspace.Id, out var lkg))
+            {
+                _logger.LogWarning(ex, "Roslyn analysis failed for workspace {WorkspaceId}, returning last-known-good cached analysis.", workspace.Id);
+                return new GetRepositoryWorkspaceAnalysisResult
+                {
+                    Success = true,
+                    Analysis = lkg,
+                };
+            }
+
             _logger.LogError(ex, "Roslyn analysis failed for workspace {WorkspaceId} at {Path}", workspace.Id, rootPath);
             return new GetRepositoryWorkspaceAnalysisResult
             {
@@ -105,6 +143,18 @@ public sealed class GetRepositoryWorkspaceAnalysisQueryHandler : IGetRepositoryW
             fileTree,
             technologies,
             cancellationToken).ConfigureAwait(false);
+
+        AnalysisCache[cacheKey] = analysisDto;
+        LastKnownGoodCache[workspace.Id] = analysisDto;
+
+        // Clean up older stale commit entries for this workspace
+        foreach (var key in AnalysisCache.Keys)
+        {
+            if (key.StartsWith($"{workspace.Id}:", StringComparison.Ordinal) && key != cacheKey)
+            {
+                AnalysisCache.TryRemove(key, out _);
+            }
+        }
 
         return new GetRepositoryWorkspaceAnalysisResult
         {

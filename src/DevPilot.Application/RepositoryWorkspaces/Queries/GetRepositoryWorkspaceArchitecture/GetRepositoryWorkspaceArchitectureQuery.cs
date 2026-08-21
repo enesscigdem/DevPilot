@@ -2,7 +2,7 @@ using DevPilot.Application.RepositoryWorkspaces.Dtos;
 
 namespace DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceArchitecture;
 
-public sealed record GetRepositoryWorkspaceArchitectureQuery(Guid WorkspaceId);
+public sealed record GetRepositoryWorkspaceArchitectureQuery(Guid WorkspaceId, bool ForceRecompute = false);
 
 public sealed class GetRepositoryWorkspaceArchitectureResult
 {

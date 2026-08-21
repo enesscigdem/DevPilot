@@ -161,8 +161,10 @@ export function Architecture() {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load architecture graph."
-      setError(msg)
-      setArchitecture((prev) => prev)
+      const currentCache = getCachedWorkspaceArchitecture(workspaceId)
+      if (!currentCache.data && !architecture) {
+        setError(msg)
+      }
     } finally {
       setIsLoading(false)
     }
@@ -239,7 +241,7 @@ export function Architecture() {
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
               <div className="text-[13px] text-muted-foreground">Analyzing solution architecture graph...</div>
             </div>
-          ) : error ? (
+          ) : error && !architecture ? (
             <div className="relative flex h-[560px] flex-col items-center justify-center gap-3 p-6 text-center">
               <AlertCircle className="h-6 w-6 text-danger" />
               <div className="text-[13px] font-medium text-foreground">Failed to load architecture</div>

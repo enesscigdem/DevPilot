@@ -13,6 +13,10 @@ import {
   getWorkspaceOverview,
 } from "@/api"
 import {
+  getCachedWorkspaceOverview,
+  setCachedWorkspaceOverview,
+} from "@/lib/workspaceCache"
+import {
   RepositoryWorkspaceStatus,
   type RepositoryWorkspace,
   type CreateRepositoryWorkspaceRequest,
@@ -46,15 +50,31 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(() => {
     return typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null
   })
-  const [overview, setOverview] = useState<WorkspaceOverview | null>(null)
+  const [overview, setOverview] = useState<WorkspaceOverview | null>(() => {
+    const persistedId = typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null
+    return persistedId ? getCachedWorkspaceOverview(persistedId).data : null
+  })
   const [isLoading, setIsLoading] = useState(true)
-  const [isLoadingOverview, setIsLoadingOverview] = useState(true)
+  const [isLoadingOverview, setIsLoadingOverview] = useState(() => {
+    const persistedId = typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null
+    return !persistedId || !getCachedWorkspaceOverview(persistedId).data
+  })
   const [error, setError] = useState<string | null>(null)
   const [overviewError, setOverviewError] = useState<string | null>(null)
 
+  const overviewRef = useRef<WorkspaceOverview | null>(overview)
   const activeReqOverviewWorkspaceIdRef = useRef<string | null>(null)
-  const isFetchingOverviewRef = useRef(false)
+  const inFlightOverviewRef = useRef<{
+    workspaceId: string
+    promise: Promise<WorkspaceOverview>
+    controller: AbortController
+  } | null>(null)
+  const inFlightWorkspacesPromiseRef = useRef<Promise<RepositoryWorkspace[]> | null>(null)
   const abortOverviewControllerRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    overviewRef.current = overview
+  }, [overview])
 
   const resolveActiveWorkspace = useCallback(
     (
@@ -90,8 +110,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const refreshWorkspaces = useCallback(async () => {
     setIsLoading(true)
     setError(null)
+
+    // Deduplicate in-flight getRepositoryWorkspaces requests (e.g. StrictMode double-mount)
+    if (!inFlightWorkspacesPromiseRef.current) {
+      inFlightWorkspacesPromiseRef.current = getRepositoryWorkspaces().finally(() => {
+        inFlightWorkspacesPromiseRef.current = null
+      })
+    }
+
     try {
-      const list = await getRepositoryWorkspaces()
+      const list = await inFlightWorkspacesPromiseRef.current
       setWorkspaces(list)
 
       setActiveWorkspaceId((prev) => {
@@ -127,16 +155,41 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      if (isFetchingOverviewRef.current) {
-        return
-      }
+      const targetWorkspaceId = activeWorkspaceId
+      activeReqOverviewWorkspaceIdRef.current = targetWorkspaceId
 
-      isFetchingOverviewRef.current = true
-      activeReqOverviewWorkspaceIdRef.current = activeWorkspaceId
-
-      if (!isBackground) {
+      // If cached data exists for this workspace, load immediately
+      const cached = getCachedWorkspaceOverview(targetWorkspaceId)
+      if (cached.data) {
+        setOverview((prev) => (prev && prev.header.workspaceId === targetWorkspaceId ? prev : cached.data))
+        if (!isBackground) {
+          setIsLoadingOverview(false)
+        }
+      } else if (!isBackground) {
         setIsLoadingOverview(true)
         setOverviewError(null)
+      }
+
+      // If an identical non-aborted request is already in flight for this workspace, reuse it
+      const currentInFlight = inFlightOverviewRef.current
+      if (
+        currentInFlight &&
+        currentInFlight.workspaceId === targetWorkspaceId &&
+        !currentInFlight.controller.signal.aborted
+      ) {
+        try {
+          const data = await currentInFlight.promise
+          if (activeReqOverviewWorkspaceIdRef.current === targetWorkspaceId) {
+            setOverview(data)
+            setOverviewError(null)
+          }
+          return
+        } catch (err) {
+          // If the reused promise failed due to an abort from previous cleanup, fall through to fetch afresh
+          if (!(err instanceof DOMException && err.name === "AbortError")) {
+            return
+          }
+        }
       }
 
       if (abortOverviewControllerRef.current) {
@@ -145,29 +198,45 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const controller = new AbortController()
       abortOverviewControllerRef.current = controller
 
+      const reqPromise = getWorkspaceOverview(targetWorkspaceId, {
+        signal: controller.signal,
+      })
+      inFlightOverviewRef.current = {
+        workspaceId: targetWorkspaceId,
+        promise: reqPromise,
+        controller,
+      }
+
       try {
-        const data = await getWorkspaceOverview(activeWorkspaceId, {
-          signal: controller.signal,
-        })
-        if (activeReqOverviewWorkspaceIdRef.current === activeWorkspaceId) {
+        const data = await reqPromise
+        if (activeReqOverviewWorkspaceIdRef.current === targetWorkspaceId) {
           setOverview(data)
+          setCachedWorkspaceOverview(targetWorkspaceId, data)
           setOverviewError(null)
         }
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
+          // Clean up this aborted controller ref so future callers don't reuse it
+          if (inFlightOverviewRef.current?.controller === controller) {
+            inFlightOverviewRef.current = null
+          }
           return
         }
-        if (activeReqOverviewWorkspaceIdRef.current === activeWorkspaceId) {
-          if (!isBackground) {
+        if (activeReqOverviewWorkspaceIdRef.current === targetWorkspaceId) {
+          // If we already have last-known-good cached data for this workspace, keep it without showing red error
+          const hasLkg = Boolean(cached.data || overviewRef.current)
+          if (!hasLkg && !isBackground) {
             setOverviewError(
               err instanceof Error ? err.message : "Failed to load workspace overview.",
             )
           }
         }
       } finally {
-        isFetchingOverviewRef.current = false
+        if (inFlightOverviewRef.current?.controller === controller) {
+          inFlightOverviewRef.current = null
+        }
         if (
-          activeReqOverviewWorkspaceIdRef.current === activeWorkspaceId &&
+          activeReqOverviewWorkspaceIdRef.current === targetWorkspaceId &&
           !isBackground
         ) {
           setIsLoadingOverview(false)
@@ -177,10 +246,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [activeWorkspaceId],
   )
 
-  // Trigger overview fetch when active workspace changes
+  // Trigger overview fetch ONLY when active workspace ID changes
   useEffect(() => {
-    setOverview(null)
-    setOverviewError(null)
+    if (!activeWorkspaceId) {
+      setOverview(null)
+      setOverviewError(null)
+      setIsLoadingOverview(false)
+      return
+    }
+
+    const cached = getCachedWorkspaceOverview(activeWorkspaceId)
+    if (cached.data) {
+      setOverview(cached.data)
+      setOverviewError(null)
+      setIsLoadingOverview(false)
+    } else {
+      setOverview(null)
+      setOverviewError(null)
+      setIsLoadingOverview(true)
+    }
+
     fetchOverview(false)
 
     return () => {
@@ -188,24 +273,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         abortOverviewControllerRef.current.abort()
       }
     }
-  }, [fetchOverview])
+  }, [activeWorkspaceId, fetchOverview])
 
-  // Single global overview polling owner: 3.5s when active execution running, 15s when idle
+  const hasActiveExecution = Boolean(
+    (overview?.activeAgentExecution && !overview.activeAgentExecution.completedAt) ||
+    (overview?.activeExecution && !overview.activeExecution.completedAt),
+  )
+
+  // Only poll when an execution is genuinely active/running. No idle background polling.
   useEffect(() => {
-    if (!activeWorkspaceId) return
+    if (!activeWorkspaceId || !hasActiveExecution) {
+      return
+    }
 
-    const hasActiveExecution = Boolean(
-      (overview?.activeAgentExecution && !overview.activeAgentExecution.completedAt) ||
-      (overview?.activeExecution && !overview.activeExecution.completedAt),
-    )
-    const intervalMs = hasActiveExecution ? 3500 : 15000
-
+    const intervalMs = 3500
     const timer = setInterval(() => {
       fetchOverview(true)
     }, intervalMs)
 
     return () => clearInterval(timer)
-  }, [activeWorkspaceId, overview?.activeAgentExecution, overview?.activeExecution, fetchOverview])
+  }, [activeWorkspaceId, hasActiveExecution, fetchOverview])
 
   const selectWorkspace = useCallback(
     (id: string) => {

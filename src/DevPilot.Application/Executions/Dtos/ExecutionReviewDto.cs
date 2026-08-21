@@ -11,6 +11,27 @@ public sealed record ExecutionReviewFileDto(
     int? Additions = null,
     int? Deletions = null);
 
+public sealed record PredictedFileActionItemDto(
+    string FilePath,
+    string Action,
+    string EvidenceType,
+    bool IsUncertain);
+
+public sealed record ActualFileActionItemDto(
+    string FilePath,
+    string Action);
+
+public sealed record PredictedVsActualComparisonDto(
+    IReadOnlyList<PredictedFileActionItemDto> PredictedFiles,
+    IReadOnlyList<ActualFileActionItemDto> ActualFiles,
+    IReadOnlyList<string> MatchedFiles,
+    IReadOnlyList<string> UnexpectedFiles,
+    IReadOnlyList<string> MissingPredictedFiles,
+    IReadOnlyList<string> ExpectedChecks,
+    IReadOnlyList<string> ExecutedChecks,
+    bool AllExpectedChecksExecuted,
+    IReadOnlyList<string> DimensionObservations);
+
 public sealed record ExecutionReviewDto(
     Guid ExecutionId,
     Guid TaskId,
@@ -54,4 +75,5 @@ public sealed record ExecutionReviewDto(
     string? MergeBlockedReason = null,
     Guid? RepositoryWorkspaceId = null,
     string? RepositoryOwner = null,
-    string? RepositoryName = null);
+    string? RepositoryName = null,
+    PredictedVsActualComparisonDto? PredictedVsActual = null);

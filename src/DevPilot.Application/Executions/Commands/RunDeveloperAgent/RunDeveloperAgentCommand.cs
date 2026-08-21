@@ -159,8 +159,24 @@ public sealed class RunDeveloperAgentCommandHandler : IRunDeveloperAgentCommandH
             .Select(f => new ImpactedFileDetail(
                 FilePath: f.FilePath,
                 ChangeType: f.ChangeType.ToString(),
-                Reason: f.Reason))
+                Reason: f.Reason,
+                EvidenceType: f.EvidenceType,
+                IsUncertain: f.IsUncertain))
             .ToList() ?? new List<ImpactedFileDetail>();
+
+        var changeDimensions = analysis.StructuredResult?.Dimensions?
+            .Select(d => $"{d.Area}: {d.Summary}")
+            .Take(5)
+            .ToList();
+
+        var expectedChecks = analysis.StructuredResult?.ChangeBrief?.ExpectedChecks?
+            .Select(c => c.DisplayName)
+            .Take(5)
+            .ToList();
+
+        var criticalUnknowns = analysis.StructuredResult?.Unknowns?
+            .Take(3)
+            .ToList();
 
         var agentRequest = new DeveloperAgentRequest(
             TaskId: task.Id,
@@ -173,7 +189,10 @@ public sealed class RunDeveloperAgentCommandHandler : IRunDeveloperAgentCommandH
             ImpactedFilePaths: impactedFiles,
             WorkspacePath: execution.WorkspacePath,
             BranchName: execution.BranchName,
-            ImpactedFiles: impactedFileDetails);
+            ImpactedFiles: impactedFileDetails,
+            ChangeDimensions: changeDimensions,
+            ExpectedChecks: expectedChecks,
+            Unknowns: criticalUnknowns);
 
         _logger.LogInformation(
             "RunDeveloperAgent: invoking DeveloperAgent for execution {ExecutionId} (Task {TaskId}).",

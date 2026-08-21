@@ -1348,6 +1348,35 @@ public sealed class DeveloperAgent : IDeveloperAgent
         sb.AppendLine("=== Impact Analysis Summary ===");
         sb.AppendLine(request.ImpactAnalysisSummary);
         sb.AppendLine();
+        if (request.ChangeDimensions != null && request.ChangeDimensions.Count > 0)
+        {
+            sb.AppendLine("=== Change Dimensions ===");
+            foreach (var dim in request.ChangeDimensions)
+            {
+                sb.AppendLine($"- {dim}");
+            }
+            sb.AppendLine();
+        }
+        if (request.ImpactedFiles != null && request.ImpactedFiles.Count > 0)
+        {
+            sb.AppendLine("=== Predicted Impacted Files ===");
+            foreach (var f in request.ImpactedFiles)
+            {
+                var ev = !string.IsNullOrEmpty(f.EvidenceType) ? $", Evidence: {f.EvidenceType}" : "";
+                var unc = f.IsUncertain ? " [Uncertain]" : "";
+                sb.AppendLine($"- {f.FilePath} ({f.ChangeType ?? "Modify"}{ev}{unc})");
+            }
+            sb.AppendLine();
+        }
+        if (request.Unknowns != null && request.Unknowns.Count > 0)
+        {
+            sb.AppendLine("=== Unknowns / Boundaries ===");
+            foreach (var u in request.Unknowns)
+            {
+                sb.AppendLine($"- {u}");
+            }
+            sb.AppendLine();
+        }
         sb.AppendLine("=== Proposed Plan ===");
         sb.AppendLine(request.ProposedPlan);
         sb.AppendLine();
