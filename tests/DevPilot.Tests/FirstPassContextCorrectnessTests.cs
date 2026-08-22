@@ -409,4 +409,135 @@ public class TodoService : ITodoService
         // 3. Must be strictly bounded to prevent token explosion
         context.Length.Should().BeLessThanOrEqualTo(4000);
     }
+
+    [Fact]
+    public void ExistingTestFileModify_SystemPrompt_RequiresLocalizedSearchReplaceAndForbidsUnchangedTestReproduction()
+    {
+        var testEntry = new ManifestFileEntry("tests/DevPilot.Tests/TodoControllerTests.cs", FileEditAction.Modify, "Add delete completed tests", null);
+        var sysPrompt = DeveloperAgent.BuildSingleFileSystemPrompt(testEntry, useFullFileReplacement: false);
+
+        // 1. Explicitly requires localized SEARCH/REPLACE
+        sysPrompt.Should().Contain("existing test-file Modify");
+        sysPrompt.Should().Contain("compact 'searchReplaceEdits'");
+        sysPrompt.Should().Contain("searchReplaceEdits");
+
+        // 2. Explicitly forbids reproducing unchanged tests or full class
+        sysPrompt.Should().Contain("DO NOT reproduce unchanged test methods or the entire test class");
+        sysPrompt.Should().Contain("TEST MODIFY DISCIPLINE");
+        sysPrompt.Should().Contain("DO NOT recreate or duplicate existing fixtures, fields, or unchanged tests");
+
+        // 3. Forbids bare closing brace alone and requires unique 2-5 line anchor
+        sysPrompt.Should().Contain("never use a bare closing brace alone");
+        sysPrompt.Should().NotContain("e.g. the closing brace '}'");
+    }
+
+    [Fact]
+    public void ExistingTestFileModify_UserPrompt_SetsSurgicalTestPatchStrategy_AndPreventsFullClassRewrite()
+    {
+        var testEntry = new ManifestFileEntry("tests/DevPilot.Tests/TodoControllerTests.cs", FileEditAction.Modify, "Add delete completed tests", null);
+        var contextFiles = new Dictionary<string, string>
+        {
+            ["tests/DevPilot.Tests/TodoControllerTests.cs"] = "public class TodoControllerTests {\n    // 50 lines of existing tests\n}"
+        };
+
+        var request = new DeveloperAgentRequest(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "Delete completed",
+            "Desc",
+            null,
+            "Summary",
+            "Plan",
+            new[] { "tests/DevPilot.Tests/TodoControllerTests.cs" },
+            _workspacePath,
+            _branchName);
+
+        var userPrompt = DeveloperAgent.BuildSingleFileUserPrompt(
+            request,
+            testEntry,
+            contextFiles,
+            completedEdits: null,
+            new List<DiscoveredProjectNode>(),
+            lockedContracts: null,
+            referencePattern: null,
+            useFullFileReplacement: false,
+            virtualWorkspace: null);
+
+        // Strategy explicitly guides surgical insertion and forbids repeating unchanged tests
+        userPrompt.Should().Contain("Edit Strategy: surgical test patch");
+        userPrompt.Should().Contain("NEVER repeat existing unchanged tests, fixtures, or the full test class");
+
+        // Forbids bare closing brace alone and requires unique 2-5 line anchor
+        userPrompt.Should().Contain("never use a bare closing brace alone");
+        userPrompt.Should().NotContain("e.g. the end of an existing test or the class closing brace '}'");
+    }
+
+    [Fact]
+    public void ExistingTestFileModify_CompactPrompt_EmphasizesMinimalTestInsertion()
+    {
+        var testEntry = new ManifestFileEntry("tests/DevPilot.Tests/TodoControllerTests.cs", FileEditAction.Modify, "Add delete completed tests", null);
+        var sysPrompt = DeveloperAgent.BuildCompactSingleFileSystemPrompt(testEntry, useFullFileReplacement: false);
+        var userPrompt = DeveloperAgent.BuildCompactSingleFileUserPrompt(
+            new DeveloperAgentRequest(
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                "Delete completed",
+                "Desc",
+                null,
+                "Summary",
+                "Plan",
+                new[] { "tests/DevPilot.Tests/TodoControllerTests.cs" },
+                _workspacePath,
+                _branchName),
+            testEntry,
+            "public class TodoControllerTests { }",
+            lockedContracts: null,
+            useFullFileReplacement: false);
+
+        sysPrompt.Should().Contain("NEVER repeat existing tests or the test class");
+        sysPrompt.Should().Contain("never a bare closing brace alone");
+        userPrompt.Should().Contain("CRITICAL TEST MODIFY DISCIPLINE: Emit ONLY the minimal searchReplaceEdit inserting the new test method(s)");
+        userPrompt.Should().Contain("never a bare closing brace alone");
+    }
+
+    [Fact]
+    public void CreateTestFile_StillUsesFullContentBehavior()
+    {
+        var createTestEntry = new ManifestFileEntry("tests/DevPilot.Tests/NewControllerTests.cs", FileEditAction.Create, "Create new tests", null);
+        var sysPrompt = DeveloperAgent.BuildSingleFileSystemPrompt(createTestEntry, useFullFileReplacement: false);
+
+        sysPrompt.Should().Contain("For 'Create' actions, specify 'newContent' containing the complete, valid file content");
+        sysPrompt.Should().Contain("MINIMAL TESTS");
+    }
+
+    [Fact]
+    public void NonTestModify_UsesStandardSurgicalPatchStrategy()
+    {
+        var serviceEntry = new ManifestFileEntry("src/Services/TodoService.cs", FileEditAction.Modify, "Modify service", null);
+        var sysPrompt = DeveloperAgent.BuildSingleFileSystemPrompt(serviceEntry, useFullFileReplacement: false);
+        var userPrompt = DeveloperAgent.BuildSingleFileUserPrompt(
+            new DeveloperAgentRequest(
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                "Modify service",
+                "Desc",
+                null,
+                "Summary",
+                "Plan",
+                new[] { "src/Services/TodoService.cs" },
+                _workspacePath,
+                _branchName),
+            serviceEntry,
+            new Dictionary<string, string> { ["src/Services/TodoService.cs"] = "public class TodoService { }" },
+            completedEdits: null,
+            new List<DiscoveredProjectNode>(),
+            lockedContracts: null,
+            referencePattern: null,
+            useFullFileReplacement: false,
+            virtualWorkspace: null);
+
+        sysPrompt.Should().Contain("This is a large-file Modify. Return only compact 'searchReplaceEdits'");
+        sysPrompt.Should().NotContain("TEST MODIFY DISCIPLINE");
+        userPrompt.Should().Contain("Edit Strategy: surgical patch. Return only minimal searchReplaceEdits");
+    }
 }
