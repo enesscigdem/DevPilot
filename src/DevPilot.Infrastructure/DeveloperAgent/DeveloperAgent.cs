@@ -9,6 +9,8 @@ using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Domain.Constants;
 using DevPilot.Domain.Enums;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -2098,15 +2100,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     {
                         // For test targets: provide behavioral implementation details
                         // For ordinary files (<= 4000 chars), provide full resulting code
-                        // For large files (> 4000 chars), extract contracts with body bounded excerpt
+                        // For large files (> 4000 chars), provide public contract + bounded behavioral implementation excerpt
                         if (generatedContent.Length <= 4000)
                         {
                             relevant[path] = generatedContent;
                         }
                         else
                         {
-                            var contract = RoslynContractExtractor.ExtractPublicContracts(path, generatedContent);
-                            relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : generatedContent.Substring(0, 4000) + "\n// ... [truncated]";
+                            relevant[path] = ExtractBehavioralTestContext(path, generatedContent, spec);
                         }
                     }
                     else if (generatedContent.Length <= 3000)
@@ -2132,8 +2133,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                             }
                             else
                             {
-                                var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
-                                relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
+                                relevant[path] = ExtractBehavioralTestContext(path, spec.NewContent, spec);
                             }
                         }
                         else if (spec.NewContent.Length > 2000)
@@ -2148,9 +2148,16 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
                     else if (spec.Action == FileEditAction.Modify && !string.IsNullOrWhiteSpace(spec.NewContent))
                     {
-                        if (isTestTarget && spec.NewContent.Length <= 4000)
+                        if (isTestTarget)
                         {
-                            relevant[path] = spec.NewContent;
+                            if (spec.NewContent.Length <= 4000)
+                            {
+                                relevant[path] = spec.NewContent;
+                            }
+                            else
+                            {
+                                relevant[path] = ExtractBehavioralTestContext(path, spec.NewContent, spec);
+                            }
                         }
                         else
                         {
@@ -2168,6 +2175,74 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         return relevant;
+    }
+
+    public static string ExtractBehavioralTestContext(
+        string filePath,
+        string fullContent,
+        FileEditSpec? editSpec = null,
+        int maxTotalChars = 3500)
+    {
+        if (string.IsNullOrWhiteSpace(fullContent)) return string.Empty;
+        if (fullContent.Length <= maxTotalChars) return fullContent;
+
+        var sb = new System.Text.StringBuilder();
+        var contract = RoslynContractExtractor.ExtractPublicContracts(filePath, fullContent);
+        if (!string.IsNullOrWhiteSpace(contract))
+        {
+            sb.AppendLine("=== Authoritative Public Contract ===");
+            sb.AppendLine(contract);
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("=== Relevant Implementation Behavior ===");
+
+        // If editSpec has SearchReplaceEdits, include the modified regions containing behavioral logic
+        if (editSpec?.SearchReplaceEdits is { Count: > 0 })
+        {
+            foreach (var edit in editSpec.SearchReplaceEdits)
+            {
+                if (!string.IsNullOrWhiteSpace(edit.Replace))
+                {
+                    sb.AppendLine($"// Modified region in {Path.GetFileName(filePath)}:");
+                    sb.AppendLine(edit.Replace.Trim());
+                    sb.AppendLine();
+                }
+            }
+        }
+        else
+        {
+            // Extract method bodies deterministically using Roslyn syntax tree
+            try
+            {
+                var tree = CSharpSyntaxTree.ParseText(fullContent);
+                var root = tree.GetCompilationUnitRoot();
+                var methods = root.DescendantNodes().OfType<MethodDeclarationSyntax>()
+                    .Where(m => m.Body != null || m.ExpressionBody != null)
+                    .ToList();
+
+                int charsUsed = sb.Length;
+                foreach (var method in methods)
+                {
+                    var methodStr = method.ToFullString().Trim();
+                    if (charsUsed + methodStr.Length > maxTotalChars && charsUsed > 500)
+                    {
+                        sb.AppendLine("// ... [remaining method implementations omitted for brevity]");
+                        break;
+                    }
+                    sb.AppendLine(methodStr);
+                    sb.AppendLine();
+                    charsUsed += methodStr.Length;
+                }
+            }
+            catch
+            {
+                var boundedExcerpt = fullContent.Substring(0, Math.Min(fullContent.Length, 2500));
+                sb.AppendLine(boundedExcerpt);
+            }
+        }
+
+        return sb.ToString().Trim();
     }
 
     public static int GetSemanticLayerScore(string filePath)

@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Infrastructure.DeveloperAgent;
 using FluentAssertions;
@@ -327,5 +327,86 @@ public class TodoService : ITodoService
         });
 
         virtualWorkspace.Count.Should().Be(100);
+    }
+
+    [Fact]
+    public void TestFileGeneration_WithLargeProductionDependency_ReceivesBothContractAndBehavioralImplementation()
+    {
+        // Arrange: Test target testing a large service (>4000 characters)
+        var testEntry = new ManifestFileEntry(
+            "tests/DevPilot.Tests/LargeTodoServiceTests.cs",
+            FileEditAction.Modify,
+            "Add tests for bulk operation",
+            null);
+
+        // Build a realistic C# class exceeding 4,000 characters (approx. 5,000 characters)
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("namespace DevPilot.Services;");
+        sb.AppendLine("public class LargeTodoService : ILargeTodoService");
+        sb.AppendLine("{");
+        sb.AppendLine("    private readonly ITodoRepository _repository;");
+        sb.AppendLine("    public LargeTodoService(ITodoRepository repository) { _repository = repository; }");
+        sb.AppendLine();
+
+        // 10 filler methods to build up file size realistically
+        for (int i = 1; i <= 10; i++)
+        {
+            sb.AppendLine($"    public async Task<TodoItemDto> GetItemById{i}Async(Guid id, CancellationToken ct = default)");
+            sb.AppendLine("    {");
+            sb.AppendLine($"        if (id == Guid.Empty) throw new ArgumentException(\"Invalid id {i}\");");
+            sb.AppendLine($"        var item = await _repository.FindByIdAsync(id, ct);");
+            sb.AppendLine($"        if (item == null) throw new KeyNotFoundException(\"Item {i} not found\");");
+            sb.AppendLine($"        return new TodoItemDto(item.Id, item.Title, item.IsCompleted, item.CreatedAt);");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+        }
+
+        // The newly added/modified behavioral method
+        sb.AppendLine("    public async Task<int> ExecuteBulkOperationAsync(IReadOnlyList<Guid> itemIds, CancellationToken ct = default)");
+        sb.AppendLine("    {");
+        sb.AppendLine("        if (itemIds == null || itemIds.Count == 0) return 0;");
+        sb.AppendLine("        var items = await _repository.GetBatchAsync(itemIds, ct);");
+        sb.AppendLine("        if (items.Count == 0) return 0;");
+        sb.AppendLine("        await _repository.ProcessBatchAsync(items, ct);");
+        sb.AppendLine("        return items.Count;");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+
+        var largeServiceContent = sb.ToString();
+        largeServiceContent.Length.Should().BeGreaterThan(4000);
+
+        var virtualWorkspace = new Dictionary<string, string>
+        {
+            ["src/DevPilot.Application/LargeTodoService.cs"] = largeServiceContent
+        };
+
+        var completedEdits = new Dictionary<string, FileEditSpec>
+        {
+            ["src/DevPilot.Application/LargeTodoService.cs"] = new(
+                "src/DevPilot.Application/LargeTodoService.cs",
+                FileEditAction.Create,
+                largeServiceContent,
+                null)
+        };
+
+        // Act
+        var relevant = DeveloperAgent.GetRelevantGeneratedEdits(testEntry, completedEdits, virtualWorkspace);
+
+        // Assert
+        relevant.Should().ContainKey("src/DevPilot.Application/LargeTodoService.cs");
+        var context = relevant["src/DevPilot.Application/LargeTodoService.cs"];
+
+        // 1. Must contain the authoritative public contract / signatures
+        context.Should().Contain("=== Authoritative Public Contract ===");
+        context.Should().Contain("LargeTodoService");
+        context.Should().Contain("ExecuteBulkOperationAsync");
+
+        // 2. Must contain the bounded behavioral implementation body (not only empty signatures!)
+        context.Should().Contain("=== Relevant Implementation Behavior ===");
+        context.Should().Contain("if (id == Guid.Empty) throw new ArgumentException");
+        context.Should().Contain("if (item == null) throw new KeyNotFoundException");
+
+        // 3. Must be strictly bounded to prevent token explosion
+        context.Length.Should().BeLessThanOrEqualTo(4000);
     }
 }
