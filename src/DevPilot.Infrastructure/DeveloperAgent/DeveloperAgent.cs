@@ -1539,7 +1539,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             : useFullFileReplacement
                 ? "This is a small-file Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
-                    ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short exact unique anchor (e.g. the closing brace '}' or the end of the previous test) and include only the new/modified test code. Omit 'newContent'."
+                    ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'."
                     : "This is a large-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'.";
 
         var testGuidance = isTest
@@ -1578,7 +1578,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             : useFullFileReplacement
                 ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
-                    ? "Output was previously truncated because too much code was emitted. For this test file, return ONLY minimal 2-5 line 'searchReplaceEdits' inserting the new test method(s). NEVER repeat existing tests or the test class. Omit 'newContent'."
+                    ? "Output was previously truncated because too much code was emitted. For this test file, return ONLY minimal 2-5 line 'searchReplaceEdits' inserting the new test method(s) using a unique 2-5 line anchor (never a bare closing brace alone). NEVER repeat existing tests or the test class. Omit 'newContent'."
                     : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods. Omit 'newContent'.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
@@ -1603,7 +1603,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             : useFullFileReplacement
                 ? "Return the complete resulting small file in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
-                    ? "Return only compact 'searchReplaceEdits'. Copy each small search anchor (2-5 lines) verbatim from the current target and make it match once; omit 'newContent'. For test files, insert or update ONLY the specific test methods and do NOT reproduce unchanged tests or the test class."
+                    ? "Return only compact 'searchReplaceEdits'. Copy each small search anchor (2-5 lines) verbatim from the current target and make it match once; omit 'newContent'. For test files, insert or update ONLY the specific test methods using a unique 2-5 line anchor (never a bare closing brace alone) and do NOT reproduce unchanged tests or the test class."
                     : "Return only compact 'searchReplaceEdits'. Copy each small search anchor (2-5 lines) verbatim from the current target and make it match once; omit 'newContent'.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
@@ -1813,7 +1813,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             var editStrategy = useFullFileReplacement
                 ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
                 : isTest
-                    ? "Edit Strategy: surgical test patch. Add only the new or modified test method(s) using a concise search anchor (e.g. the end of an existing test or the class closing brace '}'). NEVER repeat existing unchanged tests, fixtures, or the full test class."
+                    ? "Edit Strategy: surgical test patch. Add only the new or modified test method(s) using a concise 2-5 line unique search anchor from the target file (such as the tail of the preceding test method with surrounding structural lines, or the target test signature; never use a bare closing brace alone). NEVER repeat existing unchanged tests, fixtures, or the full test class."
                     : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.";
 
             sb.AppendLine(editStrategy);
@@ -1931,7 +1931,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
             if (isTest && !useFullFileReplacement)
             {
-                sb.AppendLine("CRITICAL TEST MODIFY DISCIPLINE: Emit ONLY the minimal searchReplaceEdit inserting the new test method(s). Do NOT output unchanged tests or the full class.");
+                sb.AppendLine("CRITICAL TEST MODIFY DISCIPLINE: Emit ONLY the minimal searchReplaceEdit inserting the new test method(s) using a unique 2-5 line anchor from the target (never a bare closing brace alone). Do NOT output unchanged tests or the full class.");
                 sb.AppendLine();
             }
 

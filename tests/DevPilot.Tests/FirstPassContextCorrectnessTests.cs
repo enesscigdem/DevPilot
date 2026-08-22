@@ -425,6 +425,10 @@ public class TodoService : ITodoService
         sysPrompt.Should().Contain("DO NOT reproduce unchanged test methods or the entire test class");
         sysPrompt.Should().Contain("TEST MODIFY DISCIPLINE");
         sysPrompt.Should().Contain("DO NOT recreate or duplicate existing fixtures, fields, or unchanged tests");
+
+        // 3. Forbids bare closing brace alone and requires unique 2-5 line anchor
+        sysPrompt.Should().Contain("never use a bare closing brace alone");
+        sysPrompt.Should().NotContain("e.g. the closing brace '}'");
     }
 
     [Fact]
@@ -462,6 +466,10 @@ public class TodoService : ITodoService
         // Strategy explicitly guides surgical insertion and forbids repeating unchanged tests
         userPrompt.Should().Contain("Edit Strategy: surgical test patch");
         userPrompt.Should().Contain("NEVER repeat existing unchanged tests, fixtures, or the full test class");
+
+        // Forbids bare closing brace alone and requires unique 2-5 line anchor
+        userPrompt.Should().Contain("never use a bare closing brace alone");
+        userPrompt.Should().NotContain("e.g. the end of an existing test or the class closing brace '}'");
     }
 
     [Fact]
@@ -487,7 +495,9 @@ public class TodoService : ITodoService
             useFullFileReplacement: false);
 
         sysPrompt.Should().Contain("NEVER repeat existing tests or the test class");
+        sysPrompt.Should().Contain("never a bare closing brace alone");
         userPrompt.Should().Contain("CRITICAL TEST MODIFY DISCIPLINE: Emit ONLY the minimal searchReplaceEdit inserting the new test method(s)");
+        userPrompt.Should().Contain("never a bare closing brace alone");
     }
 
     [Fact]
