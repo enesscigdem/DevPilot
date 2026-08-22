@@ -780,6 +780,157 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
         _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
     }
 
+    [Fact]
+    public async Task CompileRepair_RoutesThroughEchoFreeTargetIdBoundedOperations_WithExactDiagnosticEvidence()
+    {
+        var relativePath = "TodoServiceTests.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+
+        var content = "using Xunit;\n\npublic class TodoServiceTests\n{\n    [Fact]\n    public void Test_1() => Assert.Equal(1, 2);\n}\n";
+        await File.WriteAllTextAsync(fullPath, content);
+
+        var repairRequest = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Repair Build failure for Todo Task (round 1)",
+            TaskDescription: "Fix the following authoritative repository check failure (repair round 1/3):\nTodoServiceTests.cs(6,32): error CS0103: The name 'Assert' does not exist in the current context",
+            AcceptanceCriteria: "Resolve the authoritative repository check failure in the focused files without weakening existing tests or checks.",
+            ImpactAnalysisSummary: "Repository check repair",
+            ProposedPlan: "Repair repository verification failure",
+            ImpactedFilePaths: new[] { relativePath },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName,
+            ImpactedFiles: new[] { new ImpactedFileDetail(relativePath, "Modify", "Fix repository verification failure") },
+            IsVerificationRepair: true);
+
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "TodoServiceTests.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "targetId": "T6",
+                  "content": "    public void Test_1() => Xunit.Assert.Equal(1, 1);"
+                }
+              ]
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest);
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+
+        var capturedReq = _fakeAiProvider.ReceivedRequests[0];
+        capturedReq.MaxTokens.Should().Be(2048, "focused repair starts with a bounded 2048 budget");
+        capturedReq.SystemPrompt.Should().Contain("targetId");
+        capturedReq.SystemPrompt.Should().NotContain("\"oldText\"");
+        capturedReq.SystemPrompt.Should().NotContain("\"anchor\"");
+        capturedReq.UserPrompt.Should().Contain("=== Verification Failure Evidence ===");
+        capturedReq.UserPrompt.Should().Contain("error CS0103");
+        capturedReq.UserPrompt.Should().Contain("[T1]");
+        capturedReq.UserPrompt.Should().Contain("[T6]");
+        capturedReq.UserPrompt.Should().NotContain("=== Reference Architecture Pattern");
+        capturedReq.UserPrompt.Should().NotContain("=== Plan Excerpt ===");
+
+        var updated = await File.ReadAllTextAsync(fullPath);
+        updated.Should().Contain("Xunit.Assert.Equal(1, 1);");
+    }
+
+    [Fact]
+    public async Task TestRepair_RoutesThroughEchoFreeTargetIdBoundedOperations_WithExactTestFailureEvidence()
+    {
+        var relativePath = "TodoServiceTests.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+
+        var content = "using Xunit;\n\npublic class TodoServiceTests\n{\n    [Fact]\n    public void Test_ThreadSafety() => Assert.True(false);\n}\n";
+        await File.WriteAllTextAsync(fullPath, content);
+
+        var repairRequest = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Repair test failures for Todo Task (round 1)",
+            TaskDescription: "Fix the authoritative failing test evidence (repair round 1/3):\nAssert.True() Failure: Expected True, but got False at TodoServiceTests.Test_ThreadSafety() in TodoServiceTests.cs:line 6",
+            AcceptanceCriteria: "Resolve the failing test without weakening existing test assertions.",
+            ImpactAnalysisSummary: "Test repair",
+            ProposedPlan: "Repair test failure",
+            ImpactedFilePaths: new[] { relativePath },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName,
+            ImpactedFiles: new[] { new ImpactedFileDetail(relativePath, "Modify", "Fix test failure") },
+            IsVerificationRepair: true);
+
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "TodoServiceTests.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "targetId": "T6",
+                  "content": "    public void Test_ThreadSafety() => Assert.True(true);"
+                }
+              ]
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest);
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+
+        var capturedReq = _fakeAiProvider.ReceivedRequests[0];
+        capturedReq.MaxTokens.Should().Be(2048);
+        capturedReq.SystemPrompt.Should().Contain("targetId");
+        capturedReq.SystemPrompt.Should().NotContain("\"oldText\"");
+        capturedReq.UserPrompt.Should().Contain("=== Verification Failure Evidence ===");
+        capturedReq.UserPrompt.Should().Contain("Assert.True() Failure");
+        capturedReq.UserPrompt.Should().Contain("[T6]");
+
+        var updated = await File.ReadAllTextAsync(fullPath);
+        updated.Should().Contain("Assert.True(true);");
+    }
+
+    [Fact]
+    public async Task FocusedRepair_DoesNotEscalateTo8192_OnOutputLimit()
+    {
+        var relativePath = "TodoServiceTests.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+
+        var content = "using Xunit;\n\npublic class TodoServiceTests\n{\n    [Fact]\n    public void Test_1() => Assert.True(false);\n}\n";
+        await File.WriteAllTextAsync(fullPath, content);
+
+        var repairRequest = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Repair test failures (round 1)",
+            TaskDescription: "Fix test failure",
+            AcceptanceCriteria: "Resolve test",
+            ImpactAnalysisSummary: "Test repair",
+            ProposedPlan: "Repair",
+            ImpactedFilePaths: new[] { relativePath },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName,
+            ImpactedFiles: new[] { new ImpactedFileDetail(relativePath, "Modify", "Fix") },
+            IsVerificationRepair: true);
+
+        // Model returns length limit exceeded
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            Provider = "Kimi",
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            Content = "{\"filePath\":\"TodoServiceTests.cs\",\"operations\":["
+        });
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest);
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("exhausted the configured output token limit");
+
+        // Exactly 1 call attempted, NO escalation to 8192
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");

@@ -572,7 +572,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 prepResult.WorkspacePath,
                 prepResult.BranchName,
                 repairFiles.Select(file => new ImpactedFileDetail(file, "Modify", "Fix repository verification failure")).ToList(),
-                actualModel);
+                actualModel,
+                IsVerificationRepair: true);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();
@@ -890,7 +891,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 prepResult.WorkspacePath,
                 prepResult.BranchName,
                 repairFiles.Select(file => new ImpactedFileDetail(file, "Modify", "Fix test failure")).ToList(),
-                actualModel);
+                actualModel,
+                IsVerificationRepair: true);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();

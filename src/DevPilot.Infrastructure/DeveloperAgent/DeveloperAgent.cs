@@ -132,10 +132,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return Math.Min(defaultValue, _maxOutputTokens);
     }
 
-    public int DetermineInitialBudget(string filePath, FileEditAction action, string? targetContent = null)
+    public int DetermineInitialBudget(string filePath, FileEditAction action, string? targetContent = null, bool isRepair = false)
     {
         if (action == FileEditAction.Modify)
         {
+            if (isRepair)
+            {
+                return Math.Min(Math.Min(_budgetModifyPatch, 2048), _maxOutputTokens);
+            }
+
             var isTest = ProjectGraphHelper.IsTestFileCandidate(filePath);
             if (targetContent != null && !isTest && WorktreeEditApplier.IsSmallTextFile(targetContent))
             {
@@ -147,6 +152,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
             // Bounded operations output is compact JSON (replace, insertBefore, insertAfter, delete),
             // so its normal budget fits within 2048-4096 tokens and never scales with file size.
             return Math.Min(Math.Min(_budgetModifyPatch, 4096), _maxOutputTokens);
+        }
+
+        if (isRepair)
+        {
+            return Math.Min(Math.Min(_budgetFallback, 2048), _maxOutputTokens);
         }
 
         var score = GetSemanticLayerScore(filePath);
@@ -616,7 +626,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             throw new InvalidOperationException($"Developer Agent exceeded maximum generation call limit ({_maxGenerationCalls}) at file '{fileEntry.FilePath}'.");
         }
 
-        int initialBudget = DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent);
+        int initialBudget = DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent, isRepair: request.IsVerificationRepairRequest);
         var referencePattern = fileEntry.Action == FileEditAction.Create
             ? RoslynPatternHelper.DiscoverNearestPattern(request.WorkspacePath, fileEntry.FilePath)
             : null;
@@ -661,11 +671,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "Create"
             : (useFullFileReplacement ? "FullFileReplacement" : "SurgicalPatch");
 
+        var callKind = request.IsVerificationRepairRequest ? "VerificationRepair" : "Generation";
         LogGenerationAudit(fileEntry.FilePath, fileEntry.Action.ToString(), callNumber, fileAiRequest, fileResponse, fileSw.Elapsed);
         await RecordProviderCallActivityAsync(
             request.ExecutionId,
             fileEntry.FilePath,
-            "Generation",
+            callKind,
             fileAiRequest,
             fileResponse,
             fileSw.Elapsed,
@@ -675,9 +686,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
             editStrategy: editStrategy).ConfigureAwait(false);
 
         // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
+        // Note: Focused verification repair is already diagnostic-scoped and must NOT escalate from 4096 to 8192.
         if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
             string.Equals(fileResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
         {
+            if (request.IsVerificationRepairRequest)
+            {
+                throw new InvalidOperationException($"Focused verification repair response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
+            }
+
             int compactBudget = DetermineCompactRetryBudget(initialBudget, targetContent, fileEntry, isRepair: false);
             if (compactBudget > initialBudget && callCounter.TryIncrement(out var escCallNumber))
             {
@@ -2089,6 +2106,37 @@ public sealed class DeveloperAgent : IDeveloperAgent
         bool useBoundedOperations = false,
         string? targetContentHash = null)
     {
+        if (request.IsVerificationRepairRequest)
+        {
+            var rsb = new System.Text.StringBuilder();
+            rsb.AppendLine($"Target File: {fileEntry.FilePath}");
+            rsb.AppendLine($"Action: {fileEntry.Action}");
+            if (!string.IsNullOrEmpty(targetContentHash))
+            {
+                rsb.AppendLine($"Expected File Hash: {targetContentHash}");
+            }
+            rsb.AppendLine();
+            rsb.AppendLine("=== Verification Failure Evidence ===");
+            rsb.AppendLine(request.TaskDescription);
+            if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+            {
+                rsb.AppendLine($"Correction Goal: {request.AcceptanceCriteria}");
+            }
+            rsb.AppendLine("=== End Evidence ===");
+            rsb.AppendLine();
+            rsb.AppendLine("Edit Strategy: echo-free bounded operations (replace, insertBefore, insertAfter, delete) with target IDs [T1, T2, ...].");
+            rsb.AppendLine("=== Current Content of Target File ===");
+            if (contextFiles.TryGetValue(fileEntry.FilePath, out var currentRepairContent))
+            {
+                var isTestRepair = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
+                var boundedContent = BuildBoundedTargetSourceWindow(currentRepairContent, applicabilityFailure: null, isTestFile: isTestRepair, purpose: fileEntry.Purpose);
+                var boundedContext = WorktreeEditApplier.BuildBoundedEditContext(fileEntry.FilePath, boundedContent);
+                rsb.AppendLine(boundedContext.FormattedContext);
+            }
+            rsb.AppendLine("=== End Current Content ===");
+            return rsb.ToString();
+        }
+
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
         sb.AppendLine($"Task Description: {request.TaskDescription}");
