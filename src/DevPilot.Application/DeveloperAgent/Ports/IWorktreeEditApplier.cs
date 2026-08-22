@@ -2,7 +2,7 @@ using DevPilot.Application.DeveloperAgent.Models;
 
 namespace DevPilot.Application.DeveloperAgent.Ports;
 
-public interface IWorktreeEditApplier
+public interface IWorktreeEditApplier : IBoundedEditApplier
 {
     /// <summary>
     /// Reads allowed context files from the workspace under strict path safety and size limits.

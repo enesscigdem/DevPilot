@@ -770,6 +770,650 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         return EditApplicabilityResult.Ok(finalContent, totalEdits);
     }
 
+    public BoundedEditResult ApplyOperationsToContent(
+        string originalContent,
+        IReadOnlyList<BoundedEditOperation>? operations,
+        string filePath,
+        BoundedEditLimits? limits = null)
+    {
+        return ValidateAndApplyBoundedOperations(originalContent, operations, filePath, limits);
+    }
+
+    public static BoundedEditResult ValidateAndApplyBoundedOperations(
+        string originalContent,
+        IReadOnlyList<BoundedEditOperation>? operations,
+        string filePath,
+        BoundedEditLimits? limits = null)
+    {
+        if (originalContent == null) throw new ArgumentNullException(nameof(originalContent));
+        if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("File path cannot be empty.", nameof(filePath));
+
+        limits ??= BoundedEditLimits.Default;
+
+        if (operations == null || operations.Count == 0)
+        {
+            return BoundedEditResult.Fail(
+                BoundedEditFailureReason.InvalidOperation,
+                $"Bounded edit action failed: operations list was empty for '{filePath}'.",
+                failedOperationIndex: 0,
+                totalOperations: 0);
+        }
+
+        int totalOperations = operations.Count;
+        if (totalOperations > limits.MaxOperationsPerFile)
+        {
+            return BoundedEditResult.Fail(
+                BoundedEditFailureReason.MaxOperationsExceeded,
+                $"Bounded edit action failed: operation count ({totalOperations}) exceeds maximum limit ({limits.MaxOperationsPerFile}) for '{filePath}'.",
+                failedOperationIndex: 0,
+                totalOperations: totalOperations);
+        }
+
+        long aggregateContentChars = 0;
+        foreach (var op in operations)
+        {
+            if (op != null)
+            {
+                var rep = op.ReplacementText;
+                if (rep != null)
+                {
+                    aggregateContentChars += rep.Length;
+                }
+            }
+        }
+
+        if (aggregateContentChars > limits.MaxAggregateContentChars)
+        {
+            return BoundedEditResult.Fail(
+                BoundedEditFailureReason.MaxContentSizeExceeded,
+                $"Bounded edit action failed: aggregate content size ({aggregateContentChars} chars) exceeds maximum limit ({limits.MaxAggregateContentChars} chars) for '{filePath}'.",
+                failedOperationIndex: 0,
+                totalOperations: totalOperations);
+        }
+
+        bool hadCrLf = originalContent.Contains("\r\n", StringComparison.Ordinal);
+        var evolvingContent = NormalizeLineEndings(originalContent);
+
+        for (int i = 0; i < totalOperations; i++)
+        {
+            var op = operations[i];
+            int opIndex = i + 1;
+
+            if (op == null)
+            {
+                return BoundedEditResult.Fail(
+                    BoundedEditFailureReason.InvalidOperation,
+                    $"Bounded edit operation at index {opIndex}/{totalOperations} for '{filePath}' is null.",
+                    failedOperationIndex: opIndex,
+                    totalOperations: totalOperations);
+            }
+
+            var targetText = op.TargetText;
+            var replacementText = op.ReplacementText;
+
+            switch (op.Type)
+            {
+                case BoundedEditOperationType.Replace:
+                    if (targetText == null)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"Replace operation at index {opIndex}/{totalOperations} for '{filePath}' has null target/old text.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type);
+                    }
+
+                    if (string.IsNullOrEmpty(targetText))
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"Replace operation at index {opIndex}/{totalOperations} for '{filePath}' has empty target/old text.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type);
+                    }
+
+                    if (replacementText == null)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"Replace operation at index {opIndex}/{totalOperations} for '{filePath}' has null replacement/new text.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText);
+                    }
+
+                    if (replacementText.Length > limits.MaxIndividualOperationChars)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.MaxContentSizeExceeded,
+                            $"Replace operation content length ({replacementText.Length} chars) exceeds individual operation limit ({limits.MaxIndividualOperationChars} chars) for '{filePath}'.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText);
+                    }
+
+                    var normalizedTarget = NormalizeLineEndings(targetText);
+                    var normalizedReplace = NormalizeLineEndings(replacementText);
+
+                    var matchCount = CountOccurrences(evolvingContent, normalizedTarget);
+                    if (matchCount == 0)
+                    {
+                        var preview = FormatSearchPreview(normalizedTarget);
+                        var surrounding = ExtractSurroundingContext(evolvingContent, normalizedTarget);
+                        var errorMsg = $"Missing target match for Replace in '{filePath}':\n" +
+                            $"- Operation: {opIndex}/{totalOperations}\n" +
+                            $"- Reason: target matched 0 times (zero matches)\n" +
+                            $"- Failed target preview: {preview}";
+
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.AnchorNotFound,
+                            errorMsg,
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText,
+                            failedReplacement: replacementText,
+                            matchCount: 0,
+                            surroundingContext: surrounding);
+                    }
+
+                    if (matchCount > 1)
+                    {
+                        var preview = FormatSearchPreview(normalizedTarget);
+                        var errorMsg = $"Ambiguous multiple target matches ({matchCount}) for Replace in '{filePath}':\n" +
+                            $"- Operation: {opIndex}/{totalOperations}\n" +
+                            $"- Reason: target matched {matchCount} times (multiple matches)\n" +
+                            $"- Failed target preview: {preview}";
+
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.AmbiguousAnchor,
+                            errorMsg,
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText,
+                            failedReplacement: replacementText,
+                            matchCount: matchCount);
+                    }
+
+                    evolvingContent = ReplaceFirstOccurrence(evolvingContent, normalizedTarget, normalizedReplace);
+                    break;
+
+                case BoundedEditOperationType.Delete:
+                    if (targetText == null)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"Delete operation at index {opIndex}/{totalOperations} for '{filePath}' has null target/old text.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type);
+                    }
+
+                    if (string.IsNullOrEmpty(targetText))
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"Delete operation at index {opIndex}/{totalOperations} for '{filePath}' has empty target/old text.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type);
+                    }
+
+                    var normalizedDeleteTarget = NormalizeLineEndings(targetText);
+                    var deleteMatchCount = CountOccurrences(evolvingContent, normalizedDeleteTarget);
+
+                    if (deleteMatchCount == 0)
+                    {
+                        var preview = FormatSearchPreview(normalizedDeleteTarget);
+                        var surrounding = ExtractSurroundingContext(evolvingContent, normalizedDeleteTarget);
+                        var errorMsg = $"Missing target match for Delete in '{filePath}':\n" +
+                            $"- Operation: {opIndex}/{totalOperations}\n" +
+                            $"- Reason: target matched 0 times (zero matches)\n" +
+                            $"- Failed target preview: {preview}";
+
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.AnchorNotFound,
+                            errorMsg,
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText,
+                            matchCount: 0,
+                            surroundingContext: surrounding);
+                    }
+
+                    if (deleteMatchCount > 1)
+                    {
+                        var preview = FormatSearchPreview(normalizedDeleteTarget);
+                        var errorMsg = $"Ambiguous multiple target matches ({deleteMatchCount}) for Delete in '{filePath}':\n" +
+                            $"- Operation: {opIndex}/{totalOperations}\n" +
+                            $"- Reason: target matched {deleteMatchCount} times (multiple matches)\n" +
+                            $"- Failed target preview: {preview}";
+
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.AmbiguousAnchor,
+                            errorMsg,
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText,
+                            matchCount: deleteMatchCount);
+                    }
+
+                    evolvingContent = ReplaceFirstOccurrence(evolvingContent, normalizedDeleteTarget, string.Empty);
+                    break;
+
+                case BoundedEditOperationType.InsertBefore:
+                    if (targetText == null)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"InsertBefore operation at index {opIndex}/{totalOperations} for '{filePath}' has null anchor.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type);
+                    }
+
+                    if (string.IsNullOrEmpty(targetText))
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"InsertBefore operation at index {opIndex}/{totalOperations} for '{filePath}' has empty anchor.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type);
+                    }
+
+                    if (replacementText == null)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"InsertBefore operation at index {opIndex}/{totalOperations} for '{filePath}' has null content.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText);
+                    }
+
+                    if (replacementText.Length > limits.MaxIndividualOperationChars)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.MaxContentSizeExceeded,
+                            $"InsertBefore content length ({replacementText.Length} chars) exceeds individual operation limit ({limits.MaxIndividualOperationChars} chars) for '{filePath}'.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText);
+                    }
+
+                    var normalizedInsertBeforeAnchor = NormalizeLineEndings(targetText);
+                    var normalizedInsertBeforeContent = NormalizeLineEndings(replacementText);
+
+                    var insertBeforeMatchCount = CountOccurrences(evolvingContent, normalizedInsertBeforeAnchor);
+                    if (insertBeforeMatchCount == 0)
+                    {
+                        var preview = FormatSearchPreview(normalizedInsertBeforeAnchor);
+                        var surrounding = ExtractSurroundingContext(evolvingContent, normalizedInsertBeforeAnchor);
+                        var errorMsg = $"Missing anchor match for InsertBefore in '{filePath}':\n" +
+                            $"- Operation: {opIndex}/{totalOperations}\n" +
+                            $"- Reason: anchor matched 0 times (zero matches)\n" +
+                            $"- Failed anchor preview: {preview}";
+
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.AnchorNotFound,
+                            errorMsg,
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText,
+                            failedReplacement: replacementText,
+                            matchCount: 0,
+                            surroundingContext: surrounding);
+                    }
+
+                    if (insertBeforeMatchCount > 1)
+                    {
+                        var preview = FormatSearchPreview(normalizedInsertBeforeAnchor);
+                        var errorMsg = $"Ambiguous multiple anchor matches ({insertBeforeMatchCount}) for InsertBefore in '{filePath}':\n" +
+                            $"- Operation: {opIndex}/{totalOperations}\n" +
+                            $"- Reason: anchor matched {insertBeforeMatchCount} times (multiple matches)\n" +
+                            $"- Failed anchor preview: {preview}";
+
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.AmbiguousAnchor,
+                            errorMsg,
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText,
+                            failedReplacement: replacementText,
+                            matchCount: insertBeforeMatchCount);
+                    }
+
+                    int beforeIdx = evolvingContent.IndexOf(normalizedInsertBeforeAnchor, StringComparison.Ordinal);
+                    evolvingContent = evolvingContent.Substring(0, beforeIdx) + normalizedInsertBeforeContent + evolvingContent.Substring(beforeIdx);
+                    break;
+
+                case BoundedEditOperationType.InsertAfter:
+                    if (targetText == null)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"InsertAfter operation at index {opIndex}/{totalOperations} for '{filePath}' has null anchor.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type);
+                    }
+
+                    if (string.IsNullOrEmpty(targetText))
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"InsertAfter operation at index {opIndex}/{totalOperations} for '{filePath}' has empty anchor.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type);
+                    }
+
+                    if (replacementText == null)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.InvalidOperation,
+                            $"InsertAfter operation at index {opIndex}/{totalOperations} for '{filePath}' has null content.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText);
+                    }
+
+                    if (replacementText.Length > limits.MaxIndividualOperationChars)
+                    {
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.MaxContentSizeExceeded,
+                            $"InsertAfter content length ({replacementText.Length} chars) exceeds individual operation limit ({limits.MaxIndividualOperationChars} chars) for '{filePath}'.",
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText);
+                    }
+
+                    var normalizedInsertAfterAnchor = NormalizeLineEndings(targetText);
+                    var normalizedInsertAfterContent = NormalizeLineEndings(replacementText);
+
+                    var insertAfterMatchCount = CountOccurrences(evolvingContent, normalizedInsertAfterAnchor);
+                    if (insertAfterMatchCount == 0)
+                    {
+                        var preview = FormatSearchPreview(normalizedInsertAfterAnchor);
+                        var surrounding = ExtractSurroundingContext(evolvingContent, normalizedInsertAfterAnchor);
+                        var errorMsg = $"Missing anchor match for InsertAfter in '{filePath}':\n" +
+                            $"- Operation: {opIndex}/{totalOperations}\n" +
+                            $"- Reason: anchor matched 0 times (zero matches)\n" +
+                            $"- Failed anchor preview: {preview}";
+
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.AnchorNotFound,
+                            errorMsg,
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText,
+                            failedReplacement: replacementText,
+                            matchCount: 0,
+                            surroundingContext: surrounding);
+                    }
+
+                    if (insertAfterMatchCount > 1)
+                    {
+                        var preview = FormatSearchPreview(normalizedInsertAfterAnchor);
+                        var errorMsg = $"Ambiguous multiple anchor matches ({insertAfterMatchCount}) for InsertAfter in '{filePath}':\n" +
+                            $"- Operation: {opIndex}/{totalOperations}\n" +
+                            $"- Reason: anchor matched {insertAfterMatchCount} times (multiple matches)\n" +
+                            $"- Failed anchor preview: {preview}";
+
+                        return BoundedEditResult.Fail(
+                            BoundedEditFailureReason.AmbiguousAnchor,
+                            errorMsg,
+                            failedOperationIndex: opIndex,
+                            totalOperations: totalOperations,
+                            failedOperationType: op.Type,
+                            failedAnchor: targetText,
+                            failedReplacement: replacementText,
+                            matchCount: insertAfterMatchCount);
+                    }
+
+                    int afterIdx = evolvingContent.IndexOf(normalizedInsertAfterAnchor, StringComparison.Ordinal);
+                    int insertionPoint = afterIdx + normalizedInsertAfterAnchor.Length;
+                    evolvingContent = evolvingContent.Substring(0, insertionPoint) + normalizedInsertAfterContent + evolvingContent.Substring(insertionPoint);
+                    break;
+
+                default:
+                    return BoundedEditResult.Fail(
+                        BoundedEditFailureReason.InvalidOperation,
+                        $"Unsupported operation type '{op.Type}' at index {opIndex}/{totalOperations} for '{filePath}'.",
+                        failedOperationIndex: opIndex,
+                        totalOperations: totalOperations,
+                        failedOperationType: op.Type);
+            }
+        }
+
+        var finalContent = hadCrLf
+            ? evolvingContent.Replace("\n", "\r\n", StringComparison.Ordinal)
+            : evolvingContent;
+
+        return BoundedEditResult.Ok(finalContent, totalOperations);
+    }
+
+    public async Task<BoundedEditPlanResult> ApplyBoundedEditsAsync(
+        string workspacePath,
+        string branchName,
+        BoundedEditPlan editPlan,
+        BoundedEditLimits? limits = null,
+        IReadOnlyList<string>? authorizedRelativePaths = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (editPlan == null || editPlan.Files == null || editPlan.Files.Count == 0)
+        {
+            return BoundedEditPlanResult.Fail(BoundedEditFailureReason.InvalidOperation, "Bounded edit plan is empty.");
+        }
+
+        limits ??= BoundedEditLimits.Default;
+
+        // 1. Verify Git workspace state & branch
+        try
+        {
+            await VerifyWorkspaceAndGitBranchAsync(workspacePath, branchName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return BoundedEditPlanResult.Fail(BoundedEditFailureReason.InvalidOperation, $"Workspace verification failed: {ex.Message}");
+        }
+
+        var initialCommitHash = await GetCurrentCommitHashAsync(workspacePath, cancellationToken).ConfigureAwait(false);
+
+        // 2. Authorization check if specified
+        HashSet<string>? authorizedSet = null;
+        if (authorizedRelativePaths != null)
+        {
+            authorizedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in authorizedRelativePaths)
+            {
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    try
+                    {
+                        var norm = NormalizeAndValidateRelativePath(path);
+                        authorizedSet.Add(norm);
+                    }
+                    catch
+                    {
+                        // Ignore unparseable authorized paths
+                    }
+                }
+            }
+        }
+
+        // 3. Pre-validate all files in-memory before writing
+        var preparedModifies = new List<(string ResolvedPath, string RelativePath, string NewContent, string OriginalContent, bool HasBom)>();
+        var modifiedRelativePaths = new List<string>();
+
+        foreach (var fileEdit in editPlan.Files)
+        {
+            if (string.IsNullOrWhiteSpace(fileEdit.FilePath))
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.InvalidOperation, "File edit spec contains an empty filePath.");
+            }
+
+            string resolvedPath;
+            string logicalRelative;
+            try
+            {
+                logicalRelative = NormalizeAndValidateRelativePath(fileEdit.FilePath);
+                resolvedPath = ValidateAndResolvePath(workspacePath, fileEdit.FilePath);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("sensitive configuration/credential file", StringComparison.OrdinalIgnoreCase))
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.UnauthorizedTarget, $"Access to sensitive configuration/credential file is rejected: '{fileEdit.FilePath}'.", fileEdit.FilePath);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("resolves outside", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("rejected", StringComparison.OrdinalIgnoreCase))
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.PathOutsideWorktree, $"Path safety violation for '{fileEdit.FilePath}': {ex.Message}", fileEdit.FilePath);
+            }
+            catch (Exception ex)
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.InvalidOperation, $"Path safety violation for '{fileEdit.FilePath}': {ex.Message}", fileEdit.FilePath);
+            }
+
+            if (authorizedSet != null && !authorizedSet.Contains(logicalRelative))
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.UnauthorizedTarget, $"Target file '{fileEdit.FilePath}' is not in the authorized modification target list.", fileEdit.FilePath);
+            }
+
+            if (!File.Exists(resolvedPath))
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.TargetNotFound, $"Target file does not exist at '{fileEdit.FilePath}'.", fileEdit.FilePath);
+            }
+
+            byte[] originalBytes;
+            try
+            {
+                originalBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.InvalidOperation, $"Failed to read target file '{fileEdit.FilePath}': {ex.Message}", fileEdit.FilePath);
+            }
+
+            if (IsBinaryContent(originalBytes))
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.BinaryFile, $"Target file '{fileEdit.FilePath}' is a binary file and cannot be modified.", fileEdit.FilePath);
+            }
+
+            var originalContent = DecodeUtf8Text(originalBytes, out var hasBom);
+
+            var expectedHash = fileEdit.EffectiveExpectedHash;
+            if (!string.IsNullOrEmpty(expectedHash))
+            {
+                var currentDiskHash = ComputeContentHash(originalContent);
+                if (!string.Equals(expectedHash, currentDiskHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return BoundedEditPlanResult.Fail(
+                        BoundedEditFailureReason.StaleSource,
+                        $"Target file '{fileEdit.FilePath}' has changed since edit generation (stale target snapshot hash mismatch). Expected: {expectedHash}, Actual: {currentDiskHash}",
+                        fileEdit.FilePath);
+                }
+            }
+
+            var opResult = ValidateAndApplyBoundedOperations(originalContent, fileEdit.Operations, fileEdit.FilePath, limits);
+            if (!opResult.Success)
+            {
+                return BoundedEditPlanResult.Fail(
+                    opResult.FailureReason,
+                    opResult.ErrorMessage!,
+                    fileEdit.FilePath,
+                    opResult);
+            }
+
+            preparedModifies.Add((resolvedPath, fileEdit.FilePath, opResult.ModifiedContent!, originalContent, hasBom));
+            modifiedRelativePaths.Add(fileEdit.FilePath);
+        }
+
+        // 4. Atomic disk application with rollback
+        var backupDir = Path.Combine(Path.GetTempPath(), "DevPilot_BoundedBackup_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(backupDir);
+
+        var modifiedDiskPaths = new List<(string ResolvedPath, string BackupPath)>();
+
+        try
+        {
+            foreach (var mod in preparedModifies)
+            {
+                var backupPath = Path.Combine(backupDir, Guid.NewGuid().ToString("N"));
+                File.Copy(mod.ResolvedPath, backupPath, overwrite: true);
+                modifiedDiskPaths.Add((mod.ResolvedPath, backupPath));
+            }
+
+            foreach (var mod in preparedModifies)
+            {
+                await File.WriteAllTextAsync(mod.ResolvedPath, mod.NewContent, mod.HasBom ? Utf8WithBom : Utf8WithoutBom, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error writing files during bounded edit application. Executing rollback.");
+
+            foreach (var (modPath, backupPath) in modifiedDiskPaths)
+            {
+                try
+                {
+                    if (File.Exists(backupPath))
+                    {
+                        File.Copy(backupPath, modPath, overwrite: true);
+                    }
+                }
+                catch (Exception rollbackEx)
+                {
+                    _logger.LogWarning(rollbackEx, "Failed to restore modified file '{Path}' from backup during rollback.", modPath);
+                }
+            }
+
+            CleanupDirectory(backupDir);
+
+            return BoundedEditPlanResult.Fail(
+                BoundedEditFailureReason.ApplyConflict,
+                $"File write failed and all changes were rolled back. Error: {ex.Message}");
+        }
+        finally
+        {
+            CleanupDirectory(backupDir);
+        }
+
+        // 5. Post-application Git verification
+        try
+        {
+            await VerifyWorkspaceAndGitBranchAsync(workspacePath, branchName, cancellationToken).ConfigureAwait(false);
+            var finalCommitHash = await GetCurrentCommitHashAsync(workspacePath, cancellationToken).ConfigureAwait(false);
+            if (initialCommitHash != finalCommitHash)
+            {
+                return BoundedEditPlanResult.Fail(BoundedEditFailureReason.InvalidOperation, "Git safety violation: Commit hash changed during bounded edit application.");
+            }
+        }
+        catch (Exception ex)
+        {
+            return BoundedEditPlanResult.Fail(BoundedEditFailureReason.InvalidOperation, $"Post-edit Git safety check failed: {ex.Message}");
+        }
+
+        return BoundedEditPlanResult.Ok(modifiedRelativePaths);
+    }
+
     public static (bool Success, string? ErrorMessage, string? ModifiedContent) TryApplySearchReplaceEdits(
         string originalContent,
         IReadOnlyList<SearchReplaceEdit>? edits,

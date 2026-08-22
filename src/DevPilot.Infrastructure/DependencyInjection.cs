@@ -115,6 +115,7 @@ public static class DependencyInjection
         services.AddScoped<IExecutionProcessor, GitWorkspaceExecutionProcessor>();
         services.AddScoped<IExecutionDispatcher, HangfireExecutionDispatcher>();
         services.AddScoped<IWorktreeEditApplier, WorktreeEditApplier>();
+        services.AddScoped<IBoundedEditApplier, WorktreeEditApplier>();
         services.AddScoped<IDeveloperAgent, DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent>();
         services.AddScoped<IProcessRunner, BoundedProcessRunner>();
         services.AddScoped<IRepositoryCheckRunner, RepositoryNativeCheckRunner>();
