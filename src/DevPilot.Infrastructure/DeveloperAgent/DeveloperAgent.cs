@@ -144,9 +144,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 return Math.Min(Math.Clamp(roundedBudget, 2048, 4096), _maxOutputTokens);
             }
 
-            // SEARCH/REPLACE output is expected to contain only the changed blocks,
-            // so its budget must not scale with the size or role of the target file.
-            return Math.Min(Math.Min(_budgetModifyPatch, 8192), _maxOutputTokens);
+            // Bounded operations output is compact JSON (replace, insertBefore, insertAfter, delete),
+            // so its normal budget fits within 2048-4096 tokens and never scales with file size.
+            return Math.Min(Math.Min(_budgetModifyPatch, 4096), _maxOutputTokens);
         }
 
         var score = GetSemanticLayerScore(filePath);
@@ -170,7 +170,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         if (fileEntry.Action == FileEditAction.Modify)
         {
-            // A Modify retry remains a compact edit response. It never needs a full-file/test-file
+            // A Modify retry remains a compact bounded edit response. It never needs a full-file/test-file
             // budget, and an applicability repair does not own an additional token retry.
             // HARD CEILING: Modify retry can NEVER request > 8192 tokens under any configuration.
             if (isRepair)
@@ -611,6 +611,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                                      targetContent != null &&
                                      !isTestFile &&
                                      WorktreeEditApplier.IsSmallTextFile(targetContent);
+        var useBoundedOperations = fileEntry.Action == FileEditAction.Modify && !useFullFileReplacement;
         var recoveryUsed = false;
 
         if (!callCounter.TryIncrement(out var callNumber))
@@ -621,9 +622,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         int initialBudget = DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent);
         var referencePattern = RoslynPatternHelper.DiscoverNearestPattern(request.WorkspacePath, fileEntry.FilePath);
 
-        var singleFileSystemPrompt = BuildSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
+        var singleFileSystemPrompt = BuildSingleFileSystemPrompt(fileEntry, useFullFileReplacement, useBoundedOperations);
         var singleFileUserPrompt = BuildSingleFileUserPrompt(
-            request, fileEntry, contextFiles, completedEdits, projectGraph, lockedContracts, referencePattern, useFullFileReplacement);
+            request, fileEntry, contextFiles, completedEdits, projectGraph, lockedContracts, referencePattern, useFullFileReplacement, useBoundedOperations, targetContentHash);
 
         var fileAiRequest = new AiRequest
         {
@@ -692,8 +693,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         cancellationToken).ConfigureAwait(false);
                     targetContent = currentTarget.Content;
                     targetContentHash = currentTarget.Hash;
-                    // Compact retry for Modify is ALWAYS surgical patch to guarantee minimal output size
                     useFullFileReplacement = false;
+                    useBoundedOperations = true;
                 }
 
                 await SafeRecordActivityAsync(
@@ -702,8 +703,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     cancellationToken).ConfigureAwait(false);
 
                 var compactUserPrompt = BuildCompactSingleFileUserPrompt(
-                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement);
-                var compactSystemPrompt = BuildCompactSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
+                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement, useBoundedOperations, targetContentHash);
+                var compactSystemPrompt = BuildCompactSingleFileSystemPrompt(fileEntry, useFullFileReplacement, useBoundedOperations);
 
                 var compactRequest = new AiRequest
                 {
@@ -797,16 +798,34 @@ public sealed class DeveloperAgent : IDeveloperAgent
         FileEditSpec? editSpec = null;
         string? validationError = null;
         EditApplicabilityResult? applicabilityFailure = null;
+        BoundedEditResult? boundedFailure = null;
         string? candidateCode = null;
 
         try
         {
             editSpec = ParseSingleFileEditSpec(fileResponse.Content, fileEntry);
-            ValidateSingleFileEditSpec(editSpec, fileEntry, targetContent, useFullFileReplacement);
+            ValidateSingleFileEditSpec(editSpec, fileEntry, targetContent, useFullFileReplacement, useBoundedOperations);
 
             if (fileEntry.Action == FileEditAction.Modify)
             {
-                if (editSpec.NewContent != null)
+                if (editSpec.Operations is { Count: > 0 })
+                {
+                    var boundedResult = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+                        targetContent!,
+                        editSpec.Operations,
+                        fileEntry.FilePath);
+
+                    if (!boundedResult.Success)
+                    {
+                        validationError = boundedResult.ErrorMessage;
+                        boundedFailure = boundedResult;
+                    }
+                    else
+                    {
+                        candidateCode = boundedResult.ModifiedContent;
+                    }
+                }
+                else if (editSpec.NewContent != null)
                 {
                     candidateCode = editSpec.NewContent;
                 }
@@ -843,10 +862,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
             if (recoveryUsed)
             {
                 throw new InvalidOperationException(
-                    $"File edit validation failed for '{fileEntry.FilePath}' after the bounded compact retry: {SanitizeFailureReason(validationError, applicabilityFailure)}");
+                    $"File edit validation failed for '{fileEntry.FilePath}' after the bounded compact retry: {SanitizeFailureReason(validationError, applicabilityFailure, boundedFailure)}");
             }
 
-            var sanitizedReason = SanitizeFailureReason(validationError, applicabilityFailure);
+            var sanitizedReason = SanitizeFailureReason(validationError, applicabilityFailure, boundedFailure);
             _logger.LogWarning(
                 "DeveloperAgent: edit response for file '{FilePath}' failed validation for task {TaskId}: {Error}. Attempting bounded repair.",
                 fileEntry.FilePath,
@@ -863,6 +882,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 throw new InvalidOperationException($"Developer Agent exceeded maximum generation call limit ({_maxGenerationCalls}) during repair of file '{fileEntry.FilePath}'.");
             }
 
+            recoveryUsed = true;
             callCounter.RecordApplicabilityRepair();
 
             if (fileEntry.Action == FileEditAction.Modify)
@@ -873,9 +893,22 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     cancellationToken).ConfigureAwait(false);
                 targetContent = currentTarget.Content;
                 targetContentHash = currentTarget.Hash;
-                useFullFileReplacement = WorktreeEditApplier.IsSmallTextFile(targetContent);
+                useFullFileReplacement = !isTestFile && WorktreeEditApplier.IsSmallTextFile(targetContent);
+                useBoundedOperations = !useFullFileReplacement;
 
-                if (editSpec?.SearchReplaceEdits is { Count: > 0 })
+                if (useBoundedOperations && editSpec?.Operations is { Count: > 0 })
+                {
+                    var currentBounded = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+                        targetContent,
+                        editSpec.Operations,
+                        fileEntry.FilePath);
+                    if (!currentBounded.Success)
+                    {
+                        boundedFailure = currentBounded;
+                        validationError = currentBounded.ErrorMessage;
+                    }
+                }
+                else if (editSpec?.SearchReplaceEdits is { Count: > 0 })
                 {
                     var currentApplicability = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
                         targetContent,
@@ -899,13 +932,16 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 relevantGenerated,
                 filteredLockedContracts,
                 applicabilityFailure,
-                useFullFileReplacement);
+                boundedFailure,
+                useFullFileReplacement,
+                useBoundedOperations,
+                targetContentHash);
 
             int repairBudget = DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent);
             var repairRequest = new AiRequest
             {
                 Model = request.Model ?? string.Empty,
-                SystemPrompt = BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement),
+                SystemPrompt = BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement, useBoundedOperations),
                 UserPrompt = repairUserPrompt,
                 MaxTokens = repairBudget
             };
@@ -940,7 +976,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 repairRequest,
                 repairResponse,
                 repairSw.Elapsed,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                targetSourceChars: targetContent?.Length ?? 0,
+                totalPromptChars: (repairRequest.SystemPrompt?.Length ?? 0) + (repairRequest.UserPrompt?.Length ?? 0),
+                editStrategy: editStrategy).ConfigureAwait(false);
 
             if (!repairResponse.IsSuccess)
             {
@@ -969,12 +1008,26 @@ public sealed class DeveloperAgent : IDeveloperAgent
             try
             {
                 var repEditSpec = ParseSingleFileEditSpec(repairResponse.Content, fileEntry);
-                ValidateSingleFileEditSpec(repEditSpec, fileEntry, targetContent, useFullFileReplacement);
+                ValidateSingleFileEditSpec(repEditSpec, fileEntry, targetContent, useFullFileReplacement, useBoundedOperations);
 
                 string? repCandidateCode = null;
                 if (fileEntry.Action == FileEditAction.Modify)
                 {
-                    if (repEditSpec.NewContent != null)
+                    if (repEditSpec.Operations is { Count: > 0 })
+                    {
+                        var repBoundedResult = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+                            targetContent!,
+                            repEditSpec.Operations,
+                            fileEntry.FilePath);
+
+                        if (!repBoundedResult.Success)
+                        {
+                            throw new InvalidOperationException(repBoundedResult.ErrorMessage);
+                        }
+
+                        repCandidateCode = repBoundedResult.ModifiedContent;
+                    }
+                    else if (repEditSpec.NewContent != null)
                     {
                         repCandidateCode = repEditSpec.NewContent;
                     }
@@ -1015,7 +1068,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         if (fileEntry.Action == FileEditAction.Modify)
         {
-            editSpec = editSpec with { TargetContentHash = targetContentHash };
+            editSpec = editSpec with { TargetContentHash = targetContentHash, ExpectedHash = targetContentHash };
         }
 
         // Lock Public Contract for downstream consumers if C# file
@@ -1430,8 +1483,24 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return sb.ToString();
     }
 
-    public static string SanitizeFailureReason(string? validationError, EditApplicabilityResult? applicabilityFailure)
+    public static string SanitizeFailureReason(
+        string? validationError,
+        EditApplicabilityResult? applicabilityFailure = null,
+        BoundedEditResult? boundedFailure = null)
     {
+        if (boundedFailure != null && !boundedFailure.Success)
+        {
+            return boundedFailure.FailureReason switch
+            {
+                BoundedEditFailureReason.AnchorNotFound => $"Anchor not found for {boundedFailure.FailedOperationType} (0 matches)",
+                BoundedEditFailureReason.AmbiguousAnchor => $"Anchor ambiguous for {boundedFailure.FailedOperationType} ({boundedFailure.MatchCount} matches)",
+                BoundedEditFailureReason.StaleSource => "Stale source hash mismatch",
+                BoundedEditFailureReason.MaxOperationsExceeded => "Max operations exceeded",
+                BoundedEditFailureReason.MaxContentSizeExceeded => "Max content size exceeded",
+                _ => boundedFailure.ErrorMessage ?? "Bounded edit validation failed"
+            };
+        }
+
         if (applicabilityFailure != null && !applicabilityFailure.Success)
         {
             if (applicabilityFailure.MatchCount == 0)
@@ -1637,23 +1706,75 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
     public static string BuildSingleFileSystemPrompt(
         ManifestFileEntry fileEntry,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        bool useBoundedOperations = false)
     {
-        var actionSpecificRule = fileEntry.Action == FileEditAction.Create
-            ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
-            : useFullFileReplacement
-                ? "This is a small-file Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
-                : "This is a large-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. NEVER repeat unchanged methods, unrelated tests, or full file content. Omit 'newContent'.";
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
+            var testGuidance = isTest
+                ? "\n6. MINIMAL TESTS: Implement only the focused test(s) required by the acceptance criteria and follow existing test conventions. DO NOT reproduce or copy unrelated existing test methods from the file."
+                : "";
 
-        var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
-        var testGuidance = isTest
-            ? "\n6. MINIMAL TESTS: Implement only the focused tests required by the acceptance criteria and follow existing test conventions. DO NOT reproduce or copy unrelated existing test methods from the file."
-            : "";
+            return $$"""
+                You are a software developer agent creating a new file: '{{fileEntry.FilePath}}'.
 
-        var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
-            ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
-            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"small exact unique anchor","replace":"replacement"}]}""";
+                CRITICAL RULES:
+                1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+                2. Do NOT attempt file deletion or rename.
+                3. Do NOT execute arbitrary shell commands.
+                4. For 'Create' actions, specify 'newContent' containing the complete, valid file content.
+                5. EXACT VALUES & LITERALS: When the task specifies exact literal strings, property values, status names, or field contents, you MUST output the exact literal values specified in the task requirements.{{testGuidance}}
 
+                Required JSON shape:
+                {"filePath":"{{fileEntry.FilePath}}","action":"Create","newContent":"complete resulting file"}
+                """;
+        }
+
+        if (useFullFileReplacement)
+        {
+            return $$"""
+                You are a software developer agent editing a small file: '{{fileEntry.FilePath}}'.
+
+                CRITICAL RULES:
+                1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+                2. Do NOT attempt file deletion or rename.
+                3. Do NOT execute arbitrary shell commands.
+                4. This is a small-file Modify. Return the complete resulting file once in 'newContent'; omit 'operations' and 'searchReplaceEdits'.
+                5. EXACT VALUES & LITERALS: When the task specifies exact literal strings, property values, status names, or field contents, you MUST output the exact literal values specified in the task requirements.
+
+                Required JSON shape:
+                {"filePath":"{{fileEntry.FilePath}}","action":"Modify","newContent":"complete resulting file"}
+                """;
+        }
+
+        if (useBoundedOperations)
+        {
+            var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
+            var testGuidance = isTest
+                ? "\n6. MINIMAL TESTS: Implement only the focused test(s) required by the acceptance criteria and follow existing test conventions. DO NOT reproduce or copy unrelated existing test methods from the file."
+                : "";
+
+            return $$"""
+                You are a software developer agent editing an existing file: '{{fileEntry.FilePath}}' (Action: Modify).
+
+                CRITICAL RULES:
+                1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+                2. Do NOT attempt file deletion or rename.
+                3. Do NOT execute arbitrary shell commands.
+                4. Output only bounded operations. Do NOT reproduce unchanged source, entire classes, or complete file content.
+                5. Use exact source text from the provided target context as anchors. Anchors must be unique. Prefer the smallest reliable anchor.
+                   - For insertion: "type": "insertBefore" or "insertAfter" with "anchor" and "content".
+                   - For localized modification: "type": "replace" with "oldText" and "newText".
+                   - For removal: "type": "delete" with "oldText".
+                6. Never invent an anchor that is not present in the supplied source. Do not use full-file replacement.{{testGuidance}}
+
+                Required JSON shape:
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact unique old text","newText":"new text"},{"type":"insertBefore","anchor":"exact unique anchor","content":"inserted content"},{"type":"insertAfter","anchor":"exact unique anchor","content":"inserted content"},{"type":"delete","oldText":"exact unique text to remove"}]}
+                """;
+        }
+
+        // Legacy search/replace fallback
         return $$"""
             You are a software developer agent implementing exact edits for a single target file: '{{fileEntry.FilePath}}' (Action: {{fileEntry.Action}}).
 
@@ -1661,54 +1782,93 @@ public sealed class DeveloperAgent : IDeveloperAgent
             1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
             2. Do NOT attempt file deletion or rename.
             3. Do NOT execute arbitrary shell commands.
-            4. {{actionSpecificRule}}
-            5. EXACT VALUES & LITERALS: When the task specifies exact literal strings, property values, status names, or field contents, you MUST output the exact literal values specified in the task requirements.{{testGuidance}}
+            4. This is a large-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. NEVER repeat unchanged methods, unrelated tests, or full file content. Omit 'newContent'.
+            5. EXACT VALUES & LITERALS: When the task specifies exact literal strings, property values, status names, or field contents, you MUST output the exact literal values specified in the task requirements.
 
             Required JSON shape:
-            {{schema}}
+            {"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"small exact unique anchor","replace":"replacement"}]}
             """;
     }
 
     public static string BuildCompactSingleFileSystemPrompt(
         ManifestFileEntry fileEntry,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        bool useBoundedOperations = false)
     {
-        var actionSpecificRule = fileEntry.Action == FileEditAction.Create
-            ? "Provide complete file content in 'newContent'."
-            : useFullFileReplacement
-                ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
-                : "Output was previously truncated because too much code was emitted. Return ONLY the smallest valid surgical 'searchReplaceEdits' targeting specific modified statements or methods. NEVER repeat unchanged methods, unrelated test cases, or full class content. Omit 'newContent'.";
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            return $$"""
+                Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+                Provide complete file content in 'newContent'.
+                {"filePath":"{{fileEntry.FilePath}}","action":"Create","newContent":"complete resulting file"}
+                """;
+        }
 
-        var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
-            ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
-            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact anchor","replace":"replacement"}]}""";
+        if (useFullFileReplacement)
+        {
+            return $$"""
+                Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+                Provide the complete resulting small file once in 'newContent'; omit 'operations' and 'searchReplaceEdits'.
+                {"filePath":"{{fileEntry.FilePath}}","action":"Modify","newContent":"complete resulting file"}
+                """;
+        }
+
+        if (useBoundedOperations)
+        {
+            return $$"""
+                Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+                Output was previously truncated because too much code was emitted. Return ONLY the smallest valid bounded 'operations' (replace, insertBefore, insertAfter, delete) with exact unique anchors from the provided target source. NEVER repeat unchanged methods, unrelated test cases, or full class content.
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact unique old text","newText":"new text"},{"type":"insertBefore","anchor":"exact unique anchor","content":"inserted content"}]}
+                """;
+        }
 
         return $$"""
             Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
-            {{actionSpecificRule}}
-            {{schema}}
+            Output was previously truncated because too much code was emitted. Return ONLY the smallest valid surgical 'searchReplaceEdits' targeting specific modified statements or methods. NEVER repeat unchanged methods, unrelated test cases, or full class content. Omit 'newContent'.
+            {"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact anchor","replace":"replacement"}]}
             """;
     }
 
     public static string BuildSingleFileRepairSystemPrompt(
         ManifestFileEntry fileEntry,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        bool useBoundedOperations = false)
     {
-        var actionSpecificRule = fileEntry.Action == FileEditAction.Create
-            ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
-            : useFullFileReplacement
-                ? "Return the complete resulting small file in 'newContent'; omit 'searchReplaceEdits'."
-                : "Return only compact 'searchReplaceEdits'. Copy each search anchor verbatim from the current target and make it match once; omit 'newContent'.";
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            return $$"""
+                You are a software developer agent repairing a malformed or invalid single-file edit response for '{{fileEntry.FilePath}}'.
+                Return ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+                For 'Create' actions, specify 'newContent' containing the complete, valid file content.
+                {"filePath":"{{fileEntry.FilePath}}","action":"Create","newContent":"complete resulting file"}
+                """;
+        }
 
-        var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
-            ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
-            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact anchor","replace":"replacement"}]}""";
+        if (useFullFileReplacement)
+        {
+            return $$"""
+                You are a software developer agent repairing a small-file edit response for '{{fileEntry.FilePath}}'.
+                Return ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+                Return the complete resulting small file in 'newContent'; omit 'operations' and 'searchReplaceEdits'.
+                {"filePath":"{{fileEntry.FilePath}}","action":"Modify","newContent":"complete resulting file"}
+                """;
+        }
+
+        if (useBoundedOperations)
+        {
+            return $$"""
+                You are a software developer agent repairing an invalid bounded edit response for '{{fileEntry.FilePath}}'.
+                Return ONLY the smallest valid JSON object with corrected bounded operations (replace, insertBefore, insertAfter, delete).
+                Copy each anchor or oldText verbatim from the current target and ensure it matches exactly once.
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact unique old text","newText":"new text"},{"type":"insertBefore","anchor":"exact unique anchor","content":"inserted content"}]}
+                """;
+        }
 
         return $$"""
             You are a software developer agent repairing a malformed or invalid single-file edit response for '{{fileEntry.FilePath}}'.
             Return ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
-            {{actionSpecificRule}}
-            {{schema}}
+            Return only compact 'searchReplaceEdits'. Copy each search anchor verbatim from the current target and make it match once; omit 'newContent'.
+            {"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact anchor","replace":"replacement"}]}
             """;
     }
 
@@ -1720,7 +1880,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
         IReadOnlyDictionary<string, string>? relevantGeneratedDependencies = null,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
         EditApplicabilityResult? applicabilityFailure = null,
-        bool useFullFileReplacement = false)
+        BoundedEditResult? boundedFailure = null,
+        bool useFullFileReplacement = false,
+        bool useBoundedOperations = false,
+        string? expectedHash = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Target File: {fileEntry.FilePath}");
@@ -1728,6 +1891,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (!string.IsNullOrWhiteSpace(fileEntry.Purpose))
         {
             sb.AppendLine($"Purpose: {fileEntry.Purpose}");
+        }
+        if (!string.IsNullOrEmpty(expectedHash))
+        {
+            sb.AppendLine($"Expected File Hash: {expectedHash}");
         }
         sb.AppendLine();
         sb.AppendLine("=== Validation / Applicability Failure ===");
@@ -1744,7 +1911,35 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
-        if (applicabilityFailure != null && !applicabilityFailure.Success)
+        if (boundedFailure != null && !boundedFailure.Success)
+        {
+            sb.AppendLine("=== Bounded Edit Failure Evidence ===");
+            sb.AppendLine($"- Failure Reason: {boundedFailure.FailureReason}");
+            sb.AppendLine($"- Failed Operation Index: {boundedFailure.FailedOperationIndex} of {boundedFailure.TotalOperations}");
+            if (boundedFailure.FailedOperationType != null)
+            {
+                sb.AppendLine($"- Failed Operation Type: {boundedFailure.FailedOperationType}");
+            }
+            if (!string.IsNullOrEmpty(boundedFailure.FailedAnchor))
+            {
+                sb.AppendLine("- Failed Anchor / Target Text:");
+                sb.AppendLine(boundedFailure.FailedAnchor);
+            }
+            if (boundedFailure.MatchCount >= 0)
+            {
+                var matchDesc = boundedFailure.MatchCount == 0
+                    ? "0 occurrences found in target file (not found)"
+                    : $"{boundedFailure.MatchCount} occurrences found in target file (must match exactly once)";
+                sb.AppendLine($"- Occurrences in Target Source: {matchDesc}");
+            }
+            if (!string.IsNullOrEmpty(boundedFailure.SurroundingContext))
+            {
+                sb.AppendLine("- Surrounding Target Source Context:");
+                sb.AppendLine(boundedFailure.SurroundingContext);
+            }
+            sb.AppendLine();
+        }
+        else if (applicabilityFailure != null && !applicabilityFailure.Success)
         {
             sb.AppendLine("=== Applicability Failure Evidence ===");
             sb.AppendLine($"- Failed Edit Block: {applicabilityFailure.FailedEditIndex} of {applicabilityFailure.TotalEdits}");
@@ -1767,9 +1962,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         if (fileEntry.Action == FileEditAction.Modify)
         {
-            sb.AppendLine(useFullFileReplacement
-                ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content once in newContent."
-                : "Edit Strategy: surgical patch. Use the smallest verbatim search anchors that each match once.");
+            if (useFullFileReplacement)
+            {
+                sb.AppendLine("Edit Strategy: hash-guarded small-file replacement. Return complete resulting content once in newContent.");
+            }
+            else if (useBoundedOperations)
+            {
+                sb.AppendLine("Edit Strategy: bounded operations (replace, insertBefore, insertAfter, delete). Return only minimal bounded operations with exact unique anchors.");
+            }
+            else
+            {
+                sb.AppendLine("Edit Strategy: surgical patch. Use the smallest verbatim search anchors that each match once.");
+            }
 
             if (!string.IsNullOrWhiteSpace(currentTargetContent))
             {
@@ -1806,25 +2010,24 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
-        var boundedPrevious = previousResponse ?? string.Empty;
-        if (boundedPrevious.Length > 1500)
+        if (useFullFileReplacement)
         {
-            boundedPrevious = boundedPrevious.Substring(0, 1500) + "\n...[truncated]";
+            sb.AppendLine($"Output ONLY the corrected small-file replacement JSON for '{fileEntry.FilePath}'.");
         }
-
-        sb.AppendLine("=== Invalid Previous Edit Response ===");
-        sb.AppendLine(boundedPrevious);
-        sb.AppendLine("=== End Invalid Previous Edit Response ===");
-        sb.AppendLine();
-        sb.AppendLine(useFullFileReplacement
-            ? $"Output ONLY the corrected small-file replacement JSON for '{fileEntry.FilePath}'."
-            : $"Output ONLY the corrected surgical edit JSON for '{fileEntry.FilePath}'.");
+        else if (useBoundedOperations)
+        {
+            sb.AppendLine($"Output ONLY the corrected bounded operations JSON for '{fileEntry.FilePath}'.");
+        }
+        else
+        {
+            sb.AppendLine($"Output ONLY the corrected surgical edit JSON for '{fileEntry.FilePath}'.");
+        }
 
         return sb.ToString();
     }
 
     public static string BuildSingleFileRepairUserPrompt(string parseError, string previousResponse, ManifestFileEntry fileEntry) =>
-        BuildSingleFileRepairUserPrompt(parseError, previousResponse, fileEntry, currentTargetContent: null, relevantGeneratedDependencies: null, lockedContracts: null, applicabilityFailure: null);
+        BuildSingleFileRepairUserPrompt(parseError, previousResponse, fileEntry, currentTargetContent: null, relevantGeneratedDependencies: null, lockedContracts: null, applicabilityFailure: null, boundedFailure: null);
 
     public static string BuildSingleFileUserPrompt(
         DeveloperAgentRequest request,
@@ -1834,7 +2037,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         IReadOnlyList<DiscoveredProjectNode> projectGraph,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
         string? referencePattern = null,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        bool useBoundedOperations = false,
+        string? targetContentHash = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
@@ -1849,6 +2054,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (!string.IsNullOrWhiteSpace(fileEntry.Purpose))
         {
             sb.AppendLine($"Purpose: {fileEntry.Purpose}");
+        }
+        if (!string.IsNullOrEmpty(targetContentHash))
+        {
+            sb.AppendLine($"Expected File Hash: {targetContentHash}");
         }
         sb.AppendLine();
 
@@ -1892,9 +2101,19 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         if (fileEntry.Action == FileEditAction.Modify)
         {
-            sb.AppendLine(useFullFileReplacement
-                ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
-                : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.");
+            if (useFullFileReplacement)
+            {
+                sb.AppendLine("Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent.");
+            }
+            else if (useBoundedOperations)
+            {
+                sb.AppendLine("Edit Strategy: bounded operations (replace, insertBefore, insertAfter, delete). Return only minimal bounded operations with exact unique anchors.");
+            }
+            else
+            {
+                sb.AppendLine("Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.");
+            }
+
             sb.AppendLine("=== Current Content of Target File ===");
             if (contextFiles.TryGetValue(fileEntry.FilePath, out var currentContent))
             {
@@ -1903,9 +2122,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
             else
             {
-                sb.AppendLine(useFullFileReplacement
-                    ? "// File exists in workspace; return its complete resulting content."
-                    : "// File exists in workspace; provide exact search/replace edits.");
+                if (useFullFileReplacement)
+                {
+                    sb.AppendLine("// File exists in workspace; return its complete resulting content.");
+                }
+                else if (useBoundedOperations)
+                {
+                    sb.AppendLine("// File exists in workspace; provide exact bounded operations.");
+                }
+                else
+                {
+                    sb.AppendLine("// File exists in workspace; provide exact search/replace edits.");
+                }
             }
             sb.AppendLine("=== End Current Content ===");
             sb.AppendLine();
@@ -1971,7 +2199,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         ManifestFileEntry fileEntry,
         string? targetContent,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        bool useBoundedOperations = false,
+        string? targetContentHash = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("=== COMPACT RETRY (TOKEN LIMIT DISCIPLINE) ===");
@@ -1986,13 +2216,27 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             sb.AppendLine($"Target Purpose: {fileEntry.Purpose}");
         }
+        if (!string.IsNullOrEmpty(targetContentHash))
+        {
+            sb.AppendLine($"Expected File Hash: {targetContentHash}");
+        }
         sb.AppendLine();
 
         if (fileEntry.Action == FileEditAction.Modify)
         {
-            sb.AppendLine(useFullFileReplacement
-                ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
-                : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.");
+            if (useFullFileReplacement)
+            {
+                sb.AppendLine("Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent.");
+            }
+            else if (useBoundedOperations)
+            {
+                sb.AppendLine("Edit Strategy: bounded operations (replace, insertBefore, insertAfter, delete). Return only minimal bounded operations with exact unique anchors.");
+            }
+            else
+            {
+                sb.AppendLine("Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.");
+            }
+
             sb.AppendLine("=== Current Content of Target File ===");
             if (!string.IsNullOrWhiteSpace(targetContent))
             {
@@ -2002,9 +2246,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
             else
             {
-                sb.AppendLine(useFullFileReplacement
-                    ? "// Target file exists in workspace; return its complete resulting content."
-                    : "// Target file exists in workspace; provide exact search/replace edits.");
+                if (useFullFileReplacement)
+                {
+                    sb.AppendLine("// Target file exists in workspace; return its complete resulting content.");
+                }
+                else if (useBoundedOperations)
+                {
+                    sb.AppendLine("// Target file exists in workspace; provide exact bounded operations.");
+                }
+                else
+                {
+                    sb.AppendLine("// Target file exists in workspace; provide exact search/replace edits.");
+                }
             }
             sb.AppendLine("=== End Current Content ===");
             sb.AppendLine();
@@ -2357,31 +2610,91 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
                 if (root.ValueKind == JsonValueKind.Object)
                 {
-                    // Check if it's wrapped in { "files": [ ... ] }
+                    // 1. Check if it's wrapped in { "files": [ ... ] }
                     if (root.TryGetProperty("files", out var filesEl) && filesEl.ValueKind == JsonValueKind.Array)
                     {
                         var files = JsonSerializer.Deserialize<IReadOnlyList<FileEditSpec>>(filesEl.GetRawText(), JsonOpts);
                         if (files != null && files.Count > 0)
                         {
                             var match = files.FirstOrDefault(f => string.Equals(f.FilePath, expectedEntry.FilePath, StringComparison.OrdinalIgnoreCase)) ?? files[0];
-                            return match;
+                            return match with
+                            {
+                                FilePath = string.IsNullOrWhiteSpace(match.FilePath) ? expectedEntry.FilePath : match.FilePath,
+                                Action = match.Action == default ? expectedEntry.Action : match.Action
+                            };
                         }
                     }
 
-                    // Direct FileEditSpec object
+                    // 2. Direct object with "operations"
+                    if (root.TryGetProperty("operations", out var opsEl) && opsEl.ValueKind == JsonValueKind.Array)
+                    {
+                        var ops = JsonSerializer.Deserialize<IReadOnlyList<BoundedEditOperation>>(opsEl.GetRawText(), JsonOpts);
+                        string? filePath = null;
+                        if (root.TryGetProperty("filePath", out var fpEl) && fpEl.ValueKind == JsonValueKind.String)
+                        {
+                            filePath = fpEl.GetString();
+                        }
+                        string? expHash = null;
+                        if (root.TryGetProperty("expectedHash", out var ehEl) && ehEl.ValueKind == JsonValueKind.String)
+                        {
+                            expHash = ehEl.GetString();
+                        }
+                        else if (root.TryGetProperty("expectedFileHash", out var efhEl) && efhEl.ValueKind == JsonValueKind.String)
+                        {
+                            expHash = efhEl.GetString();
+                        }
+                        else if (root.TryGetProperty("targetContentHash", out var tchEl) && tchEl.ValueKind == JsonValueKind.String)
+                        {
+                            expHash = tchEl.GetString();
+                        }
+
+                        return new FileEditSpec(
+                            FilePath: string.IsNullOrWhiteSpace(filePath) ? expectedEntry.FilePath : filePath,
+                            Action: expectedEntry.Action,
+                            Operations: ops,
+                            ExpectedHash: expHash,
+                            TargetContentHash: expHash);
+                    }
+
+                    // 3. Direct FileEditSpec object (with newContent, searchReplaceEdits, or operations)
                     if (root.TryGetProperty("filePath", out _) || root.TryGetProperty("action", out _) ||
-                        root.TryGetProperty("newContent", out _) || root.TryGetProperty("searchReplaceEdits", out _))
+                        root.TryGetProperty("newContent", out _) || root.TryGetProperty("searchReplaceEdits", out _) ||
+                        root.TryGetProperty("operations", out _))
                     {
                         var spec = JsonSerializer.Deserialize<FileEditSpec>(candidate, JsonOpts);
                         if (spec != null)
                         {
                             var normalizedPath = string.IsNullOrWhiteSpace(spec.FilePath) ? expectedEntry.FilePath : spec.FilePath;
-                            return new FileEditSpec(normalizedPath, spec.Action == default ? expectedEntry.Action : spec.Action, spec.NewContent, spec.SearchReplaceEdits);
+                            return new FileEditSpec(
+                                FilePath: normalizedPath,
+                                Action: spec.Action == default ? expectedEntry.Action : spec.Action,
+                                NewContent: spec.NewContent,
+                                SearchReplaceEdits: spec.SearchReplaceEdits,
+                                TargetContentHash: spec.TargetContentHash ?? spec.ExpectedHash,
+                                Operations: spec.Operations,
+                                ExpectedHash: spec.ExpectedHash ?? spec.TargetContentHash);
                         }
                     }
                 }
                 else if (root.ValueKind == JsonValueKind.Array)
                 {
+                    // Direct array of BoundedEditOperation: [ { "type": "replace", ... } ]
+                    try
+                    {
+                        var ops = JsonSerializer.Deserialize<IReadOnlyList<BoundedEditOperation>>(candidate, JsonOpts);
+                        if (ops != null && ops.Count > 0 && ops[0].Type != default)
+                        {
+                            return new FileEditSpec(
+                                FilePath: expectedEntry.FilePath,
+                                Action: expectedEntry.Action,
+                                Operations: ops);
+                        }
+                    }
+                    catch
+                    {
+                        // Fall back to FileEditSpec array
+                    }
+
                     var files = JsonSerializer.Deserialize<IReadOnlyList<FileEditSpec>>(candidate, JsonOpts);
                     if (files != null && files.Count > 0)
                     {
@@ -2402,7 +2715,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
         FileEditSpec spec,
         ManifestFileEntry expectedEntry,
         string? targetContent = null,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        bool useBoundedOperations = false)
     {
         if (spec == null)
         {
@@ -2421,8 +2735,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             if (useFullFileReplacement)
             {
                 var usesFullFileReplacement = spec.NewContent != null;
-                var hasSearchReplaceEdits = spec.SearchReplaceEdits is { Count: > 0 };
-                if (usesFullFileReplacement == hasSearchReplaceEdits)
+                var hasOtherEdits = (spec.SearchReplaceEdits is { Count: > 0 }) || (spec.Operations is { Count: > 0 });
+                if (usesFullFileReplacement == hasOtherEdits)
                 {
                     throw new FormatException($"Small-file Modify action for '{expectedEntry.FilePath}' requires exactly one edit representation.");
                 }
@@ -2433,9 +2747,32 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 }
             }
 
+            if (spec.Operations is { Count: > 0 })
+            {
+                if (spec.NewContent != null)
+                {
+                    throw new FormatException($"Bounded Modify action for '{expectedEntry.FilePath}' must use bounded 'operations', not full-file 'newContent'.");
+                }
+
+                if (spec.Operations.Count > 50)
+                {
+                    throw new FormatException($"Bounded Modify action for '{expectedEntry.FilePath}' contains an excessive number of operations ({spec.Operations.Count}).");
+                }
+
+                if (!string.IsNullOrEmpty(targetContent))
+                {
+                    var appResult = WorktreeEditApplier.ValidateAndApplyBoundedOperations(targetContent, spec.Operations, expectedEntry.FilePath);
+                    if (!appResult.Success)
+                    {
+                        throw new InvalidOperationException(appResult.ErrorMessage);
+                    }
+                }
+                return;
+            }
+
             if (spec.NewContent != null)
             {
-                throw new FormatException($"Large-file Modify action for '{expectedEntry.FilePath}' must use surgical 'searchReplaceEdits'.");
+                throw new FormatException($"Large-file Modify action for '{expectedEntry.FilePath}' must use surgical 'searchReplaceEdits' or bounded 'operations'.");
             }
 
             if (spec.SearchReplaceEdits == null || spec.SearchReplaceEdits.Count == 0)
@@ -2662,27 +2999,46 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
             else if (file.Action == FileEditAction.Modify)
             {
+                var usesBoundedOperations = file.Operations is { Count: > 0 };
                 var usesFullFileReplacement = file.NewContent != null;
                 var hasSearchReplaceEdits = file.SearchReplaceEdits is { Count: > 0 };
-                if (usesFullFileReplacement == hasSearchReplaceEdits)
+
+                int repCount = (usesBoundedOperations ? 1 : 0) + (usesFullFileReplacement ? 1 : 0) + (hasSearchReplaceEdits ? 1 : 0);
+                if (repCount != 1)
                 {
                     throw new FormatException($"Modify action for file '{file.FilePath}' requires exactly one edit representation.");
                 }
 
-                if (!hasSearchReplaceEdits)
+                if (usesBoundedOperations)
                 {
-                    continue;
-                }
-
-                foreach (var edit in file.SearchReplaceEdits!)
-                {
-                    if (string.IsNullOrEmpty(edit.Search))
+                    foreach (var op in file.Operations!)
                     {
-                        throw new FormatException($"Modify action for file '{file.FilePath}' contains an empty 'search' target.");
+                        if (op == null)
+                        {
+                            throw new FormatException($"Modify action for file '{file.FilePath}' contains null bounded operation.");
+                        }
+                        if (string.IsNullOrEmpty(op.TargetText))
+                        {
+                            throw new FormatException($"Modify action for file '{file.FilePath}' contains empty target/anchor text for operation '{op.Type}'.");
+                        }
+                        if (op.Type != BoundedEditOperationType.Delete && op.ReplacementText == null)
+                        {
+                            throw new FormatException($"Modify action for file '{file.FilePath}' contains null replacement/content text for operation '{op.Type}'.");
+                        }
                     }
-                    if (edit.Replace == null)
+                }
+                else if (hasSearchReplaceEdits)
+                {
+                    foreach (var edit in file.SearchReplaceEdits!)
                     {
-                        throw new FormatException($"Modify action for file '{file.FilePath}' contains null 'replace' content.");
+                        if (string.IsNullOrEmpty(edit.Search))
+                        {
+                            throw new FormatException($"Modify action for file '{file.FilePath}' contains an empty 'search' target.");
+                        }
+                        if (edit.Replace == null)
+                        {
+                            throw new FormatException($"Modify action for file '{file.FilePath}' contains null 'replace' content.");
+                        }
                     }
                 }
             }

@@ -961,7 +961,7 @@ public class DeveloperAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_LargeFileModify_KeepsSurgicalPatchContract()
+    public async Task GenerateAndApplyEditsAsync_LargeFileModify_UsesBoundedOperationsContract()
     {
         const string relativePath = "LargeService.cs";
         var targetFile = Path.Combine(_worktreeDir, relativePath);
@@ -972,9 +972,8 @@ public class DeveloperAgentTests : IDisposable
         _fakeAiProvider.ResponsesToReturn.Enqueue("""
             {
               "filePath": "LargeService.cs",
-              "action": "Modify",
-              "searchReplaceEdits": [
-                { "search": "public int Value => 1;", "replace": "public int Value => 2;" }
+              "operations": [
+                { "type": "replace", "oldText": "public int Value => 1;", "newText": "public int Value => 2;" }
               ]
             }
             """);
@@ -984,8 +983,8 @@ public class DeveloperAgentTests : IDisposable
         result.Success.Should().BeTrue(result.ErrorMessage);
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
         _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("large-file Modify");
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("searchReplaceEdits");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("bounded operations");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("operations");
         (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 2");
     }
 

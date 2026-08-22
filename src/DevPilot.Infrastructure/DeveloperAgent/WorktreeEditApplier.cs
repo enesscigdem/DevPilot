@@ -250,9 +250,12 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
 
                     var originalContent = DecodeUtf8Text(originalBytes, out var hasBom);
 
+                    var usesBoundedOperations = spec.Operations is { Count: > 0 };
                     var usesFullFileReplacement = spec.NewContent != null;
                     var hasSearchReplaceEdits = spec.SearchReplaceEdits is { Count: > 0 };
-                    if (usesFullFileReplacement == hasSearchReplaceEdits)
+
+                    int repCount = (usesBoundedOperations ? 1 : 0) + (usesFullFileReplacement ? 1 : 0) + (hasSearchReplaceEdits ? 1 : 0);
+                    if (repCount != 1)
                     {
                         return DeveloperAgentResult.Fail(
                             $"Strict Modify action failed: provide exactly one edit representation for '{spec.FilePath}'.");
@@ -270,10 +273,11 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                             $"Strict Modify action failed: small-file replacement requires a target content hash for '{spec.FilePath}'.");
                     }
 
-                    if (!string.IsNullOrEmpty(spec.TargetContentHash))
+                    var effectiveExpectedHash = spec.TargetContentHash ?? spec.ExpectedHash;
+                    if (!string.IsNullOrEmpty(effectiveExpectedHash))
                     {
                         var currentDiskHash = ComputeContentHash(originalContent);
-                        if (!string.Equals(spec.TargetContentHash, currentDiskHash, StringComparison.Ordinal))
+                        if (!string.Equals(effectiveExpectedHash, currentDiskHash, StringComparison.OrdinalIgnoreCase))
                         {
                             return DeveloperAgentResult.Fail(
                                 $"Target file '{spec.FilePath}' has changed since edit generation (stale target snapshot hash mismatch).");
@@ -281,7 +285,17 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                     }
 
                     string modifiedContent;
-                    if (usesFullFileReplacement)
+                    if (usesBoundedOperations)
+                    {
+                        var boundedResult = ValidateAndApplyBoundedOperations(originalContent, spec.Operations, spec.FilePath);
+                        if (!boundedResult.Success)
+                        {
+                            return DeveloperAgentResult.Fail(boundedResult.ErrorMessage!);
+                        }
+
+                        modifiedContent = boundedResult.ModifiedContent!;
+                    }
+                    else if (usesFullFileReplacement)
                     {
                         var normalizedReplacement = NormalizeLineEndings(spec.NewContent!);
                         modifiedContent = originalContent.Contains("\r\n", StringComparison.Ordinal)

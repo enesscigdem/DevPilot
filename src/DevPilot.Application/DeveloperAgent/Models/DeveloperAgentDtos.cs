@@ -64,7 +64,9 @@ public sealed record FileEditSpec(
     [property: JsonPropertyName("action")] FileEditAction Action,
     [property: JsonPropertyName("newContent")] string? NewContent = null,
     [property: JsonPropertyName("searchReplaceEdits")] IReadOnlyList<SearchReplaceEdit>? SearchReplaceEdits = null,
-    [property: JsonPropertyName("targetContentHash")] string? TargetContentHash = null);
+    [property: JsonPropertyName("targetContentHash")] string? TargetContentHash = null,
+    [property: JsonPropertyName("operations")] IReadOnlyList<BoundedEditOperation>? Operations = null,
+    [property: JsonPropertyName("expectedHash")] string? ExpectedHash = null);
 
 public sealed record SearchReplaceEdit(
     [property: JsonPropertyName("search")] string Search,
