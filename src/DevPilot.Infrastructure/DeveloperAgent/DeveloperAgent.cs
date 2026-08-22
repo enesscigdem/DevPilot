@@ -607,11 +607,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         var isTestFile = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
-        var useFullFileReplacement = fileEntry.Action == FileEditAction.Modify &&
-                                     targetContent != null &&
-                                     !isTestFile &&
-                                     WorktreeEditApplier.IsSmallTextFile(targetContent);
-        var useBoundedOperations = fileEntry.Action == FileEditAction.Modify && !useFullFileReplacement;
+        var useFullFileReplacement = false;
+        var useBoundedOperations = fileEntry.Action == FileEditAction.Modify;
         var recoveryUsed = false;
 
         if (!callCounter.TryIncrement(out var callNumber))
@@ -1163,10 +1160,17 @@ public sealed class DeveloperAgent : IDeveloperAgent
         string? opTypes = null;
         int? aggOldChars = null;
         int? aggNewChars = null;
+        int? targetCount = null;
+        int? selectedTargetCount = null;
+
+        var userPromptText = request.UserPrompt ?? string.Empty;
+        var tCount = userPromptText.Split("[T").Length - 1;
+        if (tCount > 0) targetCount = tCount;
 
         if (editSpec?.Operations is { Count: > 0 } ops)
         {
             opCount = ops.Count;
+            selectedTargetCount = ops.Count(o => !string.IsNullOrWhiteSpace(o.TargetId));
             opTypes = string.Join(",", ops.Select(o => o.Type.ToString().ToLowerInvariant()).Distinct());
             aggOldChars = ops.Sum(o => o.TargetText?.Length ?? 0);
             aggNewChars = ops.Sum(o => o.ReplacementText?.Length ?? 0);
@@ -1174,6 +1178,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         else if (editSpec?.SearchReplaceEdits is { Count: > 0 } sr)
         {
             opCount = sr.Count;
+            selectedTargetCount = sr.Count;
             opTypes = "replace";
             aggOldChars = sr.Sum(e => e.Search?.Length ?? 0);
             aggNewChars = sr.Sum(e => e.Replace?.Length ?? 0);
@@ -1193,6 +1198,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             TotalPromptChars: totalPromptChars,
             EditStrategy: editStrategy,
             RetryPromptChars: retryPromptChars,
+            TargetCount: targetCount,
+            SelectedTargetCount: selectedTargetCount,
             OperationCount: opCount,
             OperationTypes: opTypes,
             AggregateOldTextChars: aggOldChars,
@@ -1779,7 +1786,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
             var testGuidance = isTest
-                ? "\n7. MINIMAL TESTS: When adding a new test method, use 'insertBefore' or 'insertAfter' with an anchor identifying an adjacent test signature or class closing brace. 'content' must contain ONLY the new test method. NEVER reproduce existing test methods or class bodies."
+                ? "\n7. MINIMAL TESTS: When adding a new test method, use 'insertBefore' or 'insertAfter' with the targetId of the closing brace or adjacent test method. 'content' must contain ONLY the new test method. NEVER reproduce existing test methods."
                 : "";
 
             return $$"""
@@ -1789,20 +1796,17 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
                 2. Do NOT attempt file deletion or rename.
                 3. Do NOT execute arbitrary shell commands.
-                4. Output only bounded operations. Return only the smallest exact operations needed. NEVER reproduce unchanged class declarations, surrounding methods, or entire files.
+                4. Output only bounded operations. Use the deterministic target IDs [T1, T2, T3...] from the annotated target source below.
+                   DO NOT emit previous source code spans or verbatim anchors.
                 5. OPERATION CONVENTIONS:
-                   - For insertion ('insertBefore' / 'insertAfter'):
-                     * "anchor": The smallest unique line or token span (e.g. adjacent method signature or class closing brace).
-                     * "content": ONLY the newly added lines/code. Do NOT include the anchor in content.
-                   - For localized modification ('replace'):
-                     * "oldText": The smallest unique span being modified (e.g. 1-3 specific lines, a field declaration, or specific statements). Do NOT include surrounding unchanged code or the whole method/class.
-                     * "newText": ONLY the new replacement code for that 'oldText' span.
-                   - For removal ('delete'):
-                     * "oldText": The exact unique span to remove.
-                6. PREFER 1 OPERATION for contiguous changes. Use multiple operations only when changes are in separate, non-contiguous sections. Never use pseudo-full-file replacement disguised as Replace.{{testGuidance}}
+                   - For modification: "type": "replace", "targetId": "T5", "content": "replacement code"
+                   - For insertion before target: "type": "insertBefore", "targetId": "T10", "content": "inserted code"
+                   - For insertion after target: "type": "insertAfter", "targetId": "T8", "content": "inserted code"
+                   - For deletion: "type": "delete", "targetId": "T4" (omit 'content')
+                6. PREFER 1 OPERATION for contiguous changes. Use multiple operations only when changes are in separate, non-contiguous sections.{{testGuidance}}
 
                 Required JSON shape:
-                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact small unique old code","newText":"replacement code"}]}
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","targetId":"T5","content":"new code"}]}
                 """;
         }
 
@@ -1849,11 +1853,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             return $$"""
                 Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
-                Output was previously truncated because too much code was emitted. Return ONLY the smallest valid bounded 'operations' (replace, insertBefore, insertAfter, delete) with minimal anchors.
-                - Do NOT repeat unchanged methods, class declarations, or whole files.
-                - 'oldText' / 'anchor' must be the smallest exact unique 1-3 line span.
-                - 'newText' / 'content' must contain ONLY the modified or inserted lines.
-                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact small unique old code","newText":"replacement code"}]}
+                Output only bounded operations. Return ONLY 1-2 small bounded operations referencing target IDs (e.g. T1, T2) from the target source.
+                Do NOT emit 'oldText', 'anchor', or unchanged code.
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","targetId":"T5","content":"new code"}]}
                 """;
         }
 
@@ -1893,12 +1895,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             return $$"""
                 You are a software developer agent repairing an invalid bounded edit response for '{{fileEntry.FilePath}}'.
-                Return ONLY the smallest valid JSON object with corrected bounded operations (replace, insertBefore, insertAfter, delete).
-                Use the provided failure evidence to locate the exact small unique anchor from the current target file.
-                - For 'replace', specify minimal 'oldText' and minimal 'newText'.
-                - For 'insertBefore' / 'insertAfter', specify unique 'anchor' and ONLY newly added 'content'.
-                - Do NOT reproduce unchanged code or entire classes.
-                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact small unique old code","newText":"replacement code"}]}
+                Output only bounded operations. Return ONLY the smallest valid JSON object with corrected bounded operations referencing valid target IDs [T1, T2, ...] from the target source.
+                - For 'replace': "type": "replace", "targetId": "T5", "content": "new code"
+                - For 'insertBefore' / 'insertAfter': "type": "insertBefore", "targetId": "T10", "content": "inserted code"
+                - For 'delete': "type": "delete", "targetId": "T4"
+                - Do NOT emit 'oldText', 'anchor', or full file content.
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","targetId":"T5","content":"new code"}]}
                 """;
         }
 
@@ -2018,7 +2020,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
                 var boundedContent = BuildBoundedTargetSourceWindow(currentTargetContent, applicabilityFailure, isTest);
                 sb.AppendLine("=== Current Content of Target File ===");
-                sb.AppendLine(boundedContent);
+                if (useBoundedOperations)
+                {
+                    var boundedContext = WorktreeEditApplier.BuildBoundedEditContext(fileEntry.FilePath, boundedContent);
+                    sb.AppendLine(boundedContext.FormattedContext);
+                }
+                else
+                {
+                    sb.AppendLine(boundedContent);
+                }
                 sb.AppendLine("=== End Current Content ===");
                 sb.AppendLine();
             }
@@ -2156,7 +2166,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
             if (contextFiles.TryGetValue(fileEntry.FilePath, out var currentContent))
             {
                 var boundedContent = BuildBoundedTargetSourceWindow(currentContent, applicabilityFailure: null, isTestFile: isTest, purpose: fileEntry.Purpose);
-                sb.AppendLine(boundedContent);
+                if (useBoundedOperations)
+                {
+                    var boundedContext = WorktreeEditApplier.BuildBoundedEditContext(fileEntry.FilePath, boundedContent);
+                    sb.AppendLine(boundedContext.FormattedContext);
+                }
+                else
+                {
+                    sb.AppendLine(boundedContent);
+                }
             }
             else
             {
@@ -2166,7 +2184,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 }
                 else if (useBoundedOperations)
                 {
-                    sb.AppendLine("// File exists in workspace; provide exact bounded operations.");
+                    sb.AppendLine("// File exists in workspace; provide exact bounded operations with target IDs.");
                 }
                 else
                 {
@@ -2276,7 +2294,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
             else if (useBoundedOperations)
             {
-                sb.AppendLine("Edit Strategy: bounded operations (replace, insertBefore, insertAfter, delete). Return only minimal bounded operations with exact unique anchors.");
+                sb.AppendLine("Edit Strategy: echo-free bounded operations (replace, insertBefore, insertAfter, delete) with target IDs [T1, T2, ...].");
             }
             else
             {
@@ -2288,7 +2306,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
             {
                 var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
                 var boundedContent = BuildBoundedTargetSourceWindow(targetContent, applicabilityFailure: null, isTestFile: isTest, purpose: fileEntry.Purpose);
-                sb.AppendLine(boundedContent);
+                if (useBoundedOperations)
+                {
+                    var boundedContext = WorktreeEditApplier.BuildBoundedEditContext(fileEntry.FilePath, boundedContent);
+                    sb.AppendLine(boundedContext.FormattedContext);
+                }
+                else
+                {
+                    sb.AppendLine(boundedContent);
+                }
             }
             else
             {
@@ -2298,7 +2324,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 }
                 else if (useBoundedOperations)
                 {
-                    sb.AppendLine("// Target file exists in workspace; provide exact bounded operations.");
+                    sb.AppendLine("// Target file exists in workspace; provide exact bounded operations with target IDs.");
                 }
                 else
                 {
@@ -2819,6 +2845,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             if (spec.NewContent != null)
             {
+                if (useFullFileReplacement || (!string.IsNullOrEmpty(targetContent) && !ProjectGraphHelper.IsTestFileCandidate(expectedEntry.FilePath) && WorktreeEditApplier.IsSmallTextFile(targetContent)))
+                {
+                    return;
+                }
+
                 throw new FormatException($"Large-file Modify action for '{expectedEntry.FilePath}' must use surgical 'searchReplaceEdits' or bounded 'operations'.");
             }
 

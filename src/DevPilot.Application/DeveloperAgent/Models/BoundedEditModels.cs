@@ -11,11 +11,38 @@ public enum BoundedEditOperationType
     Delete
 }
 
+public sealed record BoundedTargetSpan(
+    string TargetId,
+    int StartOffset,
+    int Length,
+    string Text,
+    int StartLine,
+    int EndLine,
+    IReadOnlyList<BoundedEditOperationType>? AllowedOperations = null,
+    string? Label = null)
+{
+    [JsonIgnore]
+    public int EndOffset => StartOffset + Length;
+}
+
+public sealed record BoundedEditContext(
+    string FilePath,
+    string ExpectedHash,
+    IReadOnlyList<BoundedTargetSpan> Targets,
+    string FormattedContext);
+
 public sealed record BoundedEditOperation
 {
     [JsonPropertyName("type")]
     public BoundedEditOperationType Type { get; init; }
 
+    [JsonPropertyName("targetId")]
+    public string? TargetId { get; init; }
+
+    [JsonPropertyName("content")]
+    public string? Content { get; init; }
+
+    // Legacy fields kept for backward compatibility if needed
     [JsonPropertyName("oldText")]
     public string? OldText { get; init; }
 
@@ -25,25 +52,60 @@ public sealed record BoundedEditOperation
     [JsonPropertyName("anchor")]
     public string? Anchor { get; init; }
 
-    [JsonPropertyName("content")]
-    public string? Content { get; init; }
+    [JsonIgnore]
+    public string? TargetText => TargetId ?? OldText ?? Anchor;
 
     [JsonIgnore]
-    public string? TargetText => OldText ?? Anchor;
-
-    [JsonIgnore]
-    public string? ReplacementText => NewText ?? Content;
+    public string? ReplacementText => Content ?? NewText;
 
     public BoundedEditOperation() { }
 
-    public BoundedEditOperation(BoundedEditOperationType type, string? oldTextOrAnchor = null, string? newTextOrContent = null)
+    public BoundedEditOperation(BoundedEditOperationType type, string? targetIdOrOldText = null, string? contentOrNewText = null)
     {
         Type = type;
-        OldText = oldTextOrAnchor;
-        Anchor = oldTextOrAnchor;
-        NewText = newTextOrContent;
-        Content = newTextOrContent;
+        if (targetIdOrOldText != null && targetIdOrOldText.StartsWith("T", StringComparison.OrdinalIgnoreCase) && targetIdOrOldText.Length <= 6 && !targetIdOrOldText.Contains('\n') && !targetIdOrOldText.Contains(' '))
+        {
+            TargetId = targetIdOrOldText;
+        }
+        OldText = targetIdOrOldText;
+        Anchor = targetIdOrOldText;
+        NewText = contentOrNewText;
+        Content = contentOrNewText;
     }
+
+    public static BoundedEditOperation ReplaceTarget(string targetId, string content) =>
+        new()
+        {
+            Type = BoundedEditOperationType.Replace,
+            TargetId = targetId,
+            Content = content,
+            NewText = content
+        };
+
+    public static BoundedEditOperation InsertBeforeTarget(string targetId, string content) =>
+        new()
+        {
+            Type = BoundedEditOperationType.InsertBefore,
+            TargetId = targetId,
+            Content = content,
+            NewText = content
+        };
+
+    public static BoundedEditOperation InsertAfterTarget(string targetId, string content) =>
+        new()
+        {
+            Type = BoundedEditOperationType.InsertAfter,
+            TargetId = targetId,
+            Content = content,
+            NewText = content
+        };
+
+    public static BoundedEditOperation DeleteTarget(string targetId) =>
+        new()
+        {
+            Type = BoundedEditOperationType.Delete,
+            TargetId = targetId
+        };
 
     public static BoundedEditOperation Replace(string oldText, string newText) =>
         new()

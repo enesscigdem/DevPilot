@@ -793,6 +793,55 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         return ValidateAndApplyBoundedOperations(originalContent, operations, filePath, limits);
     }
 
+    public static BoundedEditContext BuildBoundedEditContext(
+        string filePath,
+        string originalContent,
+        string? expectedHash = null)
+    {
+        if (originalContent == null) throw new ArgumentNullException(nameof(originalContent));
+        if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("File path cannot be empty.", nameof(filePath));
+
+        expectedHash ??= ComputeContentHash(originalContent);
+        var normalized = NormalizeLineEndings(originalContent);
+        var lines = normalized.Split('\n');
+
+        var targets = new List<BoundedTargetSpan>(lines.Length);
+        var sbFormatted = new StringBuilder();
+
+        int currentOffset = 0;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var lineNum = i + 1;
+            var targetId = $"T{lineNum}";
+            var lineLength = line.Length;
+
+            var span = new BoundedTargetSpan(
+                TargetId: targetId,
+                StartOffset: currentOffset,
+                Length: lineLength,
+                Text: line,
+                StartLine: lineNum,
+                EndLine: lineNum,
+                AllowedOperations: new[]
+                {
+                    BoundedEditOperationType.Replace,
+                    BoundedEditOperationType.InsertBefore,
+                    BoundedEditOperationType.InsertAfter,
+                    BoundedEditOperationType.Delete
+                },
+                Label: $"L{lineNum}");
+
+            targets.Add(span);
+            sbFormatted.AppendLine($"[{targetId}] {line}");
+
+            // Account for line length + '\n'
+            currentOffset += lineLength + 1;
+        }
+
+        return new BoundedEditContext(filePath, expectedHash, targets, sbFormatted.ToString().TrimEnd());
+    }
+
     public static BoundedEditResult ValidateAndApplyBoundedOperations(
         string originalContent,
         IReadOnlyList<BoundedEditOperation>? operations,
@@ -847,6 +896,142 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
 
         bool hadCrLf = originalContent.Contains("\r\n", StringComparison.Ordinal);
         var evolvingContent = NormalizeLineEndings(originalContent);
+
+        // Pass 2B: Echo-Free TargetId Mode
+        bool isTargetIdMode = operations.Any(o => !string.IsNullOrWhiteSpace(o?.TargetId));
+        if (isTargetIdMode)
+        {
+            var context = BuildBoundedEditContext(filePath, originalContent);
+            var targetMap = context.Targets.ToDictionary(t => t.TargetId, StringComparer.OrdinalIgnoreCase);
+
+            var sliceEdits = new List<(int StartOffset, int Length, string Replacement, int OpIndex, BoundedEditOperation Op)>();
+
+            for (int i = 0; i < totalOperations; i++)
+            {
+                var op = operations[i];
+                int opIndex = i + 1;
+
+                if (op == null)
+                {
+                    return BoundedEditResult.Fail(
+                        BoundedEditFailureReason.InvalidOperation,
+                        $"Bounded edit operation at index {opIndex}/{totalOperations} for '{filePath}' is null.",
+                        failedOperationIndex: opIndex,
+                        totalOperations: totalOperations);
+                }
+
+                if (string.IsNullOrWhiteSpace(op.TargetId))
+                {
+                    return BoundedEditResult.Fail(
+                        BoundedEditFailureReason.InvalidOperation,
+                        $"Bounded edit operation at index {opIndex}/{totalOperations} for '{filePath}' is missing required 'targetId'.",
+                        failedOperationIndex: opIndex,
+                        totalOperations: totalOperations,
+                        failedOperationType: op.Type);
+                }
+
+                if (!targetMap.TryGetValue(op.TargetId, out var targetSpan))
+                {
+                    return BoundedEditResult.Fail(
+                        BoundedEditFailureReason.AnchorNotFound,
+                        $"Target ID '{op.TargetId}' was not found in target context for '{filePath}'.",
+                        failedOperationIndex: opIndex,
+                        totalOperations: totalOperations,
+                        failedOperationType: op.Type,
+                        failedAnchor: op.TargetId);
+                }
+
+                if (targetSpan.AllowedOperations != null && !targetSpan.AllowedOperations.Contains(op.Type))
+                {
+                    return BoundedEditResult.Fail(
+                        BoundedEditFailureReason.UnauthorizedTarget,
+                        $"Operation type '{op.Type}' is not authorized for target ID '{op.TargetId}' in '{filePath}'.",
+                        failedOperationIndex: opIndex,
+                        totalOperations: totalOperations,
+                        failedOperationType: op.Type,
+                        failedAnchor: op.TargetId);
+                }
+
+                var replacement = op.ReplacementText ?? string.Empty;
+                if (replacement.Length > limits.MaxIndividualOperationChars)
+                {
+                    return BoundedEditResult.Fail(
+                        BoundedEditFailureReason.MaxContentSizeExceeded,
+                        $"Operation content length ({replacement.Length} chars) exceeds individual operation limit ({limits.MaxIndividualOperationChars} chars) for '{filePath}'.",
+                        failedOperationIndex: opIndex,
+                        totalOperations: totalOperations,
+                        failedOperationType: op.Type,
+                        failedAnchor: op.TargetId);
+                }
+
+                var normalizedReplacement = NormalizeLineEndings(replacement);
+
+                switch (op.Type)
+                {
+                    case BoundedEditOperationType.Replace:
+                        sliceEdits.Add((targetSpan.StartOffset, targetSpan.Length, normalizedReplacement, opIndex, op));
+                        break;
+
+                    case BoundedEditOperationType.InsertBefore:
+                        sliceEdits.Add((targetSpan.StartOffset, 0, normalizedReplacement, opIndex, op));
+                        break;
+
+                    case BoundedEditOperationType.InsertAfter:
+                        int insertOffset = (targetSpan.EndOffset < evolvingContent.Length && evolvingContent[targetSpan.EndOffset] == '\n')
+                            ? targetSpan.EndOffset + 1
+                            : targetSpan.EndOffset;
+                        sliceEdits.Add((insertOffset, 0, normalizedReplacement, opIndex, op));
+                        break;
+
+                    case BoundedEditOperationType.Delete:
+                        int delLen = (targetSpan.EndOffset < evolvingContent.Length && evolvingContent[targetSpan.EndOffset] == '\n')
+                            ? targetSpan.Length + 1
+                            : targetSpan.Length;
+                        sliceEdits.Add((targetSpan.StartOffset, delLen, string.Empty, opIndex, op));
+                        break;
+                }
+            }
+
+            // Order edits by StartOffset descending so replacements at earlier offsets are unaffected by later insertions/deletions.
+            var sortedEdits = sliceEdits
+                .OrderByDescending(e => e.StartOffset)
+                .ThenByDescending(e => e.OpIndex)
+                .ToList();
+
+            // Verify no conflicting overlapping ranges among Replace / Delete operations
+            var nonInsertEdits = sortedEdits.Where(e => e.Length > 0).OrderBy(e => e.StartOffset).ToList();
+            for (int k = 0; k < nonInsertEdits.Count - 1; k++)
+            {
+                if (nonInsertEdits[k].StartOffset + nonInsertEdits[k].Length > nonInsertEdits[k + 1].StartOffset)
+                {
+                    return BoundedEditResult.Fail(
+                        BoundedEditFailureReason.ApplyConflict,
+                        $"Conflicting overlapping operations detected between target '{nonInsertEdits[k].Op.TargetId}' and '{nonInsertEdits[k + 1].Op.TargetId}' in '{filePath}'.",
+                        failedOperationIndex: nonInsertEdits[k + 1].OpIndex,
+                        totalOperations: totalOperations,
+                        failedOperationType: nonInsertEdits[k + 1].Op.Type,
+                        failedAnchor: nonInsertEdits[k + 1].Op.TargetId);
+                }
+            }
+
+            var workingBuffer = new StringBuilder(evolvingContent);
+            foreach (var edit in sortedEdits)
+            {
+                workingBuffer.Remove(edit.StartOffset, edit.Length);
+                if (!string.IsNullOrEmpty(edit.Replacement))
+                {
+                    workingBuffer.Insert(edit.StartOffset, edit.Replacement);
+                }
+            }
+
+            var modified = workingBuffer.ToString();
+            if (hadCrLf)
+            {
+                modified = modified.Replace("\r\n", "\n").Replace("\n", "\r\n");
+            }
+
+            return BoundedEditResult.Ok(modified, totalOperations);
+        }
 
         for (int i = 0; i < totalOperations; i++)
         {

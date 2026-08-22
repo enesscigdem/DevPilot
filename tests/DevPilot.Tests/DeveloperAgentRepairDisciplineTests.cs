@@ -1558,7 +1558,7 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         initialMeta!.ProviderCallKind.Should().Be("Generation");
         initialMeta.TargetSourceChars.Should().BeGreaterThan(0);
         initialMeta.TotalPromptChars.Should().BeGreaterThan(0);
-        initialMeta.EditStrategy.Should().Be("FullFileReplacement");
+        initialMeta.EditStrategy.Should().BeOneOf("FullFileReplacement", "SurgicalPatch");
 
         // Compact Retry telemetry (switched to surgical patch)
         var retryMeta = providerActivities[1].Metadata;

@@ -199,20 +199,25 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
     }
 
     [Fact]
-    public async Task Modify_TinyFile_PreservesSafeFullFileReplacement()
+    public async Task Modify_TinyFile_RoutesToEchoFreeTargetIdBoundedOperations()
     {
-        var relativePath = "Status.cs";
+        var relativePath = "ITodoService.cs";
         var fullPath = Path.Combine(_worktreeDir, relativePath);
 
-        // 5 lines < 25 lines
-        var content = "namespace Enums;\n\npublic enum Status\n{\n    Pending,\n    Completed\n}\n";
+        // 7 lines
+        var content = "namespace Services;\n\npublic interface ITodoService\n{\n    Task<TodoDto> GetByIdAsync(Guid id);\n    Task<TodoDto> CreateAsync(CreateTodoDto dto);\n}\n";
         await File.WriteAllTextAsync(fullPath, content);
 
         _fakeAiProvider.ResponsesToReturn.Enqueue("""
             {
-              "filePath": "Status.cs",
-              "action": "Modify",
-              "newContent": "namespace Enums;\n\npublic enum Status\n{\n    Pending,\n    InProgress,\n    Completed\n}\n"
+              "filePath": "ITodoService.cs",
+              "operations": [
+                {
+                  "type": "insertAfter",
+                  "targetId": "T6",
+                  "content": "    Task ClearAsync();\n"
+                }
+              ]
             }
             """);
 
@@ -222,11 +227,151 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
 
         var req = _fakeAiProvider.ReceivedRequests[0];
-        req.SystemPrompt.Should().Contain("small-file Modify");
-        req.SystemPrompt.Should().Contain("newContent");
+        req.SystemPrompt.Should().Contain("targetId");
+        req.SystemPrompt.Should().NotContain("oldText");
+        req.UserPrompt.Should().Contain("[T1]");
+        req.UserPrompt.Should().Contain("[T6]");
 
         var updated = await File.ReadAllTextAsync(fullPath);
-        updated.Should().Contain("InProgress");
+        updated.Should().Contain("Task ClearAsync();");
+    }
+
+    [Fact]
+    public async Task Schema_OrdinaryModify_ContainsNoOldTextOrAnchorEcho()
+    {
+        var relativePath = "TodoAuditLogger.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+
+        var content = "namespace Services;\n\npublic class TodoAuditLogger : ITodoAuditLogger\n{\n    private readonly List<string> _logs = new();\n    public void Log(string action, string details) { _logs.Add(action); }\n    public IReadOnlyList<string> GetLogs() => _logs;\n}\n";
+        await File.WriteAllTextAsync(fullPath, content);
+
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "TodoAuditLogger.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "targetId": "T5",
+                  "content": "    private readonly Lock _lock = new();\n    private readonly List<string> _logs = new();"
+                }
+              ]
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(CreateRequest(relativePath));
+        result.Success.Should().BeTrue(result.ErrorMessage);
+
+        var req = _fakeAiProvider.ReceivedRequests[0];
+        req.SystemPrompt.Should().NotContain("\"oldText\"");
+        req.SystemPrompt.Should().NotContain("\"anchor\"");
+        req.SystemPrompt.Should().Contain("\"targetId\"");
+        req.SystemPrompt.Should().Contain("\"content\"");
+    }
+
+    [Fact]
+    public void TargetResolution_AllFourOperationTypes_ApplyDeterministicallyWithTargetId()
+    {
+        var originalContent = "namespace Services;\n\npublic class CalculatorService\n{\n    public int ObsoleteMethod() => 0;\n    public int Add(int a, int b) => a - b;\n    public int Multiply(int a, int b) => a * b;\n}\n";
+
+        // T1: namespace Services;
+        // T2: empty line
+        // T3: public class CalculatorService
+        // T4: {
+        // T5:     public int ObsoleteMethod() => 0;
+        // T6:     public int Add(int a, int b) => a - b;
+        // T7:     public int Multiply(int a, int b) => a * b;
+        // T8: }
+
+        var ops = new[]
+        {
+            BoundedEditOperation.DeleteTarget("T5"),
+            BoundedEditOperation.ReplaceTarget("T6", "    public int Add(int a, int b) => a + b;"),
+            BoundedEditOperation.InsertBeforeTarget("T7", "    public int Subtract(int a, int b) => a - b;\n"),
+            BoundedEditOperation.InsertAfterTarget("T7", "\n    public double Divide(int a, int b) => (double)a / b;")
+        };
+
+        var result = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+            originalContent,
+            ops,
+            "CalculatorService.cs");
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        var modified = result.ModifiedContent!;
+        modified.Should().NotContain("ObsoleteMethod");
+        modified.Should().Contain("public int Add(int a, int b) => a + b;");
+        modified.Should().Contain("public int Subtract(int a, int b) => a - b;");
+        modified.Should().Contain("public double Divide(int a, int b) => (double)a / b;");
+    }
+
+    [Fact]
+    public void TargetResolution_InvalidTargetId_RejectsEntireEdit()
+    {
+        var originalContent = "public class Foo\n{\n    public int Value => 1;\n}\n";
+
+        var ops = new[]
+        {
+            BoundedEditOperation.ReplaceTarget("T999", "    public int Value => 2;")
+        };
+
+        var result = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+            originalContent,
+            ops,
+            "Foo.cs");
+
+        result.Success.Should().BeFalse();
+        result.FailureReason.Should().Be(BoundedEditFailureReason.AnchorNotFound);
+        result.ErrorMessage.Should().Contain("T999");
+    }
+
+    [Fact]
+    public void TargetResolution_UnauthorizedOperationType_Rejects()
+    {
+        var originalContent = "public class Foo\n{\n    public int Value => 1;\n}\n";
+
+        var context = WorktreeEditApplier.BuildBoundedEditContext("Foo.cs", originalContent);
+        context.Targets.Should().NotBeEmpty();
+
+        var op = new BoundedEditOperation
+        {
+            Type = (BoundedEditOperationType)999,
+            TargetId = "T3",
+            Content = "test"
+        };
+
+        var result = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+            originalContent,
+            new[] { op },
+            "Foo.cs");
+
+        result.Success.Should().BeFalse();
+        result.FailureReason.Should().Be(BoundedEditFailureReason.UnauthorizedTarget);
+    }
+
+    [Fact]
+    public void AtomicApply_MultipleTargetIdOperations_ApplyAtomicallyWithoutOffsetDrift()
+    {
+        var originalContent = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+
+        var ops = new[]
+        {
+            BoundedEditOperation.ReplaceTarget("T2", "modified line 2 (longer than before)"),
+            BoundedEditOperation.InsertAfterTarget("T3", "inserted line between 3 and 4\n"),
+            BoundedEditOperation.DeleteTarget("T5")
+        };
+
+        var result = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+            originalContent,
+            ops,
+            "file.txt");
+
+        result.Success.Should().BeTrue();
+        var lines = result.ModifiedContent!.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
+        lines.Should().Contain("modified line 2 (longer than before)");
+        lines.Should().Contain("inserted line between 3 and 4");
+        lines.Should().NotContain("line 5");
+        lines.Should().Contain("line 1");
+        lines.Should().Contain("line 3");
+        lines.Should().Contain("line 4");
     }
 
     [Fact]
@@ -519,7 +664,7 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
 
         // Assert forensic prompt bounds
         capturedReq.SystemPrompt.Should().Contain("bounded operations");
-        capturedReq.SystemPrompt.Should().Contain("NEVER reproduce unchanged class declarations, surrounding methods, or entire files");
+        capturedReq.SystemPrompt.Should().Contain("target IDs");
         capturedReq.SystemPrompt.Should().Contain("PREFER 1 OPERATION for contiguous changes");
         capturedReq.UserPrompt.Should().NotContain("=== Reference Architecture Pattern (MANDATORY) ==="); // Omitted for Modify
         capturedReq.UserPrompt.Should().Contain("=== Current Content of Target File ===");

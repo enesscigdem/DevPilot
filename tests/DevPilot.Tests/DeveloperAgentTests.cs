@@ -936,7 +936,7 @@ public class DeveloperAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_SmallFileModify_UsesHashGuardedFullReplacementInOneCall()
+    public async Task GenerateAndApplyEditsAsync_SmallFileModify_UsesEchoFreeTargetIdBoundedOperations()
     {
         const string relativePath = "SmallService.cs";
         var targetFile = Path.Combine(_worktreeDir, relativePath);
@@ -945,8 +945,13 @@ public class DeveloperAgentTests : IDisposable
         _fakeAiProvider.ResponsesToReturn.Enqueue("""
             {
               "filePath": "SmallService.cs",
-              "action": "Modify",
-              "newContent": "public class SmallService { public int Value => 2; }"
+              "operations": [
+                {
+                  "type": "replace",
+                  "targetId": "T1",
+                  "content": "public class SmallService { public int Value => 2; }"
+                }
+              ]
             }
             """);
 
@@ -955,8 +960,8 @@ public class DeveloperAgentTests : IDisposable
         result.Success.Should().BeTrue(result.ErrorMessage);
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
         _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048);
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("small-file Modify");
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("newContent");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("targetId");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("bounded operations");
         (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 2");
     }
 
