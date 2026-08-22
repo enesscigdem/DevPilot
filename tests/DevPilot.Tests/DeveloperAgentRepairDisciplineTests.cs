@@ -172,7 +172,7 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
     }
 
     [Fact]
-    public void RepairPrompt_FiltersUnrelatedGeneratedDependencies_AndExtractsContractsForTests()
+    public void RepairPrompt_FiltersUnrelatedGeneratedDependencies_AndProvidesBehavioralContextForTests()
     {
         var entry = new ManifestFileEntry("NetCaseStudy.Tests/Api/ProductsApiTests.cs", FileEditAction.Modify, "Add low-stock endpoint tests", null);
 
@@ -192,13 +192,14 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
 
         var relevant = DeveloperAgent.GetRelevantGeneratedEdits(entry, completedEdits);
 
-        // Should extract public contracts rather than dumping full implementation bodies
+        // Provides relevant generated production dependencies to test targets
         relevant.Should().ContainKey("src/NetCaseStudy.Application/Dtos/LowStockProductDto.cs");
         relevant["src/NetCaseStudy.Application/Dtos/LowStockProductDto.cs"].Should().Contain("LowStockProductDto");
 
         relevant.Should().ContainKey("src/NetCaseStudy.Application/Handlers/GetLowStockProductsQueryHandler.cs");
-        // For test targets, contracts are extracted without implementation details
-        relevant["src/NetCaseStudy.Application/Handlers/GetLowStockProductsQueryHandler.cs"].Should().NotContain("return new List<LowStockProductDto>();");
+        // For test targets, reasonably-sized production dependencies include behavioral details needed for assertions
+        relevant["src/NetCaseStudy.Application/Handlers/GetLowStockProductsQueryHandler.cs"].Should().Contain("GetLowStockProductsQueryHandler");
+        relevant["src/NetCaseStudy.Application/Handlers/GetLowStockProductsQueryHandler.cs"].Should().Contain("return new List<LowStockProductDto>();");
     }
 
     [Fact]

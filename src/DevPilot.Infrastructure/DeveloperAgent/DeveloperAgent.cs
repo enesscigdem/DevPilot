@@ -268,6 +268,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         // 4. Phase 2 — Generate File Edits with Dependency-Ready DAG Scheduler
         var collectedEdits = new ConcurrentDictionary<string, FileEditSpec>(StringComparer.OrdinalIgnoreCase);
+        var virtualWorkspace = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var lockedContracts = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var capturedModels = new ConcurrentBag<string>();
         var callCounter = new ConcurrencyCallCounter(_maxGenerationCalls);
@@ -318,6 +319,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 request,
                 allContextFiles,
                 collectedEdits,
+                virtualWorkspace,
                 lockedContracts,
                 projectGraph,
                 callCounter,
@@ -404,6 +406,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         DeveloperAgentRequest request,
         IReadOnlyDictionary<string, string> contextFiles,
         ConcurrentDictionary<string, FileEditSpec> collectedEdits,
+        ConcurrentDictionary<string, string> virtualWorkspace,
         ConcurrentDictionary<string, string> lockedContracts,
         IReadOnlyList<DiscoveredProjectNode> projectGraph,
         ConcurrencyCallCounter callCounter,
@@ -491,6 +494,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                             request,
                             contextFiles,
                             collectedEdits,
+                            virtualWorkspace,
                             lockedContracts,
                             projectGraph,
                             callCounter,
@@ -561,6 +565,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         DeveloperAgentRequest request,
         IReadOnlyDictionary<string, string> contextFiles,
         IReadOnlyDictionary<string, FileEditSpec> completedEdits,
+        ConcurrentDictionary<string, string> virtualWorkspace,
         ConcurrentDictionary<string, string> lockedContracts,
         IReadOnlyList<DiscoveredProjectNode> projectGraph,
         ConcurrencyCallCounter callCounter,
@@ -619,7 +624,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var singleFileSystemPrompt = BuildSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
         var singleFileUserPrompt = BuildSingleFileUserPrompt(
-            request, fileEntry, contextFiles, completedEdits, projectGraph, lockedContracts, referencePattern, useFullFileReplacement);
+            request, fileEntry, contextFiles, completedEdits, projectGraph, lockedContracts, referencePattern, useFullFileReplacement, virtualWorkspace);
 
         var fileAiRequest = new AiRequest
         {
@@ -857,7 +862,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 }
             }
 
-            var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits);
+            var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace);
             var filteredLockedContracts = FilterRelevantContracts(fileEntry, lockedContracts, targetContent, request);
             var repairUserPrompt = BuildSingleFileRepairUserPrompt(
                 validationError ?? "Generated edit validation failed.",
@@ -984,6 +989,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (fileEntry.Action == FileEditAction.Modify)
         {
             editSpec = editSpec with { TargetContentHash = targetContentHash };
+        }
+
+        // Store authoritative synthesized resulting content into the virtual workspace overlay
+        if (!string.IsNullOrWhiteSpace(candidateCode))
+        {
+            virtualWorkspace[fileEntry.FilePath] = candidateCode;
         }
 
         // Lock Public Contract for downstream consumers if C# file
@@ -1714,7 +1725,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
         IReadOnlyList<DiscoveredProjectNode> projectGraph,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
         string? referencePattern = null,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
@@ -1753,10 +1765,21 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         if (!string.IsNullOrWhiteSpace(referencePattern))
         {
-            sb.AppendLine("=== Reference Architecture Pattern (MANDATORY) ===");
-            sb.AppendLine("Follow the structure and conventions of this existing codebase pattern:");
-            sb.AppendLine(referencePattern);
-            sb.AppendLine();
+            // Inject reference pattern ONLY for Create / new-file targets or empty files.
+            // Existing non-empty Modify targets already contain their repository conventions.
+            bool isCreateOrEmpty = fileEntry.Action == FileEditAction.Create;
+            if (!isCreateOrEmpty && contextFiles.TryGetValue(fileEntry.FilePath, out var existingTarget))
+            {
+                isCreateOrEmpty = string.IsNullOrWhiteSpace(existingTarget) || existingTarget.Trim().Length <= 50;
+            }
+
+            if (isCreateOrEmpty)
+            {
+                sb.AppendLine("=== Reference Architecture Pattern (MANDATORY) ===");
+                sb.AppendLine("Follow the structure and conventions of this existing codebase pattern:");
+                sb.AppendLine(referencePattern);
+                sb.AppendLine();
+            }
         }
 
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
@@ -1804,14 +1827,24 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
-        // Include only directly relevant dependency files if listed in context files
+        var directlyReferenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Include directly referenced dependency files: use authoritative virtual workspace if generated, else fallback to contextFiles
         if (fileEntry.Dependencies != null && fileEntry.Dependencies.Count > 0)
         {
             sb.AppendLine("=== Directly Referenced Dependency Snippets ===");
             foreach (var depPath in fileEntry.Dependencies)
             {
-                if (contextFiles.TryGetValue(depPath, out var depContent))
+                if (virtualWorkspace != null && virtualWorkspace.TryGetValue(depPath, out var genDepContent) && !string.IsNullOrWhiteSpace(genDepContent))
                 {
+                    directlyReferenced.Add(depPath);
+                    sb.AppendLine($"--- Dependency File: {depPath} ---");
+                    sb.AppendLine(genDepContent);
+                    sb.AppendLine("--- End Dependency File ---");
+                }
+                else if (contextFiles.TryGetValue(depPath, out var depContent))
+                {
+                    directlyReferenced.Add(depPath);
                     sb.AppendLine($"--- Dependency File: {depPath} ---");
                     sb.AppendLine(depContent);
                     sb.AppendLine("--- End Dependency File ---");
@@ -1820,12 +1853,16 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
-        // Include relevant in-memory generated dependency specs from earlier completed waves
-        var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits);
-        if (relevantGenerated.Count > 0)
+        // Include relevant in-memory generated dependency specs from earlier completed waves (excluding any already directly referenced)
+        var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace);
+        var nonRedundantGenerated = relevantGenerated
+            .Where(kvp => !directlyReferenced.Contains(kvp.Key))
+            .ToList();
+
+        if (nonRedundantGenerated.Count > 0)
         {
             sb.AppendLine("=== In-Memory Generated Dependency Snippets ===");
-            foreach (var (depPath, depContent) in relevantGenerated)
+            foreach (var (depPath, depContent) in nonRedundantGenerated)
             {
                 sb.AppendLine($"--- Generated Dependency: {depPath} ---");
                 sb.AppendLine(depContent);
@@ -1843,7 +1880,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         IReadOnlyDictionary<string, string> contextFiles,
         IReadOnlyList<DiscoveredProjectNode> projectGraph)
     {
-        return BuildSingleFileUserPrompt(request, fileEntry, contextFiles, completedEdits: null, projectGraph, lockedContracts: null, referencePattern: null);
+        return BuildSingleFileUserPrompt(request, fileEntry, contextFiles, completedEdits: null, projectGraph, lockedContracts: null, referencePattern: null, useFullFileReplacement: false, virtualWorkspace: null);
     }
 
     public static string BuildCompactSingleFileUserPrompt(
@@ -2004,7 +2041,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
     public static Dictionary<string, string> GetRelevantGeneratedEdits(
         ManifestFileEntry fileEntry,
-        IReadOnlyDictionary<string, FileEditSpec>? completedEdits)
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
     {
         var relevant = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (completedEdits == null || completedEdits.Count == 0) return relevant;
@@ -2017,6 +2055,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             .Replace("Controller", "")
             .Replace("Repository", "")
             .Trim();
+
+        bool isTestTarget = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
 
         foreach (var (path, spec) in completedEdits)
         {
@@ -2038,7 +2078,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
 
             // 3. Tests receive production code generated in earlier waves
-            if (ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath) && !ProjectGraphHelper.IsTestFileCandidate(path))
+            if (isTestTarget && !ProjectGraphHelper.IsTestFileCandidate(path))
             {
                 isRelevant = true;
             }
@@ -2051,28 +2091,78 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             if (isRelevant)
             {
-                if (spec.Action == FileEditAction.Create && !string.IsNullOrWhiteSpace(spec.NewContent))
+                // Prefer authoritative virtual workspace content
+                if (virtualWorkspace != null && virtualWorkspace.TryGetValue(path, out var generatedContent) && !string.IsNullOrWhiteSpace(generatedContent))
                 {
-                    bool isTestTarget = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
-                    if (isTestTarget || spec.NewContent.Length > 2000)
+                    if (isTestTarget)
                     {
-                        var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
-                        relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
+                        // For test targets: provide behavioral implementation details
+                        // For ordinary files (<= 4000 chars), provide full resulting code
+                        // For large files (> 4000 chars), extract contracts with body bounded excerpt
+                        if (generatedContent.Length <= 4000)
+                        {
+                            relevant[path] = generatedContent;
+                        }
+                        else
+                        {
+                            var contract = RoslynContractExtractor.ExtractPublicContracts(path, generatedContent);
+                            relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : generatedContent.Substring(0, 4000) + "\n// ... [truncated]";
+                        }
+                    }
+                    else if (generatedContent.Length <= 3000)
+                    {
+                        relevant[path] = generatedContent;
                     }
                     else
                     {
-                        relevant[path] = spec.NewContent;
+                        var contract = RoslynContractExtractor.ExtractPublicContracts(path, generatedContent);
+                        relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : generatedContent;
                     }
                 }
-                else if (spec.Action == FileEditAction.Modify && spec.SearchReplaceEdits != null && spec.SearchReplaceEdits.Count > 0)
+                else
                 {
-                    var summary = string.Join("\n", spec.SearchReplaceEdits.Select(e => $"Replace:\n{e.Search}\nWith:\n{e.Replace}"));
-                    relevant[path] = summary;
-                }
-                else if (spec.Action == FileEditAction.Modify && !string.IsNullOrWhiteSpace(spec.NewContent))
-                {
-                    var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
-                    relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
+                    // Fallback to completedEdits specs if virtualWorkspace is not supplied
+                    if (spec.Action == FileEditAction.Create && !string.IsNullOrWhiteSpace(spec.NewContent))
+                    {
+                        if (isTestTarget)
+                        {
+                            if (spec.NewContent.Length <= 4000)
+                            {
+                                relevant[path] = spec.NewContent;
+                            }
+                            else
+                            {
+                                var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
+                                relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
+                            }
+                        }
+                        else if (spec.NewContent.Length > 2000)
+                        {
+                            var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
+                            relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
+                        }
+                        else
+                        {
+                            relevant[path] = spec.NewContent;
+                        }
+                    }
+                    else if (spec.Action == FileEditAction.Modify && !string.IsNullOrWhiteSpace(spec.NewContent))
+                    {
+                        if (isTestTarget && spec.NewContent.Length <= 4000)
+                        {
+                            relevant[path] = spec.NewContent;
+                        }
+                        else
+                        {
+                            var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
+                            relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
+                        }
+                    }
+                    else if (spec.Action == FileEditAction.Modify && spec.SearchReplaceEdits != null && spec.SearchReplaceEdits.Count > 0)
+                    {
+                        var summary = string.Join("\n", spec.SearchReplaceEdits.Select(e => $"Replace:\n{e.Search}\nWith:\n{e.Replace}"));
+                        relevant[path] = summary;
+                    }
                 }
             }
         }
