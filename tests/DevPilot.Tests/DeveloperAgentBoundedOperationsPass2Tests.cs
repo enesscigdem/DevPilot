@@ -463,6 +463,178 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
         updated.Should().Contain("LegacyValue => 99");
     }
 
+    [Fact]
+    public async Task ForensicInspection_RepresentativeFiles_AssembledPromptsAreFocusedAndBounded()
+    {
+        var auditLoggerLines = Enumerable.Range(1, 35).Select(i => $"    // log field padding {i}").ToList();
+        var auditLoggerContent = "namespace Services;\n\npublic class TodoAuditLogger : ITodoAuditLogger\n{\n" +
+                                 string.Join("\n", auditLoggerLines) + "\n" +
+                                 "    private readonly List<string> _logs = new();\n" +
+                                 "    public void Log(string action, string details) { _logs.Add($\"{action}: {details}\"); }\n" +
+                                 "    public IReadOnlyList<string> GetLogs() => _logs;\n}\n";
+
+        var files = new (string Path, string Action, string Content, string Purpose)[]
+        {
+            ("ITodoService.cs", "Modify", "namespace Services;\n\npublic interface ITodoService\n{\n    Task<TodoDto> GetByIdAsync(Guid id);\n    Task<TodoDto> CreateAsync(CreateTodoDto dto);\n}\n", "Add logging contract"),
+            ("ITodoAuditLogger.cs", "Modify", "namespace Services;\n\npublic interface ITodoAuditLogger\n{\n    void Log(string action, string details);\n    IReadOnlyList<string> GetLogs();\n}\n", "Thread-safe audit logger interface"),
+            ("TodoAuditLogger.cs", "Modify", auditLoggerContent, "Make audit logger thread safe using lock"),
+            ("TodoService.cs", "Modify", "namespace Services;\n\npublic class TodoService : ITodoService\n{\n    private readonly ITodoAuditLogger _logger;\n    public TodoService(ITodoAuditLogger logger) { _logger = logger; }\n    public Task<TodoDto> GetByIdAsync(Guid id) => Task.FromResult(new TodoDto(id, \"Test\"));\n    public Task<TodoDto> CreateAsync(CreateTodoDto dto) { _logger.Log(\"Create\", dto.Title); return Task.FromResult(new TodoDto(Guid.NewGuid(), dto.Title)); }\n}\n", "Ensure thread-safety across service calls"),
+            ("TodoServiceTests.cs", "Modify", "using Xunit;\n\nnamespace Tests;\n\npublic class TodoServiceTests\n{\n    [Fact]\n    public void GetById_ReturnsTodo() => Assert.True(true);\n}\n", "Add thread safety test for TodoService"),
+            ("TodosControllerTests.cs", "Modify", "using Xunit;\n\nnamespace Tests;\n\npublic class TodosControllerTests\n{\n    [Fact]\n    public void Create_ReturnsOk() => Assert.True(true);\n    [Fact]\n    public void Get_ReturnsOk() => Assert.True(true);\n}\n", "Add test for concurrent audit logging")
+        };
+
+        foreach (var (path, action, content, purpose) in files)
+        {
+            var fullPath = Path.Combine(_worktreeDir, path);
+            await File.WriteAllTextAsync(fullPath, content);
+        }
+
+        // Test prompt construction for TodoAuditLogger.cs
+        var targetFile = "TodoAuditLogger.cs";
+        var fileEntry = new ManifestFileEntry(targetFile, FileEditAction.Modify, "Add thread safety locking", null);
+        var req = CreateRequest(targetFile, "Modify", "Singleton Servislerin Thread-Safety Acisindan Dogrulanmasi", "Ensure TodoAuditLogger is thread safe");
+
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "TodoAuditLogger.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "oldText": "private readonly List<string> _logs = new();",
+                  "newText": "private readonly Lock _lock = new();\n    private readonly List<string> _logs = new();"
+                },
+                {
+                  "type": "replace",
+                  "oldText": "public void Log(string action, string details) { _logs.Add($\"{action}: {details}\"); }",
+                  "newText": "public void Log(string action, string details) { lock (_lock) { _logs.Add($\"{action}: {details}\"); } }"
+                }
+              ]
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(req);
+        result.Success.Should().BeTrue(result.ErrorMessage);
+
+        var capturedReq = _fakeAiProvider.ReceivedRequests.Last();
+
+        // Assert forensic prompt bounds
+        capturedReq.SystemPrompt.Should().Contain("bounded operations");
+        capturedReq.SystemPrompt.Should().Contain("NEVER reproduce unchanged class declarations, surrounding methods, or entire files");
+        capturedReq.SystemPrompt.Should().Contain("PREFER 1 OPERATION for contiguous changes");
+        capturedReq.UserPrompt.Should().NotContain("=== Reference Architecture Pattern (MANDATORY) ==="); // Omitted for Modify
+        capturedReq.UserPrompt.Should().Contain("=== Current Content of Target File ===");
+        capturedReq.MaxTokens.Should().BeInRange(2048, 4096);
+    }
+
+    [Fact]
+    public void BoundedOperationValidator_RejectsPseudoFullFileReplace_ForLocalizedEdit()
+    {
+        var originalContent = "namespace Services;\n\npublic class TodoAuditLogger\n{\n" +
+                              "    private readonly List<string> _logs = new();\n" +
+                              "    public void Log(string action, string details) { _logs.Add(action); }\n" +
+                              "    public IReadOnlyList<string> GetLogs() => _logs;\n" +
+                              "    public void Clear() => _logs.Clear();\n" +
+                              "}\n";
+
+        // Pseudo-full-file replace where oldText covers the entire class
+        var pseudoFullFileOp = BoundedEditOperation.Replace(
+            originalContent.Trim(),
+            originalContent.Replace("private readonly List<string> _logs = new();", "private readonly Lock _lock = new();\n    private readonly List<string> _logs = new();"));
+
+        var result = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+            originalContent,
+            new[] { pseudoFullFileOp },
+            "TodoAuditLogger.cs");
+
+        result.Success.Should().BeFalse();
+        result.FailureReason.Should().Be(BoundedEditFailureReason.InvalidOperation);
+        result.ErrorMessage.Should().Contain("effectively reproduces the entire file/class");
+    }
+
+    [Fact]
+    public void BoundedOperationValidator_AcceptsLegitimateLocalizedEdit()
+    {
+        var originalContent = "namespace Services;\n\npublic class TodoAuditLogger\n{\n" +
+                              "    private readonly List<string> _logs = new();\n" +
+                              "    public void Log(string action, string details) { _logs.Add(action); }\n" +
+                              "    public IReadOnlyList<string> GetLogs() => _logs;\n" +
+                              "    public void Clear() => _logs.Clear();\n" +
+                              "}\n";
+
+        var localizedOp = BoundedEditOperation.Replace(
+            "private readonly List<string> _logs = new();",
+            "private readonly Lock _lock = new();\n    private readonly List<string> _logs = new();");
+
+        var result = WorktreeEditApplier.ValidateAndApplyBoundedOperations(
+            originalContent,
+            new[] { localizedOp },
+            "TodoAuditLogger.cs");
+
+        result.Success.Should().BeTrue();
+        result.ModifiedContent.Should().Contain("private readonly Lock _lock = new();");
+    }
+
+    [Fact]
+    public async Task InitialModifyPrompt_IsMateriallyFocused_AndRecoveryIsMateriallySmaller()
+    {
+        var relativePath = "AuditLogger.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+
+        var lines = Enumerable.Range(1, 40).Select(i => $"    public void Method_{i}() {{ }}").ToList();
+        var content = "namespace Services;\n\npublic class AuditLogger\n{\n" +
+                      string.Join("\n", lines) +
+                      "\n}\n";
+        await File.WriteAllTextAsync(fullPath, content);
+
+        var req = CreateRequest(relativePath, "Modify", "Refactor logger", "Improve audit logger locking");
+
+        // Attempt 1: anchor not found to trigger recovery
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "AuditLogger.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "oldText": "public void NonExistentMethod() { }",
+                  "newText": "public void Method_1() { /* updated */ }"
+                }
+              ]
+            }
+            """);
+
+        // Attempt 2: valid bounded edit
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "AuditLogger.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "oldText": "public void Method_1() { }",
+                  "newText": "public void Method_1() { /* locked */ }"
+                }
+              ]
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(req);
+        result.Success.Should().BeTrue(result.ErrorMessage);
+
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+
+        var initialReq = _fakeAiProvider.ReceivedRequests[0];
+        var recoveryReq = _fakeAiProvider.ReceivedRequests[1];
+
+        // Initial prompt is focused and does not contain pattern bloat
+        initialReq.UserPrompt.Should().NotContain("=== Reference Architecture Pattern (MANDATORY) ===");
+
+        // Recovery prompt has typed failure evidence and fresh expected hash
+        recoveryReq.UserPrompt.Should().Contain("=== Bounded Edit Failure Evidence ===");
+        recoveryReq.UserPrompt.Should().Contain("Expected File Hash");
+
+        // Recovery count is strictly 1 (total calls = 2)
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");

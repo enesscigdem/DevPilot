@@ -51,4 +51,8 @@ public sealed record ExecutionActivityMetadata(
     int? TargetSourceChars = null,
     int? TotalPromptChars = null,
     string? EditStrategy = null,
-    int? RetryPromptChars = null);
+    int? RetryPromptChars = null,
+    int? OperationCount = null,
+    string? OperationTypes = null,
+    int? AggregateOldTextChars = null,
+    int? AggregateNewTextChars = null);

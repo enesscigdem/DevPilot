@@ -913,6 +913,28 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                     var normalizedTarget = NormalizeLineEndings(targetText);
                     var normalizedReplace = NormalizeLineEndings(replacementText);
 
+                    // Deterministic Pseudo-Full-File Operation Detection:
+                    // If target source is large enough (> 200 chars), detect if a single Replace operation
+                    // is attempting a pseudo-full-file rewrite by using the entire file/class as oldText.
+                    if (evolvingContent.Length > 200)
+                    {
+                        var trimmedTarget = normalizedTarget.Trim();
+                        var trimmedContent = evolvingContent.Trim();
+
+                        if (trimmedTarget.Length >= (int)(trimmedContent.Length * 0.70) ||
+                            string.Equals(trimmedTarget, trimmedContent, StringComparison.Ordinal))
+                        {
+                            return BoundedEditResult.Fail(
+                                BoundedEditFailureReason.InvalidOperation,
+                                $"Modify action for '{filePath}' effectively reproduces the entire file/class ({targetText.Length}/{originalContent.Length} chars) in a single Replace block instead of a focused bounded patch. Use a localized anchor and minimal replacement.",
+                                failedOperationIndex: opIndex,
+                                totalOperations: totalOperations,
+                                failedOperationType: op.Type,
+                                failedAnchor: targetText,
+                                failedReplacement: replacementText);
+                        }
+                    }
+
                     var matchCount = CountOccurrences(evolvingContent, normalizedTarget);
                     if (matchCount == 0)
                     {

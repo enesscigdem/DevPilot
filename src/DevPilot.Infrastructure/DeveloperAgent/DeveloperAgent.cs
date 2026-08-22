@@ -620,7 +620,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         int initialBudget = DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent);
-        var referencePattern = RoslynPatternHelper.DiscoverNearestPattern(request.WorkspacePath, fileEntry.FilePath);
+        var referencePattern = fileEntry.Action == FileEditAction.Create
+            ? RoslynPatternHelper.DiscoverNearestPattern(request.WorkspacePath, fileEntry.FilePath)
+            : null;
 
         var singleFileSystemPrompt = BuildSingleFileSystemPrompt(fileEntry, useFullFileReplacement, useBoundedOperations);
         var singleFileUserPrompt = BuildSingleFileUserPrompt(
@@ -1154,8 +1156,29 @@ public sealed class DeveloperAgent : IDeveloperAgent
         int? targetSourceChars = null,
         int? totalPromptChars = null,
         string? editStrategy = null,
-        int? retryPromptChars = null)
+        int? retryPromptChars = null,
+        FileEditSpec? editSpec = null)
     {
+        int? opCount = null;
+        string? opTypes = null;
+        int? aggOldChars = null;
+        int? aggNewChars = null;
+
+        if (editSpec?.Operations is { Count: > 0 } ops)
+        {
+            opCount = ops.Count;
+            opTypes = string.Join(",", ops.Select(o => o.Type.ToString().ToLowerInvariant()).Distinct());
+            aggOldChars = ops.Sum(o => o.TargetText?.Length ?? 0);
+            aggNewChars = ops.Sum(o => o.ReplacementText?.Length ?? 0);
+        }
+        else if (editSpec?.SearchReplaceEdits is { Count: > 0 } sr)
+        {
+            opCount = sr.Count;
+            opTypes = "replace";
+            aggOldChars = sr.Sum(e => e.Search?.Length ?? 0);
+            aggNewChars = sr.Sum(e => e.Replace?.Length ?? 0);
+        }
+
         var metadata = new ExecutionActivityMetadata(
             EventKind: "ProviderCall",
             LogicalProviderCallCount: 1,
@@ -1169,7 +1192,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
             TargetSourceChars: targetSourceChars,
             TotalPromptChars: totalPromptChars,
             EditStrategy: editStrategy,
-            RetryPromptChars: retryPromptChars);
+            RetryPromptChars: retryPromptChars,
+            OperationCount: opCount,
+            OperationTypes: opTypes,
+            AggregateOldTextChars: aggOldChars,
+            AggregateNewTextChars: aggNewChars);
 
         await SafeRecordActivityAsync(
             executionId,
@@ -1752,7 +1779,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
             var testGuidance = isTest
-                ? "\n6. MINIMAL TESTS: Implement only the focused test(s) required by the acceptance criteria and follow existing test conventions. DO NOT reproduce or copy unrelated existing test methods from the file."
+                ? "\n7. MINIMAL TESTS: When adding a new test method, use 'insertBefore' or 'insertAfter' with an anchor identifying an adjacent test signature or class closing brace. 'content' must contain ONLY the new test method. NEVER reproduce existing test methods or class bodies."
                 : "";
 
             return $$"""
@@ -1762,15 +1789,20 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
                 2. Do NOT attempt file deletion or rename.
                 3. Do NOT execute arbitrary shell commands.
-                4. Output only bounded operations. Do NOT reproduce unchanged source, entire classes, or complete file content.
-                5. Use exact source text from the provided target context as anchors. Anchors must be unique. Prefer the smallest reliable anchor.
-                   - For insertion: "type": "insertBefore" or "insertAfter" with "anchor" and "content".
-                   - For localized modification: "type": "replace" with "oldText" and "newText".
-                   - For removal: "type": "delete" with "oldText".
-                6. Never invent an anchor that is not present in the supplied source. Do not use full-file replacement.{{testGuidance}}
+                4. Output only bounded operations. Return only the smallest exact operations needed. NEVER reproduce unchanged class declarations, surrounding methods, or entire files.
+                5. OPERATION CONVENTIONS:
+                   - For insertion ('insertBefore' / 'insertAfter'):
+                     * "anchor": The smallest unique line or token span (e.g. adjacent method signature or class closing brace).
+                     * "content": ONLY the newly added lines/code. Do NOT include the anchor in content.
+                   - For localized modification ('replace'):
+                     * "oldText": The smallest unique span being modified (e.g. 1-3 specific lines, a field declaration, or specific statements). Do NOT include surrounding unchanged code or the whole method/class.
+                     * "newText": ONLY the new replacement code for that 'oldText' span.
+                   - For removal ('delete'):
+                     * "oldText": The exact unique span to remove.
+                6. PREFER 1 OPERATION for contiguous changes. Use multiple operations only when changes are in separate, non-contiguous sections. Never use pseudo-full-file replacement disguised as Replace.{{testGuidance}}
 
                 Required JSON shape:
-                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact unique old text","newText":"new text"},{"type":"insertBefore","anchor":"exact unique anchor","content":"inserted content"},{"type":"insertAfter","anchor":"exact unique anchor","content":"inserted content"},{"type":"delete","oldText":"exact unique text to remove"}]}
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact small unique old code","newText":"replacement code"}]}
                 """;
         }
 
@@ -1817,8 +1849,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             return $$"""
                 Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
-                Output was previously truncated because too much code was emitted. Return ONLY the smallest valid bounded 'operations' (replace, insertBefore, insertAfter, delete) with exact unique anchors from the provided target source. NEVER repeat unchanged methods, unrelated test cases, or full class content.
-                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact unique old text","newText":"new text"},{"type":"insertBefore","anchor":"exact unique anchor","content":"inserted content"}]}
+                Output was previously truncated because too much code was emitted. Return ONLY the smallest valid bounded 'operations' (replace, insertBefore, insertAfter, delete) with minimal anchors.
+                - Do NOT repeat unchanged methods, class declarations, or whole files.
+                - 'oldText' / 'anchor' must be the smallest exact unique 1-3 line span.
+                - 'newText' / 'content' must contain ONLY the modified or inserted lines.
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact small unique old code","newText":"replacement code"}]}
                 """;
         }
 
@@ -1859,8 +1894,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return $$"""
                 You are a software developer agent repairing an invalid bounded edit response for '{{fileEntry.FilePath}}'.
                 Return ONLY the smallest valid JSON object with corrected bounded operations (replace, insertBefore, insertAfter, delete).
-                Copy each anchor or oldText verbatim from the current target and ensure it matches exactly once.
-                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact unique old text","newText":"new text"},{"type":"insertBefore","anchor":"exact unique anchor","content":"inserted content"}]}
+                Use the provided failure evidence to locate the exact small unique anchor from the current target file.
+                - For 'replace', specify minimal 'oldText' and minimal 'newText'.
+                - For 'insertBefore' / 'insertAfter', specify unique 'anchor' and ONLY newly added 'content'.
+                - Do NOT reproduce unchanged code or entire classes.
+                {"filePath":"{{fileEntry.FilePath}}","operations":[{"type":"replace","oldText":"exact small unique old code","newText":"replacement code"}]}
                 """;
         }
 
@@ -2069,7 +2107,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (targetProject != null)
         {
             sb.AppendLine($"Target Project: {targetProject.ProjectName}");
-            if (targetProject.ProjectReferences != null && targetProject.ProjectReferences.Count > 0)
+            if (fileEntry.Action == FileEditAction.Create && targetProject.ProjectReferences != null && targetProject.ProjectReferences.Count > 0)
             {
                 sb.AppendLine("Project References:");
                 foreach (var pref in targetProject.ProjectReferences)
@@ -2161,7 +2199,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 if (contextFiles.TryGetValue(depPath, out var depContent))
                 {
                     sb.AppendLine($"--- Dependency File: {depPath} ---");
-                    sb.AppendLine(depContent);
+                    if (fileEntry.Action == FileEditAction.Modify && !string.IsNullOrWhiteSpace(depContent))
+                    {
+                        var contract = RoslynContractExtractor.ExtractPublicContracts(depPath, depContent);
+                        sb.AppendLine(!string.IsNullOrWhiteSpace(contract) ? contract : depContent);
+                    }
+                    else
+                    {
+                        sb.AppendLine(depContent);
+                    }
                     sb.AppendLine("--- End Dependency File ---");
                 }
             }
@@ -2427,8 +2473,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
             {
                 if (spec.Action == FileEditAction.Create && !string.IsNullOrWhiteSpace(spec.NewContent))
                 {
+                    bool isModifyTarget = fileEntry.Action == FileEditAction.Modify;
                     bool isTestTarget = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
-                    if (isTestTarget || spec.NewContent.Length > 2000)
+                    if (isModifyTarget || isTestTarget || spec.NewContent.Length > 2000)
                     {
                         var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
                         relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
