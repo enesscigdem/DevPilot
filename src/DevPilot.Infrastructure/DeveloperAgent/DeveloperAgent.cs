@@ -1755,6 +1755,90 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return lastSpace >= 0 ? prefix.Substring(lastSpace + 1) : prefix;
     }
 
+    public static string BuildVerificationRepairBoundedContext(string filePath, string fullContent, string? taskDescription = null)
+    {
+        if (string.IsNullOrEmpty(fullContent)) return string.Empty;
+
+        var normalized = WorktreeEditApplier.NormalizeLineEndings(fullContent);
+        var lines = normalized.Split('\n');
+
+        if (lines.Length <= 80)
+        {
+            var fullContext = WorktreeEditApplier.BuildBoundedEditContext(filePath, normalized);
+            return fullContext.FormattedContext;
+        }
+
+        // For large files (> 80 lines), determine which lines to include while preserving original T{lineNum} IDs
+        var includedIndices = new HashSet<int>();
+
+        // Always include header (lines 1..30)
+        int headerCount = Math.Min(30, lines.Length);
+        for (int i = 0; i < headerCount; i++)
+        {
+            includedIndices.Add(i);
+        }
+
+        // If taskDescription/diagnostic mentions a line number like "file.cs(88,12)" or "file.cs:line 88", window around it
+        if (!string.IsNullOrEmpty(taskDescription))
+        {
+            var matches = System.Text.RegularExpressions.Regex.Matches(taskDescription, @"(?::line\s*|\(|:)(\d+)(?:,\d+|\))?");
+            foreach (System.Text.RegularExpressions.Match m in matches)
+            {
+                if (m.Groups.Count > 1 && int.TryParse(m.Groups[1].Value, out var targetLineNum) && targetLineNum >= 1 && targetLineNum <= lines.Length)
+                {
+                    int start = Math.Max(0, targetLineNum - 10);
+                    int end = Math.Min(lines.Length - 1, targetLineNum + 10);
+                    for (int l = start; l <= end; l++)
+                    {
+                        includedIndices.Add(l);
+                    }
+                }
+            }
+        }
+
+        // Always include footer / end of class (last 25 lines)
+        int footerStart = Math.Max(0, lines.Length - 25);
+        for (int i = footerStart; i < lines.Length; i++)
+        {
+            includedIndices.Add(i);
+        }
+
+        var sb = new System.Text.StringBuilder();
+        bool inOmission = false;
+        int omissionStart = -1;
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            int lineNum = i + 1;
+            if (includedIndices.Contains(i))
+            {
+                if (inOmission)
+                {
+                    sb.AppendLine($"// ... [lines T{omissionStart} to T{lineNum - 1} omitted for brevity] ...");
+                    inOmission = false;
+                    omissionStart = -1;
+                }
+
+                sb.AppendLine($"[T{lineNum}] {lines[i]}");
+            }
+            else
+            {
+                if (!inOmission)
+                {
+                    inOmission = true;
+                    omissionStart = lineNum;
+                }
+            }
+        }
+
+        if (inOmission)
+        {
+            sb.AppendLine($"// ... [lines T{omissionStart} to T{lines.Length} omitted for brevity] ...");
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
     public static string BuildSingleFileSystemPrompt(
         ManifestFileEntry fileEntry,
         bool useFullFileReplacement = false,
@@ -2128,10 +2212,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             rsb.AppendLine("=== Current Content of Target File ===");
             if (contextFiles.TryGetValue(fileEntry.FilePath, out var currentRepairContent))
             {
-                var isTestRepair = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
-                var boundedContent = BuildBoundedTargetSourceWindow(currentRepairContent, applicabilityFailure: null, isTestFile: isTestRepair, purpose: fileEntry.Purpose);
-                var boundedContext = WorktreeEditApplier.BuildBoundedEditContext(fileEntry.FilePath, boundedContent);
-                rsb.AppendLine(boundedContext.FormattedContext);
+                var boundedContext = BuildVerificationRepairBoundedContext(fileEntry.FilePath, currentRepairContent, request.TaskDescription);
+                rsb.AppendLine(boundedContext);
             }
             rsb.AppendLine("=== End Current Content ===");
             return rsb.ToString();

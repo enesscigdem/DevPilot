@@ -21,11 +21,7 @@ public sealed record DeveloperAgentRequest(
     bool IsVerificationRepair = false)
 {
     [JsonIgnore]
-    public bool IsVerificationRepairRequest =>
-        IsVerificationRepair ||
-        TaskTitle.StartsWith("Repair ", StringComparison.OrdinalIgnoreCase) ||
-        (!string.IsNullOrEmpty(ImpactAnalysisSummary) && (ImpactAnalysisSummary.StartsWith("Repository check repair", StringComparison.OrdinalIgnoreCase) || ImpactAnalysisSummary.StartsWith("Test repair", StringComparison.OrdinalIgnoreCase))) ||
-        (!string.IsNullOrEmpty(TaskDescription) && (TaskDescription.Contains("Fix the following authoritative repository check failure", StringComparison.OrdinalIgnoreCase) || TaskDescription.Contains("Fix the authoritative failing test evidence", StringComparison.OrdinalIgnoreCase)));
+    public bool IsVerificationRepairRequest => IsVerificationRepair;
 }
 
 public sealed record ImpactedFileDetail(

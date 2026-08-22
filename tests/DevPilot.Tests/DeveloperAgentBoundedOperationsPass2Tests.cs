@@ -931,6 +931,133 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
     }
 
+    [Fact]
+    public async Task OrdinaryRequest_WithRepairTitle_RemainsOrdinaryGeneration_WhenIsVerificationRepairIsFalse()
+    {
+        var relativePath = "CacheService.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+
+        var content = "namespace Services;\n\npublic class CacheService\n{\n    public void Invalidate() {}\n}\n";
+        await File.WriteAllTextAsync(fullPath, content);
+
+        var ordinaryRequest = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Repair cache invalidation bug in CacheService",
+            TaskDescription: "Fix cache key expiration so invalidated items are purged immediately.",
+            AcceptanceCriteria: "Ensure cache invalidation purges key.",
+            ImpactAnalysisSummary: "Repository check repair summary",
+            ProposedPlan: "Plan for cache repair",
+            ImpactedFilePaths: new[] { relativePath },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName,
+            ImpactedFiles: new[] { new ImpactedFileDetail(relativePath, "Modify", "Fix bug") },
+            IsVerificationRepair: false);
+
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "CacheService.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "targetId": "T5",
+                  "content": "    public void Invalidate() { /* purged */ }"
+                }
+              ]
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(ordinaryRequest);
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+
+        var capturedReq = _fakeAiProvider.ReceivedRequests[0];
+        capturedReq.UserPrompt.Should().Contain("Task Title: Repair cache invalidation bug in CacheService");
+        capturedReq.UserPrompt.Should().Contain("Task Description: Fix cache key expiration");
+        capturedReq.UserPrompt.Should().Contain("=== Plan Excerpt ===");
+        capturedReq.UserPrompt.Should().NotContain("=== Verification Failure Evidence ===");
+    }
+
+    [Fact]
+    public async Task VerificationRepair_LargeTestFile_PreservesOriginalSourceTargetIdCoordinates()
+    {
+        var relativePath = "LargeTodoServiceTests.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+
+        // Generate a 100-line test file
+        var lines = new List<string>
+        {
+            "using Xunit;",
+            "namespace Tests;",
+            "",
+            "public class LargeTodoServiceTests",
+            "{"
+        };
+
+        for (int i = 6; i <= 95; i++)
+        {
+            lines.Add($"    [Fact] public void Test_{i}() => Assert.True(true);");
+        }
+
+        // Line 96 (1-indexed) is the failing test
+        lines.Add("    [Fact] public void Test_96() => Assert.True(false);");
+        lines.Add("    [Fact] public void Test_97() => Assert.True(true);");
+        lines.Add("    [Fact] public void Test_98() => Assert.True(true);");
+        lines.Add("    [Fact] public void Test_99() => Assert.True(true);");
+        lines.Add("}"); // Line 100
+
+        var originalContent = string.Join("\n", lines) + "\n";
+        await File.WriteAllTextAsync(fullPath, originalContent);
+        var expectedHash = WorktreeEditApplier.ComputeContentHash(originalContent);
+
+        var repairRequest = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Repair test failures (round 1)",
+            TaskDescription: "Fix the authoritative failing test evidence (repair round 1/3):\nAssert.True() Failure: Expected True, but got False at LargeTodoServiceTests.Test_96() in LargeTodoServiceTests.cs:line 96",
+            AcceptanceCriteria: "Resolve failing test.",
+            ImpactAnalysisSummary: "Test repair",
+            ProposedPlan: "Repair",
+            ImpactedFilePaths: new[] { relativePath },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName,
+            ImpactedFiles: new[] { new ImpactedFileDetail(relativePath, "Modify", "Fix test") },
+            IsVerificationRepair: true);
+
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "LargeTodoServiceTests.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "targetId": "T96",
+                  "content": "    [Fact] public void Test_96() => Assert.True(true);"
+                }
+              ]
+            }
+            """);
+
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest);
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
+
+        var capturedReq = _fakeAiProvider.ReceivedRequests[0];
+        capturedReq.MaxTokens.Should().Be(2048, "repair still uses <=2048 output tokens");
+        capturedReq.UserPrompt.Should().Contain($"Expected File Hash: {expectedHash}", "full-file expected hash remains fresh current source hash");
+        capturedReq.UserPrompt.Should().Contain("[T1] using Xunit;");
+        capturedReq.UserPrompt.Should().Contain("[T96]     [Fact] public void Test_96() => Assert.True(false);", "real original target ID is preserved");
+        capturedReq.UserPrompt.Should().Contain("[T100] }", "closing class bracket retains original line number T100");
+        capturedReq.UserPrompt.Should().Contain("// ... [lines T", "narrowed context uses synthetic omission marker without assigning target ID");
+
+        // Verify applied result
+        var updatedContent = await File.ReadAllTextAsync(fullPath);
+        updatedContent.Should().Contain("Test_96() => Assert.True(true);");
+        var updatedLines = updatedContent.Replace("\r\n", "\n").Split('\n');
+        updatedLines[95].Should().Be("    [Fact] public void Test_96() => Assert.True(true);");
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");
