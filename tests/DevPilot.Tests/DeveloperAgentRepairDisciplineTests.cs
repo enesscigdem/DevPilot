@@ -176,7 +176,7 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         prompt.Should().Contain("ExistingLastTest_ReturnsOk");
 
         // Prompt must NOT dump intermediate test methods verbatim
-        prompt.Should().Contain("// ... [intermediate existing methods omitted for brevity] ...");
+        prompt.Should().Contain("omitted for brevity");
         prompt.Should().NotContain("GetProduct_40_ReturnsOk");
     }
 
@@ -1168,31 +1168,404 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
     }
 
     [Fact]
-    public void BuildBoundedTargetSourceWindow_TestFilesUnder600Lines_RetainsFullContext()
+    public void TodoService_StyleLocalizedModify_PromptDoesNotRequestFullFileOutput()
     {
-        var testContent = CreateLargeProductsApiTestsContent(); // ~100 lines
-        var window = DeveloperAgent.BuildBoundedTargetSourceWindow(testContent, applicabilityFailure: null, isTestFile: true);
+        var todoServiceContent = """
+            using System.Collections.Concurrent;
+            using TodoApi.Models;
 
-        // Entire file is preserved without cutting out intermediate test methods
-        window.Should().Be(testContent);
-        window.Should().Contain("GetProduct_1_ReturnsOk");
-        window.Should().Contain("GetProduct_10_ReturnsOk");
-        window.Should().Contain("GetProduct_20_ReturnsOk");
-        window.Should().Contain("ExistingLastTest_ReturnsOk");
+            namespace TodoApi.Services;
+
+            public class TodoService : ITodoService
+            {
+                private readonly ConcurrentDictionary<Guid, TodoItem> _items = new();
+                private readonly ITodoAuditLogger _auditLogger;
+
+                public TodoService(ITodoAuditLogger auditLogger)
+                {
+                    _auditLogger = auditLogger;
+                }
+
+                public IReadOnlyList<TodoItem> GetAll()
+                {
+                    return _items.Values.OrderBy(x => x.CreatedAtUtc).ToList();
+                }
+
+                public TodoItem? GetById(Guid id)
+                {
+                    return _items.TryGetValue(id, out var item) ? item : null;
+                }
+
+                public TodoItem Create(CreateTodoRequest request)
+                {
+                    ArgumentNullException.ThrowIfNull(request);
+                    var item = new TodoItem { Id = Guid.NewGuid(), Title = request.Title.Trim() };
+                    _items[item.Id] = item;
+                    return item;
+                }
+
+                public bool Update(Guid id, UpdateTodoRequest request)
+                {
+                    ArgumentNullException.ThrowIfNull(request);
+                    if (!_items.TryGetValue(id, out var existing)) return false;
+                    existing.Title = request.Title.Trim();
+                    return true;
+                }
+
+                public bool Delete(Guid id)
+                {
+                    return _items.TryRemove(id, out _);
+                }
+            }
+            """;
+
+        // 78-line service is not treated as a small-file full replacement
+        WorktreeEditApplier.IsSmallTextFile(todoServiceContent).Should().BeFalse();
+
+        var entry = new ManifestFileEntry("src/TodoApi/Services/TodoService.cs", FileEditAction.Modify, "Verify thread-safety");
+        var systemPrompt = DeveloperAgent.BuildSingleFileSystemPrompt(entry, useFullFileReplacement: false);
+
+        systemPrompt.Should().Contain("large-file Modify");
+        systemPrompt.Should().Contain("searchReplaceEdits");
+        systemPrompt.Should().NotContain("small-file Modify");
+        systemPrompt.Should().NotContain("Return the complete resulting file once in 'newContent'");
     }
 
     [Fact]
-    public void PromptTemplates_InstructMinimalEdits_AndProhibitDuplicatingUnrelatedTests()
+    public void LargeRepetitiveTestFile_AddingOneTest_SendsBoundedRelevantContext_NotEntireSuite()
     {
-        var testEntry = new ManifestFileEntry("tests/App.Tests/Controllers/TodosControllerTests.cs", FileEditAction.Modify, "Add test");
-        var prompt = DeveloperAgent.BuildSingleFileSystemPrompt(testEntry, useFullFileReplacement: false);
+        var todosControllerTestsContent = """
+            using FluentAssertions;
+            using Microsoft.AspNetCore.Mvc;
+            using TodoApi.Controllers;
+            using TodoApi.Models;
+            using TodoApi.Services;
+            using Xunit;
 
-        prompt.Should().Contain("MINIMAL TESTS");
-        prompt.Should().Contain("DO NOT reproduce or copy unrelated existing test methods from the file");
+            namespace TodoApi.Tests;
 
-        var compactPrompt = DeveloperAgent.BuildCompactSingleFileSystemPrompt(testEntry, useFullFileReplacement: false);
-        compactPrompt.Should().Contain("smallest valid surgical 'searchReplaceEdits'");
-        compactPrompt.Should().Contain("NEVER repeat unchanged methods or unrelated test cases");
+            public class TodosControllerTests
+            {
+                private readonly TodoService _service;
+                private readonly TodosController _controller;
+
+                public TodosControllerTests()
+                {
+                    var auditLogger = new TodoAuditLogger();
+                    _service = new TodoService(auditLogger);
+                    _controller = new TodosController(_service);
+                }
+
+                [Fact]
+                public void GetAll_ReturnsOkWithList()
+                {
+                    _service.Create(new CreateTodoRequest { Title = "Controller test 1" });
+                    var result = _controller.GetAll();
+                    var okResult = result.Result as OkObjectResult;
+                    okResult.Should().NotBeNull();
+                }
+
+                [Fact]
+                public void GetById_ExistingItem_ReturnsOkWithItem()
+                {
+                    var created = _service.Create(new CreateTodoRequest { Title = "Find me" });
+                    var result = _controller.GetById(created.Id);
+                    result.Should().NotBeNull();
+                }
+
+                [Fact]
+                public void GetById_NonExistentItem_ReturnsNotFound()
+                {
+                    var result = _controller.GetById(Guid.NewGuid());
+                    result.Result.Should().BeOfType<NotFoundResult>();
+                }
+
+                [Fact]
+                public void Create_ValidRequest_ReturnsCreatedAtAction()
+                {
+                    var result = _controller.Create(new CreateTodoRequest { Title = "New item" });
+                    result.Should().NotBeNull();
+                }
+
+                [Fact]
+                public void Create_EmptyTitle_ReturnsBadRequest()
+                {
+                    var result = _controller.Create(new CreateTodoRequest { Title = "" });
+                    result.Result.Should().BeOfType<BadRequestObjectResult>();
+                }
+            }
+            """;
+
+        var bounded = DeveloperAgent.BuildBoundedTargetSourceWindow(
+            todosControllerTestsContent,
+            applicabilityFailure: null,
+            isTestFile: true,
+            purpose: "Add thread-safety test");
+
+        // Preserves constructor & fixture setup
+        bounded.Should().Contain("public TodosControllerTests()");
+        bounded.Should().Contain("_service = new TodoService(auditLogger);");
+
+        // Summarizes existing intermediate tests without dumping their bodies
+        bounded.Should().Contain("// === Existing Tests");
+        bounded.Should().Contain("GetAll_ReturnsOkWithList");
+        bounded.Should().Contain("GetById_ExistingItem_ReturnsOkWithItem");
+        bounded.Should().NotContain("Controller test 1");
+
+        // Preserves verbatim insertion anchor at end of class
+        bounded.Should().Contain("// === Insertion / End of Class Anchor ===");
+        bounded.Should().Contain("Create_EmptyTitle_ReturnsBadRequest");
+        bounded.Should().Contain("BadRequestObjectResult");
+
+        // Substantially smaller than full test file
+        bounded.Length.Should().BeLessThan(todosControllerTestsContent.Length);
+    }
+
+    [Fact]
+    public void CompactRetry_InputIsMateriallySmallerThanInitialRequest_AndDoesNotRepeatBroadUnrelatedTaskContext()
+    {
+        var targetFile = "tests/TodoApi.Tests/TodosControllerTests.cs";
+        var fileEntry = new ManifestFileEntry(targetFile, FileEditAction.Modify, "Add thread safety test");
+        var contextFiles = new Dictionary<string, string>
+        {
+            [targetFile] = """
+                using Xunit;
+                namespace TodoApi.Tests;
+                public class TodosControllerTests
+                {
+                    public TodosControllerTests() { }
+                    [Fact] public void Test1() { }
+                    [Fact] public void Test2() { }
+                    [Fact] public void Test3() { }
+                    [Fact] public void Test4() { }
+                    [Fact] public void Test5() { }
+                }
+                """
+        };
+
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Singleton Servislerin Thread-Safety Açısından Doğrulanması",
+            TaskDescription: "A very broad and detailed task description that explains why singleton services need thread safety verification, how concurrent dictionary is used, how multiple worker threads should access the API concurrently, and how audit logs must be asserted.",
+            AcceptanceCriteria: "- Thread safety is verified under 50 concurrent tasks\n- No data race occurs\n- Audit logger captures all concurrent actions safely",
+            ImpactAnalysisSummary: "Affects TodoService and TodosControllerTests",
+            ProposedPlan: "1. Update TodoService with ConcurrentDictionary\n2. Add concurrent tests to TodosControllerTests",
+            ImpactedFilePaths: new[] { targetFile },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName);
+
+        var initialUserPrompt = DeveloperAgent.BuildSingleFileUserPrompt(
+            request, fileEntry, contextFiles, completedEdits: null, projectGraph: Array.Empty<DiscoveredProjectNode>(), lockedContracts: null, referencePattern: null, useFullFileReplacement: false);
+
+        var compactUserPrompt = DeveloperAgent.BuildCompactSingleFileUserPrompt(
+            request, fileEntry, contextFiles[targetFile], lockedContracts: null, useFullFileReplacement: false);
+
+        // Compact prompt is materially smaller
+        compactUserPrompt.Length.Should().BeLessThan(initialUserPrompt.Length);
+
+        // Compact prompt does not repeat broad task description
+        compactUserPrompt.Should().NotContain("A very broad and detailed task description that explains why singleton services");
+
+        // Compact prompt focuses on target file and purpose
+        compactUserPrompt.Should().Contain($"Target File: {targetFile}");
+        compactUserPrompt.Should().Contain("Add thread safety test");
+        compactUserPrompt.Should().Contain("surgical patch");
+    }
+
+    [Fact]
+    public void GeneratedEditRepresentation_CannotRequireReproducingUnrelatedTests()
+    {
+        var entry = new ManifestFileEntry("tests/TodoApi.Tests/TodosControllerTests.cs", FileEditAction.Modify, "Add test");
+
+        // 1. Rejects full-file replacement on large/test Modify
+        var fullFileSpec = new FileEditSpec("tests/TodoApi.Tests/TodosControllerTests.cs", FileEditAction.Modify, NewContent: "full file content", SearchReplaceEdits: null);
+        var actFull = () => DeveloperAgent.ValidateSingleFileEditSpec(fullFileSpec, entry, targetContent: "some existing target", useFullFileReplacement: false);
+        actFull.Should().Throw<FormatException>().WithMessage("*must use surgical 'searchReplaceEdits'*");
+
+        // 2. Rejects single search block reproducing entire target file
+        var largeTarget = string.Join("\n", Enumerable.Range(1, 100).Select(i => $"[Fact] public void Test_{i}() {{ }}"));
+        var monolithicSpec = new FileEditSpec("tests/TodoApi.Tests/TodosControllerTests.cs", FileEditAction.Modify, NewContent: null, SearchReplaceEdits: new[]
+        {
+            new SearchReplaceEdit(largeTarget, "replacement")
+        });
+
+        var actMonolithic = () => DeveloperAgent.ValidateSingleFileEditSpec(monolithicSpec, entry, targetContent: largeTarget, useFullFileReplacement: false);
+        actMonolithic.Should().Throw<FormatException>().WithMessage("*effectively reproduces the entire file*");
+    }
+
+    [Fact]
+    public async Task InitialExhaustion_Plus_CompactRetryExhaustion_TerminatesAsToday_NoExtraRetry()
+    {
+        var targetFile = Path.Combine(_worktreeDir, "Service.cs");
+        await File.WriteAllTextAsync(targetFile, "public class Service { public int V = 1; }");
+
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            ErrorMessage = "Output token limit exceeded"
+        });
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            ErrorMessage = "Output token limit exceeded"
+        });
+
+        var agent = new DeveloperAgent(_fakeAiProvider, _editApplier, NullLogger<DeveloperAgent>.Instance, activityRecorder: _activityRecorder);
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Update Service",
+            TaskDescription: "Change value",
+            AcceptanceCriteria: null,
+            ImpactAnalysisSummary: "Summary",
+            ProposedPlan: "Plan",
+            ImpactedFilePaths: new[] { "Service.cs" },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName);
+
+        var result = await agent.GenerateAndApplyEditsAsync(request);
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("exhausted");
+        // Exactly 2 calls: 1 initial + 1 compact retry. No 3rd call.
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+    }
+
+    [Fact]
+    public void ExistingBudgetCeiling_RemainsUnchanged()
+    {
+        var agent = new DeveloperAgent(_fakeAiProvider, _editApplier, NullLogger<DeveloperAgent>.Instance, activityRecorder: _activityRecorder);
+        var fileEntry = new ManifestFileEntry("src/App/LargeService.cs", FileEditAction.Modify, "Update");
+
+        var initialBudget = agent.DetermineInitialBudget("src/App/LargeService.cs", FileEditAction.Modify, "content");
+        initialBudget.Should().BeLessThanOrEqualTo(8192);
+
+        var compactBudget = agent.DetermineCompactRetryBudget(initialBudget, "content", fileEntry, isRepair: false);
+        compactBudget.Should().BeLessThanOrEqualTo(8192);
+    }
+
+    [Fact]
+    public void SmallFileReplacementContract_RemainsUnchanged()
+    {
+        const string smallContent = "public class SmallDto { public int Id { get; set; } }";
+        WorktreeEditApplier.IsSmallTextFile(smallContent).Should().BeTrue();
+
+        var entry = new ManifestFileEntry("src/App/SmallDto.cs", FileEditAction.Modify, "Add property");
+        var prompt = DeveloperAgent.BuildSingleFileSystemPrompt(entry, useFullFileReplacement: true);
+
+        prompt.Should().Contain("small-file Modify");
+        prompt.Should().Contain("Return the complete resulting file once in 'newContent'");
+    }
+
+    [Fact]
+    public void CreateContract_RemainsUnchanged()
+    {
+        var entry = new ManifestFileEntry("src/App/NewService.cs", FileEditAction.Create, "Create new service");
+        var prompt = DeveloperAgent.BuildSingleFileSystemPrompt(entry, useFullFileReplacement: false);
+
+        prompt.Should().Contain("For 'Create' actions, specify 'newContent'");
+    }
+
+    [Fact]
+    public void ExistingApplicabilityBehavior_RemainsUnchanged()
+    {
+        var failure = EditApplicabilityResult.Fail(
+            errorMessage: "Search text not found",
+            failedEditIndex: 1,
+            totalEdits: 1,
+            failedSearch: "nonExistentMethod()",
+            failedReplace: "replace",
+            matchCount: 0,
+            surroundingContext: "public class Target { public void ActualMethod() { } }");
+
+        var prompt = DeveloperAgent.BuildSingleFileRepairUserPrompt(
+            "Applicability error",
+            "previous response",
+            new ManifestFileEntry("src/App/Target.cs", FileEditAction.Modify, "Fix method"),
+            currentTargetContent: "public class Target { public void ActualMethod() { } }",
+            applicabilityFailure: failure);
+
+        prompt.Should().Contain("zero matches (the search text was not found");
+        prompt.Should().Contain("nonExistentMethod()");
+        prompt.Should().Contain("Surrounding Target Source Context");
+    }
+
+    [Fact]
+    public async Task PromptSizeTelemetry_RecordedForModifyGenerationAndCompactRetry()
+    {
+        var targetFile = Path.Combine(_worktreeDir, "Service.cs");
+        await File.WriteAllTextAsync(targetFile, "public class Service { public int Counter = 0; }");
+
+        // Initial call fails with length to trigger compact retry
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            ErrorMessage = "Output token limit exceeded"
+        });
+
+        // Compact retry succeeds with surgical searchReplaceEdits
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = true,
+            FinishReason = "stop",
+            Content = """
+                {
+                  "filePath": "Service.cs",
+                  "action": "Modify",
+                  "searchReplaceEdits": [
+                    {
+                      "search": "Counter = 0;",
+                      "replace": "Counter = 1;"
+                    }
+                  ]
+                }
+                """
+        });
+
+        var agent = new DeveloperAgent(_fakeAiProvider, _editApplier, NullLogger<DeveloperAgent>.Instance, activityRecorder: _activityRecorder);
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Update Service",
+            TaskDescription: "Change counter",
+            AcceptanceCriteria: null,
+            ImpactAnalysisSummary: "Summary",
+            ProposedPlan: "Plan",
+            ImpactedFilePaths: new[] { "Service.cs" },
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName);
+
+        var result = await agent.GenerateAndApplyEditsAsync(request);
+
+        result.Success.Should().BeTrue();
+
+        var providerActivities = _activityRecorder.RecordedActivities
+            .Where(a => a.Metadata?.EventKind == "ProviderCall")
+            .ToList();
+
+        providerActivities.Should().HaveCount(2);
+
+        // Initial Generation telemetry (small Service.cs was full file replacement)
+        var initialMeta = providerActivities[0].Metadata;
+        initialMeta.Should().NotBeNull();
+        initialMeta!.ProviderCallKind.Should().Be("Generation");
+        initialMeta.TargetSourceChars.Should().BeGreaterThan(0);
+        initialMeta.TotalPromptChars.Should().BeGreaterThan(0);
+        initialMeta.EditStrategy.Should().Be("FullFileReplacement");
+
+        // Compact Retry telemetry (switched to surgical patch)
+        var retryMeta = providerActivities[1].Metadata;
+        retryMeta.Should().NotBeNull();
+        retryMeta!.ProviderCallKind.Should().Be("CompactGenerationRetry");
+        retryMeta.RetryPromptChars.Should().BeGreaterThan(0);
+        retryMeta.EditStrategy.Should().Be("SurgicalPatch");
     }
 
     private static void InitGitRepo(string path)
@@ -1220,7 +1593,8 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
 
     private sealed class FakeExecutionActivityRecorder : IExecutionActivityRecorder
     {
-        public ConcurrentQueue<string> RecordedMessages { get; } = new();
+        public ConcurrentQueue<(string Message, ExecutionActivityMetadata? Metadata)> RecordedActivities { get; } = new();
+        public IEnumerable<string> RecordedMessages => RecordedActivities.Select(a => a.Message);
 
         public Task RecordActivityAsync(
             Guid executionId,
@@ -1230,7 +1604,7 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
             ExecutionActivityMetadata? metadata = null,
             CancellationToken cancellationToken = default)
         {
-            RecordedMessages.Enqueue(message);
+            RecordedActivities.Enqueue((message, metadata));
             return Task.CompletedTask;
         }
     }

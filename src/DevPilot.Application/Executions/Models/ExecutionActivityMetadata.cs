@@ -47,4 +47,8 @@ public sealed record ExecutionActivityMetadata(
     int? PreExistingFailureCount = null,
     int? NewRegressionCount = null,
     string? TargetedTestFilter = null,
-    string? VerificationOutcome = null);
+    string? VerificationOutcome = null,
+    int? TargetSourceChars = null,
+    int? TotalPromptChars = null,
+    string? EditStrategy = null,
+    int? RetryPromptChars = null);

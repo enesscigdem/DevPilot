@@ -566,10 +566,10 @@ public class TokenLimitDisciplineTests : IDisposable
     [Fact]
     public async Task Telemetry_RecordsRequestedOutputBudgetAndFinishReason()
     {
-        var targetFile = "src/Services/TelemetryTest.cs";
+        var targetFile = "src/Services/TelemetryService.cs";
         var fullPath = Path.Combine(_worktreeDir, targetFile);
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-        await File.WriteAllTextAsync(fullPath, "public class TelemetryTest {}");
+        await File.WriteAllTextAsync(fullPath, "public class TelemetryService {}");
 
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
@@ -583,12 +583,7 @@ public class TokenLimitDisciplineTests : IDisposable
                 {
                   "filePath": "{{targetFile}}",
                   "action": "Modify",
-                  "searchReplaceEdits": [
-                    {
-                      "search": "public class TelemetryTest {}",
-                      "replace": "public class TelemetryTest { int X = 1; }"
-                    }
-                  ]
+                  "newContent": "public class TelemetryService { int X = 1; }"
                 }
                 """
         });

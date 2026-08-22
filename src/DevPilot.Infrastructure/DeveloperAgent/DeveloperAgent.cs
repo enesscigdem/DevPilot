@@ -136,7 +136,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         if (action == FileEditAction.Modify)
         {
-            if (targetContent != null && WorktreeEditApplier.IsSmallTextFile(targetContent))
+            var isTest = ProjectGraphHelper.IsTestFileCandidate(filePath);
+            if (targetContent != null && !isTest && WorktreeEditApplier.IsSmallTextFile(targetContent))
             {
                 var estimatedFullFileTokens = (targetContent.Length + 2) / 3 + 512;
                 var roundedBudget = ((estimatedFullFileTokens + 511) / 512) * 512;
@@ -605,8 +606,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
             targetContentHash = WorktreeEditApplier.ComputeContentHash(targetContent);
         }
 
+        var isTestFile = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
         var useFullFileReplacement = fileEntry.Action == FileEditAction.Modify &&
                                      targetContent != null &&
+                                     !isTestFile &&
                                      WorktreeEditApplier.IsSmallTextFile(targetContent);
         var recoveryUsed = false;
 
@@ -652,6 +655,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             capturedModels.Add(fileResponse.Model);
         }
 
+        var targetSourceChars = targetContent?.Length ?? 0;
+        var totalPromptChars = (singleFileSystemPrompt?.Length ?? 0) + (singleFileUserPrompt?.Length ?? 0);
+        var editStrategy = fileEntry.Action == FileEditAction.Create
+            ? "Create"
+            : (useFullFileReplacement ? "FullFileReplacement" : "SurgicalPatch");
+
         LogGenerationAudit(fileEntry.FilePath, fileEntry.Action.ToString(), callNumber, fileAiRequest, fileResponse, fileSw.Elapsed);
         await RecordProviderCallActivityAsync(
             request.ExecutionId,
@@ -660,7 +669,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
             fileAiRequest,
             fileResponse,
             fileSw.Elapsed,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            targetSourceChars: targetSourceChars,
+            totalPromptChars: totalPromptChars,
+            editStrategy: editStrategy).ConfigureAwait(false);
 
         // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
         if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
@@ -680,7 +692,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         cancellationToken).ConfigureAwait(false);
                     targetContent = currentTarget.Content;
                     targetContentHash = currentTarget.Hash;
-                    useFullFileReplacement = WorktreeEditApplier.IsSmallTextFile(targetContent);
+                    // Compact retry for Modify is ALWAYS surgical patch to guarantee minimal output size
+                    useFullFileReplacement = false;
                 }
 
                 await SafeRecordActivityAsync(
@@ -711,6 +724,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         capturedModels.Add(compactResponse.Model);
                     }
 
+                    var retryPromptChars = (compactSystemPrompt?.Length ?? 0) + (compactUserPrompt?.Length ?? 0);
+
                     LogGenerationAudit(fileEntry.FilePath, "CompactRetry", escCallNumber, compactRequest, compactResponse, escSw.Elapsed, isCompactRetry: true);
                     await RecordProviderCallActivityAsync(
                         request.ExecutionId,
@@ -719,7 +734,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         compactRequest,
                         compactResponse,
                         escSw.Elapsed,
-                        cancellationToken).ConfigureAwait(false);
+                        cancellationToken,
+                        targetSourceChars: targetContent?.Length ?? 0,
+                        totalPromptChars: retryPromptChars,
+                        editStrategy: "SurgicalPatch",
+                        retryPromptChars: retryPromptChars).ConfigureAwait(false);
 
                     if (compactResponse.IsSuccess)
                     {
@@ -1078,7 +1097,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
         AiRequest request,
         AiResponse response,
         TimeSpan duration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? targetSourceChars = null,
+        int? totalPromptChars = null,
+        string? editStrategy = null,
+        int? retryPromptChars = null)
     {
         var metadata = new ExecutionActivityMetadata(
             EventKind: "ProviderCall",
@@ -1089,7 +1112,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
             InputTokens: response.InputTokens,
             OutputTokens: response.OutputTokens,
             StageDurationMs: (long)duration.TotalMilliseconds,
-            TargetFile: targetFile);
+            TargetFile: targetFile,
+            TargetSourceChars: targetSourceChars,
+            TotalPromptChars: totalPromptChars,
+            EditStrategy: editStrategy,
+            RetryPromptChars: retryPromptChars);
 
         await SafeRecordActivityAsync(
             executionId,
@@ -1430,7 +1457,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
     public static string BuildBoundedTargetSourceWindow(
         string targetContent,
         EditApplicabilityResult? applicabilityFailure = null,
-        bool isTestFile = false)
+        bool isTestFile = false,
+        string? purpose = null)
     {
         if (string.IsNullOrWhiteSpace(targetContent)) return targetContent;
 
@@ -1459,30 +1487,152 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return sb.ToString();
         }
 
-        // 2. For source and test files up to 600 lines / 25,000 chars,
-        // provide complete content so all methods, fixtures, and exact verbatim search anchors are grounded and available.
-        if (lines.Length <= 600 && targetContent.Length <= 25000)
+        // 2. Test-file context narrowing:
+        // For test files with repetitive test suites (> 45 lines or > 1500 chars):
+        // Preserve class declaration, fields, constructor/setup fixture in full,
+        // provide concise index of existing test signatures,
+        // and provide verbatim insertion anchor (last test method + closing bracket).
+        if (isTestFile && (lines.Length > 45 || targetContent.Length > 1500))
+        {
+            return BuildBoundedTestFileContext(lines, purpose);
+        }
+
+        // 3. For general source files up to 250 lines / 10,000 chars,
+        // provide complete content so all methods, members, and exact verbatim search anchors are grounded.
+        if (lines.Length <= 250 && targetContent.Length <= 10000)
         {
             return targetContent;
         }
 
-        // 3. For extremely large files (> 600 lines / 25,000 chars),
-        // provide fixture/class header and end anchor while preserving grounded context.
+        // 4. For large source files (> 250 lines / 10,000 chars),
+        // provide class header and end anchor while preserving grounded context.
         var sbLarge = new System.Text.StringBuilder();
-        int hCount = Math.Min(50, lines.Length);
+        int hCount = Math.Min(40, lines.Length);
         for (int i = 0; i < hCount; i++)
         {
             sbLarge.AppendLine(lines[i]);
         }
         sbLarge.AppendLine("\n// ... [intermediate existing methods omitted for brevity] ...\n");
         sbLarge.AppendLine("// === Insertion / End of Class Anchor ===");
-        int fStart = Math.Max(hCount, lines.Length - 35);
+        int fStart = Math.Max(hCount, lines.Length - 30);
         for (int i = fStart; i < lines.Length; i++)
         {
             sbLarge.AppendLine(lines[i]);
         }
 
         return sbLarge.ToString();
+    }
+
+    public static string BuildBoundedTestFileContext(string[] lines, string? purpose = null)
+    {
+        int firstTestLineIdx = -1;
+        int lastTestLineIdx = -1;
+        var testMethodSignatures = new List<(int LineIndex, string Name, string FullSignature)>();
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var lineTrim = lines[i].Trim();
+            if (lineTrim.StartsWith("[Fact", StringComparison.Ordinal) ||
+                lineTrim.StartsWith("[Theory", StringComparison.Ordinal) ||
+                lineTrim.StartsWith("[TestMethod", StringComparison.Ordinal) ||
+                lineTrim.StartsWith("[Test]", StringComparison.Ordinal))
+            {
+                if (firstTestLineIdx == -1)
+                {
+                    firstTestLineIdx = i;
+                }
+                lastTestLineIdx = i;
+
+                for (int j = i + 1; j < Math.Min(i + 5, lines.Length); j++)
+                {
+                    var sigTrim = lines[j].Trim();
+                    if (sigTrim.Contains("void ") || sigTrim.Contains("Task ") || sigTrim.Contains("ValueTask "))
+                    {
+                        var methodName = ExtractMethodName(sigTrim);
+                        testMethodSignatures.Add((i, methodName, sigTrim));
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (firstTestLineIdx <= 0 || testMethodSignatures.Count <= 2)
+        {
+            return string.Join("\n", lines);
+        }
+
+        var sb = new System.Text.StringBuilder();
+
+        // Include Header (Usings, namespace, class declaration, fields, constructor/setup)
+        for (int i = 0; i < firstTestLineIdx; i++)
+        {
+            sb.AppendLine(lines[i]);
+        }
+
+        // Include concise summary index of existing tests
+        int omittedCount = testMethodSignatures.Count - 1;
+        sb.AppendLine($"// === Existing Tests ({omittedCount} methods omitted for brevity) ===");
+        if (omittedCount <= 10)
+        {
+            for (int k = 0; k < omittedCount; k++)
+            {
+                var testSig = testMethodSignatures[k];
+                sb.AppendLine($"// - {testSig.FullSignature}");
+            }
+        }
+        else
+        {
+            for (int k = 0; k < 5; k++)
+            {
+                var testSig = testMethodSignatures[k];
+                sb.AppendLine($"// - {testSig.FullSignature}");
+            }
+            sb.AppendLine($"// - ... [{omittedCount - 8} intermediate test methods omitted] ...");
+            for (int k = omittedCount - 3; k < omittedCount; k++)
+            {
+                var testSig = testMethodSignatures[k];
+                sb.AppendLine($"// - {testSig.FullSignature}");
+            }
+        }
+        sb.AppendLine();
+
+        // If purpose targets an existing test method specifically, include its full body
+        if (!string.IsNullOrWhiteSpace(purpose))
+        {
+            for (int k = 0; k < testMethodSignatures.Count - 1; k++)
+            {
+                var testSig = testMethodSignatures[k];
+                if (!string.IsNullOrWhiteSpace(testSig.Name) && purpose.Contains(testSig.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine($"// === Targeted Existing Test Method: {testSig.Name} ===");
+                    int methodEnd = (k + 1 < testMethodSignatures.Count) ? testMethodSignatures[k + 1].LineIndex : lines.Length - 1;
+                    for (int m = testSig.LineIndex; m < methodEnd; m++)
+                    {
+                        sb.AppendLine(lines[m]);
+                    }
+                    sb.AppendLine($"// === End Targeted Test Method ===\n");
+                    break;
+                }
+            }
+        }
+
+        // Include the last test method and class closing bracket as the insertion anchor
+        sb.AppendLine("// === Insertion / End of Class Anchor ===");
+        for (int i = lastTestLineIdx; i < lines.Length; i++)
+        {
+            sb.AppendLine(lines[i]);
+        }
+
+        return sb.ToString();
+    }
+
+    private static string ExtractMethodName(string signature)
+    {
+        var openParen = signature.IndexOf('(');
+        if (openParen <= 0) return signature;
+        var prefix = signature.Substring(0, openParen).Trim();
+        var lastSpace = prefix.LastIndexOf(' ');
+        return lastSpace >= 0 ? prefix.Substring(lastSpace + 1) : prefix;
     }
 
     public static string BuildSingleFileSystemPrompt(
@@ -1493,7 +1643,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
             : useFullFileReplacement
                 ? "This is a small-file Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
-                : "This is a large-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'.";
+                : "This is a large-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. NEVER repeat unchanged methods, unrelated tests, or full file content. Omit 'newContent'.";
 
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
         var testGuidance = isTest
@@ -1527,7 +1677,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "Provide complete file content in 'newContent'."
             : useFullFileReplacement
                 ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
-                : "Output was previously truncated because too much code was emitted. Return ONLY the smallest valid surgical 'searchReplaceEdits' targeting specific modified statements or methods. NEVER repeat unchanged methods or unrelated test cases. Omit 'newContent'.";
+                : "Output was previously truncated because too much code was emitted. Return ONLY the smallest valid surgical 'searchReplaceEdits' targeting specific modified statements or methods. NEVER repeat unchanged methods, unrelated test cases, or full class content. Omit 'newContent'.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
@@ -1748,7 +1898,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine("=== Current Content of Target File ===");
             if (contextFiles.TryGetValue(fileEntry.FilePath, out var currentContent))
             {
-                var boundedContent = BuildBoundedTargetSourceWindow(currentContent, applicabilityFailure: null, isTest);
+                var boundedContent = BuildBoundedTargetSourceWindow(currentContent, applicabilityFailure: null, isTestFile: isTest, purpose: fileEntry.Purpose);
                 sb.AppendLine(boundedContent);
             }
             else
@@ -1825,28 +1975,29 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("=== COMPACT RETRY (TOKEN LIMIT DISCIPLINE) ===");
-        sb.AppendLine(useFullFileReplacement
-            ? "Emit only the JSON small-file replacement payload."
-            : "Emit only the minimal JSON searchReplaceEdits payload.");
-        sb.AppendLine();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
-        sb.AppendLine($"Task Description: {request.TaskDescription}");
         if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
         {
             sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
         }
-        sb.AppendLine();
         sb.AppendLine($"Target File: {fileEntry.FilePath}");
         sb.AppendLine($"Action: {fileEntry.Action}");
+        if (!string.IsNullOrWhiteSpace(fileEntry.Purpose))
+        {
+            sb.AppendLine($"Target Purpose: {fileEntry.Purpose}");
+        }
         sb.AppendLine();
 
         if (fileEntry.Action == FileEditAction.Modify)
         {
+            sb.AppendLine(useFullFileReplacement
+                ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
+                : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.");
             sb.AppendLine("=== Current Content of Target File ===");
             if (!string.IsNullOrWhiteSpace(targetContent))
             {
                 var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
-                var boundedContent = BuildBoundedTargetSourceWindow(targetContent, applicabilityFailure: null, isTest);
+                var boundedContent = BuildBoundedTargetSourceWindow(targetContent, applicabilityFailure: null, isTestFile: isTest, purpose: fileEntry.Purpose);
                 sb.AppendLine(boundedContent);
             }
             else
@@ -1876,7 +2027,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
         }
 
-        sb.AppendLine($"Output ONLY the compact JSON object for '{fileEntry.FilePath}'.");
+        sb.AppendLine($"Output ONLY the minimal JSON object for '{fileEntry.FilePath}'.");
         return sb.ToString();
     }
 

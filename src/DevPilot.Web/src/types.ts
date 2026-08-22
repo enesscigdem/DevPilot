@@ -369,6 +369,10 @@ export interface ExecutionActivityMetadata {
   newRegressionCount?: number | null;
   targetedTestFilter?: string | null;
   verificationOutcome?: string | null;
+  targetSourceChars?: number | null;
+  totalPromptChars?: number | null;
+  editStrategy?: string | null;
+  retryPromptChars?: number | null;
 }
 
 export interface ExecutionActivityItem {

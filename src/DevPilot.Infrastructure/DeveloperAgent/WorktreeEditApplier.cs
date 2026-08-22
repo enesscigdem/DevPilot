@@ -11,8 +11,8 @@ namespace DevPilot.Infrastructure.DeveloperAgent;
 
 public sealed class WorktreeEditApplier : IWorktreeEditApplier
 {
-    public const int SmallFileMaxLines = 100;
-    public const int SmallFileMaxChars = 4000;
+    public const int SmallFileMaxLines = 35;
+    public const int SmallFileMaxChars = 1200;
 
     private static readonly string[] SensitiveFileNameExact =
     {
