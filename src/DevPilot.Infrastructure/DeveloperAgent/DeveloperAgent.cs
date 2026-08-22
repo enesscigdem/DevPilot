@@ -683,7 +683,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             cancellationToken,
             targetSourceChars: targetSourceChars,
             totalPromptChars: totalPromptChars,
-            editStrategy: editStrategy).ConfigureAwait(false);
+            editStrategy: editStrategy,
+            isVerificationRepair: request.IsVerificationRepairRequest).ConfigureAwait(false);
 
         // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
         // Note: Focused verification repair is already diagnostic-scoped and must NOT escalate from 4096 to 8192.
@@ -755,7 +756,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         targetSourceChars: targetContent?.Length ?? 0,
                         totalPromptChars: retryPromptChars,
                         editStrategy: "SurgicalPatch",
-                        retryPromptChars: retryPromptChars).ConfigureAwait(false);
+                        retryPromptChars: retryPromptChars,
+                        isVerificationRepair: request.IsVerificationRepairRequest).ConfigureAwait(false);
 
                     if (compactResponse.IsSuccess)
                     {
@@ -995,7 +997,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 cancellationToken,
                 targetSourceChars: targetContent?.Length ?? 0,
                 totalPromptChars: (repairRequest.SystemPrompt?.Length ?? 0) + (repairRequest.UserPrompt?.Length ?? 0),
-                editStrategy: editStrategy).ConfigureAwait(false);
+                editStrategy: editStrategy,
+                isVerificationRepair: request.IsVerificationRepairRequest).ConfigureAwait(false);
 
             if (!repairResponse.IsSuccess)
             {
@@ -1159,6 +1162,142 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
     }
 
+    public static (
+        int ResponseChars,
+        bool StartsWithJsonObject,
+        bool StartsWithJsonArray,
+        int OperationMarkerCount,
+        int TargetIdMarkerCount,
+        int ContentFieldMarkerCount,
+        int OldTextMarkerCount,
+        int AnchorMarkerCount,
+        int NewContentMarkerCount,
+        int SearchReplaceMarkerCount,
+        int MarkdownFenceCount,
+        int ApproximateJsonObjectCount,
+        int ApproximateJsonArrayCount,
+        int? MaximumObservedContentFieldLength,
+        int? ParsedOperationCount,
+        int? DistinctTargetIdCount,
+        int? DuplicateTargetIdCount
+    ) ExtractTokenLimitForensics(string? rawContent)
+    {
+        var text = rawContent ?? string.Empty;
+        var trimmed = text.Trim();
+
+        int responseChars = text.Length;
+        bool startsWithJsonObject = trimmed.StartsWith("{");
+        bool startsWithJsonArray = trimmed.StartsWith("[");
+
+        int opMarkers = CountOccurrences(text, "\"operations\"") + CountOccurrences(text, "\"operation\"");
+        int targetIdMarkers = CountOccurrences(text, "\"targetId\"");
+        int contentMarkers = CountOccurrences(text, "\"content\"");
+        int oldTextMarkers = CountOccurrences(text, "\"oldText\"");
+        int anchorMarkers = CountOccurrences(text, "\"anchor\"");
+        int newContentMarkers = CountOccurrences(text, "\"newContent\"");
+        int srMarkers = CountOccurrences(text, "\"searchReplaceEdits\"") + CountOccurrences(text, "\"search\"");
+        int fenceMarkers = CountOccurrences(text, "```");
+        int jsonObjectCount = CountOccurrences(text, "{");
+        int jsonArrayCount = CountOccurrences(text, "[");
+
+        int? maxContentLen = null;
+        int? parsedOpCount = null;
+        int? distinctTargetCount = null;
+        int? duplicateTargetCount = null;
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(text);
+            var root = doc.RootElement;
+            if (root.ValueKind == System.Text.Json.JsonValueKind.Object)
+            {
+                if (root.TryGetProperty("operations", out var opsElement) && opsElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    parsedOpCount = opsElement.GetArrayLength();
+                    var targetIds = new List<string>();
+                    int maxLen = 0;
+                    foreach (var op in opsElement.EnumerateArray())
+                    {
+                        if (op.TryGetProperty("targetId", out var tProp) && tProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                        {
+                            var tid = tProp.GetString();
+                            if (!string.IsNullOrEmpty(tid)) targetIds.Add(tid);
+                        }
+                        if (op.TryGetProperty("content", out var cProp) && cProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                        {
+                            var c = cProp.GetString();
+                            if (c != null && c.Length > maxLen) maxLen = c.Length;
+                        }
+                        if (op.TryGetProperty("newText", out var ntProp) && ntProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                        {
+                            var nt = ntProp.GetString();
+                            if (nt != null && nt.Length > maxLen) maxLen = nt.Length;
+                        }
+                    }
+                    distinctTargetCount = targetIds.Distinct().Count();
+                    duplicateTargetCount = targetIds.Count - distinctTargetCount.Value;
+                    maxContentLen = maxLen;
+                }
+                else if (root.TryGetProperty("searchReplaceEdits", out var srElement) && srElement.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    parsedOpCount = srElement.GetArrayLength();
+                    int maxLen = 0;
+                    foreach (var sr in srElement.EnumerateArray())
+                    {
+                        if (sr.TryGetProperty("replace", out var rProp) && rProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                        {
+                            var r = rProp.GetString();
+                            if (r != null && r.Length > maxLen) maxLen = r.Length;
+                        }
+                    }
+                    maxContentLen = maxLen;
+                }
+                else if (root.TryGetProperty("newContent", out var ncProp) && ncProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    parsedOpCount = 1;
+                    maxContentLen = ncProp.GetString()?.Length ?? 0;
+                }
+            }
+        }
+        catch
+        {
+            // Truncated / unparseable JSON: safely keep parsed metrics null without attempting repairs
+        }
+
+        return (
+            responseChars,
+            startsWithJsonObject,
+            startsWithJsonArray,
+            opMarkers,
+            targetIdMarkers,
+            contentMarkers,
+            oldTextMarkers,
+            anchorMarkers,
+            newContentMarkers,
+            srMarkers,
+            fenceMarkers,
+            jsonObjectCount,
+            jsonArrayCount,
+            maxContentLen,
+            parsedOpCount,
+            distinctTargetCount,
+            duplicateTargetCount
+        );
+    }
+
+    private static int CountOccurrences(string source, string substring)
+    {
+        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(substring)) return 0;
+        int count = 0;
+        int index = 0;
+        while ((index = source.IndexOf(substring, index, StringComparison.OrdinalIgnoreCase)) != -1)
+        {
+            count++;
+            index += substring.Length;
+        }
+        return count;
+    }
+
     private async Task RecordProviderCallActivityAsync(
         Guid executionId,
         string targetFile,
@@ -1171,7 +1310,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
         int? totalPromptChars = null,
         string? editStrategy = null,
         int? retryPromptChars = null,
-        FileEditSpec? editSpec = null)
+        FileEditSpec? editSpec = null,
+        bool isVerificationRepair = false)
     {
         int? opCount = null;
         string? opTypes = null;
@@ -1201,6 +1341,49 @@ public sealed class DeveloperAgent : IDeveloperAgent
             aggNewChars = sr.Sum(e => e.Replace?.Length ?? 0);
         }
 
+        bool isTokenLimit = response.FailureKind == AiFailureKind.TokenLimitExceeded ||
+                            string.Equals(response.FinishReason, "length", StringComparison.OrdinalIgnoreCase);
+
+        int? respChars = null;
+        bool? startsWithObj = null;
+        bool? startsWithArr = null;
+        int? opMarkers = null;
+        int? targetIdMarkers = null;
+        int? contentMarkers = null;
+        int? oldTextMarkers = null;
+        int? anchorMarkers = null;
+        int? newContentMarkers = null;
+        int? srMarkers = null;
+        int? fenceMarkers = null;
+        int? jsonObjectCount = null;
+        int? jsonArrayCount = null;
+        int? maxContentLen = null;
+        int? parsedOpCount = null;
+        int? distinctTargetCount = null;
+        int? duplicateTargetCount = null;
+
+        if (isTokenLimit)
+        {
+            var forensics = ExtractTokenLimitForensics(response.Content);
+            respChars = forensics.ResponseChars;
+            startsWithObj = forensics.StartsWithJsonObject;
+            startsWithArr = forensics.StartsWithJsonArray;
+            opMarkers = forensics.OperationMarkerCount;
+            targetIdMarkers = forensics.TargetIdMarkerCount;
+            contentMarkers = forensics.ContentFieldMarkerCount;
+            oldTextMarkers = forensics.OldTextMarkerCount;
+            anchorMarkers = forensics.AnchorMarkerCount;
+            newContentMarkers = forensics.NewContentMarkerCount;
+            srMarkers = forensics.SearchReplaceMarkerCount;
+            fenceMarkers = forensics.MarkdownFenceCount;
+            jsonObjectCount = forensics.ApproximateJsonObjectCount;
+            jsonArrayCount = forensics.ApproximateJsonArrayCount;
+            maxContentLen = forensics.MaximumObservedContentFieldLength;
+            parsedOpCount = forensics.ParsedOperationCount;
+            distinctTargetCount = forensics.DistinctTargetIdCount;
+            duplicateTargetCount = forensics.DuplicateTargetIdCount;
+        }
+
         var metadata = new ExecutionActivityMetadata(
             EventKind: "ProviderCall",
             LogicalProviderCallCount: 1,
@@ -1220,7 +1403,27 @@ public sealed class DeveloperAgent : IDeveloperAgent
             OperationCount: opCount,
             OperationTypes: opTypes,
             AggregateOldTextChars: aggOldChars,
-            AggregateNewTextChars: aggNewChars);
+            AggregateNewTextChars: aggNewChars,
+            ResponseChars: respChars,
+            StartsWithJsonObject: startsWithObj,
+            StartsWithJsonArray: startsWithArr,
+            OperationMarkerCount: opMarkers,
+            TargetIdMarkerCount: targetIdMarkers,
+            ContentFieldMarkerCount: contentMarkers,
+            OldTextMarkerCount: oldTextMarkers,
+            AnchorMarkerCount: anchorMarkers,
+            NewContentMarkerCount: newContentMarkers,
+            SearchReplaceMarkerCount: srMarkers,
+            MarkdownFenceCount: fenceMarkers,
+            ApproximateJsonObjectCount: jsonObjectCount,
+            ApproximateJsonArrayCount: jsonArrayCount,
+            MaximumObservedContentFieldLength: maxContentLen,
+            ParsedOperationCount: parsedOpCount,
+            DistinctTargetIdCount: distinctTargetCount,
+            DuplicateTargetIdCount: duplicateTargetCount,
+            FinishReason: response.FinishReason,
+            PromptChars: totalPromptChars,
+            IsVerificationRepair: isVerificationRepair);
 
         await SafeRecordActivityAsync(
             executionId,

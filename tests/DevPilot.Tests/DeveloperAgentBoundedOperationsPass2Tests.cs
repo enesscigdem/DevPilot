@@ -5,6 +5,9 @@ using System.Linq;
 using System.Threading.Tasks;
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.DeveloperAgent.Models;
+using DevPilot.Application.Executions.Models;
+using DevPilot.Application.Executions.Ports;
+using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure.DeveloperAgent;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -20,6 +23,7 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
     private readonly string _branchName;
     private readonly FakeAiProvider _fakeAiProvider;
     private readonly WorktreeEditApplier _editApplier;
+    private readonly FakeExecutionActivityRecorder _activityRecorder;
     private readonly DeveloperAgent _developerAgent;
 
     public DeveloperAgentBoundedOperationsPass2Tests()
@@ -42,10 +46,12 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
 
         _fakeAiProvider = new FakeAiProvider();
         _editApplier = new WorktreeEditApplier(NullLogger<WorktreeEditApplier>.Instance);
+        _activityRecorder = new FakeExecutionActivityRecorder();
         _developerAgent = new DeveloperAgent(
             _fakeAiProvider,
             _editApplier,
-            NullLogger<DeveloperAgent>.Instance);
+            NullLogger<DeveloperAgent>.Instance,
+            activityRecorder: _activityRecorder);
     }
 
     public void Dispose()
@@ -1058,6 +1064,121 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
         updatedLines[95].Should().Be("    [Fact] public void Test_96() => Assert.True(true);");
     }
 
+    [Fact]
+    public void ExtractTokenLimitForensics_TruncatedJson_ExtractsSafeLexicalCountsWithoutFullParsing()
+    {
+        var truncated = "```json\n{\"filePath\":\"TodoService.cs\",\"operations\":[{\"type\":\"replace\",\"targetId\":\"T5\",\"content\":\"public void Foo() { int x = 1;";
+
+        var forensics = DeveloperAgent.ExtractTokenLimitForensics(truncated);
+
+        forensics.ResponseChars.Should().Be(truncated.Length);
+        forensics.StartsWithJsonObject.Should().BeFalse(); // Starts with ```json
+        forensics.MarkdownFenceCount.Should().Be(1);
+        forensics.OperationMarkerCount.Should().Be(1);
+        forensics.TargetIdMarkerCount.Should().Be(1);
+        forensics.ContentFieldMarkerCount.Should().Be(1);
+        forensics.ApproximateJsonObjectCount.Should().Be(3);
+        forensics.ApproximateJsonArrayCount.Should().Be(1);
+        forensics.ParsedOperationCount.Should().BeNull("cannot parse truncated JSON");
+        forensics.MaximumObservedContentFieldLength.Should().BeNull("cannot safely parse truncated JSON");
+        forensics.DistinctTargetIdCount.Should().BeNull();
+    }
+
+    [Fact]
+    public void ExtractTokenLimitForensics_CompleteJson_ExtractsBothLexicalAndStructuralMetrics()
+    {
+        var complete = """
+            {
+              "filePath": "TodoService.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "targetId": "T5",
+                  "content": "public void Foo() { return; }"
+                },
+                {
+                  "type": "insertBefore",
+                  "targetId": "T10",
+                  "content": "// helper comment"
+                }
+              ]
+            }
+            """;
+
+        var forensics = DeveloperAgent.ExtractTokenLimitForensics(complete);
+
+        forensics.ResponseChars.Should().Be(complete.Length);
+        forensics.StartsWithJsonObject.Should().BeTrue();
+        forensics.OperationMarkerCount.Should().Be(1);
+        forensics.TargetIdMarkerCount.Should().Be(2);
+        forensics.ContentFieldMarkerCount.Should().Be(2);
+        forensics.ParsedOperationCount.Should().Be(2);
+        forensics.DistinctTargetIdCount.Should().Be(2);
+        forensics.DuplicateTargetIdCount.Should().Be(0);
+        forensics.MaximumObservedContentFieldLength.Should().Be("public void Foo() { return; }".Length);
+    }
+
+    [Fact]
+    public async Task TokenLimitForensics_RecordedInActivityMetadata_WhenFinishReasonIsLength()
+    {
+        var relativePath = "TodoService.cs";
+        var fullPath = Path.Combine(_worktreeDir, relativePath);
+        await File.WriteAllTextAsync(fullPath, "public class TodoService { public void DoWork() {} }");
+
+        var truncatedResponse = "{\"filePath\":\"TodoService.cs\",\"operations\":[{\"type\":\"replace\",\"targetId\":\"T1\",\"content\":\"public class TodoService {";
+
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            Provider = "Kimi",
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            Content = truncatedResponse,
+            OutputTokens = 2048,
+            InputTokens = 350
+        });
+
+        // Compact retry follows
+        _fakeAiProvider.ResponsesToReturn.Enqueue("""
+            {
+              "filePath": "TodoService.cs",
+              "operations": [
+                {
+                  "type": "replace",
+                  "targetId": "T1",
+                  "content": "public class TodoService { public void DoWork() { /* done */ } }"
+                }
+              ]
+            }
+            """);
+
+        var request = CreateRequest(relativePath);
+        var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
+
+        result.Success.Should().BeTrue();
+
+        // Verify the initial provider call recorded the forensic metadata
+        var initialCallActivity = _activityRecorder.RecordedActivities
+            .FirstOrDefault(a => a.Metadata?.ProviderCallKind == "Generation");
+
+        initialCallActivity.Should().NotBeNull();
+        var meta = initialCallActivity!.Metadata!;
+        meta.FinishReason.Should().Be("length");
+        meta.ResponseChars.Should().Be(truncatedResponse.Length);
+        meta.StartsWithJsonObject.Should().BeTrue();
+        meta.OperationMarkerCount.Should().Be(1);
+        meta.TargetIdMarkerCount.Should().Be(1);
+        meta.ContentFieldMarkerCount.Should().Be(1);
+        meta.ApproximateJsonObjectCount.Should().Be(3);
+        meta.ParsedOperationCount.Should().BeNull();
+        meta.OutputTokens.Should().Be(2048);
+        meta.IsVerificationRepair.Should().BeFalse();
+
+        // Verify NO raw code is stored in metadata or activity messages
+        initialCallActivity.Message.Should().NotContain("public class TodoService");
+        meta.TargetFile.Should().Be(relativePath);
+    }
+
     private static void InitGitRepo(string path)
     {
         RunGit(path, "init");
@@ -1079,5 +1200,22 @@ public class DeveloperAgentBoundedOperationsPass2Tests : IDisposable
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
         p.WaitForExit();
+    }
+
+    private sealed class FakeExecutionActivityRecorder : IExecutionActivityRecorder
+    {
+        public List<(Guid ExecutionId, string Message, ExecutionActivityMetadata? Metadata)> RecordedActivities { get; } = new();
+
+        public Task RecordActivityAsync(
+            Guid executionId,
+            ExecutionStage stage,
+            ExecutionActivityStatus status,
+            string message,
+            ExecutionActivityMetadata? metadata = null,
+            CancellationToken cancellationToken = default)
+        {
+            RecordedActivities.Add((executionId, message, metadata));
+            return Task.CompletedTask;
+        }
     }
 }
