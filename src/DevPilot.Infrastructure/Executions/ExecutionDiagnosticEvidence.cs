@@ -46,15 +46,35 @@ public static class ExecutionDiagnosticEvidence
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex FailedTestRegex = new(
-        @"^\s*(?:x\s+)?Failed\s+(?<name>.+?)(?:\s+\[[^\]]+\])?\s*$",
+        @"^\s*(?:x\s+)?(?:Failed|Başarısız|Fehlgeschlagen|Échec|Fallido)\s+(?<name>[A-Za-z_][A-Za-z0-9_.+`]+)(?:\s+\[[^\]]+\])?\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex XUnitTestRegex = new(
+        @"\[xUnit\.net\s+[^\]]+\]\s+(?<name>[A-Za-z_][A-Za-z0-9_.+`]+)\s+\[FAIL\]",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex StackLocationRegex = new(
-        $@"(?:\bin\s+|\bat\s+[^\r\n]*?\()?\s*(?<path>(?:[A-Za-z]:)?[^\r\n()]*?\.{SourceExtensionPattern})(?::line\s+|:)(?<line>\d+)(?::(?<column>\d+))?",
+        $@"(?:(?:\bat|\bkonum:)\s+[^\r\n]*?\b(?:in|içinde)\s+|\bin\s+|\biçinde\s+|\bat\s+[^\r\n]*?\(|\bkonum:\s+[^\r\n]*?\()?\s*(?<path>(?:[A-Za-z]:)?[^\r\n()]*?\.{SourceExtensionPattern})(?::line\s+|:satır\s+|:\s*line\s+|:\s*satır\s+|:)(?<line>\d+)(?::(?<column>\d+))?",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex PythonStackLocationRegex = new(
         @"\bFile\s+[""'](?<path>(?:[A-Za-z]:)?[^""'\r\n]+?\.py)[""'],\s*line\s+(?<line>\d+)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex SectionHeaderRegex = new(
+        @"^\s*(?:Error\s*Message|Hata\s*İletisi|Fehlermeldung|Message\s*d'erreur|Mensaje\s*de\s*error|Message|Error)\s*:\s*(?<inline>.*)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex StackHeaderRegex = new(
+        @"^\s*(?:Stack\s*Trace|Yığın\s*İzleme|Stapelüberwachung|Trace\s*de\s*la\s*pile|Seguimiento\s*de\s*la\s*pila|Trace|StackTrace)\s*:",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex StackFrameRegex = new(
+        @"(?:^\s*(?:at|konum:)\s+|\.cs:(?:line|satır)\s+\d+)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex SummaryLineRegex = new(
+        @"^\s*(?:\[xUnit\.net|Failed!|Passed!|Başarısız!|Başarılı!|Toplam|Total|Passed|Failed|Başarısız|Başarılı|Standard\s+Output|Standart\s+Çıktı)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static CompilerFailureEvidence ParseCompilerFailure(
@@ -125,9 +145,18 @@ public static class ExecutionDiagnosticEvidence
         for (var i = 0; i < allLines.Length; i++)
         {
             var trimmed = allLines[i].Trim();
-            if (trimmed.StartsWith("Failed!", StringComparison.OrdinalIgnoreCase))
+            if (trimmed.StartsWith("Failed!", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("Başarısız!", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
+            }
+
+            var xunitMatch = XUnitTestRegex.Match(trimmed);
+            if (xunitMatch.Success)
+            {
+                failureStart = i;
+                testName = xunitMatch.Groups["name"].Value.Trim();
+                break;
             }
 
             var match = FailedTestRegex.Match(trimmed);
@@ -149,12 +178,22 @@ public static class ExecutionDiagnosticEvidence
                 var trimmed = allLines[i].TrimEnd();
                 var compact = trimmed.Trim();
 
-                if (i > failureStart &&
-                    (compact.StartsWith("Failed!", StringComparison.OrdinalIgnoreCase) ||
-                     compact.StartsWith("Passed!", StringComparison.OrdinalIgnoreCase) ||
-                     FailedTestRegex.IsMatch(compact)))
+                if (i > failureStart)
                 {
-                    break;
+                    if (compact.StartsWith("Failed!", StringComparison.OrdinalIgnoreCase) ||
+                        compact.StartsWith("Başarısız!", StringComparison.OrdinalIgnoreCase) ||
+                        compact.StartsWith("Passed!", StringComparison.OrdinalIgnoreCase) ||
+                        compact.StartsWith("Başarılı!", StringComparison.OrdinalIgnoreCase))
+                    {
+                        break;
+                    }
+
+                    var isNewTestMarker = (XUnitTestRegex.IsMatch(compact) || FailedTestRegex.IsMatch(compact)) &&
+                                          (testName == null || !compact.Contains(testName, StringComparison.OrdinalIgnoreCase));
+                    if (isNewTestMarker)
+                    {
+                        break;
+                    }
                 }
 
                 if (relevantChars + trimmed.Length > MaxTestEvidenceChars)
@@ -273,21 +312,48 @@ public static class ExecutionDiagnosticEvidence
         foreach (var line in relevant)
         {
             var trimmed = line.Trim();
-            if (trimmed.StartsWith("Error Message:", StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrWhiteSpace(trimmed)) continue;
+
+            var sectionMatch = SectionHeaderRegex.Match(trimmed);
+            if (sectionMatch.Success)
             {
                 inError = true;
-                var inline = trimmed["Error Message:".Length..].Trim();
-                if (!string.IsNullOrWhiteSpace(inline)) result.Add(inline);
+                var inline = sectionMatch.Groups["inline"].Value.Trim();
+                if (!string.IsNullOrWhiteSpace(inline))
+                {
+                    result.Add(inline);
+                }
                 continue;
             }
 
-            if (trimmed.StartsWith("Stack Trace:", StringComparison.OrdinalIgnoreCase))
+            if (StackHeaderRegex.IsMatch(trimmed))
             {
                 break;
             }
 
-            if (inError && !string.IsNullOrWhiteSpace(trimmed))
+            if (StackFrameRegex.IsMatch(trimmed))
             {
+                if (inError) break;
+                continue;
+            }
+
+            if (inError)
+            {
+                result.Add(trimmed);
+            }
+        }
+
+        if (result.Count == 0)
+        {
+            foreach (var line in relevant)
+            {
+                var trimmed = line.Trim();
+                if (string.IsNullOrWhiteSpace(trimmed)) continue;
+                if (SummaryLineRegex.IsMatch(trimmed)) continue;
+                if (StackHeaderRegex.IsMatch(trimmed)) continue;
+                if (StackFrameRegex.IsMatch(trimmed)) continue;
+                if (Regex.IsMatch(trimmed, @"^[\w\s]+:$")) continue;
+
                 result.Add(trimmed);
             }
         }
@@ -454,15 +520,36 @@ public static class ExecutionDiagnosticEvidence
         for (var i = 0; i < allLines.Length; i++)
         {
             var trimmed = allLines[i].Trim();
-            if (trimmed.StartsWith("Failed!", StringComparison.OrdinalIgnoreCase))
+            if (trimmed.StartsWith("Failed!", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("Başarısız!", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            var match = FailedTestRegex.Match(trimmed);
-            if (match.Success)
+            string? name = null;
+            var xunitMatch = XUnitTestRegex.Match(trimmed);
+            if (xunitMatch.Success)
             {
-                var name = match.Groups["name"].Value.Trim();
+                name = xunitMatch.Groups["name"].Value.Trim();
+            }
+            else
+            {
+                var match = FailedTestRegex.Match(trimmed);
+                if (match.Success)
+                {
+                    name = match.Groups["name"].Value.Trim();
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                if (failureIndices.Count > 0 &&
+                    string.Equals(failureIndices[^1].Name, name, StringComparison.OrdinalIgnoreCase) &&
+                    i - failureIndices[^1].Index < 5)
+                {
+                    continue;
+                }
+
                 failureIndices.Add((i, name));
             }
         }
@@ -480,7 +567,9 @@ public static class ExecutionDiagnosticEvidence
                 {
                     var compact = allLines[j].Trim();
                     if (j > start && (compact.StartsWith("Failed!", StringComparison.OrdinalIgnoreCase) ||
-                                     compact.StartsWith("Passed!", StringComparison.OrdinalIgnoreCase)))
+                                     compact.StartsWith("Başarısız!", StringComparison.OrdinalIgnoreCase) ||
+                                     compact.StartsWith("Passed!", StringComparison.OrdinalIgnoreCase) ||
+                                     compact.StartsWith("Başarılı!", StringComparison.OrdinalIgnoreCase)))
                     {
                         break;
                     }

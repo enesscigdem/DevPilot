@@ -1,3 +1,4 @@
+using DevPilot.Application.Executions.Ports;
 using DevPilot.Infrastructure.Executions;
 using FluentAssertions;
 using Xunit;
@@ -168,5 +169,197 @@ public sealed class ExecutionDiagnosticEvidenceTests
             location.FilePath.EndsWith("tests/test_todos.py") && location.Line == 18);
         selected.Should().Contain("tests/test_todos.py");
         selected.Should().NotContain("src/valid.py");
+    }
+
+    [Fact]
+    public void EnglishTestOutput_ParsesTestNameCorrectly()
+    {
+        var stdout = """
+            Failed Namespace.Tests.SomeTest [12ms]
+              Error Message:
+               Assert.True() Failure
+              Stack Trace:
+                 at Namespace.Tests.SomeTest() in /repo/tests/SomeTest.cs:line 42
+            """;
+
+        var failures = ExecutionDiagnosticEvidence.ParseAllTestFailures(stdout, null, null);
+
+        failures.Should().ContainSingle();
+        failures[0].TestName.Should().Be("Namespace.Tests.SomeTest");
+        failures[0].ErrorSummary.Should().Be("Assert.True() Failure");
+    }
+
+    [Fact]
+    public void LocalizedTurkishOutput_ParsesTestNameAndErrorCorrectly()
+    {
+        var stdout = """
+            [xUnit.net 00:00:01.23]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Başarısız TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [260 ms]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+              Yığın İzleme:
+                 at TodoApp.Tests.LegacyCalculatorTests.AlwaysFails() in C:\Users\enesc\OneDrive\Desktop\Desktop\projects\DevPilot.PreExistingFailureFixture\tests\TodoApp.Tests\LegacyCalculatorTests.cs:line 10
+               at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+            Başarısız! - Başarısız:     1, Başarılı:     2, Atlanan:     0, Toplam:     3, Süre: 277 ms - TodoApp.Tests.dll (net10.0)
+            """;
+
+        var failures = ExecutionDiagnosticEvidence.ParseAllTestFailures(stdout, null, null, workspaceRoot: @"C:\Users\enesc\OneDrive\Desktop\Desktop\projects\DevPilot.PreExistingFailureFixture");
+
+        failures.Should().ContainSingle();
+        failures[0].TestName.Should().Be("TodoApp.Tests.LegacyCalculatorTests.AlwaysFails");
+        failures[0].ErrorSummary.Should().Be("Intentional pre-existing fixture failure.");
+        failures[0].Location.Should().Be("tests/TodoApp.Tests/LegacyCalculatorTests.cs");
+    }
+
+    [Fact]
+    public void DifferentXUnitTimestamps_ProduceSameNormalizedFailureIdentity()
+    {
+        var output1 = """
+            [xUnit.net 00:00:01.23]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Başarısız TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [260 ms]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+              Yığın İzleme:
+                 at TodoApp.Tests.LegacyCalculatorTests.AlwaysFails() in C:\repo\tests\LegacyCalculatorTests.cs:line 10
+            """;
+
+        var output2 = """
+            [xUnit.net 00:00:04.99]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Başarısız TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [15 ms]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+              Yığın İzleme:
+                 at TodoApp.Tests.LegacyCalculatorTests.AlwaysFails() in C:\repo\tests\LegacyCalculatorTests.cs:line 10
+            """;
+
+        var f1 = ExecutionDiagnosticEvidence.ParseAllTestFailures(output1, null, null, workspaceRoot: @"C:\repo")[0];
+        var f2 = ExecutionDiagnosticEvidence.ParseAllTestFailures(output2, null, null, workspaceRoot: @"C:\repo")[0];
+
+        f1.FailureKey.Should().Be(f2.FailureKey);
+        f1.NormalizedDiagnostic.Should().Be(f2.NormalizedDiagnostic);
+    }
+
+    [Fact]
+    public void DifferentWorktreePaths_ProduceSameNormalizedFailureIdentity()
+    {
+        var taskOutput = """
+            [xUnit.net 00:00:01.23]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Başarısız TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [260 ms]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+              Yığın İzleme:
+                 at TodoApp.Tests.LegacyCalculatorTests.AlwaysFails() in C:\Users\enesc\.devpilot\workspaces\task123\tests\LegacyCalculatorTests.cs:line 10
+            """;
+
+        var baselineOutput = """
+            [xUnit.net 00:00:00.88]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Başarısız TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [120 ms]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+              Yığın İzleme:
+                 at TodoApp.Tests.LegacyCalculatorTests.AlwaysFails() in C:\Users\enesc\.devpilot\baselines\base456\tests\LegacyCalculatorTests.cs:line 10
+            """;
+
+        var taskFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(taskOutput, null, null, workspaceRoot: @"C:\Users\enesc\.devpilot\workspaces\task123");
+        var baselineFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(baselineOutput, null, null, workspaceRoot: @"C:\Users\enesc\.devpilot\baselines\base456");
+
+        taskFailures[0].FailureKey.Should().Be(baselineFailures[0].FailureKey);
+        taskFailures[0].Location.Should().Be("tests/LegacyCalculatorTests.cs");
+        baselineFailures[0].Location.Should().Be("tests/LegacyCalculatorTests.cs");
+    }
+
+    [Fact]
+    public void TurkishFixtureTaskFailure_Vs_BaselineFailure_ClassifiesPreExisting()
+    {
+        var taskOutput = """
+            [xUnit.net 00:00:01.23]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Başarısız TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [260 ms]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+              Yığın İzleme:
+                 at TodoApp.Tests.LegacyCalculatorTests.AlwaysFails() in C:\Users\enesc\.devpilot\workspaces\task123\tests\LegacyCalculatorTests.cs:line 10
+            """;
+
+        var baselineOutput = """
+            [xUnit.net 00:00:00.88]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Başarısız TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [120 ms]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+              Yığın İzleme:
+                 at TodoApp.Tests.LegacyCalculatorTests.AlwaysFails() in C:\Users\enesc\.devpilot\baselines\base456\tests\LegacyCalculatorTests.cs:line 10
+            """;
+
+        var taskFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(taskOutput, null, null, workspaceRoot: @"C:\Users\enesc\.devpilot\workspaces\task123");
+        var baselineFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(baselineOutput, null, null, workspaceRoot: @"C:\Users\enesc\.devpilot\baselines\base456");
+
+        var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
+            taskFailures,
+            baselineFailures,
+            baselineCheckSucceeded: false);
+
+        comparison.Classification.Should().Be(BaselineFailureClassification.PreExisting);
+        comparison.PreExistingCount.Should().Be(1);
+        comparison.NewRegressionCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void GenuinelyDifferentNewFailingTest_ClassifiesAsNewRegression()
+    {
+        var taskOutput = """
+            [xUnit.net 00:00:01.23]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+            [xUnit.net 00:00:01.45]     TodoApp.Tests.TodoServiceTests.AddTodo_IncreasesCount [FAIL]
+              Hata İletisi:
+               Assert.Equal() Failure: Expected 1, Actual 0
+            """;
+
+        var baselineOutput = """
+            [xUnit.net 00:00:00.88]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+            """;
+
+        var taskFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(taskOutput, null, null);
+        var baselineFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(baselineOutput, null, null);
+
+        var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
+            taskFailures,
+            baselineFailures,
+            baselineCheckSucceeded: false);
+
+        comparison.Classification.Should().Be(BaselineFailureClassification.NewRegression);
+        comparison.PreExistingCount.Should().Be(1);
+        comparison.NewRegressionCount.Should().Be(1);
+        comparison.NewRegressions.Should().ContainSingle(f => f.TestName == "TodoApp.Tests.TodoServiceTests.AddTodo_IncreasesCount");
+    }
+
+    [Fact]
+    public void ChangedAssertionError_SameTest_ClassifiesAsChangedRegression()
+    {
+        var taskOutput = """
+            [xUnit.net 00:00:01.23]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Hata İletisi:
+               New modified assertion failure.
+            """;
+
+        var baselineOutput = """
+            [xUnit.net 00:00:00.88]     TodoApp.Tests.LegacyCalculatorTests.AlwaysFails [FAIL]
+              Hata İletisi:
+               Intentional pre-existing fixture failure.
+            """;
+
+        var taskFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(taskOutput, null, null);
+        var baselineFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(baselineOutput, null, null);
+
+        var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
+            taskFailures,
+            baselineFailures,
+            baselineCheckSucceeded: false);
+
+        comparison.Classification.Should().Be(BaselineFailureClassification.ChangedRegression);
+        comparison.PreExistingCount.Should().Be(0);
+        comparison.ChangedCount.Should().Be(1);
+        comparison.ChangedFailures.Should().ContainSingle(f => f.TestName == "TodoApp.Tests.LegacyCalculatorTests.AlwaysFails");
     }
 }
