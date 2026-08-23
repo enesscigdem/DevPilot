@@ -73,6 +73,10 @@ public sealed class ExecutionDto
 
     public bool CanRequestMerge { get; set; }
 
+    public string VerificationOutcome { get; set; } = string.Empty;
+
+    public bool CanRetry { get; set; }
+
     public int ProgressPercentage { get; set; }
 
     public string? Model { get; set; }

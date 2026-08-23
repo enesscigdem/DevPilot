@@ -22,6 +22,7 @@ public sealed class RetryExecutionCommandTests
     private readonly FakeTaskRepository _taskRepository;
     private readonly FakeImpactAnalysisRepository _analysisRepository;
     private readonly FakeExecutionRepository _executionRepository;
+    private readonly FakeActivityRepository _activityRepository;
     private readonly FakeExecutionDispatcher _dispatcher;
     private readonly RetryExecutionCommandHandler _sut;
 
@@ -87,6 +88,7 @@ public sealed class RetryExecutionCommandTests
 
         _executionRepository = new FakeExecutionRepository();
         _executionRepository.Executions[_historicalFailedExecution.Id] = _historicalFailedExecution;
+        _activityRepository = new FakeActivityRepository();
 
         _dispatcher = new FakeExecutionDispatcher();
 
@@ -94,6 +96,7 @@ public sealed class RetryExecutionCommandTests
             _taskRepository,
             _analysisRepository,
             _executionRepository,
+            _activityRepository,
             _dispatcher,
             NullLogger<RetryExecutionCommandHandler>.Instance);
     }
@@ -223,6 +226,70 @@ public sealed class RetryExecutionCommandTests
         result.Success.Should().BeFalse();
         result.Conflict.Should().BeTrue();
         result.ErrorMessage.Should().Contain("completed task");
+    }
+
+    [Fact]
+    public async Task HandleAsync_WhenCompletedNeedsReview_CreatesNewExecutionAndPreservesPrevious()
+    {
+        _task.Status = DevelopmentTaskStatus.Completed;
+        _historicalFailedExecution.Status = TaskExecutionStatus.Completed;
+        _historicalFailedExecution.ErrorMessage = null;
+        _executionRepository.Executions.Clear();
+        _executionRepository.Executions[_historicalFailedExecution.Id] = _historicalFailedExecution;
+        _activityRepository.Activities[_historicalFailedExecution.Id] = new List<ExecutionActivity>
+        {
+            new()
+            {
+                ExecutionId = _historicalFailedExecution.Id,
+                Stage = ExecutionStage.DeveloperAgent,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Developer Agent completed."
+            },
+            new()
+            {
+                ExecutionId = _historicalFailedExecution.Id,
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = "{\"RepositoryCheckId\":\"build\",\"VerificationOutcome\":\"NeedsReview\"}"
+            }
+        };
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, _workspaceId));
+
+        result.Success.Should().BeTrue();
+        result.Execution.Should().NotBeNull();
+        result.Execution!.Id.Should().NotBe(_historicalFailedExecution.Id);
+        result.Execution.DevelopmentTaskId.Should().Be(_task.Id);
+        _executionRepository.Executions.Should().ContainKey(_historicalFailedExecution.Id);
+        _executionRepository.Executions[_historicalFailedExecution.Id].Status.Should().Be(TaskExecutionStatus.Completed);
+        _executionRepository.Executions[_historicalFailedExecution.Id].WorkspacePath.Should().Be("/worktrees/exec-1");
+        _task.Status.Should().Be(DevelopmentTaskStatus.Executing);
+        _dispatcher.DispatchedExecutionIds.Should().ContainSingle().Which.Should().Be(result.Execution.Id);
+    }
+
+    [Fact]
+    public async Task HandleAsync_WhenRunningExecutionExists_CannotRetryNeedsReview()
+    {
+        _task.Status = DevelopmentTaskStatus.Completed;
+        _historicalFailedExecution.Status = TaskExecutionStatus.Completed;
+        _executionRepository.ActiveExecutionExists = true;
+        _activityRepository.Activities[_historicalFailedExecution.Id] = new List<ExecutionActivity>
+        {
+            new()
+            {
+                ExecutionId = _historicalFailedExecution.Id,
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = "{\"VerificationOutcome\":\"NeedsReview\"}"
+            }
+        };
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, _workspaceId));
+
+        result.Success.Should().BeFalse();
+        result.Conflict.Should().BeTrue();
+        result.ErrorMessage.Should().Contain("active execution already exists");
+        _dispatcher.DispatchedExecutionIds.Should().BeEmpty();
     }
 
     [Fact]
@@ -446,6 +513,23 @@ public sealed class RetryExecutionCommandTests
         public Task<bool> AcknowledgeCancellationWithLeaseAsync(Guid executionId, Guid leaseToken, CancellationToken cancellationToken = default) => Task.FromResult(true);
         public Task<bool> IsCancellationRequestedAsync(Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<int> ReconcileStaleRunningExecutionsAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
+    }
+
+    private sealed class FakeActivityRepository : IExecutionActivityRepository
+    {
+        public Dictionary<Guid, List<ExecutionActivity>> Activities { get; } = new();
+
+        public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(
+            Guid executionId,
+            CancellationToken cancellationToken = default)
+        {
+            if (Activities.TryGetValue(executionId, out var activities))
+            {
+                return Task.FromResult<IReadOnlyList<ExecutionActivity>>(activities);
+            }
+
+            return Task.FromResult<IReadOnlyList<ExecutionActivity>>(Array.Empty<ExecutionActivity>());
+        }
     }
 
     private sealed class FakeExecutionDispatcher : IExecutionDispatcher

@@ -76,6 +76,7 @@ public sealed record ExecutionReviewDto(
     DateTime? MergedAt = null,
     bool CanRequestMerge = false,
     string? MergeBlockedReason = null,
+    bool CanRetry = false,
     Guid? RepositoryWorkspaceId = null,
     string? RepositoryOwner = null,
     string? RepositoryName = null,

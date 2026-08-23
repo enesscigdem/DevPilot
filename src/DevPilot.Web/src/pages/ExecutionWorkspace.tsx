@@ -34,7 +34,13 @@ import {
 } from "@/types"
 import { stages } from "@/data/mock"
 
-function getStageState(stageIndex: number, status: number, reviewStatus?: string, pullRequestStatus?: string): "done" | "active" | "todo" | "failed" | "blocked" {
+function getStageState(
+  stageIndex: number,
+  status: number,
+  reviewStatus?: string,
+  pullRequestStatus?: string,
+  verificationOutcome?: string,
+): "done" | "active" | "todo" | "failed" | "blocked" | "needsreview" {
   if (stageIndex === 6) {
     const pr = String(pullRequestStatus || "").toLowerCase()
     if (pr === "open" || pr === "merged") return "done"
@@ -43,6 +49,7 @@ function getStageState(stageIndex: number, status: number, reviewStatus?: string
     return "todo"
   }
   if (status === TaskExecutionStatus.Completed) {
+    if (stageIndex === 4 && verificationOutcome === "NeedsReview") return "needsreview"
     if (stageIndex <= 4) return "done"
     if (stageIndex === 5) {
       const r = String(reviewStatus || "").toLowerCase()
@@ -343,6 +350,7 @@ export function ExecutionWorkspace() {
   const isPending = execution.status === TaskExecutionStatus.Pending
   const isFailed = execution.status === TaskExecutionStatus.Failed
   const isCancelled = execution.status === TaskExecutionStatus.Cancelled
+  const canRetryExecution = Boolean(execution.canRetry) || isFailed || isCancelled
 
   // Authoritative build/test outcome derived from final validation activity and execution status
   const buildActivities = activities.filter((a) => a.stage === "Build" && (a.status === "Completed" || a.status === "Failed"))
@@ -431,7 +439,7 @@ export function ExecutionWorkspace() {
                 )}
               </Button>
             )}
-            {(isFailed || isCancelled) && (
+            {canRetryExecution && (
               activeExecutionForTask ? (
                 <Button
                   variant="default"
@@ -464,7 +472,7 @@ export function ExecutionWorkspace() {
               )
             )}
             <Button
-              variant={isFailed || isCancelled ? "default" : "primary"}
+              variant={canRetryExecution ? "default" : "primary"}
               size="sm"
               disabled={isPending || isRunning || isCancelled}
               onClick={() => navigate(`/review/${execution.id}`)}
@@ -483,8 +491,8 @@ export function ExecutionWorkspace() {
           <ol className="relative">
             {stages.map((st, i) => {
               const backendState = execution.stages?.[i]?.state?.toLowerCase()
-              const state = (backendState as "done" | "active" | "failed" | "blocked" | "todo") ||
-                getStageState(i, execution.status, execution.reviewStatus, execution.pullRequestStatus)
+              const state = (backendState as "done" | "active" | "failed" | "blocked" | "todo" | "needsreview") ||
+                getStageState(i, execution.status, execution.reviewStatus, execution.pullRequestStatus, execution.verificationOutcome)
 
               return (
                 <li key={st.key} className="relative flex gap-3 pb-5 last:pb-0">
@@ -503,8 +511,10 @@ export function ExecutionWorkspace() {
                         ? "border-success bg-success text-primary-foreground"
                         : state === "active"
                           ? "border-primary bg-surface"
-                          : state === "failed"
+                          :                         state === "failed"
                             ? "border-danger bg-danger text-primary-foreground"
+                            : state === "needsreview"
+                              ? "border-amber-500 bg-amber-500 text-primary-foreground"
                             : state === "blocked"
                               ? "border-accent bg-accent text-primary-foreground"
                               : "border-border bg-surface",
@@ -516,6 +526,8 @@ export function ExecutionWorkspace() {
                       <CircleDot className="h-3 w-3 animate-pulse-dot text-primary" />
                     ) : state === "failed" ? (
                       <X className="h-2.5 w-2.5" />
+                    ) : state === "needsreview" ? (
+                      <AlertCircle className="h-2.5 w-2.5" />
                     ) : state === "blocked" ? (
                       <X className="h-2 w-2" />
                     ) : (
@@ -542,6 +554,11 @@ export function ExecutionWorkspace() {
                     {state === "failed" && (
                       <span className="font-mono text-[10.5px] text-danger">
                         {i === 5 ? "rejected" : "failed here"}
+                      </span>
+                    )}
+                    {state === "needsreview" && (
+                      <span className="font-mono text-[10.5px] text-amber-600 dark:text-amber-400">
+                        needs review
                       </span>
                     )}
                     {state === "blocked" && <span className="font-mono text-[10.5px] text-accent">cancelled</span>}
@@ -1108,7 +1125,13 @@ export function ExecutionWorkspace() {
                 tone={testPassed ? "green" : testFailed ? "red" : "neutral"}
                 className="ml-auto"
               >
-                {testPassed ? "Passed" : testFailed ? "Failed" : "—"}
+                {testPassed
+                  ? "Passed"
+                  : testFailed
+                    ? "Failed"
+                    : execution.verificationOutcome === "PartiallyVerified"
+                      ? "No suite"
+                      : "—"}
               </Badge>
             </div>
           </Panel>

@@ -46,4 +46,7 @@ Thumbs.db
 # Local agent/.NET scratch
 /scratch/
 
+# Generated local validation/build outputs
+/artifacts/
+
 tests/fixtures/DevPilot.E2EFixture/
