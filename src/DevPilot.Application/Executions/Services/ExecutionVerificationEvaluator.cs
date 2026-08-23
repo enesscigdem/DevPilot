@@ -22,22 +22,30 @@ public static class ExecutionVerificationEvaluator
             return ExecutionVerificationOutcome.Blocked;
         }
 
-        var workspaceFailed = activities.Any(a => a.Stage == ExecutionStage.Workspace && a.Status == ExecutionActivityStatus.Failed);
-        var devAgentFailed = activities.Any(a => a.Stage == ExecutionStage.DeveloperAgent && a.Status == ExecutionActivityStatus.Failed);
-
-        if (workspaceFailed || (execution.Status == TaskExecutionStatus.Failed && !activities.Any(a => a.Stage == ExecutionStage.DeveloperAgent && a.Status == ExecutionActivityStatus.Completed)))
-        {
-            return ExecutionVerificationOutcome.Failed;
-        }
-
-        if (devAgentFailed)
-        {
-            return ExecutionVerificationOutcome.Failed;
-        }
-
         var parsedActivities = activities
             .Select((a, idx) => (Activity: a, Metadata: ParseMetadata(a.MetadataJson), Index: idx))
             .ToList();
+
+        var workspaceFailed = parsedActivities.Any(p =>
+            p.Activity.Stage == ExecutionStage.Workspace &&
+            p.Activity.Status == ExecutionActivityStatus.Failed);
+
+        if (workspaceFailed)
+        {
+            return ExecutionVerificationOutcome.Failed;
+        }
+
+        var terminalDeveloperAgentStatus = GetTerminalDeveloperAgentStatus(parsedActivities);
+        if (terminalDeveloperAgentStatus == ExecutionActivityStatus.Failed)
+        {
+            return ExecutionVerificationOutcome.Failed;
+        }
+
+        if (execution.Status == TaskExecutionStatus.Failed &&
+            terminalDeveloperAgentStatus != ExecutionActivityStatus.Completed)
+        {
+            return ExecutionVerificationOutcome.Failed;
+        }
 
         // 1. VerificationInfrastructureError: Infrastructure failure during check discovery or execution
         var hasInfraError = parsedActivities.Any(p =>
@@ -167,6 +175,35 @@ public static class ExecutionVerificationEvaluator
             ExecutionVerificationOutcome.Blocked => false,
             _ => false
         };
+    }
+
+    internal static ExecutionActivityStatus? GetTerminalDeveloperAgentStatus(
+        IReadOnlyList<(ExecutionActivity Activity, ExecutionActivityMetadata? Metadata, int Index)> parsedActivities)
+    {
+        var terminal = parsedActivities
+            .Where(p => p.Activity.Stage == ExecutionStage.DeveloperAgent)
+            .Where(p => p.Activity.Status is ExecutionActivityStatus.Completed or ExecutionActivityStatus.Failed)
+            .Where(p => !IsDeveloperAgentAttemptTelemetry(p.Metadata))
+            .OrderBy(p => p.Activity.CreatedAt)
+            .ThenBy(p => p.Index)
+            .LastOrDefault();
+
+        return terminal.Activity?.Status;
+    }
+
+    internal static bool IsDeveloperAgentAttemptTelemetry(ExecutionActivityMetadata? metadata)
+    {
+        if (metadata == null)
+        {
+            return false;
+        }
+
+        if (string.Equals(metadata.EventKind, "ProviderCall", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return !string.IsNullOrWhiteSpace(metadata.ProviderCallKind);
     }
 
     private static ExecutionActivityMetadata? ParseMetadata(string? metadataJson)

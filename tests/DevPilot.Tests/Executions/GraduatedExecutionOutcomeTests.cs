@@ -136,6 +136,285 @@ public class GraduatedExecutionOutcomeTests
     }
 
     [Fact]
+    public void DetermineOutcome_DeveloperAgentFailedOnly_ReturnsFailed()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Failed };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.DeveloperAgent,
+                Status = ExecutionActivityStatus.Failed,
+                Message = "Developer Agent failed: generation failed."
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.Failed);
+    }
+
+    [Fact]
+    public void DetermineOutcome_DeveloperAgentFailedAttemptThenCompleted_SupersedesFailure()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Started, "Developer Agent started."),
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Failed, "Developer Agent failed: transient generation error."),
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed.")
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().NotBe(ExecutionVerificationOutcome.Failed);
+    }
+
+    [Fact]
+    public void DetermineOutcome_TokenLimitExceededThenCompactRetryAndCompleted_IsNotFailed()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Started, "Developer Agent started."),
+            ProviderCall(ExecutionActivityStatus.Failed, "Generation", "Provider call completed: Generation."),
+            ProviderCall(ExecutionActivityStatus.Completed, "CompactGenerationRetry", "Provider call completed: CompactGenerationRetry."),
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed.")
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().NotBe(ExecutionVerificationOutcome.Failed);
+    }
+
+    [Fact]
+    public void DetermineOutcome_MultipleIntermediateDeveloperAgentFailuresThenCompleted_IsNotFailed()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Started, "Developer Agent started."),
+            ProviderCall(ExecutionActivityStatus.Failed, "Generation", "Provider call completed: Generation."),
+            ProviderCall(ExecutionActivityStatus.Failed, "Generation", "Provider call completed: Generation."),
+            ProviderCall(ExecutionActivityStatus.Completed, "CompactGenerationRetry", "Provider call completed: CompactGenerationRetry."),
+            new()
+            {
+                Stage = ExecutionStage.DeveloperAgent,
+                Status = ExecutionActivityStatus.Failed,
+                Message = "Generation technical summary.",
+                MetadataJson = "{\"EventKind\":\"GenerationSummary\",\"LogicalProviderCallCount\":3}"
+            },
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed.")
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().NotBe(ExecutionVerificationOutcome.Failed);
+    }
+
+    [Fact]
+    public void DetermineOutcome_FinalDeveloperAgentFailureWithoutLaterCompletion_ReturnsFailed()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Failed };
+        var activities = new List<ExecutionActivity>
+        {
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Started, "Developer Agent started."),
+            ProviderCall(ExecutionActivityStatus.Completed, "Generation", "Provider call completed: Generation."),
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Failed, "Developer Agent failed: apply failed.")
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.Failed);
+    }
+
+    [Fact]
+    public void DetermineOutcome_DeveloperAgentCompleted_BuildPassed_NoTests_ReturnsPartiallyVerified()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed."),
+            BuildPassed()
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.PartiallyVerified);
+        ExecutionVerificationEvaluator.IsDeliveryEligible(outcome).Should().BeTrue();
+    }
+
+    [Fact]
+    public void DetermineOutcome_RealAcceptanceShape_TransientDeveloperAgentFailureThenRepair_ReturnsPartiallyVerified()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = CreateRealAcceptanceActivities();
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.PartiallyVerified);
+        ExecutionVerificationEvaluator.IsDeliveryEligible(outcome).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ApproveCommand_RealAcceptancePartiallyVerified_AllowsApproval()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+        repo.Executions[executionId] = execution;
+
+        var activityRepo = new TestExecutionActivityRepository();
+        foreach (var activity in CreateRealAcceptanceActivities())
+        {
+            activity.ExecutionId = executionId;
+            activityRepo.Activities.Add(activity);
+        }
+
+        var handler = new ApproveExecutionReviewCommandHandler(
+            repo,
+            activityRepo,
+            new MockWorkspaceManager(),
+            new MockFingerprintCalculator(),
+            new MockActivityRecorder(),
+            NullLogger<ApproveExecutionReviewCommandHandler>.Instance);
+
+        var result = await handler.HandleAsync(new ApproveExecutionReviewCommand(executionId, "fp"));
+        result.Status.Should().Be(ApproveExecutionReviewResultStatus.Success);
+        result.ErrorMessage.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ReviewAndApprove_RealAcceptanceShape_UseTheSamePartiallyVerifiedOutcome()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Task" },
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+        repo.Executions[executionId] = execution;
+
+        var activityRepo = new TestExecutionActivityRepository();
+        foreach (var activity in CreateRealAcceptanceActivities())
+        {
+            activity.ExecutionId = executionId;
+            activityRepo.Activities.Add(activity);
+        }
+
+        var reviewHandler = CreateReviewHandler(repo, activityRepo);
+        var reviewResult = await reviewHandler.HandleAsync(new GetExecutionReviewQuery(executionId));
+        reviewResult.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        reviewResult.Review.Should().NotBeNull();
+        reviewResult.Review!.Build.Status.Should().Be("Passed");
+        reviewResult.Review.Test.Status.Should().Be("Unknown");
+        reviewResult.Review.VerificationOutcome.Should().Be("PartiallyVerified");
+
+        var approveHandler = new ApproveExecutionReviewCommandHandler(
+            repo,
+            activityRepo,
+            new MockWorkspaceManager(),
+            new MockFingerprintCalculator(),
+            new MockActivityRecorder(),
+            NullLogger<ApproveExecutionReviewCommandHandler>.Instance);
+        var approveResult = await approveHandler.HandleAsync(new ApproveExecutionReviewCommand(executionId, "fp"));
+        approveResult.Status.Should().Be(ApproveExecutionReviewResultStatus.Success);
+    }
+
+    [Fact]
+    public void DetermineOutcome_DeveloperAgentCompleted_UnresolvedBuildFailure_ReturnsNeedsReview()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var checkId = Guid.NewGuid();
+        var activities = new List<ExecutionActivity>
+        {
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed."),
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"StoppedWithEvidence\",\"ProgressResult\":\"SameFailure\",\"VerificationOutcome\":\"NeedsReview\"}}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.NeedsReview);
+        ExecutionVerificationEvaluator.IsDeliveryEligible(outcome).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ApproveCommand_UnresolvedBuildAfterDeveloperAgentCompleted_StillBlocks()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        repo.Executions[executionId] = new TaskExecution
+        {
+            Id = executionId,
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+
+        var checkId = Guid.NewGuid();
+        var activityRepo = new TestExecutionActivityRepository();
+        activityRepo.Activities.Add(DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed.", executionId));
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Failed,
+            MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"StoppedWithEvidence\",\"ProgressResult\":\"SameFailure\",\"VerificationOutcome\":\"NeedsReview\"}}"
+        });
+
+        var handler = new ApproveExecutionReviewCommandHandler(
+            repo,
+            activityRepo,
+            new MockWorkspaceManager(),
+            new MockFingerprintCalculator(),
+            new MockActivityRecorder(),
+            NullLogger<ApproveExecutionReviewCommandHandler>.Instance);
+
+        var result = await handler.HandleAsync(new ApproveExecutionReviewCommand(executionId, "fp"));
+        result.Status.Should().Be(ApproveExecutionReviewResultStatus.Conflict);
+        result.ErrorMessage.Should().Contain("verification outcome is 'NeedsReview'");
+    }
+
+    [Fact]
+    public void DetermineOutcome_WorkspaceFatalFailure_RemainsFailed()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Failed };
+        var activities = new List<ExecutionActivity>
+        {
+            new() { Stage = ExecutionStage.Workspace, Status = ExecutionActivityStatus.Failed, Message = "Workspace prepare failed." },
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed.")
+        };
+
+        ExecutionVerificationEvaluator.DetermineOutcome(execution, activities)
+            .Should().Be(ExecutionVerificationOutcome.Failed);
+    }
+
+    [Fact]
+    public void DetermineOutcome_Cancelled_RemainsBlocked()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Cancelled };
+        var activities = new List<ExecutionActivity>
+        {
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed."),
+            BuildPassed()
+        };
+
+        ExecutionVerificationEvaluator.DetermineOutcome(execution, activities)
+            .Should().Be(ExecutionVerificationOutcome.Blocked);
+    }
+
+    [Fact]
     public void BaselineComparison_Inconclusive_ProducesUnknownWithZeroNewRegressions()
     {
         var taskFailures = new List<NormalizedFailureItem>
@@ -837,6 +1116,72 @@ public class GraduatedExecutionOutcomeTests
         result.Review.Test.PreExistingFailureCount.Should().Be(2);
         result.Review.VerificationOutcome.Should().Be("NoNewRegressions");
     }
+
+    private static List<ExecutionActivity> CreateRealAcceptanceActivities()
+    {
+        var checkId = "npm-build";
+        return new List<ExecutionActivity>
+        {
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Started, "Developer Agent started."),
+            ProviderCall(ExecutionActivityStatus.Failed, "Generation", "Provider call completed: Generation."),
+            ProviderCall(ExecutionActivityStatus.Completed, "CompactGenerationRetry", "Provider call completed: CompactGenerationRetry."),
+            DeveloperAgentLifecycle(ExecutionActivityStatus.Completed, "Developer Agent completed."),
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                Message = "npm build failed with 1 compiler error.",
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"VerifyingRepository\"}}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Started,
+                Message = "Compile repair started.",
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"FixingBuildIssue\",\"RepairKind\":\"Compile\",\"RepairRound\":1}}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "npm build passed.",
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"CheckPassed\",\"VerificationOutcome\":\"Verified\"}}"
+            }
+        };
+    }
+
+    private static ExecutionActivity DeveloperAgentLifecycle(
+        ExecutionActivityStatus status,
+        string message,
+        Guid? executionId = null) =>
+        new()
+        {
+            ExecutionId = executionId ?? Guid.Empty,
+            Stage = ExecutionStage.DeveloperAgent,
+            Status = status,
+            Message = message,
+            MetadataJson = "{\"EventKind\":\"GeneratingChange\"}"
+        };
+
+    private static ExecutionActivity ProviderCall(
+        ExecutionActivityStatus status,
+        string callKind,
+        string message) =>
+        new()
+        {
+            Stage = ExecutionStage.DeveloperAgent,
+            Status = status,
+            Message = message,
+            MetadataJson = $"{{\"EventKind\":\"ProviderCall\",\"ProviderCallKind\":\"{callKind}\",\"LogicalProviderCallCount\":1}}"
+        };
+
+    private static ExecutionActivity BuildPassed() =>
+        new()
+        {
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Completed,
+            MetadataJson = "{\"RepositoryCheckId\":\"build\",\"VerificationOutcome\":\"Verified\"}"
+        };
 
     private static GetExecutionReviewQueryHandler CreateReviewHandler(
         IExecutionRepository repo,
