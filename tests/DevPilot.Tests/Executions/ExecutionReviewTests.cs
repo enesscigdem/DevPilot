@@ -89,8 +89,8 @@ public class ExecutionReviewTests : IDisposable
         result.Status.Should().Be(ExecutionReviewResultStatus.Success);
         result.Review.Should().NotBeNull();
         result.Review!.ExecutionStatus.Should().Be("Completed");
-        result.Review.Build.Status.Should().Be("Passed");
-        result.Review.Test.Status.Should().Be("Passed");
+        result.Review.Build.Status.Should().Be("Unknown");
+        result.Review.Test.Status.Should().Be("Unknown");
         result.Review.ChangedFileCount.Should().Be(1);
         result.Review.ChangedFiles[0].Path.Should().Be("src/Calculator.cs");
         result.Review.ChangedFiles[0].ChangeType.Should().Be("Modified");

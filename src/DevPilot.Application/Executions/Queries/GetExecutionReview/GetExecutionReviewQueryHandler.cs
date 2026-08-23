@@ -342,82 +342,155 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         Domain.Entities.TaskExecution execution,
         IReadOnlyList<ExecutionActivity> activities)
     {
-        var buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
-        var buildFailed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Failed);
-        var buildStarted = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Started);
+        var parsedActivities = activities
+            .Select((a, idx) => (Activity: a, Metadata: ParseActivityMetadata(a), Index: idx))
+            .ToList();
 
-        var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
-        var testFailed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Failed);
-        var testStarted = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started);
+        // 1. Evaluate Build stage from terminal check states
+        var buildActivities = parsedActivities
+            .Where(p => p.Activity.Stage == ExecutionStage.Build)
+            .ToList();
 
-        var testCompletedActivity = activities
-            .Where(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed)
-            .OrderByDescending(a => a.CreatedAt)
-            .FirstOrDefault();
-
-        var testCompletedMeta = ParseActivityMetadata(testCompletedActivity);
-
-        var isNoNewRegressions = activities.Any(a =>
-            a.Stage == ExecutionStage.Test &&
-            a.Status == ExecutionActivityStatus.Completed &&
-            (ParseActivityMetadata(a)?.VerificationOutcome == "NoNewRegressions" ||
-             ParseActivityMetadata(a)?.BaselineClassification == "PreExisting" ||
-             a.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase)));
-
-        var preExistingCount = testCompletedMeta?.PreExistingFailureCount ?? 0;
-        var newRegressionCount = activities
-            .Where(a => a.Stage == ExecutionStage.Test)
-            .OrderByDescending(a => a.CreatedAt)
-            .Select(a => ParseActivityMetadata(a)?.NewRegressionCount)
-            .FirstOrDefault(c => c != null) ?? 0;
+        var buildGroups = buildActivities
+            .GroupBy(p => !string.IsNullOrWhiteSpace(p.Metadata?.RepositoryCheckId)
+                ? p.Metadata.RepositoryCheckId
+                : $"activity_{p.Index}")
+            .ToList();
 
         string buildStatus;
-        if (buildPassed || (execution.Status == TaskExecutionStatus.Completed && !buildFailed))
-        {
-            buildStatus = "Passed";
-        }
-        else if (buildFailed)
-        {
-            buildStatus = "Failed";
-        }
-        else if (buildStarted)
-        {
-            buildStatus = "Running";
-        }
-        else
+        if (buildGroups.Count == 0)
         {
             buildStatus = "Unknown";
         }
+        else
+        {
+            var terminalBuilds = buildGroups
+                .Select(g => g
+                    .Where(p => p.Activity.Status == ExecutionActivityStatus.Completed ||
+                                p.Activity.Status == ExecutionActivityStatus.Failed ||
+                                !string.IsNullOrWhiteSpace(p.Metadata?.VerificationOutcome))
+                    .OrderBy(p => p.Index)
+                    .LastOrDefault())
+                .Where(t => t.Activity != null)
+                .ToList();
+
+            if (terminalBuilds.Count == 0)
+            {
+                buildStatus = buildActivities.Any(p => p.Activity.Status == ExecutionActivityStatus.Started)
+                    ? "Running"
+                    : "Unknown";
+            }
+            else if (terminalBuilds.Any(t =>
+                string.Equals(t.Metadata?.VerificationOutcome, "NeedsReview", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(t.Metadata?.BaselineClassification, "Unknown", StringComparison.OrdinalIgnoreCase) ||
+                (t.Activity.Status == ExecutionActivityStatus.Failed &&
+                 !string.Equals(t.Metadata?.VerificationOutcome, "NoNewRegressions", StringComparison.OrdinalIgnoreCase) &&
+                 !string.Equals(t.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase))))
+            {
+                buildStatus = "Failed";
+            }
+            else if (terminalBuilds.Any(t =>
+                string.Equals(t.Metadata?.VerificationOutcome, "NoNewRegressions", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(t.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase)))
+            {
+                buildStatus = "NoNewRegressions";
+            }
+            else if (terminalBuilds.All(t => t.Activity.Status == ExecutionActivityStatus.Completed))
+            {
+                buildStatus = "Passed";
+            }
+            else
+            {
+                buildStatus = "Unknown";
+            }
+        }
+
+        // 2. Evaluate Test stage from terminal check states
+        var testActivities = parsedActivities
+            .Where(p => p.Activity.Stage == ExecutionStage.Test)
+            .ToList();
+
+        var testGroups = testActivities
+            .GroupBy(p => !string.IsNullOrWhiteSpace(p.Metadata?.RepositoryCheckId)
+                ? p.Metadata.RepositoryCheckId
+                : $"activity_{p.Index}")
+            .ToList();
 
         string testStatus;
         string? testDetailSummary = null;
+        var preExistingCount = 0;
+        var newRegressionCount = 0;
 
-        if (isNoNewRegressions)
+        if (testGroups.Count == 0)
         {
-            testStatus = "NoNewRegressions";
-            testDetailSummary = preExistingCount > 0
-                ? $"{preExistingCount} pre-existing repository failure(s) remain"
-                : "No new regressions";
-        }
-        else if (testPassed || (execution.Status == TaskExecutionStatus.Completed && !testFailed))
-        {
-            testStatus = "Passed";
-            testDetailSummary = "All tests passed";
-        }
-        else if (testFailed)
-        {
-            testStatus = "Failed";
-            testDetailSummary = newRegressionCount > 0
-                ? $"{newRegressionCount} new regression(s) introduced"
-                : "Tests failed";
-        }
-        else if (testStarted)
-        {
-            testStatus = "Running";
+            testStatus = "Unknown";
         }
         else
         {
-            testStatus = "Unknown";
+            var terminalTests = testGroups
+                .Select(g => g
+                    .Where(p => p.Activity.Status == ExecutionActivityStatus.Completed ||
+                                p.Activity.Status == ExecutionActivityStatus.Failed ||
+                                !string.IsNullOrWhiteSpace(p.Metadata?.VerificationOutcome))
+                    .OrderBy(p => p.Index)
+                    .LastOrDefault())
+                .Where(t => t.Activity != null)
+                .ToList();
+
+            if (terminalTests.Count == 0)
+            {
+                testStatus = testActivities.Any(p => p.Activity.Status == ExecutionActivityStatus.Started)
+                    ? "Running"
+                    : "Unknown";
+            }
+            else
+            {
+                var preExistingMeta = terminalTests
+                    .Select(t => t.Metadata?.PreExistingFailureCount)
+                    .FirstOrDefault(c => c.HasValue);
+                if (preExistingMeta.HasValue) preExistingCount = preExistingMeta.Value;
+
+                var newRegressionMeta = terminalTests
+                    .Select(t => t.Metadata?.NewRegressionCount)
+                    .FirstOrDefault(c => c.HasValue);
+                if (newRegressionMeta.HasValue) newRegressionCount = newRegressionMeta.Value;
+
+                var isFailed = terminalTests.Any(t =>
+                    string.Equals(t.Metadata?.VerificationOutcome, "NeedsReview", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(t.Metadata?.BaselineClassification, "Unknown", StringComparison.OrdinalIgnoreCase) ||
+                    (t.Activity.Status == ExecutionActivityStatus.Failed &&
+                     !string.Equals(t.Metadata?.VerificationOutcome, "NoNewRegressions", StringComparison.OrdinalIgnoreCase) &&
+                     !string.Equals(t.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase)));
+
+                var isNoNewRegressions = terminalTests.Any(t =>
+                    string.Equals(t.Metadata?.VerificationOutcome, "NoNewRegressions", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(t.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase) ||
+                    (t.Activity.Status == ExecutionActivityStatus.Completed && t.Activity.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase)));
+
+                if (isFailed)
+                {
+                    testStatus = "Failed";
+                    testDetailSummary = newRegressionCount > 0
+                        ? $"{newRegressionCount} new regression(s) introduced"
+                        : "Tests failed";
+                }
+                else if (isNoNewRegressions)
+                {
+                    testStatus = "NoNewRegressions";
+                    testDetailSummary = preExistingCount > 0
+                        ? $"{preExistingCount} pre-existing repository failure(s) remain"
+                        : "No new regressions";
+                }
+                else if (terminalTests.All(t => t.Activity.Status == ExecutionActivityStatus.Completed))
+                {
+                    testStatus = "Passed";
+                    testDetailSummary = "All tests passed";
+                }
+                else
+                {
+                    testStatus = "Unknown";
+                }
+            }
         }
 
         return (

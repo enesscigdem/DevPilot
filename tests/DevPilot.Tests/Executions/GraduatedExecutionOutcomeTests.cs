@@ -1,7 +1,10 @@
 using DevPilot.Application.Executions.Commands.ApproveExecutionReview;
 using DevPilot.Application.Executions.Commands.CommitExecution;
+using DevPilot.Application.Executions.Dtos;
 using DevPilot.Application.Executions.Models;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Queries.GetExecutionReview;
 using DevPilot.Application.Executions.Services;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
@@ -9,6 +12,7 @@ using DevPilot.Domain.ValueObjects;
 using DevPilot.Infrastructure.Executions;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace DevPilot.Tests.Executions;
@@ -588,6 +592,266 @@ public class GraduatedExecutionOutcomeTests
         result.ErrorMessage.Should().Contain("verification outcome is 'NeedsReview'");
     }
 
+    [Fact]
+    public async Task ReviewStageStatus_BuildFailed_TestsNeverStarted_ReturnsBuildFailedAndTestsUnknown()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Task" },
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+        repo.Executions[executionId] = execution;
+
+        var activityRepo = new TestExecutionActivityRepository();
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Failed,
+            MetadataJson = "{\"RepositoryCheckId\":\"build\",\"VerificationOutcome\":\"NeedsReview\"}"
+        });
+
+        var handler = CreateReviewHandler(repo, activityRepo);
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.Build.Status.Should().Be("Failed");
+        result.Review.Test.Status.Should().Be("Unknown");
+        result.Review.VerificationOutcome.Should().Be("NeedsReview");
+    }
+
+    [Fact]
+    public async Task ReviewStageStatus_VerificationUnavailable_NoChecksExecuted_ReturnsBothUnknown()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Task" },
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+        repo.Executions[executionId] = execution;
+
+        var activityRepo = new TestExecutionActivityRepository();
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Execution,
+            Status = ExecutionActivityStatus.Completed,
+            MetadataJson = "{\"VerificationOutcome\":\"VerificationUnavailable\"}"
+        });
+
+        var handler = CreateReviewHandler(repo, activityRepo);
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.Build.Status.Should().Be("Unknown");
+        result.Review.Test.Status.Should().Be("Unknown");
+        result.Review.VerificationOutcome.Should().Be("VerificationUnavailable");
+    }
+
+    [Fact]
+    public async Task ReviewStageStatus_BuildOnlyRepository_BuildPasses_ReturnsBuildPassedAndTestsUnknown()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Task" },
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+        repo.Executions[executionId] = execution;
+
+        var activityRepo = new TestExecutionActivityRepository();
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Completed,
+            MetadataJson = "{\"RepositoryCheckId\":\"build\",\"VerificationOutcome\":\"Verified\"}"
+        });
+
+        var handler = CreateReviewHandler(repo, activityRepo);
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.Build.Status.Should().Be("Passed");
+        result.Review.Test.Status.Should().Be("Unknown");
+        result.Review.VerificationOutcome.Should().Be("PartiallyVerified");
+    }
+
+    [Fact]
+    public async Task ReviewStageStatus_BuildAndTestsPass_ReturnsBothPassed()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Task" },
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+        repo.Executions[executionId] = execution;
+
+        var activityRepo = new TestExecutionActivityRepository();
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Completed,
+            MetadataJson = "{\"RepositoryCheckId\":\"build\",\"VerificationOutcome\":\"Verified\"}"
+        });
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Test,
+            Status = ExecutionActivityStatus.Completed,
+            MetadataJson = "{\"RepositoryCheckId\":\"tests\",\"VerificationOutcome\":\"Verified\"}"
+        });
+
+        var handler = CreateReviewHandler(repo, activityRepo);
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.Build.Status.Should().Be("Passed");
+        result.Review.Test.Status.Should().Be("Passed");
+        result.Review.VerificationOutcome.Should().Be("Verified");
+    }
+
+    [Fact]
+    public async Task ReviewStageStatus_TestFail_Repair_TestPasses_ReturnsTestsPassed()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Task" },
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+        repo.Executions[executionId] = execution;
+
+        var activityRepo = new TestExecutionActivityRepository();
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Completed,
+            MetadataJson = "{\"RepositoryCheckId\":\"build\"}"
+        });
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Test,
+            Status = ExecutionActivityStatus.Failed,
+            MetadataJson = "{\"RepositoryCheckId\":\"tests\",\"EventKind\":\"VerifyingRepository\"}"
+        });
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Test,
+            Status = ExecutionActivityStatus.Completed,
+            MetadataJson = "{\"RepositoryCheckId\":\"tests\",\"EventKind\":\"CheckPassed\"}"
+        });
+
+        var handler = CreateReviewHandler(repo, activityRepo);
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.Build.Status.Should().Be("Passed");
+        result.Review.Test.Status.Should().Be("Passed");
+        result.Review.VerificationOutcome.Should().Be("Verified");
+    }
+
+    [Fact]
+    public async Task ReviewStageStatus_PreExistingTestFailures_ReturnsTestsNoNewRegressions()
+    {
+        var executionId = Guid.NewGuid();
+        var repo = new InMemoryExecutionRepository();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Task" },
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Pending,
+            WorkspacePath = "/ws",
+            BranchName = "feature"
+        };
+        repo.Executions[executionId] = execution;
+
+        var activityRepo = new TestExecutionActivityRepository();
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Completed,
+            MetadataJson = "{\"RepositoryCheckId\":\"build\"}"
+        });
+        activityRepo.Activities.Add(new ExecutionActivity
+        {
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Test,
+            Status = ExecutionActivityStatus.Completed,
+            Message = "No new regressions (2 pre-existing repository failure(s) remain).",
+            MetadataJson = "{\"RepositoryCheckId\":\"tests\",\"VerificationOutcome\":\"NoNewRegressions\",\"BaselineClassification\":\"PreExisting\",\"PreExistingFailureCount\":2,\"NewRegressionCount\":0}"
+        });
+
+        var handler = CreateReviewHandler(repo, activityRepo);
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.Build.Status.Should().Be("Passed");
+        result.Review.Test.Status.Should().Be("NoNewRegressions");
+        result.Review.Test.PreExistingFailureCount.Should().Be(2);
+        result.Review.VerificationOutcome.Should().Be("NoNewRegressions");
+    }
+
+    private static GetExecutionReviewQueryHandler CreateReviewHandler(
+        IExecutionRepository repo,
+        IExecutionActivityRepository activityRepo)
+    {
+        return new GetExecutionReviewQueryHandler(
+            repo,
+            new MockWorkspaceManager(),
+            new MockDiffReader(),
+            new MockFingerprintCalculator(),
+            activityRepo,
+            Options.Create(new MergePolicyOptions()),
+            NullLogger<GetExecutionReviewQueryHandler>.Instance);
+    }
+
     private sealed class TestExecutionActivityRepository : IExecutionActivityRepository
     {
         public List<ExecutionActivity> Activities { get; } = new();
@@ -605,6 +869,15 @@ public class GraduatedExecutionOutcomeTests
 
         public Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(string workspacePath, string expectedBranchName, bool requireClean = true, CancellationToken cancellationToken = default)
             => Task.FromResult(new WorkspaceVerificationResult(true, true, true, true, null));
+    }
+
+    private sealed class MockDiffReader : IExecutionGitDiffReader
+    {
+        public Task<ExecutionGitDiffResult> ReadWorkspaceDiffAsync(string workspacePath, string branchName, CancellationToken cancellationToken = default)
+            => Task.FromResult(new ExecutionGitDiffResult(true, null, new[] { new ExecutionReviewFileDto("src/TodoService.cs", "Modified") }, "diff"));
+
+        public Task<ExecutionGitDiffResult> ReadCommittedDiffAsync(string workspacePath, string baseCommitSha, string commitSha, CancellationToken cancellationToken = default)
+            => Task.FromResult(new ExecutionGitDiffResult(true, null, new[] { new ExecutionReviewFileDto("src/TodoService.cs", "Modified") }, "diff"));
     }
 
     private sealed class MockFingerprintCalculator : IExecutionChangeFingerprintCalculator
