@@ -826,6 +826,43 @@ public class GitWorkspaceExecutionProcessorTests
         recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
+    [Fact]
+    public async Task NpmCiInfrastructureFailure_DoesNotTriggerFocusedRepair()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/models/issue.ts" })
+        };
+        var recorder = new TestActivityRecorder();
+        var processor = new GitWorkspaceExecutionProcessor(
+            new TestWorkspaceManager(),
+            new TestExecutionRepository(),
+            new TestImpactAnalysisRepository
+            {
+                AnalysisToReturn = new TaskImpactAnalysis
+                {
+                    Id = Guid.NewGuid(),
+                    DevelopmentTaskId = taskId,
+                    Status = ImpactAnalysisStatus.Completed
+                }
+            },
+            agent,
+            new NodePrerequisiteInfrastructureCheckRunner(),
+            recorder,
+            NullLogger<GitWorkspaceExecutionProcessor>.Instance);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.CallCount.Should().Be(1, "only initial generation should run");
+        agent.FocusedRepairRequests.Should().BeEmpty();
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.status == ExecutionActivityStatus.Failed &&
+            activity.message.Contains("infrastructure failure", StringComparison.OrdinalIgnoreCase) &&
+            activity.metadata != null &&
+            activity.metadata.VerificationOutcome == "VerificationInfrastructureError");
+    }
+
     private static GitWorkspaceExecutionProcessor CreateProcessor(
         Guid taskId,
         TestDeveloperAgent agent,
@@ -938,6 +975,45 @@ public class GitWorkspaceExecutionProcessorTests
             string baseHeadSha,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(new ExecutionFingerprintResult(true, Fingerprint: treeSha, BaseHeadSha: baseHeadSha));
+    }
+
+    private sealed class NodePrerequisiteInfrastructureCheckRunner : IRepositoryCheckRunner
+    {
+        private static readonly RepositoryCheck BuildCheck = new(
+            "node:package.json:build",
+            "npm build",
+            RepositoryCheckKind.Build,
+            "node",
+            "npm",
+            new[] { "run", "build" },
+            ".",
+            true,
+            TimeSpan.FromMinutes(5),
+            RepositoryCheckSource.PackageJsonScript,
+            "package.json",
+            Order: 110);
+
+        public Task<RepositoryProfile> DiscoverAsync(
+            RepositoryPreflightRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new RepositoryProfile(
+                RepositoryVerificationState.Configured,
+                new[] { "node" },
+                new[] { BuildCheck }));
+
+        public Task<RepositoryCheckResult> ExecuteAsync(
+            RepositoryCheckExecutionRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new RepositoryCheckResult
+            {
+                CheckId = request.Check.Id,
+                CheckDisplayName = request.Check.DisplayName,
+                CheckKind = request.Check.Kind,
+                FailureCategory = RepositoryCheckFailureCategory.InfrastructureFailure,
+                Success = false,
+                ExitCode = 1,
+                ErrorMessage = "Node dependency preparation failed (npm ci): exit 1. This is a repository prerequisite infrastructure failure."
+            });
     }
 
     private sealed class UnconfiguredRepositoryCheckRunner : IRepositoryCheckRunner

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.Executions.Models;
@@ -6,26 +7,45 @@ using DevPilot.Domain.ValueObjects;
 
 namespace DevPilot.Application.TaskImpactAnalysis.Services;
 
+public sealed record NodeTechnologyDetails(
+    string ManifestPath,
+    string? PackageManager,
+    bool HasTypeScript,
+    IReadOnlyList<string> Scripts,
+    IReadOnlyList<string> KeyDependencies,
+    IReadOnlyList<string> Frameworks);
+
+public sealed record PythonTechnologyDetails(
+    string ManifestPath,
+    IReadOnlyList<string> Tools,
+    IReadOnlyList<string> KeyDependencies);
+
 public sealed record RepositoryEvidenceProfile(
     IReadOnlyList<DiscoveredProjectNode>? ProjectGraph = null,
     IReadOnlyList<string>? ProjectRoots = null,
     RepositoryProfile? VerificationProfile = null,
+    IReadOnlyList<string>? InventoryFiles = null,
     IReadOnlyList<string>? InventoryCsFiles = null,
     IReadOnlyList<string>? ControllerFiles = null,
     IReadOnlyList<string>? PersistenceFiles = null,
     IReadOnlyList<string>? MigrationFiles = null,
     IReadOnlyList<string>? TestFiles = null,
+    NodeTechnologyDetails? NodeTechnology = null,
+    PythonTechnologyDetails? PythonTechnology = null,
     bool HasEfCore = false,
     bool HasTestProjects = false)
 {
     public IReadOnlyList<DiscoveredProjectNode> ProjectGraph { get; init; } = ProjectGraph ?? Array.Empty<DiscoveredProjectNode>();
     public IReadOnlyList<string> ProjectRoots { get; init; } = ProjectRoots ?? Array.Empty<string>();
     public RepositoryProfile VerificationProfile { get; init; } = VerificationProfile ?? new RepositoryProfile(RepositoryVerificationState.Unconfigured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null);
-    public IReadOnlyList<string> InventoryCsFiles { get; init; } = InventoryCsFiles ?? Array.Empty<string>();
+    public IReadOnlyList<string> InventoryFiles { get; init; } = InventoryFiles ?? InventoryCsFiles ?? Array.Empty<string>();
+    public IReadOnlyList<string> InventoryCsFiles { get; init; } = InventoryCsFiles ?? (InventoryFiles != null ? InventoryFiles.Where(f => f.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)).ToList() : Array.Empty<string>());
     public IReadOnlyList<string> ControllerFiles { get; init; } = ControllerFiles ?? Array.Empty<string>();
     public IReadOnlyList<string> PersistenceFiles { get; init; } = PersistenceFiles ?? Array.Empty<string>();
     public IReadOnlyList<string> MigrationFiles { get; init; } = MigrationFiles ?? Array.Empty<string>();
     public IReadOnlyList<string> TestFiles { get; init; } = TestFiles ?? Array.Empty<string>();
+    public NodeTechnologyDetails? NodeTechnology { get; init; } = NodeTechnology;
+    public PythonTechnologyDetails? PythonTechnology { get; init; } = PythonTechnology;
     public bool HasEfCore { get; init; } = HasEfCore;
     public bool HasTestProjects { get; init; } = HasTestProjects;
 }
@@ -40,13 +60,13 @@ public static class ChangeIntelligenceEvidenceCollector
         var projectGraph = ProjectGraphHelper.DiscoverProjectGraph(workspaceLocalPath);
         var projectRoots = ProjectGraphHelper.DiscoverProjectRoots(workspaceLocalPath);
 
-        var allCsFiles = new List<string>();
+        var allFiles = new List<string>();
         if (!string.IsNullOrWhiteSpace(workspaceLocalPath) && Directory.Exists(workspaceLocalPath))
         {
             try
             {
                 var canonical = Path.GetFullPath(workspaceLocalPath);
-                allCsFiles = ProjectGraphHelper.SafeFindFiles(canonical, "*.cs")
+                allFiles = ProjectGraphHelper.SafeFindFiles(canonical, "*")
                     .Select(f => Path.GetRelativePath(canonical, f).Replace('\\', '/'))
                     .Where(f => !f.StartsWith("..", StringComparison.Ordinal))
                     .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
@@ -58,47 +78,199 @@ public static class ChangeIntelligenceEvidenceCollector
             }
         }
 
-        var controllerFiles = allCsFiles
-            .Where(f => f.Contains("Controller", StringComparison.OrdinalIgnoreCase) ||
-                        f.Contains("/Controllers/", StringComparison.OrdinalIgnoreCase))
+        var allCsFiles = allFiles
+            .Where(f => f.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        var persistenceFiles = allCsFiles
+        var controllerFiles = allFiles
+            .Where(f => f.Contains("Controller", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/Controllers/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/controllers/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/routes/", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith("server.ts", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith("app.ts", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith("server.js", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith("app.js", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith("app.py", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith("main.py", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var persistenceFiles = allFiles
             .Where(f => f.Contains("DbContext", StringComparison.OrdinalIgnoreCase) ||
                         f.Contains("/Entities/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/entities/", StringComparison.OrdinalIgnoreCase) ||
                         f.Contains("/Persistence/", StringComparison.OrdinalIgnoreCase) ||
                         f.Contains("/Data/", StringComparison.OrdinalIgnoreCase) ||
-                        f.Contains("Configuration.cs", StringComparison.OrdinalIgnoreCase))
+                        f.Contains("Configuration.cs", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/models/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/repositories/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/storage/", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith("Repository.ts", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith("Store.ts", StringComparison.OrdinalIgnoreCase) ||
+                        f.StartsWith("data/", StringComparison.OrdinalIgnoreCase) ||
+                        (f.EndsWith(".json", StringComparison.OrdinalIgnoreCase) && f.Contains("/data/")))
             .ToList();
 
-        var migrationFiles = allCsFiles
+        var migrationFiles = allFiles
             .Where(f => f.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase) ||
-                        f.Contains("ModelSnapshot", StringComparison.OrdinalIgnoreCase))
+                        f.Contains("/migrations/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("ModelSnapshot", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/alembic/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("prisma/migrations", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        var testFiles = allCsFiles
+        var testFiles = allFiles
             .Where(f => f.EndsWith("Tests.cs", StringComparison.OrdinalIgnoreCase) ||
                         f.EndsWith("Test.cs", StringComparison.OrdinalIgnoreCase) ||
                         f.Contains("/Tests/", StringComparison.OrdinalIgnoreCase) ||
-                        f.Contains(".Tests/", StringComparison.OrdinalIgnoreCase))
+                        f.Contains(".Tests/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/test/", StringComparison.OrdinalIgnoreCase) ||
+                        f.Contains("/__tests__/", StringComparison.OrdinalIgnoreCase) ||
+                        ProjectGraphHelper.IsTestFileCandidate(f))
             .ToList();
 
         var hasEfCore = projectGraph.Any(p =>
             p.PackageReferences.Any(pkg => pkg.Contains("EntityFrameworkCore", StringComparison.OrdinalIgnoreCase)));
 
-        var hasTestProjects = projectGraph.Any(p => p.IsTestProject) || testFiles.Count > 0;
+        var hasTestProjects = projectGraph.Any(p => p.IsTestProject) ||
+                              testFiles.Count > 0 ||
+                              verificationProfile.Checks.Any(c => c.Kind == RepositoryCheckKind.Test);
+
+        NodeTechnologyDetails? nodeTech = null;
+        if (!string.IsNullOrWhiteSpace(workspaceLocalPath) && Directory.Exists(workspaceLocalPath))
+        {
+            nodeTech = TryDiscoverNodeTechnology(workspaceLocalPath, allFiles);
+        }
+
+        PythonTechnologyDetails? pythonTech = null;
+        if (!string.IsNullOrWhiteSpace(workspaceLocalPath) && Directory.Exists(workspaceLocalPath))
+        {
+            pythonTech = TryDiscoverPythonTechnology(workspaceLocalPath, allFiles);
+        }
 
         return new RepositoryEvidenceProfile(
             ProjectGraph: projectGraph,
             ProjectRoots: projectRoots,
             VerificationProfile: verificationProfile,
+            InventoryFiles: allFiles,
             InventoryCsFiles: allCsFiles,
             ControllerFiles: controllerFiles,
             PersistenceFiles: persistenceFiles,
             MigrationFiles: migrationFiles,
             TestFiles: testFiles,
+            NodeTechnology: nodeTech,
+            PythonTechnology: pythonTech,
             HasEfCore: hasEfCore,
             HasTestProjects: hasTestProjects);
+    }
+
+    private static NodeTechnologyDetails? TryDiscoverNodeTechnology(string workspaceLocalPath, IReadOnlyList<string> allFiles)
+    {
+        var packageJsonRel = allFiles.FirstOrDefault(f => Path.GetFileName(f).Equals("package.json", StringComparison.OrdinalIgnoreCase));
+        if (packageJsonRel == null) return null;
+
+        var fullPackageJson = Path.Combine(workspaceLocalPath, packageJsonRel.Replace('/', Path.DirectorySeparatorChar));
+        if (!File.Exists(fullPackageJson)) return null;
+
+        try
+        {
+            var content = File.ReadAllText(fullPackageJson);
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+
+            var scripts = new List<string>();
+            if (root.TryGetProperty("scripts", out var scriptsElem) && scriptsElem.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in scriptsElem.EnumerateObject())
+                {
+                    scripts.Add($"{prop.Name}: {prop.Value.GetString()}");
+                }
+            }
+
+            var dependencies = new List<string>();
+            if (root.TryGetProperty("dependencies", out var depsElem) && depsElem.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in depsElem.EnumerateObject())
+                {
+                    dependencies.Add(prop.Name);
+                }
+            }
+            if (root.TryGetProperty("devDependencies", out var devDepsElem) && devDepsElem.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in devDepsElem.EnumerateObject())
+                {
+                    dependencies.Add(prop.Name);
+                }
+            }
+
+            var hasTs = allFiles.Any(f => f.EndsWith("tsconfig.json", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".ts", StringComparison.OrdinalIgnoreCase)) ||
+                        dependencies.Any(d => d.Contains("typescript", StringComparison.OrdinalIgnoreCase) || d.Contains("ts-node", StringComparison.OrdinalIgnoreCase));
+
+            string pkgManager = "npm";
+            if (allFiles.Any(f => f.EndsWith("pnpm-lock.yaml", StringComparison.OrdinalIgnoreCase))) pkgManager = "pnpm";
+            else if (allFiles.Any(f => f.EndsWith("yarn.lock", StringComparison.OrdinalIgnoreCase))) pkgManager = "yarn";
+            else if (root.TryGetProperty("packageManager", out var pmElem) && pmElem.ValueKind == JsonValueKind.String)
+            {
+                var pmVal = pmElem.GetString();
+                if (!string.IsNullOrWhiteSpace(pmVal))
+                {
+                    pkgManager = pmVal.Split('@')[0].Trim();
+                }
+            }
+
+            var frameworks = new List<string>();
+            var knownFrameworks = new[] { "express", "fastify", "koa", "nest", "@nestjs/core", "react", "vue", "next", "prisma", "@prisma/client", "typeorm", "sequelize", "mongoose" };
+            foreach (var kf in knownFrameworks)
+            {
+                if (dependencies.Contains(kf, StringComparer.OrdinalIgnoreCase))
+                {
+                    frameworks.Add(kf);
+                }
+            }
+
+            return new NodeTechnologyDetails(
+                ManifestPath: packageJsonRel,
+                PackageManager: pkgManager,
+                HasTypeScript: hasTs,
+                Scripts: scripts,
+                KeyDependencies: dependencies.Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToList(),
+                Frameworks: frameworks);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static PythonTechnologyDetails? TryDiscoverPythonTechnology(string workspaceLocalPath, IReadOnlyList<string> allFiles)
+    {
+        var pyprojectRel = allFiles.FirstOrDefault(f => Path.GetFileName(f).Equals("pyproject.toml", StringComparison.OrdinalIgnoreCase)) ??
+                           allFiles.FirstOrDefault(f => Path.GetFileName(f).Equals("requirements.txt", StringComparison.OrdinalIgnoreCase));
+        if (pyprojectRel == null && !allFiles.Any(f => f.EndsWith(".py", StringComparison.OrdinalIgnoreCase))) return null;
+
+        var manifestPath = pyprojectRel ?? "pyproject.toml";
+        var tools = new List<string>();
+        var fullPyproject = Path.Combine(workspaceLocalPath, manifestPath.Replace('/', Path.DirectorySeparatorChar));
+
+        if (File.Exists(fullPyproject))
+        {
+            try
+            {
+                var text = File.ReadAllText(fullPyproject);
+                if (text.Contains("pytest", StringComparison.OrdinalIgnoreCase)) tools.Add("pytest");
+                if (text.Contains("mypy", StringComparison.OrdinalIgnoreCase)) tools.Add("mypy");
+                if (text.Contains("ruff", StringComparison.OrdinalIgnoreCase)) tools.Add("ruff");
+            }
+            catch
+            {
+                // Suppress
+            }
+        }
+
+        return new PythonTechnologyDetails(
+            ManifestPath: manifestPath,
+            Tools: tools,
+            KeyDependencies: Array.Empty<string>());
     }
 
     public static bool IsHistoricalMigrationFile(string filePath, RepositoryEvidenceProfile evidence)
@@ -114,8 +286,9 @@ public static class ChangeIntelligenceEvidenceCollector
 
         // An existing file in repository inventory that belongs to Migrations folder or has migration designer extension
         if (evidence.MigrationFiles.Contains(norm, StringComparer.OrdinalIgnoreCase) ||
-            (evidence.InventoryCsFiles.Contains(norm, StringComparer.OrdinalIgnoreCase) &&
+            (evidence.InventoryFiles.Contains(norm, StringComparer.OrdinalIgnoreCase) &&
              (norm.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase) ||
+              norm.Contains("/migrations/", StringComparison.OrdinalIgnoreCase) ||
               norm.EndsWith(".Designer.cs", StringComparison.OrdinalIgnoreCase))))
         {
             return true;
@@ -145,7 +318,8 @@ public static class ChangeIntelligenceEvidenceCollector
         int? modelConfidence,
         RepositoryEvidenceProfile evidence)
     {
-        var isInventoryMatch = evidence.InventoryCsFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
+        var isInventoryMatch = evidence.InventoryFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
+                               evidence.InventoryCsFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
                                evidence.ControllerFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
                                evidence.PersistenceFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
                                evidence.MigrationFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
@@ -158,28 +332,41 @@ public static class ChangeIntelligenceEvidenceCollector
         // 1. Controller / API Surface
         if (evidence.ControllerFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
             normalizedPath.Contains("/Controllers/", StringComparison.OrdinalIgnoreCase) ||
-            normalizedPath.EndsWith("Controller.cs", StringComparison.OrdinalIgnoreCase))
+            normalizedPath.Contains("/controllers/", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.Contains("/routes/", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.EndsWith("Controller.cs", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.EndsWith("Controller.ts", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.EndsWith("Controller.js", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.EndsWith("Routes.ts", StringComparison.OrdinalIgnoreCase) ||
+            normalizedPath.EndsWith("Route.ts", StringComparison.OrdinalIgnoreCase))
         {
             isUncertain = !isInventoryMatch && changeType != ImpactFileChangeType.Add;
             evType = "ControllerUsage";
-            evDetails = "Controller endpoint definition in API layer";
+            evDetails = "Controller endpoint or route definition in API layer";
         }
         // 2. Migration
         else if (evidence.MigrationFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
-                 normalizedPath.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase))
+                 normalizedPath.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase) ||
+                 normalizedPath.Contains("/migrations/", StringComparison.OrdinalIgnoreCase))
         {
             isUncertain = !isInventoryMatch && changeType != ImpactFileChangeType.Add;
             evType = "MigrationRelationship";
             evDetails = "Database migration history or model snapshot";
         }
-        // 3. Persistence / Entity
+        // 3. Persistence / Entity / Model / Store
         else if (evidence.PersistenceFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
                  normalizedPath.Contains("/Entities/", StringComparison.OrdinalIgnoreCase) ||
-                 normalizedPath.Contains("DbContext", StringComparison.OrdinalIgnoreCase))
+                 normalizedPath.Contains("/entities/", StringComparison.OrdinalIgnoreCase) ||
+                 normalizedPath.Contains("/models/", StringComparison.OrdinalIgnoreCase) ||
+                 normalizedPath.Contains("/repositories/", StringComparison.OrdinalIgnoreCase) ||
+                 normalizedPath.Contains("/storage/", StringComparison.OrdinalIgnoreCase) ||
+                 normalizedPath.Contains("DbContext", StringComparison.OrdinalIgnoreCase) ||
+                 normalizedPath.EndsWith("Repository.ts", StringComparison.OrdinalIgnoreCase) ||
+                 normalizedPath.EndsWith("Store.ts", StringComparison.OrdinalIgnoreCase))
         {
             isUncertain = !isInventoryMatch && changeType != ImpactFileChangeType.Add;
             evType = "PersistenceRelationship";
-            evDetails = "Entity, DbContext, or database configuration";
+            evDetails = "Entity, DbContext, model, repository, or database configuration";
         }
         // 4. Test File
         else if (evidence.TestFiles.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase) ||
@@ -205,7 +392,7 @@ public static class ChangeIntelligenceEvidenceCollector
             evType = "SymbolReference";
             evDetails = "Existing repository component match";
         }
-        // 7. Newly Added File in Discovered Project Root
+        // 7. Newly Added File in Discovered Project Root or Valid Repository Path
         else if (changeType == ImpactFileChangeType.Add)
         {
             isUncertain = false;

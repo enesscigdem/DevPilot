@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.DeveloperAgent.Models;
@@ -299,8 +300,8 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     Message: "Verification runner not configured.");
             }
 
-            var (context, roslynResult) = await BuildContextWithRoslynAsync(task, workspace, executionToken).ConfigureAwait(false);
-            var evidenceProfile = ChangeIntelligenceEvidenceCollector.CollectEvidence(workspace.LocalPath, verificationProfile, roslynResult);
+            var evidenceProfile = ChangeIntelligenceEvidenceCollector.CollectEvidence(workspace.LocalPath, verificationProfile);
+            var (context, roslynResult) = await BuildContextWithRoslynAsync(task, workspace, evidenceProfile, executionToken).ConfigureAwait(false);
 
             const int defaultImpactMaxTokens = 2048;
             var totalProviderCalls = 1;
@@ -546,6 +547,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private async Task<(string ContextText, RepositoryAnalysisResult? RoslynResult)> BuildContextWithRoslynAsync(
         DevelopmentTask task,
         RepositoryWorkspace workspace,
+        RepositoryEvidenceProfile evidence,
         CancellationToken cancellationToken)
     {
         var builder = new StringBuilder();
@@ -577,6 +579,13 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             builder.AppendLine(semanticContext);
         }
 
+        var lexicalContext = BuildLexicalSourceContext(task, workspace.LocalPath, evidence.InventoryFiles);
+        if (!string.IsNullOrWhiteSpace(lexicalContext))
+        {
+            builder.AppendLine();
+            builder.AppendLine(lexicalContext);
+        }
+
         if (builder.Length == 0)
         {
             builder.AppendLine("No structural or semantic context was available for this workspace.");
@@ -589,17 +598,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         StringBuilder builder,
         RepositoryAnalysisResult? result)
     {
-        builder.AppendLine("## Repository structure (Roslyn)");
-
         if (result is null)
         {
-            builder.AppendLine("- Roslyn analysis was not available.");
             return;
-        }
-
-        if (!result.Success)
-        {
-            builder.AppendLine($"- Roslyn analysis reported an error: {result.Error ?? "unknown"}");
         }
 
         var projects = result.Solutions
@@ -610,8 +611,14 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         if (projects.Count == 0)
         {
-            builder.AppendLine("- No projects were discovered in the workspace.");
             return;
+        }
+
+        builder.AppendLine("## Repository structure (Roslyn)");
+
+        if (!result.Success)
+        {
+            builder.AppendLine($"- Roslyn analysis reported an error: {result.Error ?? "unknown"}");
         }
 
         foreach (var project in projects)
@@ -745,7 +752,138 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         return builder.ToString().Trim();
     }
 
-    private static string BuildRepositoryFileInventory(string workspacePath, int maxFiles = 250)
+    private static string BuildLexicalSourceContext(
+        DevelopmentTask task,
+        string workspacePath,
+        IReadOnlyList<string> inventoryFiles,
+        int maxFiles = 6,
+        int maxCharsPerFile = 1200)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath) || inventoryFiles == null || inventoryFiles.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            var canonical = Path.GetFullPath(workspacePath);
+            var taskText = $"{task.Title} {task.Description} {task.AcceptanceCriteria}".ToLowerInvariant();
+
+            var stopWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "the", "and", "for", "with", "this", "that", "from", "when", "should", "must", "allow", "reject",
+                "preserve", "existing", "values", "value", "each", "have", "supplied", "behavior", "create", "list",
+                "all", "new", "add", "not", "can", "are", "but", "also", "into", "been", "will", "more", "some", "such"
+            };
+
+            var tokens = Regex.Matches(taskText, @"[a-zA-Z_]{3,}")
+                .Select(m => m.Value.ToLowerInvariant())
+                .Where(w => !stopWords.Contains(w))
+                .Distinct()
+                .ToList();
+
+            if (tokens.Count == 0) return string.Empty;
+
+            var scoredFiles = new List<(string FilePath, int Score)>();
+            foreach (var file in inventoryFiles)
+            {
+                if (file.EndsWith(".lock", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith("package-lock.json", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith("pnpm-lock.yaml", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith(".min.js", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith(".map", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith(".svg", StringComparison.OrdinalIgnoreCase) ||
+                    file.EndsWith(".ico", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var score = 0;
+                var lowerPath = file.ToLowerInvariant();
+                var fileName = Path.GetFileNameWithoutExtension(lowerPath);
+
+                foreach (var token in tokens)
+                {
+                    if (fileName.Equals(token, StringComparison.OrdinalIgnoreCase))
+                    {
+                        score += 15;
+                    }
+                    else if (fileName.Contains(token, StringComparison.OrdinalIgnoreCase))
+                    {
+                        score += 8;
+                    }
+                    else if (lowerPath.Contains(token, StringComparison.OrdinalIgnoreCase))
+                    {
+                        score += 4;
+                    }
+                }
+
+                if (file.StartsWith("src/", StringComparison.OrdinalIgnoreCase))
+                {
+                    score += 2;
+                }
+
+                if (score > 0)
+                {
+                    scoredFiles.Add((file, score));
+                }
+            }
+
+            var topFiles = scoredFiles
+                .OrderByDescending(f => f.Score)
+                .ThenBy(f => f.FilePath, StringComparer.OrdinalIgnoreCase)
+                .Take(maxFiles)
+                .Select(f => f.FilePath)
+                .ToList();
+
+            if (topFiles.Count == 0) return string.Empty;
+
+            var sb = new StringBuilder();
+            sb.AppendLine("## Relevant source context (Repository files)");
+
+            foreach (var relPath in topFiles)
+            {
+                var fullFilePath = Path.Combine(canonical, relPath.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(fullFilePath)) continue;
+
+                try
+                {
+                    var content = File.ReadAllText(fullFilePath);
+                    var truncatedContent = Truncate(content, maxCharsPerFile);
+                    var ext = Path.GetExtension(relPath).TrimStart('.').ToLowerInvariant();
+                    var lang = ext switch
+                    {
+                        "ts" or "tsx" => "typescript",
+                        "js" or "jsx" or "mjs" or "cjs" => "javascript",
+                        "cs" => "csharp",
+                        "py" => "python",
+                        "json" => "json",
+                        _ => ext
+                    };
+
+                    sb.AppendLine();
+                    sb.AppendLine($"### {relPath}");
+                    sb.AppendLine($"```{lang}");
+                    sb.AppendLine(truncatedContent);
+                    sb.AppendLine("```");
+                }
+                catch
+                {
+                    // Suppress read errors
+                }
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string BuildRepositoryFileInventory(string workspacePath, IReadOnlyList<string>? preloadedFiles = null, int maxFiles = 250)
     {
         if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
             return string.Empty;
@@ -753,16 +891,42 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         try
         {
             var canonical = Path.GetFullPath(workspacePath);
-            var files = ProjectGraphHelper.SafeFindFiles(canonical, "*.cs")
-                .Select(f => Path.GetRelativePath(canonical, f).Replace('\\', '/'))
-                .Where(f => !f.StartsWith("..", StringComparison.Ordinal))
-                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                .Take(maxFiles)
-                .ToList();
+            List<string> files;
+            if (preloadedFiles != null && preloadedFiles.Count > 0)
+            {
+                files = preloadedFiles.Take(maxFiles).ToList();
+            }
+            else
+            {
+                files = ProjectGraphHelper.SafeFindFiles(canonical, "*")
+                    .Select(f => Path.GetRelativePath(canonical, f).Replace('\\', '/'))
+                    .Where(f => !f.StartsWith("..", StringComparison.Ordinal))
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .Take(maxFiles)
+                    .ToList();
+            }
 
             if (files.Count == 0) return string.Empty;
 
+            var directories = files
+                .Select(f => Path.GetDirectoryName(f)?.Replace('\\', '/'))
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
+                .Take(40)
+                .ToList();
+
             var sb = new StringBuilder();
+            if (directories.Count > 0)
+            {
+                sb.AppendLine("# Repository Directory Structure");
+                foreach (var dir in directories)
+                {
+                    sb.AppendLine($"- {dir}/");
+                }
+                sb.AppendLine();
+            }
+
             sb.AppendLine("# Existing Repository Files (Grounding Inventory)");
             foreach (var file in files)
             {
@@ -776,7 +940,11 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         }
     }
 
-    private static List<string> FindCandidatePaths(string targetPath, string workspaceLocalPath, IReadOnlyList<string> projectRoots)
+    private static List<string> FindCandidatePaths(
+        string targetPath,
+        string workspaceLocalPath,
+        IReadOnlyList<string> projectRoots,
+        IReadOnlyList<string>? allInventoryFiles = null)
     {
         var candidates = new List<string>();
         if (string.IsNullOrWhiteSpace(workspaceLocalPath) || !Directory.Exists(workspaceLocalPath))
@@ -785,33 +953,66 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         try
         {
             var canonical = Path.GetFullPath(workspaceLocalPath);
-            var allCsFiles = ProjectGraphHelper.SafeFindFiles(canonical, "*.cs")
-                .Select(f => Path.GetRelativePath(canonical, f).Replace('\\', '/'))
-                .Where(f => !f.StartsWith("..", StringComparison.Ordinal))
-                .ToList();
+            List<string> allFiles;
+            if (allInventoryFiles != null && allInventoryFiles.Count > 0)
+            {
+                allFiles = allInventoryFiles.ToList();
+            }
+            else
+            {
+                allFiles = ProjectGraphHelper.SafeFindFiles(canonical, "*")
+                    .Select(f => Path.GetRelativePath(canonical, f).Replace('\\', '/'))
+                    .Where(f => !f.StartsWith("..", StringComparison.Ordinal))
+                    .ToList();
+            }
 
-            var targetFileName = Path.GetFileNameWithoutExtension(targetPath);
+            var cleanTargetPath = targetPath.Replace('*', ' ').Replace('?', ' ').Trim();
+            var targetFileName = Path.GetFileNameWithoutExtension(cleanTargetPath);
+            var targetExt = Path.GetExtension(cleanTargetPath);
+            var targetDir = Path.GetDirectoryName(cleanTargetPath)?.Replace('\\', '/').Trim('/');
 
-            // 1. Files containing target stem / domain name
-            var stemMatches = allCsFiles
-                .Where(f => !string.IsNullOrEmpty(targetFileName) && Path.GetFileName(f).Contains(targetFileName, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            candidates.AddRange(stemMatches);
+            // 1. Files containing target stem / domain name in filename
+            if (!string.IsNullOrWhiteSpace(targetFileName))
+            {
+                var stemMatches = allFiles
+                    .Where(f => Path.GetFileName(f).Contains(targetFileName, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                candidates.AddRange(stemMatches);
+            }
 
-            // 2. Files in same project folder
+            // 2. Files in matching directory
+            if (!string.IsNullOrWhiteSpace(targetDir))
+            {
+                var dirMatches = allFiles
+                    .Where(f => f.Contains(targetDir, StringComparison.OrdinalIgnoreCase))
+                    .Take(25)
+                    .ToList();
+                candidates.AddRange(dirMatches);
+            }
+
+            // 3. Files in same project folder
             var targetProjectRoot = projectRoots?.FirstOrDefault(r =>
-                !string.IsNullOrEmpty(r) && targetPath.StartsWith(r.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase));
+                !string.IsNullOrEmpty(r) && cleanTargetPath.StartsWith(r.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase));
 
             if (targetProjectRoot != null)
             {
-                var projectFiles = allCsFiles
+                var projectFiles = allFiles
                     .Where(f => f.StartsWith(targetProjectRoot.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase))
                     .Take(25);
                 candidates.AddRange(projectFiles);
             }
 
-            // 3. Fallback to all files
-            candidates.AddRange(allCsFiles.Take(30));
+            // 4. Files with same extension if applicable
+            if (!string.IsNullOrWhiteSpace(targetExt) && targetExt != ".*")
+            {
+                var extFiles = allFiles
+                    .Where(f => f.EndsWith(targetExt, StringComparison.OrdinalIgnoreCase))
+                    .Take(20);
+                candidates.AddRange(extFiles);
+            }
+
+            // 5. Fallback to all files
+            candidates.AddRange(allFiles.Take(30));
 
             return candidates.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
@@ -861,7 +1062,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         builder.AppendLine("# Instructions for Repair");
         builder.AppendLine(
             "1. Correct ONLY the invalid impacted entries while preserving all valid entries.\n" +
-            "2. For changeType 'Modify' or 'Delete': Select ONLY from the available real repository files listed above. Do NOT propose nonexistent files.\n" +
+            "2. For changeType 'Modify' or 'Delete': Select ONLY from the available real repository files listed above. Do NOT propose nonexistent files or wildcards.\n" +
             "3. For changeType 'Add' (or 'Create'): Use Add ONLY for genuinely new files that do not currently exist in the repository.\n" +
             "4. Return the complete corrected impact analysis as a single JSON object matching the schema below (no markdown fences, no commentary):");
         builder.AppendLine(JsonSchema);
@@ -889,9 +1090,10 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         builder.AppendLine();
 
         builder.AppendLine("# Candidate Repository Files");
-        if (evidence.InventoryCsFiles.Count > 0)
+        var candidateFiles = evidence.InventoryFiles.Count > 0 ? evidence.InventoryFiles : evidence.InventoryCsFiles;
+        if (candidateFiles.Count > 0)
         {
-            foreach (var f in evidence.InventoryCsFiles.Take(25))
+            foreach (var f in candidateFiles.Take(25))
             {
                 builder.AppendLine($"- {f}");
             }
@@ -939,9 +1141,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             $"{workspace.Owner}/{workspace.Repository} (branch: {workspace.Branch}, commit: {workspace.CommitSha})");
         builder.AppendLine();
 
-        builder.AppendLine("# Discovered .NET Project Graph");
         if (evidence.ProjectGraph != null && evidence.ProjectGraph.Count > 0)
         {
+            builder.AppendLine("# Discovered .NET Project Graph");
             foreach (var proj in evidence.ProjectGraph)
             {
                 var pkgList = proj.PackageReferences.Count > 0 ? string.Join(", ", proj.PackageReferences) : "none";
@@ -950,12 +1152,46 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 builder.AppendLine($"  PackageReferences: [{pkgList}]");
                 builder.AppendLine($"  ProjectReferences: [{projRefList}]");
             }
+            builder.AppendLine();
+        }
+        else if (evidence.NodeTechnology != null)
+        {
+            var node = evidence.NodeTechnology;
+            builder.AppendLine("# Discovered Node.js / TypeScript Technology Profile");
+            builder.AppendLine($"- Manifest: {node.ManifestPath}");
+            builder.AppendLine($"- Package Manager: {node.PackageManager ?? "npm"}");
+            builder.AppendLine($"- TypeScript: {(node.HasTypeScript ? "Detected (tsconfig.json, .ts source files)" : "Not detected")}");
+            if (node.Scripts.Count > 0)
+            {
+                builder.AppendLine($"- Configured Scripts: {string.Join(", ", node.Scripts)}");
+            }
+            if (node.Frameworks.Count > 0)
+            {
+                builder.AppendLine($"- Frameworks / Libraries: {string.Join(", ", node.Frameworks)}");
+            }
+            else if (node.KeyDependencies.Count > 0)
+            {
+                builder.AppendLine($"- Key Dependencies: {string.Join(", ", node.KeyDependencies.Take(10))}");
+            }
+            builder.AppendLine();
+        }
+        else if (evidence.PythonTechnology != null)
+        {
+            var py = evidence.PythonTechnology;
+            builder.AppendLine("# Discovered Python Technology Profile");
+            builder.AppendLine($"- Manifest: {py.ManifestPath}");
+            if (py.Tools.Count > 0)
+            {
+                builder.AppendLine($"- Discovered Tools: {string.Join(", ", py.Tools)}");
+            }
+            builder.AppendLine();
         }
         else
         {
-            builder.AppendLine("- No projects were discovered in the workspace.");
+            builder.AppendLine("# Discovered Repository Technology Profile");
+            builder.AppendLine("- Generic file-based repository (no .NET solution or package manifest discovered).");
+            builder.AppendLine();
         }
-        builder.AppendLine();
 
         builder.AppendLine("# Repository Verification Preflight");
         if (evidence.VerificationProfile.State == RepositoryVerificationState.Configured && evidence.VerificationProfile.Checks.Count > 0)
@@ -976,7 +1212,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         }
         builder.AppendLine();
 
-        builder.AppendLine("# Database & Migration Intelligence");
+        builder.AppendLine("# Database & Persistence Intelligence");
         if (evidence.HasEfCore)
         {
             builder.AppendLine("- Migration Mechanism: EF Core Migrations detected in package references.");
@@ -990,13 +1226,18 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             }
             builder.AppendLine("- For schema changes: represent a NEW migration as a Create/Add candidate (e.g. 'src/Project/Migrations/2026XXXX_Description.cs' with changeType 'Add'). Never modify historical migration files.");
         }
+        else if (evidence.NodeTechnology != null && evidence.PersistenceFiles.Any(f => f.EndsWith(".json", StringComparison.OrdinalIgnoreCase) || f.Contains("Store", StringComparison.OrdinalIgnoreCase)))
+        {
+            builder.AppendLine("- Persistence Mechanism: File-based persistence / repository pattern (e.g., JSON store in repository structure). No EF Core or relational database migration framework.");
+            builder.AppendLine("- Database Migrations: No database migration framework detected. Do NOT propose database migration files.");
+        }
         else
         {
-            builder.AppendLine("- No EF Core migration framework detected in project references.");
+            builder.AppendLine("- Database / Migration Mechanism: No EF Core or relational database migration framework detected in repository.");
         }
         builder.AppendLine();
 
-        var inventory = BuildRepositoryFileInventory(workspace.LocalPath);
+        var inventory = BuildRepositoryFileInventory(workspace.LocalPath, evidence.InventoryFiles);
         if (!string.IsNullOrWhiteSpace(inventory))
         {
             builder.AppendLine(inventory);
@@ -1012,16 +1253,16 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             "Analyze the impact of implementing this task on the repository and produce evidence-backed Change Intelligence. " +
             "Respond with a single compact JSON object only, no markdown fences, no extra commentary.\n" +
             "CRITICAL CHANGE INTELLIGENCE RULES:\n" +
-            "1. All proposed C# (*.cs) file paths MUST be located within one of the discovered .NET project directories listed above.\n" +
-            "2. For changeType 'Modify' or 'Delete': The file path MUST EXACTLY match an existing file from the 'Existing Repository Files' inventory above. Never invent a file path for Modify or Delete.\n" +
-            "3. For changeType 'Add' (or 'Create'): Use Add ONLY for genuinely NEW files that do not currently exist in the repository inventory.\n" +
-            "4. Unit and integration test files MUST be placed in an existing discovered test project.\n" +
+            "1. For changeType 'Modify' or 'Delete': The file path MUST EXACTLY match an existing file from the 'Existing Repository Files' inventory above. Wildcards/globs (e.g. 'models/issue.*') and directory-only paths are STRICTLY FORBIDDEN.\n" +
+            "2. For changeType 'Add' (or 'Create'): Use Add ONLY for genuinely NEW files with concrete repository-relative file paths (no wildcards). Do NOT propose creating a file that already exists in the repository.\n" +
+            "3. Strict Technology Grounding: Ground all proposed changes, dimensions, risks, and plan steps strictly in the discovered repository technology profile above. Do NOT invent .NET projects, EF migrations, or unreferenced frameworks for non-.NET repositories.\n" +
+            "4. If .NET projects are discovered: All proposed C# (*.cs) file paths MUST be located within one of the discovered .NET project directories. Unit and integration test files MUST be placed in an existing discovered test project.\n" +
             "5. Historical migration files are immutable historical records; NEVER propose modifying existing historical migrations for new schema changes. For new schema changes, propose a NEW migration file with changeType 'Add'.\n" +
             "6. Keep all strings short (1-2 sentences max). Do not duplicate file lists inside plan or dimensions.\n" +
             "7. Database/migration statements must remain probabilistic ('migration likely/expected') unless deterministic repository evidence proves otherwise.\n" +
             "8. Supported dimensions: CODE, API, DATA, TESTS, RUNTIME, DEPENDENCIES, INFRASTRUCTURE. Emit ONLY dimensions supported by repository evidence.\n" +
             "9. Unknowns must be explicit first-class outputs (e.g. unconfigured tests, deployment sequencing, external contracts).\n" +
-            "10. STRICT ARCHITECTURAL GROUNDING: Strictly adhere to existing architectural patterns, interfaces, and libraries referenced in the project graph.\n" +
+            "10. STRICT ARCHITECTURAL GROUNDING: Strictly adhere to existing architectural patterns, interfaces, and libraries referenced in the project graph or technology profile.\n" +
             "Confidence must be an integer 0-100. Use the following schema:");
         builder.AppendLine(JsonSchema);
 
@@ -1131,6 +1372,36 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                     return ParseResult.Failure($"Impacted file path '{rawPath}' is invalid: {ex.Message}");
                 }
 
+                if (rawPath.EndsWith('/') || rawPath.EndsWith('\\'))
+                {
+                    var directoryErr = $"Impacted file path '{rawPath}' is a directory-only path. Exact concrete file paths are required.";
+                    return ParseResult.GroundingFailure(
+                        directoryErr,
+                        new ImpactGroundingErrorDetails
+                        {
+                            InvalidFilePath = rawPath,
+                            InvalidChangeType = f.ChangeType ?? "Modify",
+                            ExactError = directoryErr,
+                            ValidImpactedFiles = impactedFiles.ToList(),
+                            CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots, evidence.InventoryFiles)
+                        });
+                }
+
+                if (normalizedPath.Contains('*') || normalizedPath.Contains('?') || normalizedPath.Contains("..."))
+                {
+                    var wildcardErr = $"Impacted file path '{rawPath}' contains forbidden wildcard/glob characters. Exact concrete file paths are required.";
+                    return ParseResult.GroundingFailure(
+                        wildcardErr,
+                        new ImpactGroundingErrorDetails
+                        {
+                            InvalidFilePath = rawPath,
+                            InvalidChangeType = f.ChangeType ?? "Modify",
+                            ExactError = wildcardErr,
+                            ValidImpactedFiles = impactedFiles.ToList(),
+                            CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots, evidence.InventoryFiles)
+                        });
+                }
+
                 var changeType = ParseChangeType(f.ChangeType);
 
                 if (normalizedPath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
@@ -1154,7 +1425,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                                         InvalidChangeType = changeType.ToString(),
                                         ExactError = remapErr,
                                         ValidImpactedFiles = impactedFiles.ToList(),
-                                        CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                                        CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots, evidence.InventoryFiles)
                                     });
                             }
                         }
@@ -1169,7 +1440,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                                     InvalidChangeType = changeType.ToString(),
                                     ExactError = outsideErr,
                                     ValidImpactedFiles = impactedFiles.ToList(),
-                                    CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                                    CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots, evidence.InventoryFiles)
                                 });
                         }
                     }
@@ -1189,7 +1460,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                                 InvalidChangeType = changeType.ToString(),
                                 ExactError = migrationErr,
                                 ValidImpactedFiles = impactedFiles.ToList(),
-                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots, evidence.InventoryFiles)
                             });
                     }
 
@@ -1210,7 +1481,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                                 InvalidChangeType = changeType.ToString(),
                                 ExactError = err,
                                 ValidImpactedFiles = impactedFiles.ToList(),
-                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots, evidence.InventoryFiles)
                             });
                     }
                     normalizedPath = resolvedModifyPath;
@@ -1229,7 +1500,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                                 InvalidChangeType = "Create",
                                 ExactError = err,
                                 ValidImpactedFiles = impactedFiles.ToList(),
-                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots)
+                                CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots, evidence.InventoryFiles)
                             });
                     }
                 }

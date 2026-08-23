@@ -167,14 +167,35 @@ public static class ProjectGraphHelper
         resolvedRelativePath = relativeFilePath;
         failureReason = null;
 
+        if (string.IsNullOrWhiteSpace(relativeFilePath))
+        {
+            failureReason = "File path cannot be null or empty.";
+            return false;
+        }
+
+        var normalized = relativeFilePath.Replace('\\', '/').TrimStart('/');
+
+        // 0. Wildcards/globs are strictly forbidden for Modify/Delete
+        if (normalized.Contains('*') || normalized.Contains('?') || normalized.Contains("..."))
+        {
+            failureReason = $"Impacted file path '{relativeFilePath}' with action 'Modify' does not exist in the repository and cannot be deterministically resolved.";
+            return false;
+        }
+
         if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
         {
             // If workspace path is not on disk, keep path as-is
             return true;
         }
 
-        var normalized = relativeFilePath.Replace('\\', '/').TrimStart('/');
         var fullPath = Path.Combine(workspacePath, normalized.Replace('/', Path.DirectorySeparatorChar));
+
+        // Directory-only paths are never valid Modify/Delete targets.
+        if (Directory.Exists(fullPath))
+        {
+            failureReason = $"Impacted file path '{relativeFilePath}' with action 'Modify' is a directory-only path. Exact concrete file paths are required.";
+            return false;
+        }
 
         // 1. If the file already exists on disk, it is grounded and valid.
         if (File.Exists(fullPath))
@@ -185,9 +206,7 @@ public static class ProjectGraphHelper
 
         // 2. Discover existing files in the workspace (excluding build/artifact dirs)
         var canonicalWorkspace = GetCanonicalRealPath(workspacePath);
-        var searchExt = Path.GetExtension(normalized);
-        var searchPattern = string.IsNullOrEmpty(searchExt) ? "*.*" : "*" + searchExt;
-        var existingFullFiles = SafeFindFiles(canonicalWorkspace, searchPattern);
+        var existingFullFiles = SafeFindFiles(canonicalWorkspace, "*");
 
         var existingRelativeFiles = existingFullFiles
             .Select(f => Path.GetRelativePath(canonicalWorkspace, f).Replace('\\', '/'))
@@ -197,6 +216,26 @@ public static class ProjectGraphHelper
         if (existingRelativeFiles.Count == 0)
         {
             failureReason = $"Impacted file path '{relativeFilePath}' with action 'Modify' does not exist in the repository and cannot be deterministically resolved.";
+            return false;
+        }
+
+        // --- Match Strategy 1: Exact Suffix Match ---
+        // e.g. "models/issue.ts" matching "src/models/issue.ts"
+        var suffixPattern = normalized.StartsWith('/') ? normalized : "/" + normalized;
+        var suffixMatches = existingRelativeFiles
+            .Where(f => f.EndsWith(suffixPattern, StringComparison.OrdinalIgnoreCase) || f.Equals(normalized, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (suffixMatches.Count == 1)
+        {
+            resolvedRelativePath = suffixMatches[0];
+            return true;
+        }
+
+        if (suffixMatches.Count > 1)
+        {
+            failureReason = $"Impacted file path '{relativeFilePath}' with action 'Modify' does not exist in the repository and matches multiple candidate files ({string.Join(", ", suffixMatches)}). Ambiguous mapping cannot be resolved safely.";
             return false;
         }
 
@@ -216,41 +255,44 @@ public static class ProjectGraphHelper
             candidatePool = existingRelativeFiles;
         }
 
-        // --- Match Strategy 1: Exact Filename Match ---
-        var exactNameMatches = candidatePool
-            .Where(f => Path.GetFileName(f).Equals(targetFileName, StringComparison.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (exactNameMatches.Count == 1)
+        // --- Match Strategy 2: Exact Filename Match ---
+        if (!string.IsNullOrEmpty(targetFileName))
         {
-            resolvedRelativePath = exactNameMatches[0];
-            return true;
-        }
-
-        if (exactNameMatches.Count > 1)
-        {
-            failureReason = $"Impacted file path '{relativeFilePath}' with action 'Modify' does not exist in the repository and matches multiple candidate files ({string.Join(", ", exactNameMatches)}). Ambiguous mapping cannot be resolved safely.";
-            return false;
-        }
-
-        // If target project pool had 0 exact matches, check whole workspace for exact filename match
-        if (targetProjectRoot != null && candidatePool != existingRelativeFiles)
-        {
-            var workspaceExactMatches = existingRelativeFiles
+            var exactNameMatches = candidatePool
                 .Where(f => Path.GetFileName(f).Equals(targetFileName, StringComparison.OrdinalIgnoreCase))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            if (workspaceExactMatches.Count == 1)
+            if (exactNameMatches.Count == 1)
             {
-                resolvedRelativePath = workspaceExactMatches[0];
+                resolvedRelativePath = exactNameMatches[0];
                 return true;
             }
-            if (workspaceExactMatches.Count > 1)
+
+            if (exactNameMatches.Count > 1)
             {
-                failureReason = $"Impacted file path '{relativeFilePath}' with action 'Modify' does not exist in the repository and matches multiple candidate files ({string.Join(", ", workspaceExactMatches)}). Ambiguous mapping cannot be resolved safely.";
+                failureReason = $"Impacted file path '{relativeFilePath}' with action 'Modify' does not exist in the repository and matches multiple candidate files ({string.Join(", ", exactNameMatches)}). Ambiguous mapping cannot be resolved safely.";
                 return false;
+            }
+
+            // If target project pool had 0 exact matches, check whole workspace for exact filename match
+            if (targetProjectRoot != null && candidatePool != existingRelativeFiles)
+            {
+                var workspaceExactMatches = existingRelativeFiles
+                    .Where(f => Path.GetFileName(f).Equals(targetFileName, StringComparison.OrdinalIgnoreCase))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (workspaceExactMatches.Count == 1)
+                {
+                    resolvedRelativePath = workspaceExactMatches[0];
+                    return true;
+                }
+                if (workspaceExactMatches.Count > 1)
+                {
+                    failureReason = $"Impacted file path '{relativeFilePath}' with action 'Modify' does not exist in the repository and matches multiple candidate files ({string.Join(", ", workspaceExactMatches)}). Ambiguous mapping cannot be resolved safely.";
+                    return false;
+                }
             }
         }
 
