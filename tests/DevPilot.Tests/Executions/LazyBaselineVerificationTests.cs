@@ -386,7 +386,8 @@ C:\app\Controllers\OrderController.cs(10,5): error CS0246: The type or namespace
             baselineIsInconclusive: true);
 
         comparison.Classification.Should().Be(BaselineFailureClassification.Unknown);
-        comparison.NewRegressionCount.Should().Be(1);
+        comparison.NewRegressionCount.Should().Be(0);
+        comparison.NewRegressions.Should().BeEmpty();
         comparison.PreExistingCount.Should().Be(0);
     }
 

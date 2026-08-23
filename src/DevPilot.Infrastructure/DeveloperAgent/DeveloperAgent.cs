@@ -284,41 +284,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
             catch (Exception parseEx)
             {
-                var retrySystemPrompt = BuildSingleFileRepairSystemPrompt(manifestEntry, useFullFileReplacement);
-                var retryUserPrompt = BuildSingleFileRepairUserPrompt(
-                    parseEx.Message,
-                    aiResponse.Content ?? string.Empty,
-                    manifestEntry,
-                    currentTargetContent: currentContent,
-                    useFullFileReplacement: useFullFileReplacement);
-
-                var retryRequest = new AiRequest
-                {
-                    UserPrompt = retryUserPrompt,
-                    SystemPrompt = retrySystemPrompt,
-                    MaxTokens = budget,
-                    Model = request.Model ?? string.Empty
-                };
-
-                AiResponse retryResponse;
-                try
-                {
-                    retryResponse = await _aiProvider.SendAsync(retryRequest, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception retryEx)
-                {
-                    return DeveloperAgentResult.Fail($"Focused repair retry AI call failed: {retryEx.Message}", request.Model);
-                }
-
-                try
-                {
-                    editSpec = ParseSingleFileEditSpec(retryResponse.Content ?? string.Empty, manifestEntry);
-                    ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
-                }
-                catch (Exception finalEx)
-                {
-                    return DeveloperAgentResult.Fail($"Focused repair output was invalid after retry: {finalEx.Message}", request.Model);
-                }
+                return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseEx.Message}", request.Model);
             }
 
             collectedEdits.Add(editSpec);

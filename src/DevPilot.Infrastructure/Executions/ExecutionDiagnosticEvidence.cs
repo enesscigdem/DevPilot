@@ -509,15 +509,15 @@ public static class ExecutionDiagnosticEvidence
             return new BaselineFailureComparison(
                 BaselineFailureClassification.Unknown,
                 PreExistingCount: 0,
-                NewRegressionCount: taskFailures.Count,
+                NewRegressionCount: 0,
                 ChangedCount: 0,
                 PreExistingFailures: Array.Empty<NormalizedFailureItem>(),
-                NewRegressions: taskFailures,
+                NewRegressions: Array.Empty<NormalizedFailureItem>(),
                 ChangedFailures: Array.Empty<NormalizedFailureItem>(),
                 Summary: "Baseline check was inconclusive; preserving task failure evidence.");
         }
 
-        if (baselineCheckSucceeded || baselineFailures.Count == 0)
+        if (baselineCheckSucceeded)
         {
             return new BaselineFailureComparison(
                 BaselineFailureClassification.NewRegression,
@@ -528,6 +528,19 @@ public static class ExecutionDiagnosticEvidence
                 NewRegressions: taskFailures,
                 ChangedFailures: Array.Empty<NormalizedFailureItem>(),
                 Summary: $"Failed: {taskFailures.Count} new regression(s) introduced.");
+        }
+
+        if (baselineFailures.Count == 0)
+        {
+            return new BaselineFailureComparison(
+                BaselineFailureClassification.Unknown,
+                PreExistingCount: 0,
+                NewRegressionCount: 0,
+                ChangedCount: 0,
+                PreExistingFailures: Array.Empty<NormalizedFailureItem>(),
+                NewRegressions: Array.Empty<NormalizedFailureItem>(),
+                ChangedFailures: Array.Empty<NormalizedFailureItem>(),
+                Summary: "Baseline check produced no diagnostic items; unable to classify regression.");
         }
 
         var preExisting = new List<NormalizedFailureItem>();
@@ -619,6 +632,92 @@ public static class ExecutionDiagnosticEvidence
             NewRegressions: newRegressions,
             ChangedFailures: changed,
             Summary: summary);
+    }
+
+    public static CompilerFailureEvidence CreateActionableCompilerEvidence(
+        IReadOnlyList<NormalizedFailureItem> actionableFailures,
+        string? fallbackStdOut,
+        string? fallbackStdErr,
+        string? fallbackErrorMessage)
+    {
+        if (actionableFailures == null || actionableFailures.Count == 0)
+        {
+            return ParseCompilerFailure(fallbackStdOut, fallbackStdErr, fallbackErrorMessage);
+        }
+
+        var lines = actionableFailures
+            .Select(f => f.ErrorSummary)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(MaxCompilerDiagnostics)
+            .ToList();
+
+        var locations = new List<DiagnosticSourceLocation>();
+        var normalized = new List<string>();
+
+        foreach (var failure in actionableFailures)
+        {
+            if (!string.IsNullOrWhiteSpace(failure.Location))
+            {
+                var parts = failure.Location.Split(':', StringSplitOptions.RemoveEmptyEntries);
+                var path = NormalizePath(parts[0]);
+                int? line = parts.Length > 1 && int.TryParse(parts[1], out var parsedLine) ? parsedLine : null;
+                locations.Add(new DiagnosticSourceLocation(path, line));
+            }
+            normalized.Add(failure.NormalizedDiagnostic);
+        }
+
+        if (normalized.Count == 0)
+        {
+            normalized.Add(NormalizeText(fallbackErrorMessage ?? "build failed"));
+        }
+
+        return new CompilerFailureEvidence(
+            ComputeFingerprint(normalized),
+            lines,
+            locations);
+    }
+
+    public static TestFailureEvidence CreateActionableTestEvidence(
+        IReadOnlyList<NormalizedFailureItem> actionableFailures,
+        string? fallbackStdOut,
+        string? fallbackStdErr,
+        string? fallbackErrorMessage)
+    {
+        if (actionableFailures == null || actionableFailures.Count == 0)
+        {
+            return ParseTestFailure(fallbackStdOut, fallbackStdErr, fallbackErrorMessage);
+        }
+
+        var first = actionableFailures[0];
+        var testName = first.TestName;
+        var errorSummary = string.Join(" | ", actionableFailures.Select(f => f.ErrorSummary).Take(5));
+        var relevant = actionableFailures.Select(f => f.ErrorSummary).ToList();
+        var locations = new List<DiagnosticSourceLocation>();
+
+        foreach (var failure in actionableFailures)
+        {
+            if (!string.IsNullOrWhiteSpace(failure.Location))
+            {
+                var parts = failure.Location.Split(':', StringSplitOptions.RemoveEmptyEntries);
+                var path = NormalizePath(parts[0]);
+                int? line = parts.Length > 1 && int.TryParse(parts[1], out var parsedLine) ? parsedLine : null;
+                locations.Add(new DiagnosticSourceLocation(path, line));
+            }
+        }
+
+        var identityParts = new List<string>
+        {
+            NormalizeText(testName ?? "unknown test"),
+            NormalizeText(errorSummary)
+        };
+
+        return new TestFailureEvidence(
+            ComputeFingerprint(identityParts),
+            testName,
+            errorSummary,
+            relevant,
+            locations);
     }
 
     private static bool IsSubstantiallySimilarError(string errA, string errB)

@@ -66,18 +66,32 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
             CheckId: check.Id,
             TargetedTestFilter: targetedFilter);
 
-        var (baselineEvidence, cacheHit, durationMs) = await GetOrExecuteBaselineCheckAsync(
-            key,
-            sourceRepositoryPath,
-            baseCommitSha,
-            check,
-            targetedFilter,
-            isTest: true,
-            cancellationToken).ConfigureAwait(false);
+        (BaselineCheckEvidence? baselineEvidence, bool cacheHit, long durationMs) = (null, false, 0);
+        try
+        {
+            (baselineEvidence, cacheHit, durationMs) = await GetOrExecuteBaselineCheckAsync(
+                key,
+                sourceRepositoryPath,
+                baseCommitSha,
+                check,
+                targetedFilter,
+                isTest: true,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Baseline check execution failed with exception for check {CheckId}: {Message}", check.Id, ex.Message);
+            return InconclusiveComparison(taskCheckResult, $"Baseline check execution failed: {ex.Message}");
+        }
 
         if (baselineEvidence == null)
         {
             return InconclusiveComparison(taskCheckResult, "Baseline check could not be executed or was inconclusive.");
+        }
+
+        if (!baselineEvidence.Success && baselineEvidence.Failures.Count == 0)
+        {
+            return InconclusiveComparison(taskCheckResult, $"Baseline check infrastructure failure: {baselineEvidence.ErrorSummary ?? "unknown error"}");
         }
 
         var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
@@ -117,18 +131,32 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
             CheckId: check.Id,
             TargetedTestFilter: null);
 
-        var (baselineEvidence, cacheHit, durationMs) = await GetOrExecuteBaselineCheckAsync(
-            key,
-            sourceRepositoryPath,
-            baseCommitSha,
-            check,
-            targetedTestFilter: null,
-            isTest: false,
-            cancellationToken).ConfigureAwait(false);
+        (BaselineCheckEvidence? baselineEvidence, bool cacheHit, long durationMs) = (null, false, 0);
+        try
+        {
+            (baselineEvidence, cacheHit, durationMs) = await GetOrExecuteBaselineCheckAsync(
+                key,
+                sourceRepositoryPath,
+                baseCommitSha,
+                check,
+                targetedTestFilter: null,
+                isTest: false,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Baseline check execution failed with exception for check {CheckId}: {Message}", check.Id, ex.Message);
+            return InconclusiveComparison(taskCheckResult, $"Baseline check execution failed: {ex.Message}");
+        }
 
         if (baselineEvidence == null)
         {
             return InconclusiveComparison(taskCheckResult, "Baseline check could not be executed or was inconclusive.");
+        }
+
+        if (!baselineEvidence.Success && baselineEvidence.Failures.Count == 0)
+        {
+            return InconclusiveComparison(taskCheckResult, $"Baseline check infrastructure failure: {baselineEvidence.ErrorSummary ?? "unknown error"}");
         }
 
         var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
@@ -327,17 +355,13 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
 
     private static BaselineFailureComparison InconclusiveComparison(RepositoryCheckResult taskResult, string reason)
     {
-        var taskFailures = (taskResult.CheckKind == RepositoryCheckKind.Test)
-            ? ExecutionDiagnosticEvidence.ParseAllTestFailures(taskResult.StdOut, taskResult.StdErr, taskResult.ErrorMessage)
-            : ExecutionDiagnosticEvidence.ParseAllCompilerFailures(taskResult.StdOut, taskResult.StdErr, taskResult.ErrorMessage);
-
         return new BaselineFailureComparison(
             Classification: BaselineFailureClassification.Unknown,
             PreExistingCount: 0,
-            NewRegressionCount: taskFailures.Count,
+            NewRegressionCount: 0,
             ChangedCount: 0,
             PreExistingFailures: Array.Empty<NormalizedFailureItem>(),
-            NewRegressions: taskFailures,
+            NewRegressions: Array.Empty<NormalizedFailureItem>(),
             ChangedFailures: Array.Empty<NormalizedFailureItem>(),
             Summary: reason);
     }
