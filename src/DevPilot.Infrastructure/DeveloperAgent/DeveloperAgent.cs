@@ -138,16 +138,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         if (action == FileEditAction.Modify)
         {
-            if (targetContent != null && WorktreeEditApplier.IsSmallTextFile(targetContent))
-            {
-                var estimatedFullFileTokens = (targetContent.Length + 2) / 3 + 512;
-                var roundedBudget = ((estimatedFullFileTokens + 511) / 512) * 512;
-                return Math.Min(Math.Clamp(roundedBudget, 2048, 4096), _maxOutputTokens);
-            }
-
-            // SEARCH/REPLACE output is expected to contain only the changed blocks,
-            // so its budget must not scale with the size or role of the target file.
-            return Math.Min(Math.Min(_budgetModifyPatch, 8192), _maxOutputTokens);
+            // Existing-file Modify is always SEARCH/REPLACE. The budget is a bounded
+            // patch contract and must not scale with the current file size.
+            return Math.Min(Math.Min(_budgetModifyPatch, 4096), _maxOutputTokens);
         }
 
         var score = GetSemanticLayerScore(filePath);
@@ -178,14 +171,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         if (fileEntry.Action == FileEditAction.Modify)
         {
-            // A Modify retry remains a compact edit response. It never needs a full-file/test-file
-            // budget, and an applicability repair does not own an additional token retry.
-            if (isRepair)
-            {
-                return initialBudget;
-            }
-
-            return Math.Min(Math.Max(initialBudget * 2, 4096), Math.Min(8192, _maxCompactRetryOutputTokens));
+            // Modify recovery stays a compact SEARCH/REPLACE response. It must become
+            // more concise, not receive a larger allowance.
+            var boundedPatch = Math.Min(Math.Min(_budgetModifyPatch, 4096), _maxOutputTokens);
+            return Math.Min(initialBudget, boundedPatch);
         }
 
         int targetLines = targetContent != null ? targetContent.Split('\n').Length : 0;
@@ -256,11 +245,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 filePath,
                 request,
                 currentContent ?? string.Empty);
+            var boundedTarget = BuildFocusedRepairTargetWindow(
+                currentContent ?? string.Empty,
+                request.DiagnosticLocations,
+                request.DiagnosticEvidence);
 
             var systemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath);
             var userPrompt = BuildFocusedDiagnosticRepairUserPrompt(
                 filePath,
-                currentContent ?? string.Empty,
+                boundedTarget,
                 request,
                 peerContext);
 
@@ -272,6 +265,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 Model = request.Model ?? string.Empty
             };
 
+            var repairSw = Stopwatch.StartNew();
             AiResponse aiResponse;
             try
             {
@@ -281,6 +275,16 @@ public sealed class DeveloperAgent : IDeveloperAgent
             {
                 return DeveloperAgentResult.Fail($"Focused repair AI call failed: {ex.Message}", request.Model);
             }
+            repairSw.Stop();
+
+            await RecordProviderCallActivityAsync(
+                request.ExecutionId,
+                filePath,
+                "FocusedVerificationRepair",
+                aiRequest,
+                aiResponse,
+                repairSw.Elapsed,
+                cancellationToken).ConfigureAwait(false);
 
             if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
             {
@@ -732,9 +736,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             targetContentHash = WorktreeEditApplier.ComputeContentHash(targetContent);
         }
 
-        var useFullFileReplacement = fileEntry.Action == FileEditAction.Modify &&
-                                     targetContent != null &&
-                                     WorktreeEditApplier.IsSmallTextFile(targetContent);
+        // Existing-file Modify is always SEARCH/REPLACE. Create still uses full newContent.
+        var useFullFileReplacement = false;
         var recoveryUsed = false;
 
         if (!callCounter.TryIncrement(out var callNumber))
@@ -789,23 +792,31 @@ public sealed class DeveloperAgent : IDeveloperAgent
             fileSw.Elapsed,
             cancellationToken).ConfigureAwait(false);
 
-        // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
+        // File-local token recovery: one bounded retry for this file only.
+        // Modify retries stay SEARCH/REPLACE with the same/smaller budget.
         if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
             string.Equals(fileResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
         {
             int compactBudget = DetermineCompactRetryBudget(initialBudget, targetContent, fileEntry, isRepair: false);
-            if (compactBudget > initialBudget && callCounter.TryIncrement(out var escCallNumber))
+            var isModify = fileEntry.Action == FileEditAction.Modify;
+            var attemptRetry = isModify || compactBudget > initialBudget;
+            if (attemptRetry && callCounter.TryIncrement(out var escCallNumber))
             {
                 recoveryUsed = true;
                 callCounter.RecordCompactRetry();
+                var retryKind = isModify ? "SurgicalModifyRetry" : "CompactGenerationRetry";
                 await SafeRecordActivityAsync(
                     request.ExecutionId,
-                    $"Performing compact generation retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit.",
+                    isModify
+                        ? $"Performing surgical modify retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit."
+                        : $"Performing compact generation retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit.",
                     cancellationToken).ConfigureAwait(false);
 
                 var compactUserPrompt = BuildCompactSingleFileUserPrompt(
-                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement);
-                var compactSystemPrompt = BuildCompactSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
+                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement, virtualWorkspace);
+                var compactSystemPrompt = isModify
+                    ? BuildSurgicalModifyRetrySystemPrompt(fileEntry)
+                    : BuildCompactSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
 
                 var compactRequest = new AiRequest
                 {
@@ -826,11 +837,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         capturedModels.Add(compactResponse.Model);
                     }
 
-                    LogGenerationAudit(fileEntry.FilePath, "CompactRetry", escCallNumber, compactRequest, compactResponse, escSw.Elapsed, isCompactRetry: true);
+                    LogGenerationAudit(fileEntry.FilePath, retryKind, escCallNumber, compactRequest, compactResponse, escSw.Elapsed, isCompactRetry: true);
                     await RecordProviderCallActivityAsync(
                         request.ExecutionId,
                         fileEntry.FilePath,
-                        "CompactGenerationRetry",
+                        retryKind,
                         compactRequest,
                         compactResponse,
                         escSw.Elapsed,
@@ -969,7 +980,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     cancellationToken).ConfigureAwait(false);
                 targetContent = currentTarget.Content;
                 targetContentHash = currentTarget.Hash;
-                useFullFileReplacement = WorktreeEditApplier.IsSmallTextFile(targetContent);
+                useFullFileReplacement = false;
 
                 if (editSpec?.SearchReplaceEdits is { Count: > 0 })
                 {
@@ -1210,7 +1221,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             InputTokens: response.InputTokens,
             OutputTokens: response.OutputTokens,
             StageDurationMs: (long)duration.TotalMilliseconds,
-            TargetFile: targetFile);
+            TargetFile: targetFile,
+            FailureKind: response.FailureKind == AiFailureKind.None ? null : response.FailureKind.ToString());
 
         await SafeRecordActivityAsync(
             executionId,
@@ -1649,6 +1661,92 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return sbLarge.ToString();
     }
 
+    public static string BuildFocusedRepairTargetWindow(
+        string targetContent,
+        IReadOnlyList<string>? diagnosticLocations,
+        string? diagnosticEvidence = null)
+    {
+        if (string.IsNullOrWhiteSpace(targetContent))
+        {
+            return targetContent;
+        }
+
+        var lines = targetContent.Replace("\r\n", "\n").Split('\n');
+        if (lines.Length <= 80 && targetContent.Length <= 4000)
+        {
+            return targetContent;
+        }
+
+        var lineNumbers = new SortedSet<int>();
+        foreach (var location in diagnosticLocations ?? Array.Empty<string>())
+        {
+            TryAddDiagnosticLineNumber(location, lineNumbers);
+        }
+
+        if (!string.IsNullOrWhiteSpace(diagnosticEvidence))
+        {
+            foreach (Match match in Regex.Matches(diagnosticEvidence, @"\((\d+),\d+\)"))
+            {
+                if (int.TryParse(match.Groups[1].Value, out var line) && line > 0)
+                {
+                    lineNumbers.Add(line);
+                }
+            }
+        }
+
+        if (lineNumbers.Count == 0)
+        {
+            return BuildBoundedTargetSourceWindow(targetContent);
+        }
+
+        var included = new bool[lines.Length];
+        foreach (var lineNumber in lineNumbers)
+        {
+            var index = Math.Clamp(lineNumber - 1, 0, lines.Length - 1);
+            var start = Math.Max(0, index - 12);
+            var end = Math.Min(lines.Length - 1, index + 12);
+            for (var i = start; i <= end; i++)
+            {
+                included[i] = true;
+            }
+        }
+
+        var sb = new System.Text.StringBuilder();
+        var emittingGap = false;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!included[i])
+            {
+                emittingGap = true;
+                continue;
+            }
+
+            if (emittingGap)
+            {
+                sb.AppendLine("// ... [unrelated methods omitted] ...");
+                emittingGap = false;
+            }
+
+            sb.AppendLine(lines[i]);
+        }
+
+        return sb.ToString();
+    }
+
+    private static void TryAddDiagnosticLineNumber(string location, ISet<int> lineNumbers)
+    {
+        if (string.IsNullOrWhiteSpace(location))
+        {
+            return;
+        }
+
+        var match = Regex.Match(location, @"\((\d+),\d+\)");
+        if (match.Success && int.TryParse(match.Groups[1].Value, out var line) && line > 0)
+        {
+            lineNumbers.Add(line);
+        }
+    }
+
     public static string BuildSingleFileSystemPrompt(
         ManifestFileEntry fileEntry,
         bool useFullFileReplacement = false)
@@ -1661,7 +1759,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 ? "This is a small-file Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
                     ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'."
-                    : "This is a large-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'.";
+                    : "This is an existing-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Do not reproduce unchanged file content. Omit 'newContent'.";
 
         var testGuidance = isTest
             ? fileEntry.Action == FileEditAction.Modify
@@ -1700,7 +1798,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
                     ? "Output was previously truncated because too much code was emitted. For this test file, return ONLY minimal 2-5 line 'searchReplaceEdits' inserting the new test method(s) using a unique 2-5 line anchor (never a bare closing brace alone). NEVER repeat existing tests or the test class. Omit 'newContent'."
-                    : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods. Omit 'newContent'.";
+                    : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods or the rest of the file. Omit 'newContent'.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
@@ -1710,6 +1808,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
             Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
             {{actionSpecificRule}}
             {{schema}}
+            """;
+    }
+
+    public static string BuildSurgicalModifyRetrySystemPrompt(ManifestFileEntry fileEntry)
+    {
+        return $$"""
+            Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+            The previous existing-file Modify response exhausted the output budget.
+            Return ONLY 1-3 compact 'searchReplaceEdits' with exact 2-5 line unique anchors from the current target.
+            Change only the required statements. NEVER reproduce unchanged methods or the entire file.
+            Omit 'newContent'.
+            {"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact 2-5 line unique anchor","replace":"replacement"}]}
             """;
     }
 
@@ -2354,7 +2464,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
                 : isTest
                     ? "Edit Strategy: surgical test patch. Add only the new or modified test method(s) using a concise 2-5 line unique search anchor from the target file (such as the tail of the preceding test method with surrounding structural lines, or the target test signature; never use a bare closing brace alone). NEVER repeat existing unchanged tests, fixtures, or the full test class."
-                    : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.";
+                    : "Edit Strategy: surgical SEARCH/REPLACE patch. Return only the changed regions with exact unique anchors. Do not reproduce unchanged file content.";
 
             sb.AppendLine(editStrategy);
             sb.AppendLine("=== Current Content of Target File ===");
@@ -2447,13 +2557,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
         ManifestFileEntry fileEntry,
         string? targetContent,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("=== COMPACT RETRY (TOKEN LIMIT DISCIPLINE) ===");
         sb.AppendLine(useFullFileReplacement
             ? "Emit only the JSON small-file replacement payload."
-            : "Emit only the minimal JSON searchReplaceEdits payload.");
+            : "The previous response was too long. Emit only the minimal JSON searchReplaceEdits payload. Do not reproduce unchanged file content.");
         sb.AppendLine();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
         sb.AppendLine($"Task Description: {request.TaskDescription}");
@@ -2506,6 +2617,23 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 }
                 sb.AppendLine();
             }
+        }
+
+        if (virtualWorkspace != null && virtualWorkspace.Count > 0)
+        {
+            sb.AppendLine("=== In-Memory Generated Dependency Snippets ===");
+            foreach (var (depPath, depContent) in virtualWorkspace.Take(5))
+            {
+                if (string.Equals(depPath, fileEntry.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                sb.AppendLine($"--- Generated Dependency: {depPath} ---");
+                sb.AppendLine(depContent.Length > 1200 ? depContent[..1200] + "\n...[truncated]" : depContent);
+                sb.AppendLine("--- End Generated Dependency ---");
+            }
+            sb.AppendLine();
         }
 
         sb.AppendLine($"Output ONLY the compact JSON object for '{fileEntry.FilePath}'.");
@@ -3042,7 +3170,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             if (spec.NewContent != null)
             {
-                throw new FormatException($"Large-file Modify action for '{expectedEntry.FilePath}' must use surgical 'searchReplaceEdits'.");
+                throw new FormatException($"Modify action for '{expectedEntry.FilePath}' must use surgical 'searchReplaceEdits'.");
             }
 
             if (spec.SearchReplaceEdits == null || spec.SearchReplaceEdits.Count == 0)

@@ -573,8 +573,8 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeTrue();
         _fakeAiProvider.ReceivedRequests.Should().HaveCount(2);
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048, "small-file Modify uses an expected full-file output budget");
-        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(2048, "small-file applicability recovery keeps the same bounded budget");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096, "existing-file Modify uses the bounded patch budget");
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(4096, "applicability recovery keeps the same bounded patch budget");
     }
 
     [Fact]
@@ -626,7 +626,7 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeTrue();
         _fakeAiProvider.ReceivedRequests.Should().HaveCount(1);
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048, "small-file Modify budget is based on expected output, not the global ceiling");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096, "Modify patch budget stays bounded and does not follow the inflated ceiling");
     }
 
     [Fact]
@@ -946,7 +946,9 @@ public class DeveloperAgentTests : IDisposable
             {
               "filePath": "SmallService.cs",
               "action": "Modify",
-              "newContent": "public class SmallService { public int Value => 2; }"
+              "searchReplaceEdits": [
+                { "search": "public int Value => 1;", "replace": "public int Value => 2;" }
+              ]
             }
             """);
 
@@ -954,9 +956,10 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeTrue(result.ErrorMessage);
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048);
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("small-file Modify");
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("newContent");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("existing-file Modify");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("searchReplaceEdits");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().NotContain("small-file Modify");
         (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 2");
     }
 
@@ -984,7 +987,7 @@ public class DeveloperAgentTests : IDisposable
         result.Success.Should().BeTrue(result.ErrorMessage);
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
         _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("large-file Modify");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("existing-file Modify");
         _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("searchReplaceEdits");
         (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 2");
     }
@@ -1021,7 +1024,7 @@ public class DeveloperAgentTests : IDisposable
         var result = await _developerAgent.GenerateAndApplyEditsAsync(CreateModifyRequest(relativePath));
 
         result.Success.Should().BeTrue(result.ErrorMessage);
-        _fakeAiProvider.ReceivedRequests.Select(request => request.MaxTokens).Should().Equal(4096, 8192);
+        _fakeAiProvider.ReceivedRequests.Select(request => request.MaxTokens).Should().Equal(4096, 4096);
         _fakeAiProvider.ReceivedRequests.Should().OnlyContain(request => request.MaxTokens < 32768);
     }
 
@@ -1140,7 +1143,9 @@ public class DeveloperAgentTests : IDisposable
                     {
                       "filePath": "CurrentSourceService.cs",
                       "action": "Modify",
-                      "newContent": "public class CurrentSourceService { public int Value => 20; }"
+                      "searchReplaceEdits": [
+                        { "search": "Value => 10", "replace": "Value => 20" }
+                      ]
                     }
                     """
             };

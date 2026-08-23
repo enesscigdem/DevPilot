@@ -402,10 +402,10 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         var entry = new ManifestFileEntry("NetCaseStudy.Tests/Api/ProductsApiTests.cs", FileEditAction.Modify, "Add tests", null);
 
         var retryBudget = agent.DetermineCompactRetryBudget(6144, largeContent, entry, isRepair: false);
-        retryBudget.Should().Be(8192, "Modify retry is capped by expected compact patch size");
+        retryBudget.Should().Be(4096, "Modify retry stays at the bounded patch budget and does not escalate");
 
         var repairRetryBudget = agent.DetermineCompactRetryBudget(6144, largeContent, entry, isRepair: true);
-        repairRetryBudget.Should().Be(6144, "applicability recovery cannot own another token escalation");
+        repairRetryBudget.Should().Be(4096, "applicability recovery stays on the bounded patch budget and does not escalate");
     }
 
     [Fact]

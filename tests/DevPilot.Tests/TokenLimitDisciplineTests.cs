@@ -609,7 +609,7 @@ public class TokenLimitDisciplineTests : IDisposable
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
         result.Success.Should().BeTrue();
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048, "small-file Modify uses the bounded expected-output budget");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096, "existing-file Modify uses the bounded patch budget");
 
         // Verify activities were safely recorded
         _activityRecorder.RecordedActivities.Should().NotBeEmpty();
