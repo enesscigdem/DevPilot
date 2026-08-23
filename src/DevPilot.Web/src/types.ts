@@ -255,7 +255,7 @@ export function getExecutionStatusMeta(status: number | string): { label: string
   return { label: String(status), tone: "neutral" };
 }
 
-export type ExecutionStageStepState = "Todo" | "Active" | "Done" | "Failed" | "Blocked";
+export type ExecutionStageStepState = "Todo" | "Active" | "Done" | "Failed" | "Blocked" | "NeedsReview";
 
 export interface ExecutionStageStep {
   stageKey: string;
@@ -316,6 +316,8 @@ export interface ExecutionDetail {
   mergeCommitSha?: string | null;
   mergedAt?: string | null;
   canRequestMerge?: boolean;
+  verificationOutcome?: string;
+  canRetry?: boolean;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -478,6 +480,7 @@ export interface ExecutionReview {
   mergeMethod?: string | null;
   canRequestMerge?: boolean;
   mergeBlockedReason?: string | null;
+  canRetry?: boolean;
   repositoryWorkspaceId?: string;
   repositoryOwner?: string;
   repositoryName?: string;

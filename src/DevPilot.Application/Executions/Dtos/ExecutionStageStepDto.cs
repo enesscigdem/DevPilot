@@ -9,7 +9,8 @@ public enum ExecutionStageStepState
     Active,
     Done,
     Failed,
-    Blocked
+    Blocked,
+    NeedsReview
 }
 
 public sealed class ExecutionStageStepDto

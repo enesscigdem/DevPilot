@@ -386,4 +386,31 @@ public sealed class ExecutionStageEvaluatorTests
 
         Assert.Equal(ExecutionStageStepState.Done, stages[4].State);
     }
+
+    [Fact]
+    public void EvaluateStages_WhenCompletedNeedsReview_BuildTestIsNeedsReviewNotFailed()
+    {
+        var task = CreateTask(DevelopmentTaskStatus.Completed);
+        var execution = CreateExecution(task.Id, TaskExecutionStatus.Completed);
+        var activities = new List<ExecutionActivity>
+        {
+            new() { Id = Guid.NewGuid(), ExecutionId = execution.Id, Stage = ExecutionStage.DeveloperAgent, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                Message = "Build failed",
+                MetadataJson = "{\"RepositoryCheckId\":\"build\",\"VerificationOutcome\":\"NeedsReview\"}",
+                CreatedAt = DateTime.UtcNow.AddSeconds(1)
+            }
+        };
+
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        Assert.Equal(ExecutionStageStepState.Done, stages[3].State);
+        Assert.Equal(ExecutionStageStepState.NeedsReview, stages[4].State);
+        Assert.NotEqual(ExecutionStageStepState.Failed, stages[4].State);
+    }
 }

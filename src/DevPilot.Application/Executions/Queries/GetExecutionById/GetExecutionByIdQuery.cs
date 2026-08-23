@@ -73,9 +73,16 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
         }
 
         var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
-        var buildPassed = activities.Any(a => a.Stage == DevPilot.Domain.Enums.ExecutionStage.Build && a.Status == DevPilot.Domain.Enums.ExecutionActivityStatus.Completed);
-        var testPassed = activities.Any(a => a.Stage == DevPilot.Domain.Enums.ExecutionStage.Test && a.Status == DevPilot.Domain.Enums.ExecutionActivityStatus.Completed);
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        var hasActive = await _executionRepository
+            .HasActiveExecutionForTaskAsync(execution.DevelopmentTaskId, cancellationToken)
+            .ConfigureAwait(false);
+        var canRetry = !hasActive &&
+                       (execution.Status is DevPilot.Domain.Enums.TaskExecutionStatus.Failed
+                           or DevPilot.Domain.Enums.TaskExecutionStatus.Cancelled
+                        || (execution.Status == DevPilot.Domain.Enums.TaskExecutionStatus.Completed &&
+                            outcome == DevPilot.Domain.Enums.ExecutionVerificationOutcome.NeedsReview));
 
         var analysis = await _impactAnalysisRepository.GetLatestByTaskIdAsync(execution.DevelopmentTaskId, cancellationToken).ConfigureAwait(false);
         var stages = ExecutionStageEvaluator.EvaluateStages(execution, execution.DevelopmentTask, analysis, activities);
@@ -84,15 +91,16 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
         return new GetExecutionByIdResult
         {
             Found = true,
-            Execution = MapToDto(execution, allowNoChecks, buildPassed, testPassed, stages, progressPercentage),
+            Execution = MapToDto(execution, allowNoChecks, activities, outcome, canRetry, stages, progressPercentage),
         };
     }
 
     private static ExecutionDto MapToDto(
         TaskExecution execution,
         bool allowNoChecks,
-        bool buildPassed,
-        bool testPassed,
+        IReadOnlyList<DevPilot.Domain.Entities.ExecutionActivity> activities,
+        DevPilot.Domain.Enums.ExecutionVerificationOutcome outcome,
+        bool canRetry,
         IReadOnlyList<ExecutionStageStepDto> stages,
         int progressPercentage) =>
         new()
@@ -144,7 +152,9 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             MergeStatus = execution.MergeStatus.ToString(),
             MergeCommitSha = execution.MergeCommitSha,
             MergedAt = execution.MergedAt,
-            CanRequestMerge = DevPilot.Application.Executions.Services.ExecutionMergeEligibility.CalculateCanRequestMerge(execution, allowNoChecks, buildPassed, testPassed),
+            CanRequestMerge = ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks).CanMerge,
+            VerificationOutcome = outcome.ToString(),
+            CanRetry = canRetry,
             ProgressPercentage = progressPercentage,
             Stages = stages,
         };

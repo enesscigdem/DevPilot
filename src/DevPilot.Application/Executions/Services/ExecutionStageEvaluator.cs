@@ -93,10 +93,17 @@ public static class ExecutionStageEvaluator
              a.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase) ||
              (a.MetadataJson != null && (a.MetadataJson.Contains("\"VerificationOutcome\":\"NoNewRegressions\"", StringComparison.OrdinalIgnoreCase) || a.MetadataJson.Contains("\"BaselineClassification\":\"PreExisting\"", StringComparison.OrdinalIgnoreCase)))));
 
+        var verificationOutcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+
         ExecutionStageStepState buildTestState;
         if (repositoryVerificationReady || (buildPassed && testPassed))
         {
             buildTestState = ExecutionStageStepState.Done;
+        }
+        else if (execution.Status == TaskExecutionStatus.Completed &&
+                 verificationOutcome == ExecutionVerificationOutcome.NeedsReview)
+        {
+            buildTestState = ExecutionStageStepState.NeedsReview;
         }
         else if (buildFailed || testFailed)
         {
@@ -189,7 +196,7 @@ public static class ExecutionStageEvaluator
         for (var i = 0; i < stages.Count; i++)
         {
             var state = stages[i].State;
-            if (state is ExecutionStageStepState.Done or ExecutionStageStepState.Active or ExecutionStageStepState.Failed or ExecutionStageStepState.Blocked)
+            if (state is ExecutionStageStepState.Done or ExecutionStageStepState.Active or ExecutionStageStepState.Failed or ExecutionStageStepState.Blocked or ExecutionStageStepState.NeedsReview)
             {
                 furthestIndex = i + 1;
                 furthestState = state;

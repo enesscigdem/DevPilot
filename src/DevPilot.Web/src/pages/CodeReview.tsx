@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Link as RouterLink, useParams as useReactParams } from "react-router-dom"
+import { Link as RouterLink, useNavigate, useParams as useReactParams } from "react-router-dom"
 import {
   ArrowLeft,
   GitBranch,
@@ -15,11 +15,12 @@ import {
   XCircle,
   UploadCloud,
   RotateCw,
+  RotateCcw,
   Sparkles,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl, retryExecution } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import {
   getExecutionStatusMeta,
@@ -201,6 +202,7 @@ function DiffRow({ line }: { line: ParsedLine }) {
 
 export function CodeReview() {
   const { id } = useReactParams<{ id: string }>()
+  const navigate = useNavigate()
   const { selectWorkspace, activeWorkspaceId } = useWorkspace()
 
   const [review, setReview] = useState<ExecutionReview | null>(null)
@@ -209,6 +211,7 @@ export function CodeReview() {
   const [error, setError] = useState<string | null>(null)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [isSubmittingDecision, setIsSubmittingDecision] = useState(false)
+  const [isRetrying, setIsRetrying] = useState(false)
   const [decisionError, setDecisionError] = useState<string | null>(null)
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReasonInput, setRejectionReasonInput] = useState("")
@@ -264,6 +267,21 @@ export function CodeReview() {
 
   const [isSubmittingCommit, setIsSubmittingCommit] = useState(false)
   const [isSubmittingPush, setIsSubmittingPush] = useState(false)
+
+  const handleRetryExecution = async () => {
+    if (!review || isRetrying) return
+    setIsRetrying(true)
+    setDecisionError(null)
+
+    try {
+      const created = await retryExecution(review.taskId, review.repositoryWorkspaceId ?? activeWorkspaceId)
+      navigate(`/executions/${created.id}`)
+    } catch (err) {
+      setDecisionError(err instanceof Error ? err.message : "Failed to retry execution.")
+    } finally {
+      setIsRetrying(false)
+    }
+  }
 
   const handleApprove = async () => {
     if (!id || !review || isSubmittingDecision) return
@@ -569,7 +587,7 @@ export function CodeReview() {
               {review.verificationOutcome === "PartiallyVerified" && <Badge tone="amber">Partially verified</Badge>}
               {review.verificationOutcome === "VerificationUnavailable" && <Badge tone="gray">Verification unavailable</Badge>}
               {review.verificationOutcome === "VerificationInfrastructureError" && <Badge tone="red">Verification infra error</Badge>}
-              {review.verificationOutcome === "NeedsReview" && <Badge tone="red">Needs review</Badge>}
+              {review.verificationOutcome === "NeedsReview" && <Badge tone="amber">Needs review</Badge>}
               {isApproved && <Badge tone="green">Approved</Badge>}
               {isRejected && <Badge tone="red">Rejected</Badge>}
             </div>
@@ -857,7 +875,9 @@ export function CodeReview() {
               >
                 {review.test.status === "NoNewRegressions"
                   ? "No new regressions"
-                  : review.test.status}
+                  : review.verificationOutcome === "PartiallyVerified" && review.test.status === "Unknown"
+                    ? "No suite"
+                    : review.test.status}
               </div>
               {review.test.detailSummary && (
                 <div className="mt-0.5 text-[11px] text-muted-foreground">
@@ -879,9 +899,27 @@ export function CodeReview() {
                     Review is pending developer decision. You may inspect the diff and approve or reject the changes.
                   </Panel>
                   {review.verificationOutcome === "NeedsReview" && (
-                    <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-danger/30 bg-danger/10 p-2.5 text-[12px] text-danger">
-                      <AlertCircle className="h-4 w-4 shrink-0" />
-                      <span>Execution has unresolved regressions (NeedsReview). Standard delivery is blocked.</span>
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[12px] text-amber-600 dark:text-amber-400">
+                        <AlertCircle className="h-4 w-4 shrink-0" />
+                        <span>Execution has unresolved regressions (NeedsReview). Approval is blocked. Retry execution to produce a new attempt.</span>
+                      </div>
+                      {review.canRetry && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          disabled={isSubmittingDecision || isRetrying}
+                          onClick={handleRetryExecution}
+                          className="w-full"
+                        >
+                          {isRetrying ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          )}
+                          {isRetrying ? "Retrying…" : "Retry execution"}
+                        </Button>
+                      )}
                     </div>
                   )}
                   {review.verificationOutcome === "NoNewRegressions" && (

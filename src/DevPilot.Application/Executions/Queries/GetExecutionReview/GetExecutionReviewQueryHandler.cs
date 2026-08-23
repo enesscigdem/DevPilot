@@ -90,13 +90,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
         var outcome = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
         var isDeliveryEligible = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.IsDeliveryEligible(outcome);
-        var (buildDto, testDto) = DetermineStageStatuses(execution, activities);
-        var buildPassed = buildDto.Status == "Passed";
-        var testPassed = testDto.Status is "Passed" or "NoNewRegressions";
+        var (buildDto, testDto) = ExecutionReviewStageClassifier.Classify(execution, activities);
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
-        var (canRequestMerge, mergeBlockedReason) = isDeliveryEligible
-            ? ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks, buildPassed, testPassed)
-            : (false, $"Execution verification outcome is '{outcome}'.");
+        var (canRequestMerge, mergeBlockedReason) = ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks);
+        var canRetry = execution.Status == TaskExecutionStatus.Completed &&
+                       outcome == ExecutionVerificationOutcome.NeedsReview &&
+                       execution.ReviewStatus == ExecutionReviewStatus.Pending;
 
         if (execution.CommitStatus == ExecutionCommitStatus.Committed)
         {
@@ -176,6 +175,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 MergedAt: execution.MergedAt,
                 CanRequestMerge: canRequestMerge,
                 MergeBlockedReason: mergeBlockedReason,
+                CanRetry: canRetry,
                 RepositoryWorkspaceId: execution.DevelopmentTask?.RepositoryWorkspaceId,
                 RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
                 RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository,
@@ -311,6 +311,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             MergedAt: execution.MergedAt,
             CanRequestMerge: canRequestMerge,
             MergeBlockedReason: mergeBlockedReason,
+            CanRetry: canRetry,
             RepositoryWorkspaceId: execution.DevelopmentTask?.RepositoryWorkspaceId,
             RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
             RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository,
@@ -318,184 +319,6 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             VerificationOutcome: outcome.ToString());
 
         return GetExecutionReviewResult.Ok(review);
-    }
-
-    private static readonly System.Text.Json.JsonSerializerOptions MetadataJsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
-
-    private static ExecutionActivityMetadata? ParseActivityMetadata(Domain.Entities.ExecutionActivity? activity)
-    {
-        if (activity == null || string.IsNullOrWhiteSpace(activity.MetadataJson)) return null;
-        try
-        {
-            return System.Text.Json.JsonSerializer.Deserialize<ExecutionActivityMetadata>(activity.MetadataJson, MetadataJsonOptions);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static (ExecutionReviewStageStatusDto Build, ExecutionReviewStageStatusDto Test) DetermineStageStatuses(
-        Domain.Entities.TaskExecution execution,
-        IReadOnlyList<ExecutionActivity> activities)
-    {
-        var parsedActivities = activities
-            .Select((a, idx) => (Activity: a, Metadata: ParseActivityMetadata(a), Index: idx))
-            .ToList();
-
-        // 1. Evaluate Build stage from terminal check states
-        var buildActivities = parsedActivities
-            .Where(p => p.Activity.Stage == ExecutionStage.Build)
-            .ToList();
-
-        var buildGroups = buildActivities
-            .GroupBy(p => !string.IsNullOrWhiteSpace(p.Metadata?.RepositoryCheckId)
-                ? p.Metadata.RepositoryCheckId
-                : $"activity_{p.Index}")
-            .ToList();
-
-        string buildStatus;
-        if (buildGroups.Count == 0)
-        {
-            buildStatus = "Unknown";
-        }
-        else
-        {
-            var terminalBuilds = buildGroups
-                .Select(g => g
-                    .Where(p => p.Activity.Status == ExecutionActivityStatus.Completed ||
-                                p.Activity.Status == ExecutionActivityStatus.Failed ||
-                                !string.IsNullOrWhiteSpace(p.Metadata?.VerificationOutcome))
-                    .OrderBy(p => p.Index)
-                    .LastOrDefault())
-                .Where(t => t.Activity != null)
-                .ToList();
-
-            if (terminalBuilds.Count == 0)
-            {
-                buildStatus = buildActivities.Any(p => p.Activity.Status == ExecutionActivityStatus.Started)
-                    ? "Running"
-                    : "Unknown";
-            }
-            else if (terminalBuilds.Any(t =>
-                string.Equals(t.Metadata?.VerificationOutcome, "NeedsReview", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(t.Metadata?.BaselineClassification, "Unknown", StringComparison.OrdinalIgnoreCase) ||
-                (t.Activity.Status == ExecutionActivityStatus.Failed &&
-                 !string.Equals(t.Metadata?.VerificationOutcome, "NoNewRegressions", StringComparison.OrdinalIgnoreCase) &&
-                 !string.Equals(t.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase))))
-            {
-                buildStatus = "Failed";
-            }
-            else if (terminalBuilds.Any(t =>
-                string.Equals(t.Metadata?.VerificationOutcome, "NoNewRegressions", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(t.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase)))
-            {
-                buildStatus = "NoNewRegressions";
-            }
-            else if (terminalBuilds.All(t => t.Activity.Status == ExecutionActivityStatus.Completed))
-            {
-                buildStatus = "Passed";
-            }
-            else
-            {
-                buildStatus = "Unknown";
-            }
-        }
-
-        // 2. Evaluate Test stage from terminal check states
-        var testActivities = parsedActivities
-            .Where(p => p.Activity.Stage == ExecutionStage.Test)
-            .ToList();
-
-        var testGroups = testActivities
-            .GroupBy(p => !string.IsNullOrWhiteSpace(p.Metadata?.RepositoryCheckId)
-                ? p.Metadata.RepositoryCheckId
-                : $"activity_{p.Index}")
-            .ToList();
-
-        string testStatus;
-        string? testDetailSummary = null;
-        var preExistingCount = 0;
-        var newRegressionCount = 0;
-
-        if (testGroups.Count == 0)
-        {
-            testStatus = "Unknown";
-        }
-        else
-        {
-            var terminalTests = testGroups
-                .Select(g => g
-                    .Where(p => p.Activity.Status == ExecutionActivityStatus.Completed ||
-                                p.Activity.Status == ExecutionActivityStatus.Failed ||
-                                !string.IsNullOrWhiteSpace(p.Metadata?.VerificationOutcome))
-                    .OrderBy(p => p.Index)
-                    .LastOrDefault())
-                .Where(t => t.Activity != null)
-                .ToList();
-
-            if (terminalTests.Count == 0)
-            {
-                testStatus = testActivities.Any(p => p.Activity.Status == ExecutionActivityStatus.Started)
-                    ? "Running"
-                    : "Unknown";
-            }
-            else
-            {
-                var preExistingMeta = terminalTests
-                    .Select(t => t.Metadata?.PreExistingFailureCount)
-                    .FirstOrDefault(c => c.HasValue);
-                if (preExistingMeta.HasValue) preExistingCount = preExistingMeta.Value;
-
-                var newRegressionMeta = terminalTests
-                    .Select(t => t.Metadata?.NewRegressionCount)
-                    .FirstOrDefault(c => c.HasValue);
-                if (newRegressionMeta.HasValue) newRegressionCount = newRegressionMeta.Value;
-
-                var isFailed = terminalTests.Any(t =>
-                    string.Equals(t.Metadata?.VerificationOutcome, "NeedsReview", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(t.Metadata?.BaselineClassification, "Unknown", StringComparison.OrdinalIgnoreCase) ||
-                    (t.Activity.Status == ExecutionActivityStatus.Failed &&
-                     !string.Equals(t.Metadata?.VerificationOutcome, "NoNewRegressions", StringComparison.OrdinalIgnoreCase) &&
-                     !string.Equals(t.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase)));
-
-                var isNoNewRegressions = terminalTests.Any(t =>
-                    string.Equals(t.Metadata?.VerificationOutcome, "NoNewRegressions", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(t.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase) ||
-                    (t.Activity.Status == ExecutionActivityStatus.Completed && t.Activity.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase)));
-
-                if (isFailed)
-                {
-                    testStatus = "Failed";
-                    testDetailSummary = newRegressionCount > 0
-                        ? $"{newRegressionCount} new regression(s) introduced"
-                        : "Tests failed";
-                }
-                else if (isNoNewRegressions)
-                {
-                    testStatus = "NoNewRegressions";
-                    testDetailSummary = preExistingCount > 0
-                        ? $"{preExistingCount} pre-existing repository failure(s) remain"
-                        : "No new regressions";
-                }
-                else if (terminalTests.All(t => t.Activity.Status == ExecutionActivityStatus.Completed))
-                {
-                    testStatus = "Passed";
-                    testDetailSummary = "All tests passed";
-                }
-                else
-                {
-                    testStatus = "Unknown";
-                }
-            }
-        }
-
-        return (
-            new ExecutionReviewStageStatusDto(buildStatus),
-            new ExecutionReviewStageStatusDto(testStatus, preExistingCount, newRegressionCount, testDetailSummary));
     }
 
     private static bool CalculateCanRequestPush(Domain.Entities.TaskExecution execution)

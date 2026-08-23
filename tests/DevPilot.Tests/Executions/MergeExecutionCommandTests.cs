@@ -678,10 +678,18 @@ public sealed class MergeExecutionCommandTests
         var activityRepo = new TestActivityRepository();
         var execution = SeedExecution(repository, approvedSha: approvedSha, ciStatus: ExecutionCiStatus.NoChecks);
 
-        // Only Build completed, Test did not pass
         activityRepo.Seed(execution.Id, new[]
         {
-            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow }
+            new ExecutionActivity { ExecutionId = execution.Id, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new ExecutionActivity
+            {
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Failed,
+                Message = "Tests failed",
+                MetadataJson = "{\"RepositoryCheckId\":\"test\",\"VerificationOutcome\":\"NeedsReview\"}",
+                CreatedAt = DateTime.UtcNow.AddSeconds(1)
+            }
         });
 
         var handler = CreateHandler(repository, testHandler, allowNoChecks: true, activityRepo: activityRepo);
@@ -689,7 +697,50 @@ public sealed class MergeExecutionCommandTests
         var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
 
         result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
-        result.ErrorMessage.Should().Contain("Local tests did not pass");
+        result.ErrorMessage.Should().Contain("NeedsReview");
+        result.ErrorMessage.Should().NotContain("Local tests did not pass");
+    }
+
+    [Fact]
+    public async Task Merge_PartiallyVerified_NoTestSuite_AllowNoChecksTrue_Succeeds()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var approvedSha = "a451333161ec91ce5edffc1770ec7617818e2b9d";
+
+        var testHandler = CreateTestHttpMessageHandler(
+            prJson: CreatePrJson(42, "open", false, "devpilot/task-1", approvedSha, "master"),
+            checkRunsJson: "{\"total_count\":0,\"check_runs\":[]}",
+            statusesJson: "[]",
+            mergeResponseJson: JsonSerializer.Serialize(new { sha = "mergecommit123", merged = true, message = "Merged" }),
+            postMergePrJson: CreatePrJson(42, "closed", true, "devpilot/task-1", approvedSha, "master", mergedAt: DateTime.UtcNow));
+
+        var activityRepo = new TestActivityRepository();
+        var execution = SeedExecution(repository, approvedSha: approvedSha, ciStatus: ExecutionCiStatus.NoChecks);
+        activityRepo.Seed(execution.Id, new[]
+        {
+            new ExecutionActivity
+            {
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.DeveloperAgent,
+                Status = ExecutionActivityStatus.Completed,
+                CreatedAt = DateTime.UtcNow
+            },
+            new ExecutionActivity
+            {
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Repository checks passed.",
+                MetadataJson = "{\"RepositoryCheckId\":\"build\"}",
+                CreatedAt = DateTime.UtcNow.AddSeconds(1)
+            }
+        });
+
+        var handler = CreateHandler(repository, testHandler, allowNoChecks: true, activityRepo: activityRepo);
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Success);
+        result.Response!.MergeStatus.Should().Be("Merged");
     }
 
     [Fact]

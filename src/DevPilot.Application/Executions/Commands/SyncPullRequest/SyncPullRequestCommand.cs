@@ -212,18 +212,14 @@ public sealed class SyncPullRequestCommandHandler : ISyncPullRequestCommandHandl
         TaskExecution execution,
         CancellationToken cancellationToken)
     {
-        var buildPassed = true;
-        var testPassed = true;
-
-        if (_activityRepository != null)
+        var allowNoChecks = _mergePolicyOptions?.Value.AllowNoChecks ?? false;
+        if (_activityRepository == null)
         {
-            var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
-            buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
-            testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
+            return ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks);
         }
 
-        var allowNoChecks = _mergePolicyOptions?.Value.AllowNoChecks ?? false;
-        return ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks, buildPassed, testPassed);
+        var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
+        return ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks);
     }
 
     public static SyncPullRequestResponseDto MapToResponseDto(

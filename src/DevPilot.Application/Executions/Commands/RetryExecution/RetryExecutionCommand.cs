@@ -1,5 +1,6 @@
 using DevPilot.Application.Executions.Dtos;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Services;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.Tasks.Ports;
 using DevPilot.Domain.Entities;
@@ -51,6 +52,7 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
     private readonly ITaskRepository _taskRepository;
     private readonly IImpactAnalysisRepository _analysisRepository;
     private readonly IExecutionRepository _executionRepository;
+    private readonly IExecutionActivityRepository _activityRepository;
     private readonly IExecutionDispatcher _dispatcher;
     private readonly ILogger<RetryExecutionCommandHandler> _logger;
 
@@ -58,12 +60,14 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
         ITaskRepository taskRepository,
         IImpactAnalysisRepository analysisRepository,
         IExecutionRepository executionRepository,
+        IExecutionActivityRepository activityRepository,
         IExecutionDispatcher dispatcher,
         ILogger<RetryExecutionCommandHandler> logger)
     {
         _taskRepository = taskRepository;
         _analysisRepository = analysisRepository;
         _executionRepository = executionRepository;
+        _activityRepository = activityRepository;
         _dispatcher = dispatcher;
         _logger = logger;
     }
@@ -106,41 +110,7 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
                 "Only tasks that previously passed approval and failed execution may be retried.");
         }
 
-        if (task.Status == DevelopmentTaskStatus.Completed)
-        {
-            return RetryExecutionResult.ConflictResult(
-                "Cannot retry execution for a completed task.");
-        }
-
-        if (task.Status != DevelopmentTaskStatus.Failed && task.Status != DevelopmentTaskStatus.Approved)
-        {
-            return RetryExecutionResult.ConflictResult(
-                $"Cannot retry execution for a task in '{task.Status}' status.");
-        }
-
-        // 4. Require approved impact analysis / plan evidence
-        var analysis = await _analysisRepository
-            .GetLatestByTaskIdAsync(command.TaskId, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (analysis is null || analysis.Status != ImpactAnalysisStatus.Completed)
-        {
-            return RetryExecutionResult.ConflictResult(
-                "A completed impact analysis is required before a task can be retried.");
-        }
-
-        // 5. Require a historical failed execution for this task
-        var hasFailed = await _executionRepository
-            .HasFailedExecutionForTaskAsync(command.TaskId, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (!hasFailed)
-        {
-            return RetryExecutionResult.ConflictResult(
-                "No failed execution exists for this task to retry.");
-        }
-
-        // 6. Optimistic pre-check: ensure NO active (Pending or Running) execution exists
+        // 4. Optimistic pre-check: ensure NO active (Pending or Running) execution exists
         var hasActive = await _executionRepository
             .HasActiveExecutionForTaskAsync(command.TaskId, cancellationToken)
             .ConfigureAwait(false);
@@ -149,6 +119,43 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
         {
             return RetryExecutionResult.ConflictResult(
                 "An active execution already exists for this task.");
+        }
+
+        var hasFailed = await _executionRepository
+            .HasFailedExecutionForTaskAsync(command.TaskId, cancellationToken)
+            .ConfigureAwait(false);
+        var hasNeedsReviewCompletion = await HasCompletedNeedsReviewExecutionAsync(command.TaskId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (task.Status == DevelopmentTaskStatus.Completed && !hasNeedsReviewCompletion)
+        {
+            return RetryExecutionResult.ConflictResult(
+                "Cannot retry execution for a completed task.");
+        }
+
+        if (task.Status != DevelopmentTaskStatus.Failed &&
+            task.Status != DevelopmentTaskStatus.Approved &&
+            !(task.Status == DevelopmentTaskStatus.Completed && hasNeedsReviewCompletion))
+        {
+            return RetryExecutionResult.ConflictResult(
+                $"Cannot retry execution for a task in '{task.Status}' status.");
+        }
+
+        if (!hasFailed && !hasNeedsReviewCompletion)
+        {
+            return RetryExecutionResult.ConflictResult(
+                "No failed execution exists for this task to retry.");
+        }
+
+        // 5. Require approved impact analysis / plan evidence
+        var analysis = await _analysisRepository
+            .GetLatestByTaskIdAsync(command.TaskId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (analysis is null || analysis.Status != ImpactAnalysisStatus.Completed)
+        {
+            return RetryExecutionResult.ConflictResult(
+                "A completed impact analysis is required before a task can be retried.");
         }
 
         // 7. Create NEW execution attempt (preserving old execution untouched)
@@ -204,6 +211,29 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
             execution.Id);
 
         return RetryExecutionResult.Ok(MapToDto(execution, task));
+    }
+
+    private async Task<bool> HasCompletedNeedsReviewExecutionAsync(
+        Guid taskId,
+        CancellationToken cancellationToken)
+    {
+        var executions = await _executionRepository.GetAllAsync(cancellationToken).ConfigureAwait(false);
+        var latestCompleted = executions
+            .Where(e => e.DevelopmentTaskId == taskId && e.Status == TaskExecutionStatus.Completed)
+            .OrderByDescending(e => e.CreatedAt)
+            .ThenByDescending(e => e.CompletedAt)
+            .FirstOrDefault();
+
+        if (latestCompleted is null)
+        {
+            return false;
+        }
+
+        var activities = await _activityRepository
+            .GetByExecutionIdAsync(latestCompleted.Id, cancellationToken)
+            .ConfigureAwait(false);
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(latestCompleted, activities);
+        return outcome == ExecutionVerificationOutcome.NeedsReview;
     }
 
     private static ExecutionDto MapToDto(TaskExecution execution, DevelopmentTask task) =>
