@@ -249,7 +249,7 @@ public class ExecutionEngineHardeningTests
 
         var result = await handler.HandleAsync(new ApproveExecutionReviewCommand(executionId, "fp"));
         result.Status.Should().Be(ApproveExecutionReviewResultStatus.Conflict);
-        result.ErrorMessage.Should().Contain("Build validation did not pass");
+        result.ErrorMessage.Should().Contain("verification outcome");
     }
 
     [Fact]

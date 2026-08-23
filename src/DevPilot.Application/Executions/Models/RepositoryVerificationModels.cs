@@ -73,10 +73,21 @@ public sealed record RepositoryCheckExecutionRequest(
     bool SkipBuild = false,
     string? TestFilter = null);
 
+public enum VerificationOutcome
+{
+    Passed = 0,
+    NoNewRegressions = 1,
+    Failed = 2,
+    Unknown = 3
+}
+
 public sealed record RepositoryCheckResult : ExecutionValidationResult
 {
     public string CheckId { get; init; } = string.Empty;
     public string CheckDisplayName { get; init; } = string.Empty;
     public RepositoryCheckKind CheckKind { get; init; }
     public RepositoryCheckFailureCategory FailureCategory { get; init; }
+    public VerificationOutcome Outcome { get; init; } = VerificationOutcome.Passed;
+    public int PreExistingFailureCount { get; init; }
+    public int NewRegressionCount { get; init; }
 }

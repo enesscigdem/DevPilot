@@ -140,6 +140,8 @@ public static class DependencyInjection
         services.AddScoped<IExecutionGitHubSyncService, ExecutionGitHubSyncService>();
         services.AddScoped<ICreatePullRequestCommandHandler, CreatePullRequestCommandHandler>();
         services.AddScoped<ISyncPullRequestCommandHandler, SyncPullRequestCommandHandler>();
+        services.AddSingleton<IBaselineVerificationCoordinator, BaselineVerificationCoordinator>();
+        services.AddScoped<IBaselineVerificationService, BaselineVerificationService>();
         services.AddSingleton<IExecutionCancellationRegistry, ExecutionCancellationRegistry>();
         services.AddSingleton<IExecutionHeartbeatService, ExecutionHeartbeatService>();
         services.AddHostedService<ExecutionStartupReconciler>();

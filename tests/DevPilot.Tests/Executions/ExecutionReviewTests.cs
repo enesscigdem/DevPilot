@@ -89,8 +89,8 @@ public class ExecutionReviewTests : IDisposable
         result.Status.Should().Be(ExecutionReviewResultStatus.Success);
         result.Review.Should().NotBeNull();
         result.Review!.ExecutionStatus.Should().Be("Completed");
-        result.Review.Build.Status.Should().Be("Passed");
-        result.Review.Test.Status.Should().Be("Passed");
+        result.Review.Build.Status.Should().Be("Unknown");
+        result.Review.Test.Status.Should().Be("Unknown");
         result.Review.ChangedFileCount.Should().Be(1);
         result.Review.ChangedFiles[0].Path.Should().Be("src/Calculator.cs");
         result.Review.ChangedFiles[0].ChangeType.Should().Be("Modified");
@@ -1291,9 +1291,155 @@ public class ExecutionReviewTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task GetExecutionReview_WithPreExistingFailures_ReturnsNoNewRegressionsStageStatus()
+    {
+        // Arrange
+        var fileRelPath = "src/Calculator.cs";
+        var fullPath = Path.Combine(_workspaceDir, fileRelPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, "public class Calculator {}");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial commit");
+        File.WriteAllText(fullPath, "public class Calculator { public int Add(int a, int b) => a + b; }");
+
+        var executionId = Guid.NewGuid();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Fix Calculator" },
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main"
+        };
+
+        var metadataJson = "{\"verificationOutcome\":\"NoNewRegressions\",\"preExistingFailureCount\":3,\"newRegressionCount\":0}";
+        var activity = new ExecutionActivity
+        {
+            Id = Guid.NewGuid(),
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Test,
+            Status = ExecutionActivityStatus.Completed,
+            Message = "No new regressions introduced. 3 pre-existing repository failure(s) matched clean baseline.",
+            MetadataJson = metadataJson,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var activityRepo = new FakeExecutionActivityRepository(new[] { activity });
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, activityRepo, Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.Test.Status.Should().Be("NoNewRegressions");
+        result.Review.Test.PreExistingFailureCount.Should().Be(3);
+        result.Review.Test.NewRegressionCount.Should().Be(0);
+        result.Review.Test.DetailSummary.Should().Contain("3 pre-existing repository failure(s) remain");
+    }
+
+    [Fact]
+    public async Task GetExecutionReview_WithNewRegressions_ReturnsFailedStageStatusWithCount()
+    {
+        // Arrange
+        var fileRelPath = "src/Calculator.cs";
+        var fullPath = Path.Combine(_workspaceDir, fileRelPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllText(fullPath, "public class Calculator {}");
+        RunGit(_workspaceDir, "add", ".");
+        RunGit(_workspaceDir, "commit", "-m", "Initial commit");
+        File.WriteAllText(fullPath, "public class Calculator { public int Add(int a, int b) => a + b; }");
+
+        var executionId = Guid.NewGuid();
+        var execution = new TaskExecution
+        {
+            Id = executionId,
+            DevelopmentTaskId = Guid.NewGuid(),
+            DevelopmentTask = new DevelopmentTask { Title = "Fix Calculator" },
+            Status = TaskExecutionStatus.Completed,
+            WorkspacePath = _workspaceDir,
+            BranchName = "main"
+        };
+
+        var metadataJson = "{\"verificationOutcome\":\"Failed\",\"newRegressionCount\":2,\"preExistingFailureCount\":0}";
+        var activity = new ExecutionActivity
+        {
+            Id = Guid.NewGuid(),
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Test,
+            Status = ExecutionActivityStatus.Failed,
+            Message = "Test verification failed. 2 new regression(s) introduced.",
+            MetadataJson = metadataJson,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        var repo = new FakeExecutionRepository(execution);
+        var workspaceManager = new FakeWorkspaceManager(isValid: true);
+        var diffReader = new GitExecutionDiffReader(NullLogger<GitExecutionDiffReader>.Instance);
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var activityRepo = new FakeExecutionActivityRepository(new[] { activity });
+        var handler = new GetExecutionReviewQueryHandler(repo, workspaceManager, diffReader, fingerprintCalculator, activityRepo, Options.Create(new MergePolicyOptions()), NullLogger<GetExecutionReviewQueryHandler>.Instance);
+
+        // Act
+        var result = await handler.HandleAsync(new GetExecutionReviewQuery(executionId));
+
+        // Assert
+        result.Status.Should().Be(ExecutionReviewResultStatus.Success);
+        result.Review.Should().NotBeNull();
+        result.Review!.Test.Status.Should().Be("Failed");
+        result.Review.Test.NewRegressionCount.Should().Be(2);
+        result.Review.Test.DetailSummary.Should().Contain("2 new regression(s) introduced");
+    }
+
+    [Fact]
+    public void ExecutionStageEvaluator_WithNoNewRegressionsOutcome_EvaluatesBuildTestAsDone()
+    {
+        // Arrange
+        var task = new DevelopmentTask { Id = Guid.NewGuid(), Status = DevelopmentTaskStatus.Executing };
+        var execution = new TaskExecution { Id = Guid.NewGuid(), DevelopmentTaskId = task.Id, Status = TaskExecutionStatus.Running };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.DeveloperAgent,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Edits generated."
+            },
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "No new regressions introduced.",
+                MetadataJson = "{\"VerificationOutcome\":\"NoNewRegressions\",\"BaselineClassification\":\"PreExisting\"}"
+            }
+        };
+
+        // Act
+        var stages = DevPilot.Application.Executions.Services.ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        // Assert
+        var buildTestStep = stages.FirstOrDefault(s => s.StageKey == "build");
+        buildTestStep.Should().NotBeNull();
+        buildTestStep!.State.Should().Be(ExecutionStageStepState.Done);
+    }
+
     private class FakeExecutionActivityRepository : IExecutionActivityRepository
     {
+        private readonly IReadOnlyList<ExecutionActivity> _activities;
+
+        public FakeExecutionActivityRepository(IEnumerable<ExecutionActivity>? activities = null)
+        {
+            _activities = activities?.ToList() ?? (IReadOnlyList<ExecutionActivity>)Array.Empty<ExecutionActivity>();
+        }
+
         public Task<IReadOnlyList<ExecutionActivity>> GetByExecutionIdAsync(Guid executionId, CancellationToken cancellationToken = default)
-            => Task.FromResult<IReadOnlyList<ExecutionActivity>>(Array.Empty<ExecutionActivity>());
+            => Task.FromResult(_activities);
     }
 }

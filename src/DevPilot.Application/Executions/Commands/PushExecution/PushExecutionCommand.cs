@@ -52,17 +52,20 @@ public sealed class PushExecutionCommandHandler : IPushExecutionCommandHandler
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionGitPushService _gitPushService;
     private readonly IExecutionActivityRecorder _activityRecorder;
+    private readonly IExecutionActivityRepository? _activityRepository;
     private readonly ILogger<PushExecutionCommandHandler> _logger;
 
     public PushExecutionCommandHandler(
         IExecutionRepository executionRepository,
         IExecutionGitPushService gitPushService,
         IExecutionActivityRecorder activityRecorder,
-        ILogger<PushExecutionCommandHandler> logger)
+        ILogger<PushExecutionCommandHandler> logger,
+        IExecutionActivityRepository? activityRepository = null)
     {
         _executionRepository = executionRepository;
         _gitPushService = gitPushService;
         _activityRecorder = activityRecorder;
+        _activityRepository = activityRepository;
         _logger = logger;
     }
 
@@ -96,6 +99,20 @@ public sealed class PushExecutionCommandHandler : IPushExecutionCommandHandler
         {
             return PushExecutionResult.Conflict(
                 $"Execution review status is '{execution.ReviewStatus}' and cannot be pushed.");
+        }
+
+        if (_activityRepository != null)
+        {
+            var activities = await _activityRepository
+                .GetByExecutionIdAsync(execution.Id, cancellationToken)
+                .ConfigureAwait(false);
+
+            var outcome = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+            if (outcome is ExecutionVerificationOutcome.NeedsReview or ExecutionVerificationOutcome.Failed or ExecutionVerificationOutcome.Blocked)
+            {
+                return PushExecutionResult.Conflict(
+                    $"Execution cannot be pushed because verification outcome is '{outcome}'.");
+            }
         }
 
         if (execution.CommitStatus != ExecutionCommitStatus.Committed || string.IsNullOrWhiteSpace(execution.CommitSha))

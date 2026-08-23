@@ -100,19 +100,11 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
             .GetByExecutionIdAsync(execution.Id, cancellationToken)
             .ConfigureAwait(false);
 
-        bool buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
-        bool buildFailed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Failed);
-        bool testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
-        bool testFailed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Failed);
-
-        if (!buildPassed || buildFailed)
+        var outcome = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        if (outcome is ExecutionVerificationOutcome.NeedsReview or ExecutionVerificationOutcome.Failed or ExecutionVerificationOutcome.Blocked)
         {
-            return ApproveExecutionReviewResult.Conflict("Execution cannot be approved because Build validation did not pass.");
-        }
-
-        if (!testPassed || testFailed)
-        {
-            return ApproveExecutionReviewResult.Conflict("Execution cannot be approved because Test validation did not pass.");
+            return ApproveExecutionReviewResult.Conflict(
+                $"Execution cannot be approved because verification outcome is '{outcome}'.");
         }
 
         if (string.IsNullOrWhiteSpace(execution.WorkspacePath) || string.IsNullOrWhiteSpace(execution.BranchName))

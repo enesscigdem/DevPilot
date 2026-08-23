@@ -88,7 +88,10 @@ public static class ExecutionStageEvaluator
         var testStarted = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started);
         var repositoryVerificationReady = activities.Any(a =>
             a.Status == ExecutionActivityStatus.Completed &&
-            (a.Message == "Repository checks passed." || a.Message == "Tests passed."));
+            (a.Message.StartsWith("Repository checks passed", StringComparison.OrdinalIgnoreCase) ||
+             a.Message.StartsWith("Tests passed", StringComparison.OrdinalIgnoreCase) ||
+             a.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase) ||
+             (a.MetadataJson != null && (a.MetadataJson.Contains("\"VerificationOutcome\":\"NoNewRegressions\"", StringComparison.OrdinalIgnoreCase) || a.MetadataJson.Contains("\"BaselineClassification\":\"PreExisting\"", StringComparison.OrdinalIgnoreCase)))));
 
         ExecutionStageStepState buildTestState;
         if (repositoryVerificationReady || (buildPassed && testPassed))

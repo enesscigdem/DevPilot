@@ -19,6 +19,19 @@ public sealed record DeveloperAgentRequest(
     IReadOnlyList<string>? ExpectedChecks = null,
     IReadOnlyList<string>? Unknowns = null);
 
+public sealed record FocusedRepairRequest(
+    Guid TaskId,
+    Guid ExecutionId,
+    string TaskTitle,
+    string? AcceptanceCriteria,
+    string WorkspacePath,
+    string BranchName,
+    IReadOnlyList<string> RepairFiles,
+    string DiagnosticEvidence,
+    IReadOnlyList<string>? DiagnosticLocations = null,
+    string? LanguageContext = null,
+    string? Model = null);
+
 public sealed record ImpactedFileDetail(
     string FilePath,
     string? ChangeType = null,
