@@ -36,25 +36,10 @@ public static class ExecutionVerificationEvaluator
         }
 
         var parsedActivities = activities
-            .Select(a => (Activity: a, Metadata: ParseMetadata(a.MetadataJson)))
+            .Select((a, idx) => (Activity: a, Metadata: ParseMetadata(a.MetadataJson), Index: idx))
             .ToList();
 
-        // 1. NeedsReview: Any unresolved real regression, inconclusive baseline, or unhandled check failure
-        var hasNeedsReview = parsedActivities.Any(p =>
-            string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.NeedsReview), StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(p.Metadata?.BaselineClassification, "Unknown", StringComparison.OrdinalIgnoreCase) ||
-            (p.Activity.Status == ExecutionActivityStatus.Failed &&
-             (p.Activity.Stage == ExecutionStage.Build || p.Activity.Stage == ExecutionStage.Test) &&
-             !string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationInfrastructureError), StringComparison.OrdinalIgnoreCase) &&
-             !string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.NoNewRegressions), StringComparison.OrdinalIgnoreCase) &&
-             !string.Equals(p.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase)));
-
-        if (hasNeedsReview)
-        {
-            return ExecutionVerificationOutcome.NeedsReview;
-        }
-
-        // 2. VerificationInfrastructureError: Any infrastructure failure during check discovery or execution
+        // 1. VerificationInfrastructureError: Infrastructure failure during check discovery or execution
         var hasInfraError = parsedActivities.Any(p =>
             string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationInfrastructureError), StringComparison.OrdinalIgnoreCase) ||
             (p.Metadata?.VerificationFailureCategory != null && p.Metadata.VerificationFailureCategory.Contains("Infrastructure", StringComparison.OrdinalIgnoreCase)) ||
@@ -67,38 +52,94 @@ public static class ExecutionVerificationEvaluator
             return ExecutionVerificationOutcome.VerificationInfrastructureError;
         }
 
-        // 3. NoNewRegressions: Pre-existing failure proven by baseline comparison on build or test
-        var hasPreExisting = parsedActivities.Any(p =>
-            string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.NoNewRegressions), StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(p.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase) ||
-            (p.Activity.Stage == ExecutionStage.Test && p.Activity.Status == ExecutionActivityStatus.Completed && p.Activity.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase)));
+        // 2. Identify check activities and derive the latest (terminal) result per repository check identity.
+        // Intermediate failure activities that were subsequently superseded by successful repair must not force NeedsReview.
+        var checkActivities = parsedActivities
+            .Where(p => p.Activity.Stage == ExecutionStage.Build || p.Activity.Stage == ExecutionStage.Test)
+            .ToList();
 
-        if (hasPreExisting)
+        var checkGroups = checkActivities
+            .GroupBy(p => !string.IsNullOrWhiteSpace(p.Metadata?.RepositoryCheckId)
+                ? p.Metadata.RepositoryCheckId
+                : $"activity_{p.Index}")
+            .ToList();
+
+        var terminalCheckResults = new List<(string CheckKey, ExecutionActivity Activity, ExecutionActivityMetadata? Metadata, bool Passed, bool IsPreExisting, bool IsUnresolvedFailure)>();
+
+        foreach (var group in checkGroups)
+        {
+            var terminalActivity = group
+                .Where(p => p.Activity.Status == ExecutionActivityStatus.Completed ||
+                            p.Activity.Status == ExecutionActivityStatus.Failed ||
+                            !string.IsNullOrWhiteSpace(p.Metadata?.VerificationOutcome))
+                .OrderBy(p => p.Index)
+                .LastOrDefault();
+
+            if (terminalActivity.Activity != null)
+            {
+                var isCompleted = terminalActivity.Activity.Status == ExecutionActivityStatus.Completed;
+                var outcomeStr = terminalActivity.Metadata?.VerificationOutcome;
+                var baseClassification = terminalActivity.Metadata?.BaselineClassification;
+
+                var isPreExisting = string.Equals(outcomeStr, nameof(ExecutionVerificationOutcome.NoNewRegressions), StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(baseClassification, "PreExisting", StringComparison.OrdinalIgnoreCase) ||
+                                   (isCompleted && terminalActivity.Activity.Stage == ExecutionStage.Test && terminalActivity.Activity.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase));
+
+                var isNeedsReviewExplicit = string.Equals(outcomeStr, nameof(ExecutionVerificationOutcome.NeedsReview), StringComparison.OrdinalIgnoreCase) ||
+                                            string.Equals(baseClassification, "Unknown", StringComparison.OrdinalIgnoreCase);
+
+                var isUnresolvedFailure = isNeedsReviewExplicit ||
+                                         (!isCompleted && !isPreExisting);
+
+                terminalCheckResults.Add((
+                    group.Key,
+                    terminalActivity.Activity,
+                    terminalActivity.Metadata,
+                    Passed: isCompleted || isPreExisting,
+                    IsPreExisting: isPreExisting,
+                    IsUnresolvedFailure: isUnresolvedFailure));
+            }
+        }
+
+        // 3. NeedsReview: Any check ended with an unresolved failure (same failure, unhandled failure, new regression, unknown baseline)
+        if (terminalCheckResults.Any(t => t.IsUnresolvedFailure))
+        {
+            return ExecutionVerificationOutcome.NeedsReview;
+        }
+
+        var hasExplicitGlobalNeedsReview = parsedActivities.Any(p =>
+            p.Activity.Stage != ExecutionStage.Build && p.Activity.Stage != ExecutionStage.Test &&
+            string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.NeedsReview), StringComparison.OrdinalIgnoreCase));
+
+        if (hasExplicitGlobalNeedsReview)
+        {
+            return ExecutionVerificationOutcome.NeedsReview;
+        }
+
+        // 4. NoNewRegressions: Pre-existing failure proven by baseline comparison on build or test
+        if (terminalCheckResults.Any(t => t.IsPreExisting))
         {
             return ExecutionVerificationOutcome.NoNewRegressions;
         }
 
-        // 4. VerificationUnavailable: No checks discovered or unconfigured
+        // 5. VerificationUnavailable: No checks discovered or unconfigured
         var hasUnavailable = parsedActivities.Any(p =>
             string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationUnavailable), StringComparison.OrdinalIgnoreCase) ||
             string.Equals(p.Metadata?.VerificationFailureCategory, "Unconfigured", StringComparison.OrdinalIgnoreCase));
 
-        var buildActivities = activities.Where(a => a.Stage == ExecutionStage.Build).ToList();
-        var testActivities = activities.Where(a => a.Stage == ExecutionStage.Test).ToList();
+        var buildCount = terminalCheckResults.Count(t => t.Activity.Stage == ExecutionStage.Build);
+        var testCount = terminalCheckResults.Count(t => t.Activity.Stage == ExecutionStage.Test);
 
-        if (hasUnavailable || (buildActivities.Count == 0 && testActivities.Count == 0))
+        if (hasUnavailable || (buildCount == 0 && testCount == 0))
         {
             return ExecutionVerificationOutcome.VerificationUnavailable;
         }
 
-        // 5. Check if preflight reported unresolved verification (e.g. partial discovery / unresolved scripts)
+        // 6. Check if preflight reported unresolved verification (e.g. partial discovery / unresolved scripts)
         var hasUnresolvedVerification = parsedActivities.Any(p => p.Metadata?.VerificationUnresolved == true);
 
-        // 6. Clean build passed and no tests discovered
-        var buildPassed = buildActivities.Any(a => a.Status == ExecutionActivityStatus.Completed);
-        var testPassed = testActivities.Any(a => a.Status == ExecutionActivityStatus.Completed);
-
-        if (buildPassed && testActivities.Count == 0)
+        // 7. Clean build passed and no tests discovered
+        if (buildCount > 0 && testCount == 0)
         {
             return ExecutionVerificationOutcome.PartiallyVerified;
         }
@@ -108,7 +149,7 @@ public static class ExecutionVerificationEvaluator
             return ExecutionVerificationOutcome.PartiallyVerified;
         }
 
-        // 7. Verified: Build+Test or Test-only passed with full verification
+        // 8. Verified: Build+Test or Test-only passed with full verification
         return ExecutionVerificationOutcome.Verified;
     }
 

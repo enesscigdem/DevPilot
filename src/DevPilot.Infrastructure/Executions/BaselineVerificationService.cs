@@ -48,7 +48,8 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
         var taskFailures = ExecutionDiagnosticEvidence.ParseAllTestFailures(
             taskCheckResult.StdOut,
             taskCheckResult.StdErr,
-            taskCheckResult.ErrorMessage);
+            taskCheckResult.ErrorMessage,
+            workspaceRoot: workspacePath);
 
         var singleEvidence = ExecutionDiagnosticEvidence.ParseTestFailure(
             taskCheckResult.StdOut,
@@ -123,7 +124,8 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
         var taskFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
             taskCheckResult.StdOut,
             taskCheckResult.StdErr,
-            taskCheckResult.ErrorMessage);
+            taskCheckResult.ErrorMessage,
+            workspaceRoot: workspacePath);
 
         var key = new BaselineVerificationKey(
             RepositoryWorkspaceKey: Path.GetFullPath(sourceRepositoryPath).ToLowerInvariant(),
@@ -251,8 +253,8 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
             }
 
             var failures = isTest
-                ? ExecutionDiagnosticEvidence.ParseAllTestFailures(result.StdOut, result.StdErr, result.ErrorMessage)
-                : ExecutionDiagnosticEvidence.ParseAllCompilerFailures(result.StdOut, result.StdErr, result.ErrorMessage);
+                ? ExecutionDiagnosticEvidence.ParseAllTestFailures(result.StdOut, result.StdErr, result.ErrorMessage, workspaceRoot: baselineWorktreePath)
+                : ExecutionDiagnosticEvidence.ParseAllCompilerFailures(result.StdOut, result.StdErr, result.ErrorMessage, workspaceRoot: baselineWorktreePath);
 
             return new BaselineCheckEvidence(
                 CheckId: check.Id,

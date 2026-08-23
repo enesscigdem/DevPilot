@@ -348,10 +348,35 @@ public static class ExecutionDiagnosticEvidence
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized))).ToLowerInvariant();
     }
 
+    public static string MakeRepositoryRelative(string path, string? workspaceRoot = null)
+    {
+        var normalizedPath = NormalizePath(path);
+        if (string.IsNullOrWhiteSpace(normalizedPath))
+        {
+            return normalizedPath;
+        }
+
+        if (!string.IsNullOrWhiteSpace(workspaceRoot))
+        {
+            var normalizedRoot = NormalizePath(workspaceRoot).TrimEnd('/');
+            if (normalizedPath.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                return normalizedPath[(normalizedRoot.Length + 1)..];
+            }
+            if (string.Equals(normalizedPath, normalizedRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Empty;
+            }
+        }
+
+        return normalizedPath;
+    }
+
     public static IReadOnlyList<NormalizedFailureItem> ParseAllCompilerFailures(
         string? stdOut,
         string? stdErr,
-        string? errorMessage)
+        string? errorMessage,
+        string? workspaceRoot = null)
     {
         var lines = JoinOutput(stdOut, stdErr, errorMessage)
             .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
@@ -382,13 +407,14 @@ public static class ExecutionDiagnosticEvidence
                 continue;
             }
 
-            var path = NormalizePath(match.Groups["path"].Value);
+            var rawPath = match.Groups["path"].Value;
+            var relativePath = MakeRepositoryRelative(rawPath, workspaceRoot);
             var lineNo = match.Groups["line"].Value;
             var colNo = match.Groups["column"].Value;
             var code = match.Groups["code"].Value.ToUpperInvariant();
             var msg = match.Groups["message"].Value;
 
-            var normDiag = $"{path.ToLowerInvariant()}:{lineNo}:{colNo}:{code}:{NormalizeText(msg)}";
+            var normDiag = $"{relativePath.ToLowerInvariant()}:{lineNo}:{colNo}:{code}:{NormalizeText(msg)}";
             var failureKey = ComputeFingerprint(new[] { normDiag });
 
             failures.Add(new NormalizedFailureItem(
@@ -396,7 +422,7 @@ public static class ExecutionDiagnosticEvidence
                 TestName: null,
                 ErrorSummary: line,
                 NormalizedDiagnostic: normDiag,
-                Location: $"{path}:{lineNo}"));
+                Location: $"{relativePath}:{lineNo}"));
         }
 
         if (failures.Count == 0)
@@ -416,7 +442,8 @@ public static class ExecutionDiagnosticEvidence
     public static IReadOnlyList<NormalizedFailureItem> ParseAllTestFailures(
         string? stdOut,
         string? stdErr,
-        string? errorMessage)
+        string? errorMessage,
+        string? workspaceRoot = null)
     {
         var allLines = JoinOutput(stdOut, stdErr, errorMessage)
             .Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
@@ -470,7 +497,7 @@ public static class ExecutionDiagnosticEvidence
                         StackLocationRegex.Matches(line).Cast<Match>()
                             .Concat(PythonStackLocationRegex.Matches(line).Cast<Match>()))
                     .Select(m => new DiagnosticSourceLocation(
-                        NormalizePath(m.Groups["path"].Value),
+                        MakeRepositoryRelative(m.Groups["path"].Value, workspaceRoot),
                         int.TryParse(m.Groups["line"].Value, out var parsedLine) ? parsedLine : (int?)null))
                     .DistinctBy(l => $"{l.FilePath}:{l.Line}", StringComparer.OrdinalIgnoreCase)
                     .ToList();

@@ -343,6 +343,177 @@ public class GraduatedExecutionOutcomeTests
     }
 
     [Fact]
+    public void BuildFail_RepairRetryFail_LaterBuildPass_ReturnsVerified()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var checkId = Guid.NewGuid();
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"VerifyingRepository\"}}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"FixingBuildIssue\",\"RepairRound\":1}}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"CheckPassed\"}}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = "{\"RepositoryCheckId\":\"tests\",\"EventKind\":\"CheckPassed\"}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.Verified);
+    }
+
+    [Fact]
+    public void TestFail_RetryFail_LaterTestPass_ReturnsVerified()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var checkId = Guid.NewGuid();
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"VerifyingRepository\"}}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"FixingTestIssue\",\"RepairRound\":1}}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"CheckPassed\"}}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.Verified);
+    }
+
+    [Fact]
+    public void UnresolvedFinalFailure_ReturnsNeedsReview()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var checkId = Guid.NewGuid();
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = $"{{\"RepositoryCheckId\":\"{checkId}\",\"EventKind\":\"StoppedWithEvidence\",\"ProgressResult\":\"SameFailure\",\"VerificationOutcome\":\"NeedsReview\"}}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.NeedsReview);
+    }
+
+    [Fact]
+    public void WorktreeIndependent_CompilerBaselineComparison_ClassifiedPreExisting()
+    {
+        var taskOutput = "C:/tmp/executions/abc/src/TodoService.cs(42,5): error CS1002: ; expected";
+        var baselineOutput = "C:/tmp/baselines/xyz/src/TodoService.cs(42,5): error CS1002: ; expected";
+
+        var taskFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
+            taskOutput, null, null, workspaceRoot: "C:/tmp/executions/abc");
+        var baselineFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
+            baselineOutput, null, null, workspaceRoot: "C:/tmp/baselines/xyz");
+
+        taskFailures.Should().ContainSingle();
+        baselineFailures.Should().ContainSingle();
+        taskFailures[0].Location.Should().Be("src/TodoService.cs:42");
+        baselineFailures[0].Location.Should().Be("src/TodoService.cs:42");
+
+        var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
+            taskFailures, baselineFailures, baselineCheckSucceeded: false);
+
+        comparison.Classification.Should().Be(BaselineFailureClassification.PreExisting);
+        comparison.PreExistingCount.Should().Be(1);
+        comparison.NewRegressionCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void SameRelativeFile_ChangedCompilerError_ClassifiedNewRegression()
+    {
+        var taskOutput = "C:/tmp/executions/abc/src/TodoService.cs(42,5): error CS1002: ; expected";
+        var baselineOutput = "C:/tmp/baselines/xyz/src/TodoService.cs(42,5): error CS0103: The name 'foo' does not exist in the current context";
+
+        var taskFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
+            taskOutput, null, null, workspaceRoot: "C:/tmp/executions/abc");
+        var baselineFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
+            baselineOutput, null, null, workspaceRoot: "C:/tmp/baselines/xyz");
+
+        var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
+            taskFailures, baselineFailures, baselineCheckSucceeded: false);
+
+        comparison.Classification.Should().Be(BaselineFailureClassification.NewRegression);
+        comparison.NewRegressionCount.Should().Be(1);
+    }
+
+    [Fact]
+    public void DifferentRepositoryFiles_SameFilename_NotConflated()
+    {
+        var taskOutput = "C:/tmp/executions/abc/src/a/TodoService.cs(42,5): error CS1002: ; expected";
+        var baselineOutput = "C:/tmp/baselines/xyz/src/b/TodoService.cs(42,5): error CS1002: ; expected";
+
+        var taskFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
+            taskOutput, null, null, workspaceRoot: "C:/tmp/executions/abc");
+        var baselineFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
+            baselineOutput, null, null, workspaceRoot: "C:/tmp/baselines/xyz");
+
+        taskFailures[0].Location.Should().Be("src/a/TodoService.cs:42");
+        baselineFailures[0].Location.Should().Be("src/b/TodoService.cs:42");
+
+        var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
+            taskFailures, baselineFailures, baselineCheckSucceeded: false);
+
+        comparison.Classification.Should().Be(BaselineFailureClassification.NewRegression);
+        comparison.NewRegressionCount.Should().Be(1);
+        comparison.PreExistingCount.Should().Be(0);
+    }
+
+    [Fact]
+    public void UnixAbsoluteTaskAndBaselineWorktreeRoots_MatchesCorrectly()
+    {
+        var taskOutput = "/tmp/executions/abc/src/TodoService.cs:42:5: error CS1002: ; expected";
+        var baselineOutput = "/tmp/baselines/xyz/src/TodoService.cs:42:5: error CS1002: ; expected";
+
+        var taskFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
+            taskOutput, null, null, workspaceRoot: "/tmp/executions/abc");
+        var baselineFailures = ExecutionDiagnosticEvidence.ParseAllCompilerFailures(
+            baselineOutput, null, null, workspaceRoot: "/tmp/baselines/xyz");
+
+        taskFailures[0].Location.Should().Be("src/TodoService.cs:42");
+        baselineFailures[0].Location.Should().Be("src/TodoService.cs:42");
+
+        var comparison = ExecutionDiagnosticEvidence.CompareFailureSets(
+            taskFailures, baselineFailures, baselineCheckSucceeded: false);
+
+        comparison.Classification.Should().Be(BaselineFailureClassification.PreExisting);
+    }
+
+    [Fact]
     public async Task ApproveCommand_NeedsReviewOutcome_BlocksApproval()
     {
         var executionId = Guid.NewGuid();
