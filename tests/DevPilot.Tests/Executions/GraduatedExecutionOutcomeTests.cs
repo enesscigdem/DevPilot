@@ -165,6 +165,183 @@ public class GraduatedExecutionOutcomeTests
         actionableEvidence.RelevantLines.Should().Contain("Err2");
     }
 
+    [Theory]
+    [InlineData("C:/repo/src/TodoService.cs:42", "C:/repo/src/TodoService.cs", 42)]
+    [InlineData(@"C:\repo\src\TodoService.cs:42", "C:/repo/src/TodoService.cs", 42)]
+    [InlineData("/home/user/repo/src/TodoService.cs:42", "/home/user/repo/src/TodoService.cs", 42)]
+    [InlineData("src/TodoService.cs:42", "src/TodoService.cs", 42)]
+    [InlineData("C:/repo/src/TodoService.cs", "C:/repo/src/TodoService.cs", null)]
+    public void ParseDiagnosticLocation_WindowsAndUnixPaths_PreservesFullPathAndLine(string input, string expectedPath, int? expectedLine)
+    {
+        var (path, line) = ExecutionDiagnosticEvidence.ParseDiagnosticLocation(input);
+        path.Should().Be(expectedPath);
+        line.Should().Be(expectedLine);
+    }
+
+    [Fact]
+    public void WindowsActionableCompilerRepair_CorrelatesToTouchedFile()
+    {
+        var failure = new NormalizedFailureItem(
+            FailureKey: "key1",
+            TestName: null,
+            ErrorSummary: "CS1002 ; expected",
+            NormalizedDiagnostic: "c:/repo/src/todoservice.cs:42:5:CS1002:; expected",
+            Location: "C:/repo/src/TodoService.cs:42");
+
+        var actionable = ExecutionDiagnosticEvidence.CreateActionableCompilerEvidence(
+            new[] { failure },
+            null,
+            null,
+            "build failed");
+
+        actionable.Locations.Should().ContainSingle();
+        actionable.Locations[0].FilePath.Should().Be("C:/repo/src/TodoService.cs");
+        actionable.Locations[0].Line.Should().Be(42);
+
+        var modified = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "C:/repo/src/TodoService.cs",
+            "C:/repo/src/Other.cs"
+        };
+
+        var repairFiles = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(actionable, modified).ToList();
+        repairFiles.Should().Equal("C:/repo/src/TodoService.cs");
+    }
+
+    [Fact]
+    public void PreExistingBuild_NoTests_ReturnsNoNewRegressions()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = "{\"VerificationOutcome\":\"NoNewRegressions\",\"BaselineClassification\":\"PreExisting\",\"PreExistingFailureCount\":1,\"NewRegressionCount\":0}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.NoNewRegressions);
+    }
+
+    [Fact]
+    public void PreExistingTest_LaterPassingTest_ReturnsNoNewRegressions()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Check 1: No new regressions (1 pre-existing failure(s) remain).",
+                MetadataJson = "{\"VerificationOutcome\":\"NoNewRegressions\",\"BaselineClassification\":\"PreExisting\",\"PreExistingFailureCount\":1,\"NewRegressionCount\":0}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Check 2 passed.",
+                MetadataJson = "{\"VerificationOutcome\":\"Verified\"}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.NoNewRegressions);
+    }
+
+    [Fact]
+    public void InfrastructureErrorEvidence_WithPassingCheck_DoesNotReturnVerified()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = "{\"VerificationOutcome\":\"Verified\"}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = "{\"VerificationOutcome\":\"VerificationInfrastructureError\"}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.VerificationInfrastructureError);
+    }
+
+    [Fact]
+    public void CleanBuildOnlyRepository_ReturnsPartiallyVerified()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = "{\"VerificationOutcome\":\"Verified\"}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.PartiallyVerified);
+    }
+
+    [Fact]
+    public void CleanBuildAndTestsRepository_ReturnsVerified()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = "{\"VerificationOutcome\":\"Verified\"}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = "{\"VerificationOutcome\":\"Verified\"}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.Verified);
+    }
+
+    [Fact]
+    public void NeedsReview_CannotBeOverwrittenByLaterStatusMetadata()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Failed,
+                MetadataJson = "{\"VerificationOutcome\":\"NeedsReview\",\"NewRegressionCount\":1}"
+            },
+            new()
+            {
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Completed,
+                MetadataJson = "{\"VerificationOutcome\":\"Verified\"}"
+            }
+        };
+
+        var outcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        outcome.Should().Be(ExecutionVerificationOutcome.NeedsReview);
+    }
+
     [Fact]
     public async Task ApproveCommand_NeedsReviewOutcome_BlocksApproval()
     {

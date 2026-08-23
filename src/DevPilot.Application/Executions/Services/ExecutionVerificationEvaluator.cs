@@ -35,72 +35,80 @@ public static class ExecutionVerificationEvaluator
             return ExecutionVerificationOutcome.Failed;
         }
 
-        // 1. Check if an activity explicitly sets VerificationOutcome
-        var explicitMeta = activities
-            .Where(a => !string.IsNullOrWhiteSpace(a.MetadataJson))
-            .OrderByDescending(a => a.CreatedAt)
-            .Select(a => ParseMetadata(a.MetadataJson))
-            .FirstOrDefault(m => !string.IsNullOrWhiteSpace(m?.VerificationOutcome));
+        var parsedActivities = activities
+            .Select(a => (Activity: a, Metadata: ParseMetadata(a.MetadataJson)))
+            .ToList();
 
-        if (explicitMeta != null && Enum.TryParse<ExecutionVerificationOutcome>(explicitMeta.VerificationOutcome, ignoreCase: true, out var parsedOutcome))
+        // 1. NeedsReview: Any unresolved real regression, inconclusive baseline, or unhandled check failure
+        var hasNeedsReview = parsedActivities.Any(p =>
+            string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.NeedsReview), StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(p.Metadata?.BaselineClassification, "Unknown", StringComparison.OrdinalIgnoreCase) ||
+            (p.Activity.Status == ExecutionActivityStatus.Failed &&
+             (p.Activity.Stage == ExecutionStage.Build || p.Activity.Stage == ExecutionStage.Test) &&
+             !string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationInfrastructureError), StringComparison.OrdinalIgnoreCase) &&
+             !string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.NoNewRegressions), StringComparison.OrdinalIgnoreCase) &&
+             !string.Equals(p.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase)));
+
+        if (hasNeedsReview)
         {
-            return parsedOutcome;
+            return ExecutionVerificationOutcome.NeedsReview;
         }
 
-        // 2. Evaluate from activities
-        var buildActivities = activities.Where(a => a.Stage == ExecutionStage.Build).ToList();
-        var testActivities = activities.Where(a => a.Stage == ExecutionStage.Test).ToList();
-
-        var buildPassed = buildActivities.Any(a => a.Status == ExecutionActivityStatus.Completed);
-        var buildFailed = buildActivities.Any(a => a.Status == ExecutionActivityStatus.Failed);
-        var testPassed = testActivities.Any(a => a.Status == ExecutionActivityStatus.Completed);
-        var testFailed = testActivities.Any(a => a.Status == ExecutionActivityStatus.Failed);
-
-        var hasInfraError = activities.Any(a =>
-            a.MetadataJson != null &&
-            (a.MetadataJson.Contains("InfrastructureFailure", StringComparison.OrdinalIgnoreCase) ||
-             a.MetadataJson.Contains("VerificationInfrastructureError", StringComparison.OrdinalIgnoreCase)));
+        // 2. VerificationInfrastructureError: Any infrastructure failure during check discovery or execution
+        var hasInfraError = parsedActivities.Any(p =>
+            string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationInfrastructureError), StringComparison.OrdinalIgnoreCase) ||
+            (p.Metadata?.VerificationFailureCategory != null && p.Metadata.VerificationFailureCategory.Contains("Infrastructure", StringComparison.OrdinalIgnoreCase)) ||
+            (p.Activity.MetadataJson != null &&
+             (p.Activity.MetadataJson.Contains("InfrastructureFailure", StringComparison.OrdinalIgnoreCase) ||
+              p.Activity.MetadataJson.Contains("VerificationInfrastructureError", StringComparison.OrdinalIgnoreCase))));
 
         if (hasInfraError)
         {
             return ExecutionVerificationOutcome.VerificationInfrastructureError;
         }
 
-        var isNoNewRegressions = testActivities.Any(a =>
-            a.Status == ExecutionActivityStatus.Completed &&
-            (a.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase) ||
-             (a.MetadataJson != null && (a.MetadataJson.Contains("NoNewRegressions", StringComparison.OrdinalIgnoreCase) || a.MetadataJson.Contains("PreExisting", StringComparison.OrdinalIgnoreCase)))));
+        // 3. NoNewRegressions: Pre-existing failure proven by baseline comparison on build or test
+        var hasPreExisting = parsedActivities.Any(p =>
+            string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.NoNewRegressions), StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(p.Metadata?.BaselineClassification, "PreExisting", StringComparison.OrdinalIgnoreCase) ||
+            (p.Activity.Stage == ExecutionStage.Test && p.Activity.Status == ExecutionActivityStatus.Completed && p.Activity.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase)));
 
-        if (isNoNewRegressions)
+        if (hasPreExisting)
         {
             return ExecutionVerificationOutcome.NoNewRegressions;
         }
 
-        if (buildFailed || testFailed)
+        // 4. VerificationUnavailable: No checks discovered or unconfigured
+        var hasUnavailable = parsedActivities.Any(p =>
+            string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationUnavailable), StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(p.Metadata?.VerificationFailureCategory, "Unconfigured", StringComparison.OrdinalIgnoreCase));
+
+        var buildActivities = activities.Where(a => a.Stage == ExecutionStage.Build).ToList();
+        var testActivities = activities.Where(a => a.Stage == ExecutionStage.Test).ToList();
+
+        if (hasUnavailable || (buildActivities.Count == 0 && testActivities.Count == 0))
         {
-            return ExecutionVerificationOutcome.NeedsReview;
+            return ExecutionVerificationOutcome.VerificationUnavailable;
         }
 
-        if (buildPassed && testPassed)
-        {
-            return ExecutionVerificationOutcome.Verified;
-        }
+        // 5. Check if preflight reported unresolved verification (e.g. partial discovery / unresolved scripts)
+        var hasUnresolvedVerification = parsedActivities.Any(p => p.Metadata?.VerificationUnresolved == true);
 
-        if (testPassed && buildActivities.Count == 0)
-        {
-            return ExecutionVerificationOutcome.Verified;
-        }
+        // 6. Clean build passed and no tests discovered
+        var buildPassed = buildActivities.Any(a => a.Status == ExecutionActivityStatus.Completed);
+        var testPassed = testActivities.Any(a => a.Status == ExecutionActivityStatus.Completed);
 
         if (buildPassed && testActivities.Count == 0)
         {
             return ExecutionVerificationOutcome.PartiallyVerified;
         }
 
-        if (buildActivities.Count == 0 && testActivities.Count == 0)
+        if (hasUnresolvedVerification)
         {
-            return ExecutionVerificationOutcome.VerificationUnavailable;
+            return ExecutionVerificationOutcome.PartiallyVerified;
         }
 
+        // 7. Verified: Build+Test or Test-only passed with full verification
         return ExecutionVerificationOutcome.Verified;
     }
 

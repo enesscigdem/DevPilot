@@ -302,14 +302,17 @@ public static class ExecutionDiagnosticEvidence
         return parts.Length >= 2 ? parts[^2] : null;
     }
 
-    private static string? MatchModifiedFile(string diagnosticPath, IEnumerable<string> modifiedFiles)
+    private static string? MatchModifiedFile(
+        string diagnosticPath,
+        IEnumerable<string> modifiedFiles)
     {
         var normalizedDiagnostic = NormalizePath(diagnosticPath);
         var candidates = modifiedFiles
-            .Select(path => new { Original = path, Normalized = NormalizePath(path) })
+            .Select(path => (Original: path, Normalized: NormalizePath(path)))
             .Where(item =>
                 string.Equals(item.Normalized, normalizedDiagnostic, StringComparison.OrdinalIgnoreCase) ||
-                normalizedDiagnostic.EndsWith('/' + item.Normalized, StringComparison.OrdinalIgnoreCase))
+                normalizedDiagnostic.EndsWith('/' + item.Normalized.TrimStart('/'), StringComparison.OrdinalIgnoreCase) ||
+                item.Normalized.EndsWith('/' + normalizedDiagnostic.TrimStart('/'), StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         if (candidates.Count == 1) return candidates[0].Original;
@@ -326,7 +329,15 @@ public static class ExecutionDiagnosticEvidence
     private static string JoinOutput(string? stdOut, string? stdErr, string? errorMessage) =>
         $"{stdOut}\n{stdErr}\n{errorMessage}";
 
-    private static string NormalizePath(string path) => path.Trim().Replace('\\', '/').TrimStart('.', '/');
+    private static string NormalizePath(string path)
+    {
+        var trimmed = path.Trim().Replace('\\', '/');
+        if (trimmed.StartsWith("./", StringComparison.Ordinal))
+        {
+            trimmed = trimmed[2..];
+        }
+        return trimmed;
+    }
 
     private static string NormalizeText(string value) =>
         Regex.Replace(value ?? string.Empty, @"\s+", " ").Trim().ToLowerInvariant();
@@ -580,11 +591,11 @@ public static class ExecutionDiagnosticEvidence
 
             if (taskFailure.TestName == null && !string.IsNullOrWhiteSpace(taskFailure.Location))
             {
-                var fileOnly = taskFailure.Location.Split(':')[0];
+                var (fileOnly, _) = ParseDiagnosticLocation(taskFailure.Location);
                 var matchingComp = baselineFailures.FirstOrDefault(b =>
                     b.TestName == null &&
                     b.Location != null &&
-                    string.Equals(b.Location.Split(':')[0], fileOnly, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(ParseDiagnosticLocation(b.Location).FilePath, fileOnly, StringComparison.OrdinalIgnoreCase) &&
                     IsSubstantiallySimilarError(taskFailure.ErrorSummary, b.ErrorSummary));
 
                 if (matchingComp != null)
@@ -659,9 +670,7 @@ public static class ExecutionDiagnosticEvidence
         {
             if (!string.IsNullOrWhiteSpace(failure.Location))
             {
-                var parts = failure.Location.Split(':', StringSplitOptions.RemoveEmptyEntries);
-                var path = NormalizePath(parts[0]);
-                int? line = parts.Length > 1 && int.TryParse(parts[1], out var parsedLine) ? parsedLine : null;
+                var (path, line) = ParseDiagnosticLocation(failure.Location);
                 locations.Add(new DiagnosticSourceLocation(path, line));
             }
             normalized.Add(failure.NormalizedDiagnostic);
@@ -699,9 +708,7 @@ public static class ExecutionDiagnosticEvidence
         {
             if (!string.IsNullOrWhiteSpace(failure.Location))
             {
-                var parts = failure.Location.Split(':', StringSplitOptions.RemoveEmptyEntries);
-                var path = NormalizePath(parts[0]);
-                int? line = parts.Length > 1 && int.TryParse(parts[1], out var parsedLine) ? parsedLine : null;
+                var (path, line) = ParseDiagnosticLocation(failure.Location);
                 locations.Add(new DiagnosticSourceLocation(path, line));
             }
         }
@@ -718,6 +725,25 @@ public static class ExecutionDiagnosticEvidence
             errorSummary,
             relevant,
             locations);
+    }
+
+    public static (string FilePath, int? Line) ParseDiagnosticLocation(string? location)
+    {
+        if (string.IsNullOrWhiteSpace(location))
+        {
+            return (string.Empty, null);
+        }
+
+        var trimmed = location.Trim();
+        var lastColon = trimmed.LastIndexOf(':');
+
+        if (lastColon > 0 && int.TryParse(trimmed.AsSpan(lastColon + 1), out var line))
+        {
+            var rawPath = trimmed[..lastColon];
+            return (NormalizePath(rawPath), line);
+        }
+
+        return (NormalizePath(trimmed), null);
     }
 
     private static bool IsSubstantiallySimilarError(string errA, string errB)
