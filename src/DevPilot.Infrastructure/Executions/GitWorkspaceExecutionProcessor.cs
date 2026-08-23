@@ -148,22 +148,37 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 .ThenBy(check => check.Id, StringComparer.Ordinal)
                 .ToList();
 
-            if (profile.State != RepositoryVerificationState.Configured || requiredChecks.Count == 0)
+            if (requiredChecks.Count == 0)
             {
-                var category = profile.State == RepositoryVerificationState.InfrastructureFailure
-                    ? RepositoryCheckFailureCategory.InfrastructureFailure.ToString()
-                    : "Unconfigured";
-                var error = profile.State == RepositoryVerificationState.InfrastructureFailure
-                    ? $"Repository verification preflight failed: {profile.Message ?? "Infrastructure failure."}"
-                    : $"Repository verification is unconfigured: {profile.Message ?? "No trustworthy check was discovered."}";
+                var msg = profile.State == RepositoryVerificationState.InfrastructureFailure
+                    ? $"Repository verification preflight had infrastructure failure: {profile.Message ?? "Infrastructure failure."} Proceeding with unverified generation."
+                    : $"Repository verification is unconfigured: {profile.Message ?? "No trustworthy check was discovered."} Proceeding with unverified generation.";
 
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
-                    ExecutionStage.Execution,
-                    ExecutionActivityStatus.Failed,
-                    error,
+                    ExecutionStage.Workspace,
+                    ExecutionActivityStatus.Completed,
+                    msg,
                     new ExecutionActivityMetadata(
-                        EventKind: "StoppedWithEvidence",
+                        EventKind: "RepositoryPreflight",
+                        DiscoveredCheckCount: 0,
+                        DiscoveredChecks: Array.Empty<string>(),
+                        DetectedEcosystems: profile.Ecosystems,
+                        VerificationFailureCategory: profile.State == RepositoryVerificationState.InfrastructureFailure ? "InfrastructureFailure" : "Unconfigured",
+                        DeterministicCheck: true,
+                        VerificationUnresolved: profile.HasUnresolvedVerification,
+                        VerificationOutcome: profile.State == RepositoryVerificationState.InfrastructureFailure ? "VerificationInfrastructureError" : "VerificationUnavailable"),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Workspace,
+                    ExecutionActivityStatus.Completed,
+                    "Repository verification checks discovered.",
+                    new ExecutionActivityMetadata(
+                        EventKind: "RepositoryPreflight",
                         DiscoveredCheckCount: requiredChecks.Count,
                         DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
                         DiscoveredCheckEvidence: requiredChecks
@@ -171,30 +186,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                             .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
                             .ToList(),
                         DetectedEcosystems: profile.Ecosystems,
-                        VerificationFailureCategory: category,
                         DeterministicCheck: true,
                         VerificationUnresolved: profile.HasUnresolvedVerification),
                     cancellationToken).ConfigureAwait(false);
-                throw new InvalidOperationException(error);
             }
-
-            await SafeRecordActivityAsync(
-                context.ExecutionId,
-                ExecutionStage.Workspace,
-                ExecutionActivityStatus.Completed,
-                "Repository verification checks discovered.",
-                new ExecutionActivityMetadata(
-                    EventKind: "RepositoryPreflight",
-                    DiscoveredCheckCount: requiredChecks.Count,
-                    DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
-                    DiscoveredCheckEvidence: requiredChecks
-                        .Where(check => !string.IsNullOrWhiteSpace(check.DiscoveryEvidence))
-                        .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
-                        .ToList(),
-                    DetectedEcosystems: profile.Ecosystems,
-                    DeterministicCheck: true,
-                    VerificationUnresolved: profile.HasUnresolvedVerification),
-                cancellationToken).ConfigureAwait(false);
 
             var analysis = await _impactAnalysisRepository
                 .GetLatestByTaskIdAsync(context.TaskId, cancellationToken)
@@ -320,9 +315,31 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             var prerequisiteChecks = requiredChecks.Where(check => check.Kind != RepositoryCheckKind.Test).ToList();
             var testChecks = requiredChecks.Where(check => check.Kind == RepositoryCheckKind.Test).ToList();
 
+            if (requiredChecks.Count == 0)
+            {
+                var outcome = profile.State == RepositoryVerificationState.InfrastructureFailure
+                    ? "VerificationInfrastructureError"
+                    : "VerificationUnavailable";
+                var verificationSummary = profile.State == RepositoryVerificationState.InfrastructureFailure
+                    ? "Verification infrastructure error: preflight discovery encountered infrastructure failure; diff is preserved for review."
+                    : "Verification unavailable: no trustworthy verification checks discovered for repository.";
+
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Execution,
+                    ExecutionActivityStatus.Completed,
+                    verificationSummary,
+                    new ExecutionActivityMetadata(
+                        EventKind: "ReadyForReview",
+                        VerificationOutcome: outcome),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            var allPrerequisitesPassed = true;
             foreach (var check in prerequisiteChecks)
             {
-                await RunPrerequisiteCheckAsync(
+                var passed = await RunPrerequisiteCheckAsync(
                     context,
                     prepResult,
                     analysis,
@@ -330,13 +347,25 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     check,
                     modifiedFiles,
                     cancellationToken).ConfigureAwait(false);
+
+                if (!passed)
+                {
+                    allPrerequisitesPassed = false;
+                    break;
+                }
+            }
+
+            if (!allPrerequisitesPassed)
+            {
+                return;
             }
 
             var confirmedBuild = prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build);
+            var allTestsPassed = true;
             for (var index = 0; index < testChecks.Count; index++)
             {
                 var check = testChecks[index];
-                await RunTestCheckAsync(
+                var passed = await RunTestCheckAsync(
                     context,
                     prepResult,
                     analysis,
@@ -347,18 +376,33 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     index == testChecks.Count - 1,
                     modifiedFiles,
                     cancellationToken).ConfigureAwait(false);
+
+                if (!passed)
+                {
+                    allTestsPassed = false;
+                    break;
+                }
+            }
+
+            if (!allTestsPassed)
+            {
+                return;
             }
 
             if (testChecks.Count == 0)
             {
+                var hasBuild = prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build);
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
                     ExecutionStage.Build,
                     ExecutionActivityStatus.Completed,
-                    "Repository checks passed.",
+                    hasBuild
+                        ? "Repository build passed (partially verified: no test suite discovered)."
+                        : "Repository checks passed.",
                     new ExecutionActivityMetadata(
-                        BuildPassed: prerequisiteChecks.Any(check => check.Kind == RepositoryCheckKind.Build) ? true : null,
-                        EventKind: "ReadyForReview"),
+                        BuildPassed: hasBuild ? true : null,
+                        EventKind: "ReadyForReview",
+                        VerificationOutcome: hasBuild ? "PartiallyVerified" : "Verified"),
                     cancellationToken).ConfigureAwait(false);
             }
         }
@@ -392,7 +436,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         }
     }
 
-    private async Task RunPrerequisiteCheckAsync(
+    private async Task<bool> RunPrerequisiteCheckAsync(
         ExecutionProcessingContext context,
         ExecutionWorkspaceResult prepResult,
         TaskImpactAnalysis analysis,
@@ -418,12 +462,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
         {
             await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Build, check, result, cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
+            return false;
         }
 
+        BaselineFailureComparison? baseComparison = null;
         if (!result.Success && _baselineVerificationService != null && !string.IsNullOrWhiteSpace(prepResult.BaseCommitSha))
         {
-            var baseComparison = await _baselineVerificationService.EvaluateCompilerFailureAsync(
+            baseComparison = await _baselineVerificationService.EvaluateCompilerFailureAsync(
                 prepResult.WorkspacePath,
                 context.WorkspaceLocalPath,
                 prepResult.BaseCommitSha,
@@ -451,7 +496,28 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         baselineCacheHit: baseComparison.CacheHit,
                         stageDurationMs: stopwatch.ElapsedMilliseconds),
                     cancellationToken).ConfigureAwait(false);
-                return;
+                return true;
+            }
+
+            if (baseComparison.Classification == BaselineFailureClassification.Unknown)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Build,
+                    ExecutionActivityStatus.Failed,
+                    $"Needs review: baseline comparison was inconclusive ({baseComparison.Summary}).",
+                    CheckMetadata(
+                        check,
+                        "StoppedWithEvidence",
+                        result,
+                        buildPassed: false,
+                        baselineClassification: "Unknown",
+                        verificationOutcome: "NeedsReview",
+                        baseCommitSha: prepResult.BaseCommitSha,
+                        baselineCacheHit: baseComparison.CacheHit,
+                        stageDurationMs: stopwatch.ElapsedMilliseconds),
+                    cancellationToken).ConfigureAwait(false);
+                return false;
             }
         }
 
@@ -461,7 +527,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         while (!result.Success && repairRound < _maxCompileRepairRounds)
         {
             repairRound++;
-            var evidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(result.StdOut, result.StdErr, result.ErrorMessage);
+            var actionableFailures = baseComparison != null && (baseComparison.Classification == BaselineFailureClassification.NewRegression || baseComparison.Classification == BaselineFailureClassification.ChangedRegression)
+                ? baseComparison.NewRegressions.Concat(baseComparison.ChangedFailures).ToList()
+                : null;
+
+            var evidence = (actionableFailures != null && actionableFailures.Count > 0)
+                ? ExecutionDiagnosticEvidence.CreateActionableCompilerEvidence(actionableFailures, result.StdOut, result.StdErr, result.ErrorMessage)
+                : ExecutionDiagnosticEvidence.ParseVerificationFailure(result.StdOut, result.StdErr, result.ErrorMessage);
 
             if (string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal))
             {
@@ -656,7 +728,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
             {
                 await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Build, check, result, cancellationToken).ConfigureAwait(false);
-                throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
+                return false;
             }
 
             await SafeRecordActivityAsync(
@@ -687,9 +759,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     check,
                     "StoppedWithEvidence",
                     result,
-                    buildPassed: check.Kind == RepositoryCheckKind.Build ? false : null),
+                    buildPassed: check.Kind == RepositoryCheckKind.Build ? false : null,
+                    verificationOutcome: "NeedsReview",
+                    newRegressionCount: baseComparison?.NewRegressionCount ?? 0,
+                    preExistingFailureCount: baseComparison?.PreExistingCount ?? 0),
                 cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException(error);
+            return false;
         }
 
         await SafeRecordActivityAsync(
@@ -702,11 +777,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 "VerifyingRepository",
                 result,
                 buildPassed: check.Kind == RepositoryCheckKind.Build ? true : null,
+                verificationOutcome: "Verified",
                 stageDurationMs: stopwatch.ElapsedMilliseconds),
             cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
-    private async Task RunTestCheckAsync(
+    private async Task<bool> RunTestCheckAsync(
         ExecutionProcessingContext context,
         ExecutionWorkspaceResult prepResult,
         TaskImpactAnalysis analysis,
@@ -739,12 +816,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
         {
             await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Test, check, result, cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
+            return false;
         }
 
+        BaselineFailureComparison? baseComparison = null;
         if (!result.Success && _baselineVerificationService != null && !string.IsNullOrWhiteSpace(prepResult.BaseCommitSha))
         {
-            var baseComparison = await _baselineVerificationService.EvaluateTestFailureAsync(
+            baseComparison = await _baselineVerificationService.EvaluateTestFailureAsync(
                 prepResult.WorkspacePath,
                 context.WorkspaceLocalPath,
                 prepResult.BaseCommitSha,
@@ -774,7 +852,28 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         baselineCacheHit: baseComparison.CacheHit,
                         stageDurationMs: stopwatch.ElapsedMilliseconds),
                     cancellationToken).ConfigureAwait(false);
-                return;
+                return true;
+            }
+
+            if (baseComparison.Classification == BaselineFailureClassification.Unknown)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Test,
+                    ExecutionActivityStatus.Failed,
+                    $"Needs review: baseline comparison was inconclusive ({baseComparison.Summary}).",
+                    CheckMetadata(
+                        check,
+                        "StoppedWithEvidence",
+                        result,
+                        testPassed: false,
+                        baselineClassification: "Unknown",
+                        verificationOutcome: "NeedsReview",
+                        baseCommitSha: prepResult.BaseCommitSha,
+                        baselineCacheHit: baseComparison.CacheHit,
+                        stageDurationMs: stopwatch.ElapsedMilliseconds),
+                    cancellationToken).ConfigureAwait(false);
+                return false;
             }
         }
 
@@ -783,7 +882,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         while (!result.Success && repairRound < _maxTestRepairRounds)
         {
             repairRound++;
-            var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(result.StdOut, result.StdErr, result.ErrorMessage);
+            var actionableFailures = baseComparison != null && (baseComparison.Classification == BaselineFailureClassification.NewRegression || baseComparison.Classification == BaselineFailureClassification.ChangedRegression)
+                ? baseComparison.NewRegressions.Concat(baseComparison.ChangedFailures).ToList()
+                : null;
+
+            var evidence = (actionableFailures != null && actionableFailures.Count > 0)
+                ? ExecutionDiagnosticEvidence.CreateActionableTestEvidence(actionableFailures, result.StdOut, result.StdErr, result.ErrorMessage)
+                : ExecutionDiagnosticEvidence.ParseTestFailure(result.StdOut, result.StdErr, result.ErrorMessage);
 
             if (string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal))
             {
@@ -924,6 +1029,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 break;
             }
 
+            var prerequisiteFailed = false;
             foreach (var prerequisite in prerequisiteChecks)
             {
                 var prerequisiteResult = await _repositoryCheckRunner.ExecuteAsync(
@@ -935,15 +1041,20 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     continue;
                 }
 
+                prerequisiteFailed = true;
                 var newEvidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
                     prerequisiteResult.StdOut,
                     prerequisiteResult.StdErr,
                     prerequisiteResult.ErrorMessage);
+
+                var isInfra = prerequisiteResult.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure;
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
                     ExecutionStage.Build,
                     ExecutionActivityStatus.Failed,
-                    "Stopped with evidence: repository check failed after focused test repair.",
+                    isInfra
+                        ? "Repository check infrastructure failure after test repair."
+                        : "Stopped with evidence: repository check failed after focused test repair.",
                     CheckMetadata(
                         prerequisite,
                         "StoppedWithEvidence",
@@ -951,13 +1062,15 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         repairKind: "Compile",
                         repairRound: repairRound,
                         failureFingerprint: newEvidence.FailureFingerprint,
-                        progressResult: "NewBuildFailure"),
+                        progressResult: "NewBuildFailure",
+                        verificationOutcome: isInfra ? "VerificationInfrastructureError" : "NeedsReview"),
                     cancellationToken).ConfigureAwait(false);
+                break;
+            }
 
-                var prefix = prerequisiteResult.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure
-                    ? "Repository check infrastructure failure after test repair"
-                    : "Build validation failed after test repair";
-                throw new InvalidOperationException($"{prefix}: {prerequisiteResult.ErrorMessage ?? newEvidence.DiagnosticLines.FirstOrDefault() ?? "Repository check failed."}");
+            if (prerequisiteFailed)
+            {
+                return false;
             }
 
             await SafeRecordActivityAsync(
@@ -1000,7 +1113,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
             {
                 await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Test, check, result, cancellationToken).ConfigureAwait(false);
-                throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
+                return false;
             }
 
             await SafeRecordActivityAsync(
@@ -1020,9 +1133,16 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ExecutionStage.Test,
                 ExecutionActivityStatus.Failed,
                 error,
-                CheckMetadata(check, "StoppedWithEvidence", result, testPassed: false),
+                CheckMetadata(
+                    check,
+                    "StoppedWithEvidence",
+                    result,
+                    testPassed: false,
+                    verificationOutcome: "NeedsReview",
+                    newRegressionCount: baseComparison?.NewRegressionCount ?? 0,
+                    preExistingFailureCount: baseComparison?.PreExistingCount ?? 0),
                 cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException(error);
+            return false;
         }
 
         await SafeRecordActivityAsync(
@@ -1035,8 +1155,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 isFinalTest ? "ReadyForReview" : "VerifyingRepository",
                 result,
                 testPassed: true,
+                verificationOutcome: "Verified",
                 stageDurationMs: stopwatch.ElapsedMilliseconds),
             cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     private async Task RecordInfrastructureFailureAsync(
@@ -1051,7 +1173,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             stage,
             ExecutionActivityStatus.Failed,
             $"Repository check infrastructure failure: {result.ErrorMessage}",
-            CheckMetadata(check, "StoppedWithEvidence", result),
+            CheckMetadata(
+                check,
+                "StoppedWithEvidence",
+                result,
+                verificationOutcome: "VerificationInfrastructureError"),
             cancellationToken).ConfigureAwait(false);
     }
 

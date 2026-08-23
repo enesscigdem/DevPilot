@@ -563,8 +563,13 @@ export function CodeReview() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="font-mono text-[11px] text-subtle-foreground">{review.taskId ? `TASK-${review.taskId.slice(0, 8)}` : review.executionId.slice(0, 8)}</span>
-              <h1 className="truncate text-[14.5px] font-semibold text-foreground">{review.taskTitle || "Code review"}</h1>
               <Badge tone={statusMeta.tone}>{review.executionStatus}</Badge>
+              {review.verificationOutcome === "Verified" && <Badge tone="green">Verified</Badge>}
+              {review.verificationOutcome === "NoNewRegressions" && <Badge tone="green">No new regressions</Badge>}
+              {review.verificationOutcome === "PartiallyVerified" && <Badge tone="amber">Partially verified</Badge>}
+              {review.verificationOutcome === "VerificationUnavailable" && <Badge tone="gray">Verification unavailable</Badge>}
+              {review.verificationOutcome === "VerificationInfrastructureError" && <Badge tone="red">Verification infra error</Badge>}
+              {review.verificationOutcome === "NeedsReview" && <Badge tone="red">Needs review</Badge>}
               {isApproved && <Badge tone="green">Approved</Badge>}
               {isRejected && <Badge tone="red">Rejected</Badge>}
             </div>
@@ -865,23 +870,42 @@ export function CodeReview() {
           <div className="mt-5 space-y-3">
             <div className="tech-label">Review decision</div>
             {isPendingDecision && (() => {
-              const buildPassed = activities.some((a) => a.stage === "Build" && a.status === "Completed")
-              const buildFailed = activities.some((a) => a.stage === "Build" && a.status === "Failed")
-              const testPassed = activities.some((a) => a.stage === "Test" && a.status === "Completed")
-              const testFailed = activities.some((a) => a.stage === "Test" && a.status === "Failed")
-              const isNoNewRegressions = review.test.status === "NoNewRegressions" || activities.some((a) => a.stage === "Test" && a.status === "Completed" && (a.metadata?.verificationOutcome === "NoNewRegressions" || a.metadata?.baselineClassification === "PreExisting"))
-              const hasValidationResults = activities.some((a) => a.stage === "Build" || a.stage === "Test")
-              const validationPassed = !hasValidationResults || (buildPassed && !buildFailed && (testPassed || isNoNewRegressions) && !testFailed) || review.test.status === "NoNewRegressions"
+              const isBlocked = review.verificationOutcome === "NeedsReview" || review.verificationOutcome === "Failed" || review.verificationOutcome === "Blocked"
+              const validationPassed = !isBlocked
 
               return (
                 <div className="space-y-2">
                   <Panel className="p-3 text-[12px] text-muted-foreground">
                     Review is pending developer decision. You may inspect the diff and approve or reject the changes.
                   </Panel>
-                  {!validationPassed && (
+                  {review.verificationOutcome === "NeedsReview" && (
                     <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-danger/30 bg-danger/10 p-2.5 text-[12px] text-danger">
                       <AlertCircle className="h-4 w-4 shrink-0" />
-                      <span>Build or Test validation did not pass. Approval is blocked.</span>
+                      <span>Execution has unresolved regressions (NeedsReview). Standard delivery is blocked.</span>
+                    </div>
+                  )}
+                  {review.verificationOutcome === "NoNewRegressions" && (
+                    <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[12px] text-amber-600 dark:text-amber-400">
+                      <Info className="h-4 w-4 shrink-0" />
+                      <span>Pre-existing repository failure(s) remain. Delivery is allowed.</span>
+                    </div>
+                  )}
+                  {review.verificationOutcome === "PartiallyVerified" && (
+                    <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[12px] text-amber-600 dark:text-amber-400">
+                      <Info className="h-4 w-4 shrink-0" />
+                      <span>Partially verified: build passed; no repository test suite discovered.</span>
+                    </div>
+                  )}
+                  {review.verificationOutcome === "VerificationUnavailable" && (
+                    <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-border bg-surface-2 p-2.5 text-[12px] text-muted-foreground">
+                      <Info className="h-4 w-4 shrink-0" />
+                      <span>Verification unavailable: repository verification is unconfigured.</span>
+                    </div>
+                  )}
+                  {review.verificationOutcome === "VerificationInfrastructureError" && (
+                    <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[12px] text-amber-600 dark:text-amber-400">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      <span>Verification infrastructure error occurred during check execution.</span>
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-2">

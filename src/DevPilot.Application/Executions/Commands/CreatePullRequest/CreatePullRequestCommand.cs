@@ -64,17 +64,20 @@ public sealed class CreatePullRequestCommandHandler : ICreatePullRequestCommandH
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionGitHubPullRequestService _githubPrService;
     private readonly IExecutionActivityRecorder _activityRecorder;
+    private readonly IExecutionActivityRepository? _activityRepository;
     private readonly ILogger<CreatePullRequestCommandHandler> _logger;
 
     public CreatePullRequestCommandHandler(
         IExecutionRepository executionRepository,
         IExecutionGitHubPullRequestService githubPrService,
         IExecutionActivityRecorder activityRecorder,
-        ILogger<CreatePullRequestCommandHandler> logger)
+        ILogger<CreatePullRequestCommandHandler> logger,
+        IExecutionActivityRepository? activityRepository = null)
     {
         _executionRepository = executionRepository;
         _githubPrService = githubPrService;
         _activityRecorder = activityRecorder;
+        _activityRepository = activityRepository;
         _logger = logger;
     }
 
@@ -113,6 +116,20 @@ public sealed class CreatePullRequestCommandHandler : ICreatePullRequestCommandH
         if (execution.ReviewStatus != ExecutionReviewStatus.Approved)
         {
             return CreatePullRequestResult.Conflict($"Execution review status is '{execution.ReviewStatus}' and cannot request pull request.");
+        }
+
+        if (_activityRepository != null)
+        {
+            var activities = await _activityRepository
+                .GetByExecutionIdAsync(execution.Id, cancellationToken)
+                .ConfigureAwait(false);
+
+            var outcome = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+            if (outcome is ExecutionVerificationOutcome.NeedsReview or ExecutionVerificationOutcome.Failed or ExecutionVerificationOutcome.Blocked)
+            {
+                return CreatePullRequestResult.Conflict(
+                    $"Pull request cannot be created because verification outcome is '{outcome}'.");
+            }
         }
 
         if (execution.CommitStatus != ExecutionCommitStatus.Committed || string.IsNullOrWhiteSpace(execution.CommitSha))

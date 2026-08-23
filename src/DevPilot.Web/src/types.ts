@@ -482,7 +482,18 @@ export interface ExecutionReview {
   repositoryOwner?: string;
   repositoryName?: string;
   predictedVsActual?: PredictedVsActualComparison | null;
+  verificationOutcome?: ExecutionVerificationOutcome | string;
 }
+
+export type ExecutionVerificationOutcome =
+  | 'Verified'
+  | 'NoNewRegressions'
+  | 'PartiallyVerified'
+  | 'VerificationUnavailable'
+  | 'VerificationInfrastructureError'
+  | 'NeedsReview'
+  | 'Failed'
+  | 'Blocked';
 
 export interface ExecutionReviewDecision {
   executionId: string;

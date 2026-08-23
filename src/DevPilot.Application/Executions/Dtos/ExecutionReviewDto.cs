@@ -79,4 +79,5 @@ public sealed record ExecutionReviewDto(
     Guid? RepositoryWorkspaceId = null,
     string? RepositoryOwner = null,
     string? RepositoryName = null,
-    PredictedVsActualComparisonDto? PredictedVsActual = null);
+    PredictedVsActualComparisonDto? PredictedVsActual = null,
+    string VerificationOutcome = "Verified");

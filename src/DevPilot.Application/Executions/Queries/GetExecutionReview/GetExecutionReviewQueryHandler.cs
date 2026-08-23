@@ -88,11 +88,15 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         }
 
         var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
+        var outcome = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        var isDeliveryEligible = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.IsDeliveryEligible(outcome);
         var (buildDto, testDto) = DetermineStageStatuses(execution, activities);
         var buildPassed = buildDto.Status == "Passed";
         var testPassed = testDto.Status is "Passed" or "NoNewRegressions";
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
-        var (canRequestMerge, mergeBlockedReason) = ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks, buildPassed, testPassed);
+        var (canRequestMerge, mergeBlockedReason) = isDeliveryEligible
+            ? ExecutionMergeEligibility.EvaluateMergeEligibility(execution, allowNoChecks, buildPassed, testPassed)
+            : (false, $"Execution verification outcome is '{outcome}'.");
 
         if (execution.CommitStatus == ExecutionCommitStatus.Committed)
         {
@@ -145,12 +149,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 RemoteBranchName: execution.RemoteBranchName,
                 RemoteCommitSha: execution.RemoteCommitSha,
                 PushedAt: execution.PushedAt,
-                CanRequestPush: CalculateCanRequestPush(execution),
+                CanRequestPush: isDeliveryEligible && CalculateCanRequestPush(execution),
                 PullRequestStatus: execution.PullRequestStatus.ToString(),
                 PullRequestNumber: execution.PullRequestNumber,
                 PullRequestUrl: execution.PullRequestUrl,
                 PullRequestCreatedAt: execution.PullRequestCreatedAt,
-                CanRequestPullRequest: DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution),
+                CanRequestPullRequest: isDeliveryEligible && DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution),
                 PullRequestRemoteState: execution.PullRequestRemoteState.ToString(),
                 PullRequestIntegrityStatus: execution.PullRequestIntegrityStatus.ToString(),
                 PullRequestLastSyncedAt: execution.PullRequestLastSyncedAt,
@@ -174,7 +178,9 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 MergeBlockedReason: mergeBlockedReason,
                 RepositoryWorkspaceId: execution.DevelopmentTask?.RepositoryWorkspaceId,
                 RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
-                RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository);
+                RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository,
+                PredictedVsActual: null,
+                VerificationOutcome: outcome.ToString());
 
             return GetExecutionReviewResult.Ok(committedReview);
         }
@@ -230,7 +236,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                              && approvedMatchesCurrent
                              && !isCommitted
                              && !fingerprintResult.HasSensitiveFiles
-                             && (diffResult.ChangedFiles?.Count ?? 0) > 0;
+                             && (diffResult.ChangedFiles?.Count ?? 0) > 0
+                             && isDeliveryEligible;
 
         PredictedVsActualComparisonDto? predictedVsActual = null;
         if (_impactAnalysisRepository != null)
@@ -277,12 +284,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             RemoteBranchName: execution.RemoteBranchName,
             RemoteCommitSha: execution.RemoteCommitSha,
             PushedAt: execution.PushedAt,
-            CanRequestPush: CalculateCanRequestPush(execution),
+            CanRequestPush: isDeliveryEligible && CalculateCanRequestPush(execution),
             PullRequestStatus: execution.PullRequestStatus.ToString(),
             PullRequestNumber: execution.PullRequestNumber,
             PullRequestUrl: execution.PullRequestUrl,
             PullRequestCreatedAt: execution.PullRequestCreatedAt,
-            CanRequestPullRequest: DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution),
+            CanRequestPullRequest: isDeliveryEligible && DevPilot.Application.Executions.Commands.CreatePullRequest.CreatePullRequestCommandHandler.CalculateCanRequestPullRequest(execution),
             PullRequestRemoteState: execution.PullRequestRemoteState.ToString(),
             PullRequestIntegrityStatus: execution.PullRequestIntegrityStatus.ToString(),
             PullRequestLastSyncedAt: execution.PullRequestLastSyncedAt,
@@ -307,7 +314,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             RepositoryWorkspaceId: execution.DevelopmentTask?.RepositoryWorkspaceId,
             RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
             RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository,
-            PredictedVsActual: predictedVsActual);
+            PredictedVsActual: predictedVsActual,
+            VerificationOutcome: outcome.ToString());
 
         return GetExecutionReviewResult.Ok(review);
     }

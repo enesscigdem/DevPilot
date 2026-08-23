@@ -54,6 +54,7 @@ public sealed class CommitExecutionCommandHandler : ICommitExecutionCommandHandl
     private readonly IExecutionWorkspaceManager _workspaceManager;
     private readonly IExecutionGitCommitService _gitCommitService;
     private readonly IExecutionActivityRecorder _activityRecorder;
+    private readonly IExecutionActivityRepository? _activityRepository;
     private readonly ILogger<CommitExecutionCommandHandler> _logger;
 
     public CommitExecutionCommandHandler(
@@ -61,12 +62,14 @@ public sealed class CommitExecutionCommandHandler : ICommitExecutionCommandHandl
         IExecutionWorkspaceManager workspaceManager,
         IExecutionGitCommitService gitCommitService,
         IExecutionActivityRecorder activityRecorder,
-        ILogger<CommitExecutionCommandHandler> logger)
+        ILogger<CommitExecutionCommandHandler> logger,
+        IExecutionActivityRepository? activityRepository = null)
     {
         _executionRepository = executionRepository;
         _workspaceManager = workspaceManager;
         _gitCommitService = gitCommitService;
         _activityRecorder = activityRecorder;
+        _activityRepository = activityRepository;
         _logger = logger;
     }
 
@@ -99,6 +102,20 @@ public sealed class CommitExecutionCommandHandler : ICommitExecutionCommandHandl
         {
             return CommitExecutionResult.Conflict(
                 $"Execution review status is '{execution.ReviewStatus}' and cannot be committed.");
+        }
+
+        if (_activityRepository != null)
+        {
+            var activities = await _activityRepository
+                .GetByExecutionIdAsync(execution.Id, cancellationToken)
+                .ConfigureAwait(false);
+
+            var outcome = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+            if (outcome is ExecutionVerificationOutcome.NeedsReview or ExecutionVerificationOutcome.Failed or ExecutionVerificationOutcome.Blocked)
+            {
+                return CommitExecutionResult.Conflict(
+                    $"Execution cannot be committed because verification outcome is '{outcome}'.");
+            }
         }
 
         if (string.IsNullOrWhiteSpace(execution.ApprovedChangeFingerprint))

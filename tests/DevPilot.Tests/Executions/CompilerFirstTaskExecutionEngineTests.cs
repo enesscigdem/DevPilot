@@ -386,9 +386,10 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         var context = new ExecutionProcessingContext(executionId, taskId, "Unresolvable compile", "Desc", null, Guid.NewGuid(), "/src", "Summary");
         var act = async () => await processor.ProcessAsync(context);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+        await act.Should().NotThrowAsync();
         agent.CallCount.Should().Be(2); // initial + one focused repair; identical diagnostic stops
         runner.BuildCallCount.Should().Be(2);
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     // Scenario 12: Test failure -> repair -> targeted tests success
@@ -448,9 +449,10 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         var context = new ExecutionProcessingContext(executionId, taskId, "Unresolvable test", "Desc", null, Guid.NewGuid(), "/src", "Summary");
         var act = async () => await processor.ProcessAsync(context);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Test validation failed*");
+        await act.Should().NotThrowAsync();
         agent.CallCount.Should().Be(2); // identical targeted failure stops before a second repair
         runner.TestCallCount.Should().Be(2);
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     // Scenario 14: Build and test activity exposes concise sanitized diagnostics

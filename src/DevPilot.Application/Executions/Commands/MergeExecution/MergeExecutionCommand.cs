@@ -120,8 +120,16 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
 
         // 2. Fetch local Build & Test evidence
         var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
+        var outcome = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        if (outcome is ExecutionVerificationOutcome.NeedsReview or ExecutionVerificationOutcome.Failed or ExecutionVerificationOutcome.Blocked)
+        {
+            return MergeExecutionResult.Conflict(
+                $"Execution cannot be merged because verification outcome is '{outcome}'.");
+        }
+
+        var isNoNewRegressions = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed && (a.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase) || (a.MetadataJson != null && a.MetadataJson.Contains("NoNewRegressions", StringComparison.OrdinalIgnoreCase))));
         var buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
-        var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
+        var testPassed = isNoNewRegressions || activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
 
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
 

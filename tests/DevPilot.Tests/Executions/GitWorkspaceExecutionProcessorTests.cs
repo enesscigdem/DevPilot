@@ -126,13 +126,12 @@ public class GitWorkspaceExecutionProcessorTests
 
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
-        await act.Should().ThrowAsync<InvalidOperationException>()
-            .WithMessage("Repository verification is unconfigured:*");
-        agent.CallCount.Should().Be(0);
+        await act.Should().NotThrowAsync();
+        agent.CallCount.Should().Be(1);
         recorder.RecordedActivities.Should().Contain(activity =>
             activity.metadata != null &&
-            activity.metadata.VerificationFailureCategory == "Unconfigured" &&
-            activity.metadata.EventKind == "StoppedWithEvidence");
+            activity.metadata.VerificationOutcome == "VerificationUnavailable" &&
+            activity.metadata.EventKind == "ReadyForReview");
     }
 
     [Fact]
@@ -277,13 +276,12 @@ public class GitWorkspaceExecutionProcessorTests
 
         var act = async () => await processor.ProcessAsync(context);
 
-        var ex = await act.Should().ThrowAsync<InvalidOperationException>();
-        ex.WithMessage("Build validation failed: dotnet build failed with exit code 1.");
+        await act.Should().NotThrowAsync();
 
         validationRunner.BuildCallCount.Should().Be(1);
         validationRunner.TestCallCount.Should().Be(0);
 
-        recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.Build && a.status == ExecutionActivityStatus.Failed);
+        recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.Build && a.status == ExecutionActivityStatus.Failed && a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
         recorder.RecordedActivities.Should().NotContain(a => a.stage == ExecutionStage.Test);
     }
 
@@ -327,14 +325,13 @@ public class GitWorkspaceExecutionProcessorTests
 
         var act = async () => await processor.ProcessAsync(context);
 
-        var ex = await act.Should().ThrowAsync<InvalidOperationException>();
-        ex.WithMessage("Test validation failed: dotnet test failed with exit code 1.");
+        await act.Should().NotThrowAsync();
 
         validationRunner.BuildCallCount.Should().Be(1);
         validationRunner.TestCallCount.Should().Be(1);
         agent.CallCount.Should().Be(1, "uncorrelated test output must not trigger broad repair");
 
-        recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.Test && a.status == ExecutionActivityStatus.Failed);
+        recorder.RecordedActivities.Should().Contain(a => a.stage == ExecutionStage.Test && a.status == ExecutionActivityStatus.Failed && a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     [Fact]
@@ -614,7 +611,7 @@ public class GitWorkspaceExecutionProcessorTests
             ImpactAnalysisSummary: "Impact summary");
 
         var act = () => processor.ProcessAsync(context);
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+        await act.Should().NotThrowAsync();
 
         agent.CallCount.Should().Be(2);
         validationRunner.BuildCallCount.Should().Be(2);
@@ -626,6 +623,7 @@ public class GitWorkspaceExecutionProcessorTests
         messages.Should().Contain("Build retry started.");
         messages.Should().Contain("Build retry failed.");
         messages.Should().Contain(m => m.Contains("Build validation failed:"));
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     [Fact]
@@ -647,12 +645,14 @@ public class GitWorkspaceExecutionProcessorTests
                 }
             });
 
-        var processor = CreateProcessor(taskId, agent, runner);
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, recorder: recorder);
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+        await act.Should().NotThrowAsync();
         agent.CallCount.Should().Be(1, "uncorrelated diagnostics must not regenerate all touched files");
         runner.BuildRequests.Should().HaveCount(1);
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     [Fact]
@@ -671,14 +671,16 @@ public class GitWorkspaceExecutionProcessorTests
         };
         var runner = new ScriptedValidationRunner(new[] { failure });
         var fingerprint = new TestFingerprintCalculator("same", "same");
-        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
 
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+        await act.Should().NotThrowAsync();
         agent.CallCount.Should().Be(2);
         runner.BuildRequests.Should().HaveCount(1, "a no-diff repair should stop before another build");
         agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     [Fact]
@@ -697,14 +699,16 @@ public class GitWorkspaceExecutionProcessorTests
         };
         var runner = new ScriptedValidationRunner(new[] { failure, failure });
         var fingerprint = new TestFingerprintCalculator("before", "after");
-        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
 
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
+        await act.Should().NotThrowAsync();
         agent.CallCount.Should().Be(2, "the identical diagnostic must stop before a second repair");
         runner.BuildRequests.Should().HaveCount(2);
         agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     [Fact]
@@ -787,8 +791,7 @@ public class GitWorkspaceExecutionProcessorTests
 
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
-        await act.Should().ThrowAsync<InvalidOperationException>()
-            .WithMessage("Build validation failed after test repair:*");
+        await act.Should().NotThrowAsync();
         agent.CallCount.Should().Be(2, "stale test evidence must not start a second test repair");
         runner.TestRequests.Should().HaveCount(1);
         recorder.RecordedActivities.Should().Contain(activity =>
@@ -811,14 +814,16 @@ public class GitWorkspaceExecutionProcessorTests
             new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
             new[] { failedTest, failedTest });
         var fingerprint = new TestFingerprintCalculator("before", "after");
-        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
 
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Test validation failed*");
+        await act.Should().NotThrowAsync();
         agent.CallCount.Should().Be(2);
         agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/TodoService.cs");
         runner.TestRequests.Should().HaveCount(2, "the same targeted failure stops before another repair");
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     private static GitWorkspaceExecutionProcessor CreateProcessor(
