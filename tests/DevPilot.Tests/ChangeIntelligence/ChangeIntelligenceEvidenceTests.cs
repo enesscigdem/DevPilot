@@ -655,4 +655,108 @@ public sealed class ChangeIntelligenceEvidenceTests
         Assert.Equal(90, data.ImpactedFiles[1].Confidence);
         Assert.Equal(90, data.Confidence);
     }
+
+    [Fact]
+    public void CollectEvidence_NonDotNetTypeScriptRepo_ExposesGenericInventoryAndNodeTechnology()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_ci_node_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "routes"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "data"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue { id: string; }");
+            File.WriteAllText(Path.Combine(tempDir, "src", "routes", "issueRoutes.ts"), "export const routes = [];");
+            File.WriteAllText(Path.Combine(tempDir, "data", "issues.json"), "[]");
+            File.WriteAllText(Path.Combine(tempDir, "tsconfig.json"), "{}");
+            File.WriteAllText(Path.Combine(tempDir, "package.json"), """
+            {
+              "name": "issue-tracker",
+              "scripts": { "build": "tsc" },
+              "dependencies": { "express": "^4.19.2" },
+              "devDependencies": { "typescript": "^5.4.5" }
+            }
+            """);
+
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(
+                tempDir,
+                new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            Assert.Contains("src/models/issue.ts", evidence.InventoryFiles);
+            Assert.Contains("src/routes/issueRoutes.ts", evidence.InventoryFiles);
+            Assert.Contains("package.json", evidence.InventoryFiles);
+            Assert.Contains("tsconfig.json", evidence.InventoryFiles);
+            Assert.Empty(evidence.ProjectGraph);
+            Assert.False(evidence.HasEfCore);
+            Assert.NotNull(evidence.NodeTechnology);
+            Assert.True(evidence.NodeTechnology!.HasTypeScript);
+            Assert.Contains("build: tsc", evidence.NodeTechnology.Scripts);
+            Assert.Contains("express", evidence.NodeTechnology.Frameworks);
+            Assert.Contains("src/models/issue.ts", evidence.PersistenceFiles);
+            Assert.Contains("src/routes/issueRoutes.ts", evidence.ControllerFiles);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void ClassifyFileEvidence_IdentifiesTypeScriptRoutesAndModels()
+    {
+        var evidence = new RepositoryEvidenceProfile
+        {
+            ControllerFiles = new[] { "src/routes/issueRoutes.ts" },
+            PersistenceFiles = new[] { "src/models/issue.ts" },
+            InventoryFiles = new[] { "src/routes/issueRoutes.ts", "src/models/issue.ts" }
+        };
+
+        var (routeType, routeDetails, routeUncertain) = ChangeIntelligenceEvidenceCollector.ClassifyFileEvidence(
+            "src/routes/issueRoutes.ts",
+            ImpactFileChangeType.Modify,
+            90,
+            evidence);
+
+        Assert.Equal("ControllerUsage", routeType);
+        Assert.Contains("route", routeDetails, StringComparison.OrdinalIgnoreCase);
+        Assert.False(routeUncertain);
+
+        var (modelType, modelDetails, modelUncertain) = ChangeIntelligenceEvidenceCollector.ClassifyFileEvidence(
+            "src/models/issue.ts",
+            ImpactFileChangeType.Modify,
+            90,
+            evidence);
+
+        Assert.Equal("PersistenceRelationship", modelType);
+        Assert.Contains("model", modelDetails, StringComparison.OrdinalIgnoreCase);
+        Assert.False(modelUncertain);
+    }
+
+    [Fact]
+    public void TryResolveModifyTarget_UniqueSuffix_CanonicalizesWithoutProvider()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_ci_suffix_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+        File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue {}");
+
+        try
+        {
+            var resolved = ProjectGraphHelper.TryResolveModifyTarget(
+                "models/issue.ts",
+                tempDir,
+                Array.Empty<DiscoveredProjectNode>(),
+                Array.Empty<string>(),
+                out var resolvedPath,
+                out var failureReason);
+
+            Assert.True(resolved);
+            Assert.Equal("src/models/issue.ts", resolvedPath);
+            Assert.Null(failureReason);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
 }

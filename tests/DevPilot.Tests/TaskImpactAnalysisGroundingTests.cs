@@ -3,6 +3,7 @@ using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Commands.StartExecution;
+using DevPilot.Application.Executions.Models;
 using DevPilot.Application.ProjectBrain.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
@@ -811,6 +812,501 @@ public class TaskImpactAnalysisGroundingTests
         parseResult.ResultData.ImpactedFiles[0].ChangeType.Should().Be(ImpactFileChangeType.Add);
         parseResult.ResultData.ImpactedFiles[0].EvidenceType.Should().Be("MigrationRelationship");
         parseResult.ResultData.ImpactedFiles[0].Confidence.Should().Be(90);
+    }
+
+    [Fact]
+    public void Scenario_NonDotNetRepo_ReceivesGenericFileInventory()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_nondotnet_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "services"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue { id: string; }");
+            File.WriteAllText(Path.Combine(tempDir, "src", "services", "issueService.ts"), "export class IssueService {}");
+            File.WriteAllText(Path.Combine(tempDir, "package.json"), """{"name": "issue-tracker", "scripts": {"build": "tsc"}}""");
+
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            evidence.InventoryFiles.Should().Contain("src/models/issue.ts");
+            evidence.InventoryFiles.Should().Contain("src/services/issueService.ts");
+            evidence.InventoryFiles.Should().Contain("package.json");
+            evidence.ProjectGraph.Should().BeEmpty();
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_TypeScriptRepo_InventoryIncludesExactTsPaths()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_ts_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "controllers"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "routes"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "controllers", "issueController.ts"), "export class IssueController {}");
+            File.WriteAllText(Path.Combine(tempDir, "src", "routes", "issueRoutes.ts"), "export const routes = [];");
+            File.WriteAllText(Path.Combine(tempDir, "tsconfig.json"), "{}");
+
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Unconfigured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            evidence.InventoryFiles.Should().Contain("src/controllers/issueController.ts");
+            evidence.InventoryFiles.Should().Contain("src/routes/issueRoutes.ts");
+            evidence.InventoryFiles.Should().Contain("tsconfig.json");
+            evidence.ControllerFiles.Should().Contain("src/controllers/issueController.ts");
+            evidence.ControllerFiles.Should().Contain("src/routes/issueRoutes.ts");
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_PackageJsonAndTsconfigEvidence_ExposedWithoutReadmeInference()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_pkg_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "package.json"), """
+            {
+              "name": "devpilot-issue-tracker",
+              "scripts": {
+                "build": "tsc",
+                "start": "node dist/server.js",
+                "dev": "ts-node src/server.ts"
+              },
+              "dependencies": {
+                "express": "^4.19.2"
+              },
+              "devDependencies": {
+                "typescript": "^5.4.5"
+              }
+            }
+            """);
+            File.WriteAllText(Path.Combine(tempDir, "tsconfig.json"), "{}");
+            File.WriteAllText(Path.Combine(tempDir, "README.md"), "Build with dotnet build. Add EF Core migrations before running.");
+
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            evidence.NodeTechnology.Should().NotBeNull();
+            evidence.NodeTechnology!.HasTypeScript.Should().BeTrue();
+            evidence.NodeTechnology.PackageManager.Should().Be("npm");
+            evidence.NodeTechnology.Scripts.Should().Contain("build: tsc");
+            evidence.NodeTechnology.Frameworks.Should().Contain("express");
+            evidence.HasEfCore.Should().BeFalse("README command inference must not fabricate .NET evidence.");
+            evidence.ProjectGraph.Should().BeEmpty();
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_NodeTypeScriptRepo_DoesNotReceiveFabricatedDotNetProjectEvidence()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_nodotnet_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "data"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue {}");
+            File.WriteAllText(Path.Combine(tempDir, "data", "issues.json"), "[]");
+            File.WriteAllText(Path.Combine(tempDir, "package.json"), """{"name": "issue-tracker", "scripts": {"build": "tsc"}}""");
+
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            evidence.HasEfCore.Should().BeFalse();
+            evidence.ProjectGraph.Should().BeEmpty();
+            evidence.ProjectRoots.Should().BeEmpty();
+            evidence.PersistenceFiles.Should().Contain("src/models/issue.ts");
+            evidence.PersistenceFiles.Should().Contain("data/issues.json");
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_ModifyExactExistingPath_Accepted()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_exact_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue {}");
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            var rawJson = """
+            {
+              "summary": "Update issue model to include status property",
+              "confidence": 95,
+              "impactedFiles": [
+                {
+                  "filePath": "src/models/issue.ts",
+                  "changeType": "Modify",
+                  "reason": "Add status field to Issue interface"
+                }
+              ]
+            }
+            """;
+
+            var result = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, tempDir);
+
+            result.Success.Should().BeTrue();
+            result.ResultData!.ImpactedFiles.Should().HaveCount(1);
+            result.ResultData.ImpactedFiles[0].FilePath.Should().Be("src/models/issue.ts");
+            result.ResultData.ImpactedFiles[0].ChangeType.Should().Be(ImpactFileChangeType.Modify);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_ModifyWildcard_Rejected()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_wildcard_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue {}");
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            var rawJson = """
+            {
+              "summary": "Update issue models",
+              "confidence": 85,
+              "impactedFiles": [
+                {
+                  "filePath": "models/issue.*",
+                  "changeType": "Modify",
+                  "reason": "Wildcard pattern"
+                }
+              ]
+            }
+            """;
+
+            var result = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, tempDir);
+
+            result.Success.Should().BeFalse();
+            result.IsGroundingError.Should().BeTrue();
+            result.ErrorMessage.Should().Contain("wildcard");
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_ConcreteSuffixPath_ResolvesToFullRelativePath_IffUnique()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_suffix_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue {}");
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            var rawJson = """
+            {
+              "summary": "Update issue model using suffix path",
+              "confidence": 90,
+              "impactedFiles": [
+                {
+                  "filePath": "models/issue.ts",
+                  "changeType": "Modify",
+                  "reason": "Add status field to Issue interface"
+                }
+              ]
+            }
+            """;
+
+            var result = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, tempDir);
+
+            result.Success.Should().BeTrue();
+            result.ResultData!.ImpactedFiles.Should().HaveCount(1);
+            result.ResultData.ImpactedFiles[0].FilePath.Should().Be("src/models/issue.ts");
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_AmbiguousBasenameOrSuffix_RejectedSafely()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_ambig_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "client", "models"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "server", "models"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "client", "models", "issue.ts"), "export interface ClientIssue {}");
+            File.WriteAllText(Path.Combine(tempDir, "src", "server", "models", "issue.ts"), "export interface ServerIssue {}");
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            var rawJson = """
+            {
+              "summary": "Ambiguous model path",
+              "confidence": 80,
+              "impactedFiles": [
+                {
+                  "filePath": "models/issue.ts",
+                  "changeType": "Modify",
+                  "reason": "Ambiguous path matching two files"
+                }
+              ]
+            }
+            """;
+
+            var result = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, tempDir);
+
+            result.Success.Should().BeFalse();
+            result.IsGroundingError.Should().BeTrue();
+            result.ErrorMessage.Should().Contain("matches multiple candidate files");
+            result.ErrorMessage.Should().Contain("Ambiguous mapping cannot be resolved safely");
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_CreateConcreteNewPath_Accepted()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_create_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue {}");
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(tempDir, new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            var rawJson = """
+            {
+              "summary": "Create new issue status enum file",
+              "confidence": 95,
+              "impactedFiles": [
+                {
+                  "filePath": "src/models/issueStatus.ts",
+                  "changeType": "Create",
+                  "reason": "New enum for issue statuses"
+                }
+              ]
+            }
+            """;
+
+            var result = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, tempDir);
+
+            result.Success.Should().BeTrue();
+            result.ResultData!.ImpactedFiles.Should().HaveCount(1);
+            result.ResultData.ImpactedFiles[0].FilePath.Should().Be("src/models/issueStatus.ts");
+            result.ResultData.ImpactedFiles[0].ChangeType.Should().Be(ImpactFileChangeType.Add);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Scenario_ImpactAnalysis_GenericInventory_ReturnsNonZeroImpactedFiles_WhenRoslynProjectCountIsZero()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_zero_roslyn_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "services"));
+
+        try
+        {
+            File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue { id: string; }");
+            File.WriteAllText(Path.Combine(tempDir, "src", "services", "issueService.ts"), "export class IssueService {}");
+            File.WriteAllText(Path.Combine(tempDir, "package.json"), """{"name": "issue-tracker", "scripts": {"build": "tsc"}}""");
+
+            var workspaceId = Guid.NewGuid();
+            var task = new DevelopmentTask
+            {
+                Id = Guid.NewGuid(),
+                Title = "Add issue status property",
+                Description = "Extend Issue interface with status property and update issueService",
+                Status = DevelopmentTaskStatus.Draft,
+                RepositoryWorkspaceId = workspaceId
+            };
+
+            var workspace = new RepositoryWorkspace
+            {
+                Id = workspaceId,
+                LocalPath = tempDir,
+                Owner = "testowner",
+                Repository = "testrepo",
+                Branch = "main",
+                CommitSha = "abc1234",
+                Status = RepositoryWorkspaceStatus.Completed
+            };
+
+            var taskRepo = new FakeTaskRepository();
+            await taskRepo.AddAsync(task);
+            var workspaceQuery = new FakeWorkspaceQuery { WorkspaceToReturn = workspace };
+            var analysisRepo = new FakeAnalysisRepository();
+            var analyzer = new FakeRepositoryAnalyzer();
+            var embeddingProvider = new FakeEmbeddingProvider();
+            var searchService = new FakeSearchService();
+
+            var aiProvider = new FakeAiProvider();
+            aiProvider.ResponsesToReturn.Enqueue("""
+                {
+                  "summary": "Add status field to Issue interface and update service",
+                  "confidence": 90,
+                  "impactedFiles": [
+                    {
+                      "filePath": "src/models/issue.ts",
+                      "changeType": "Modify",
+                      "reason": "Add status field to Issue interface"
+                    },
+                    {
+                      "filePath": "src/services/issueService.ts",
+                      "changeType": "Modify",
+                      "reason": "Handle status updates in issueService"
+                    }
+                  ],
+                  "proposedPlan": [
+                    {
+                      "stepNumber": 1,
+                      "title": "Update model",
+                      "description": "Add status field to Issue interface"
+                    }
+                  ]
+                }
+                """);
+
+            var handler = new AnalyzeTaskImpactCommandHandler(
+                taskRepo,
+                workspaceQuery,
+                analysisRepo,
+                analyzer,
+                aiProvider,
+                embeddingProvider,
+                searchService,
+                NullLogger<AnalyzeTaskImpactCommandHandler>.Instance);
+
+            var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(task.Id));
+
+            result.Success.Should().BeTrue();
+            result.Analysis.Should().NotBeNull();
+            result.Analysis!.StructuredResult!.ImpactedFiles.Should().HaveCount(2);
+            result.Analysis.StructuredResult.ImpactedFiles.Select(f => f.FilePath).Should().Contain("src/models/issue.ts");
+            result.Analysis.StructuredResult.ImpactedFiles.Select(f => f.FilePath).Should().Contain("src/services/issueService.ts");
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_PathSafety_PreservesZeroImpactSafetyExceptionInDeveloperAgent()
+    {
+        var request = new DeveloperAgentRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Task with empty impact",
+            TaskDescription: "Empty impact test",
+            AcceptanceCriteria: null,
+            ImpactAnalysisSummary: "Summary",
+            ProposedPlan: "Plan",
+            ImpactedFilePaths: Array.Empty<string>(),
+            WorkspacePath: _repoRoot,
+            BranchName: "main",
+            ImpactedFiles: Array.Empty<ImpactedFileDetail>());
+
+        var act = () => DeveloperAgent.BuildManifestFromImpactAnalysis(
+            request,
+            _repoRoot,
+            ProjectGraphHelper.DiscoverProjectRoots(_repoRoot),
+            maxManifestFiles: 10,
+            projectGraph: null);
+
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*contains no impacted files*");
+    }
+
+    [Fact]
+    public void Scenario_ModifyDirectoryOnlyPath_Rejected()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "devpilot_test_dironly_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        Directory.CreateDirectory(Path.Combine(tempDir, "src", "models"));
+        File.WriteAllText(Path.Combine(tempDir, "src", "models", "issue.ts"), "export interface Issue {}");
+
+        try
+        {
+            var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(
+                tempDir,
+                new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+            var rawJson = """
+            {
+              "summary": "Update models directory",
+              "confidence": 80,
+              "impactedFiles": [
+                {
+                  "filePath": "src/models/",
+                  "changeType": "Modify",
+                  "reason": "Directory-only path"
+                }
+              ]
+            }
+            """;
+
+            var result = AnalyzeTaskImpactCommandHandler.TryParseStructuredResult(rawJson, evidence, tempDir);
+
+            result.Success.Should().BeFalse();
+            result.IsGroundingError.Should().BeTrue();
+            result.ErrorMessage.Should().Contain("directory-only");
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Scenario_DotNetRoslynRepo_StillReceivesProjectGraphEvidence()
+    {
+        var evidence = ChangeIntelligenceEvidenceCollector.CollectEvidence(
+            _repoRoot,
+            new RepositoryProfile(RepositoryVerificationState.Configured, Array.Empty<string>(), Array.Empty<RepositoryCheck>(), null));
+
+        evidence.ProjectGraph.Should().NotBeEmpty();
+        evidence.ProjectRoots.Should().Contain(r => r.Contains("DevPilot.Application", StringComparison.OrdinalIgnoreCase));
+        evidence.InventoryCsFiles.Should().Contain("src/DevPilot.Domain/Entities/DevelopmentTask.cs");
+        evidence.HasEfCore.Should().BeTrue();
     }
 
     private class FakeTaskRepository : ITaskRepository
