@@ -426,10 +426,17 @@ C:\app\Controllers\OrderController.cs(10,5): error CS0246: The type or namespace
     private sealed class FakeDevAgent : IDeveloperAgent
     {
         public int GenerateCalls { get; set; }
+        public int RepairCalls { get; set; }
         public Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(DeveloperAgentRequest request, CancellationToken cancellationToken = default)
         {
             GenerateCalls++;
             return Task.FromResult(DeveloperAgentResult.Ok(new[] { "src/File1.cs" }, model: "test-model"));
+        }
+
+        public Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(FocusedRepairRequest request, CancellationToken cancellationToken = default)
+        {
+            RepairCalls++;
+            return Task.FromResult(DeveloperAgentResult.Ok(request.RepairFiles, model: "test-model"));
         }
     }
 

@@ -1026,6 +1026,12 @@ public class GitWorkspaceExecutionProcessorTests
             Requests.Add(request);
             return Task.FromResult(ResultToReturn);
         }
+
+        public Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(FocusedRepairRequest request, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult(ResultToReturn);
+        }
     }
 
     private class TestExecutionValidationRunner : IExecutionValidationRunner

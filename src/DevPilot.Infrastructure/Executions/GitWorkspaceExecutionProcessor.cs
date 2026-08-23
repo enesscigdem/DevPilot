@@ -550,36 +550,26 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     cancellationToken).ConfigureAwait(false);
             }
 
-            var repairDescription = new StringBuilder()
-                .AppendLine($"Fix the following authoritative repository check failure (repair round {repairRound}/{_maxCompileRepairRounds}):")
-                .AppendLine(string.Join("\n", evidence.DiagnosticLines.Take(10)))
-                .ToString();
             var languageContext = _repairContextProvider?.GetCompileRepairContext(check, prepResult.WorkspacePath, repairFiles);
-            if (!string.IsNullOrWhiteSpace(languageContext))
-            {
-                repairDescription += $"\n=== Available Repository / Port Abstractions ===\n{languageContext}\nUse existing repository abstractions; do not invent unavailable types.";
-            }
-
-            var repairRequest = new DeveloperAgentRequest(
-                context.TaskId,
-                context.ExecutionId,
-                $"Repair {check.DisplayName} failure for {context.TaskTitle} (round {repairRound})",
-                repairDescription,
-                "Resolve the authoritative repository check failure in the focused files without weakening existing tests or checks.",
-                analysis.Summary ?? "Repository check repair",
-                "Repair repository verification failure",
-                repairFiles,
-                prepResult.WorkspacePath,
-                prepResult.BranchName,
-                repairFiles.Select(file => new ImpactedFileDetail(file, "Modify", "Fix repository verification failure")).ToList(),
-                actualModel);
+            var repairRequest = new FocusedRepairRequest(
+                TaskId: context.TaskId,
+                ExecutionId: context.ExecutionId,
+                TaskTitle: context.TaskTitle,
+                AcceptanceCriteria: "Resolve the authoritative repository check failure in the focused files without weakening existing tests or checks.",
+                WorkspacePath: prepResult.WorkspacePath,
+                BranchName: prepResult.BranchName,
+                RepairFiles: repairFiles,
+                DiagnosticEvidence: string.Join("\n", evidence.DiagnosticLines.Take(10)),
+                DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
+                LanguageContext: languageContext,
+                Model: actualModel);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();
             DeveloperAgentResult repairResult;
             try
             {
-                repairResult = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest, cancellationToken).ConfigureAwait(false);
+                repairResult = await _developerAgent.ExecuteFocusedRepairAsync(repairRequest, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -849,26 +839,25 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     failureFingerprint: evidence.FailureFingerprint),
                 cancellationToken).ConfigureAwait(false);
 
-            var repairRequest = new DeveloperAgentRequest(
-                context.TaskId,
-                context.ExecutionId,
-                $"Repair test failures for {context.TaskTitle} (round {repairRound})",
-                $"Fix the authoritative failing test evidence (repair round {repairRound}/{_maxTestRepairRounds}):\n{string.Join("\n", evidence.RelevantLines)}\n\nDo not delete, skip, comment out, or weaken existing tests.",
-                "Resolve the failing test without weakening existing test assertions.",
-                analysis.Summary ?? "Test repair",
-                "Repair test failure",
-                repairFiles,
-                prepResult.WorkspacePath,
-                prepResult.BranchName,
-                repairFiles.Select(file => new ImpactedFileDetail(file, "Modify", "Fix test failure")).ToList(),
-                actualModel);
+            var repairRequest = new FocusedRepairRequest(
+                TaskId: context.TaskId,
+                ExecutionId: context.ExecutionId,
+                TaskTitle: context.TaskTitle,
+                AcceptanceCriteria: "Resolve the failing test without weakening existing test assertions.",
+                WorkspacePath: prepResult.WorkspacePath,
+                BranchName: prepResult.BranchName,
+                RepairFiles: repairFiles,
+                DiagnosticEvidence: string.Join("\n", evidence.RelevantLines),
+                DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
+                LanguageContext: null,
+                Model: actualModel);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();
             DeveloperAgentResult repairResult;
             try
             {
-                repairResult = await _developerAgent.GenerateAndApplyEditsAsync(repairRequest, cancellationToken).ConfigureAwait(false);
+                repairResult = await _developerAgent.ExecuteFocusedRepairAsync(repairRequest, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
