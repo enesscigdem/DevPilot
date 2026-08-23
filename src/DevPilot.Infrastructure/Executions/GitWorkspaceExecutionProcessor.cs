@@ -26,6 +26,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly IExecutionChangeFingerprintCalculator? _changeFingerprintCalculator;
     private readonly IRepositoryRepairContextProvider? _repairContextProvider;
+    private readonly IBaselineVerificationService? _baselineVerificationService;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
     private readonly int _maxCompileRepairRounds;
     private readonly int _maxTestRepairRounds;
@@ -40,7 +41,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         ILogger<GitWorkspaceExecutionProcessor> logger,
         IConfiguration? configuration = null,
         IExecutionChangeFingerprintCalculator? changeFingerprintCalculator = null,
-        IRepositoryRepairContextProvider? repairContextProvider = null)
+        IRepositoryRepairContextProvider? repairContextProvider = null,
+        IBaselineVerificationService? baselineVerificationService = null)
     {
         _workspaceManager = workspaceManager;
         _executionRepository = executionRepository;
@@ -50,6 +52,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         _activityRecorder = activityRecorder;
         _changeFingerprintCalculator = changeFingerprintCalculator;
         _repairContextProvider = repairContextProvider;
+        _baselineVerificationService = baselineVerificationService;
         _logger = logger;
 
         _maxCompileRepairRounds = TryGetNonNegativeSetting(
@@ -418,6 +421,40 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
         }
 
+        if (!result.Success && _baselineVerificationService != null && !string.IsNullOrWhiteSpace(prepResult.BaseCommitSha))
+        {
+            var baseComparison = await _baselineVerificationService.EvaluateCompilerFailureAsync(
+                prepResult.WorkspacePath,
+                context.WorkspaceLocalPath,
+                prepResult.BaseCommitSha,
+                check,
+                result,
+                cancellationToken).ConfigureAwait(false);
+
+            if (baseComparison.Classification == BaselineFailureClassification.PreExisting)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Build,
+                    ExecutionActivityStatus.Completed,
+                    $"No new regressions: {baseComparison.PreExistingCount} pre-existing repository failure(s) remain.",
+                    CheckMetadata(
+                        check,
+                        "VerifyingRepository",
+                        result,
+                        buildPassed: true,
+                        baselineClassification: "PreExisting",
+                        verificationOutcome: "NoNewRegressions",
+                        preExistingFailureCount: baseComparison.PreExistingCount,
+                        newRegressionCount: 0,
+                        baseCommitSha: prepResult.BaseCommitSha,
+                        baselineCacheHit: baseComparison.CacheHit,
+                        stageDurationMs: stopwatch.ElapsedMilliseconds),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+
         var repairRound = 0;
         string? previousFailureFingerprint = null;
 
@@ -715,6 +752,42 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             throw new InvalidOperationException($"Repository check infrastructure failure: {result.ErrorMessage}");
         }
 
+        if (!result.Success && _baselineVerificationService != null && !string.IsNullOrWhiteSpace(prepResult.BaseCommitSha))
+        {
+            var baseComparison = await _baselineVerificationService.EvaluateTestFailureAsync(
+                prepResult.WorkspacePath,
+                context.WorkspaceLocalPath,
+                prepResult.BaseCommitSha,
+                check,
+                result,
+                cancellationToken).ConfigureAwait(false);
+
+            if (baseComparison.Classification == BaselineFailureClassification.PreExisting)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Test,
+                    ExecutionActivityStatus.Completed,
+                    isFinalTest
+                        ? $"No new regressions: {baseComparison.PreExistingCount} pre-existing repository failure(s) remain."
+                        : $"{check.DisplayName}: No new regressions ({baseComparison.PreExistingCount} pre-existing failure(s) remain).",
+                    CheckMetadata(
+                        check,
+                        isFinalTest ? "ReadyForReview" : "VerifyingRepository",
+                        result,
+                        testPassed: true,
+                        baselineClassification: "PreExisting",
+                        verificationOutcome: "NoNewRegressions",
+                        preExistingFailureCount: baseComparison.PreExistingCount,
+                        newRegressionCount: 0,
+                        baseCommitSha: prepResult.BaseCommitSha,
+                        baselineCacheHit: baseComparison.CacheHit,
+                        stageDurationMs: stopwatch.ElapsedMilliseconds),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+
         var repairRound = 0;
         string? previousFailureFingerprint = null;
         while (!result.Success && repairRound < _maxTestRepairRounds)
@@ -1006,7 +1079,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         string? progressResult = null,
         long? stageDurationMs = null,
         bool? buildPassed = null,
-        bool? testPassed = null) => new(
+        bool? testPassed = null,
+        string? baselineClassification = null,
+        string? verificationOutcome = null,
+        int? preExistingFailureCount = null,
+        int? newRegressionCount = null,
+        string? baseCommitSha = null,
+        bool? baselineCacheHit = null) => new(
             BuildPassed: buildPassed,
             TestPassed: testPassed,
             EventKind: eventKind,
@@ -1024,7 +1103,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             ProcessExitCode: result?.ExitCode,
             VerificationFailureCategory: result?.FailureCategory.ToString(),
             DeterministicCheck: true,
-            RepositoryCheckEvidence: check.DiscoveryEvidence);
+            RepositoryCheckEvidence: check.DiscoveryEvidence,
+            BaselineClassification: baselineClassification,
+            VerificationOutcome: verificationOutcome,
+            PreExistingFailureCount: preExistingFailureCount,
+            NewRegressionCount: newRegressionCount,
+            BaseCommitSha: baseCommitSha,
+            BaselineCacheHit: baselineCacheHit);
 
     private async Task<string?> GetChangeFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
     {

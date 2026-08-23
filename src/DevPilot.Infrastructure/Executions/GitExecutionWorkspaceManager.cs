@@ -121,20 +121,26 @@ public sealed class GitExecutionWorkspaceManager : IExecutionWorkspaceManager
             return Failure($"Original repository branch was unexpectedly modified from '{initialBranch}' to '{postBranchName?.Trim()}'. Error: {postBranchError}");
         }
 
+        // Capture BaseCommitSha from worktree HEAD before any changes
+        var (headShaOk, headSha, _) = await RunGitCommandAsync(targetWorkspacePath, cancellationToken, "rev-parse", "HEAD").ConfigureAwait(false);
+        var baseCommitSha = headShaOk && !string.IsNullOrWhiteSpace(headSha) ? headSha.Trim() : null;
+
         _logger.LogInformation(
             "Execution workspace prepared successfully. " +
-            "ExecutionId: {ExecutionId}, TaskId: {TaskId}, Path: '{Path}', Branch: '{Branch}', SourceRepo: '{SourceRepo}' (Branch: '{SourceBranch}').",
+            "ExecutionId: {ExecutionId}, TaskId: {TaskId}, Path: '{Path}', Branch: '{Branch}', BaseSha: '{BaseSha}', SourceRepo: '{SourceRepo}' (Branch: '{SourceBranch}').",
             executionId,
             taskId,
             targetWorkspacePath,
             targetBranchName,
+            baseCommitSha,
             sourcePath,
             initialBranch);
 
         return new ExecutionWorkspaceResult(
             WorkspacePath: targetWorkspacePath,
             BranchName: targetBranchName,
-            Success: true);
+            Success: true,
+            BaseCommitSha: baseCommitSha);
     }
 
     public async Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(
