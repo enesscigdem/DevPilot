@@ -3,7 +3,10 @@ using DevPilot.Domain.Enums;
 namespace DevPilot.Application.Executions.Dtos;
 
 public sealed record ExecutionReviewStageStatusDto(
-    string Status);
+    string Status,
+    int PreExistingFailureCount = 0,
+    int NewRegressionCount = 0,
+    string? DetailSummary = null);
 
 public sealed record ExecutionReviewFileDto(
     string Path,

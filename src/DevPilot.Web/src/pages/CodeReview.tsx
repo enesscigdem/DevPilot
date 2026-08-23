@@ -829,7 +829,7 @@ export function CodeReview() {
                 <FlaskConical
                   className={cn(
                     "h-3.5 w-3.5",
-                    review.test.status === "Passed"
+                    review.test.status === "Passed" || review.test.status === "NoNewRegressions"
                       ? "text-success"
                       : review.test.status === "Failed"
                         ? "text-danger"
@@ -843,13 +843,22 @@ export function CodeReview() {
                   "mt-1 text-[13px] font-semibold",
                   review.test.status === "Passed"
                     ? "text-success"
-                    : review.test.status === "Failed"
-                      ? "text-danger"
-                      : "text-muted-foreground",
+                    : review.test.status === "NoNewRegressions"
+                      ? "text-emerald-500"
+                      : review.test.status === "Failed"
+                        ? "text-danger"
+                        : "text-muted-foreground",
                 )}
               >
-                {review.test.status}
+                {review.test.status === "NoNewRegressions"
+                  ? "No new regressions"
+                  : review.test.status}
               </div>
+              {review.test.detailSummary && (
+                <div className="mt-0.5 text-[11px] text-muted-foreground">
+                  {review.test.detailSummary}
+                </div>
+              )}
             </Panel>
           </div>
 
@@ -860,8 +869,9 @@ export function CodeReview() {
               const buildFailed = activities.some((a) => a.stage === "Build" && a.status === "Failed")
               const testPassed = activities.some((a) => a.stage === "Test" && a.status === "Completed")
               const testFailed = activities.some((a) => a.stage === "Test" && a.status === "Failed")
+              const isNoNewRegressions = review.test.status === "NoNewRegressions" || activities.some((a) => a.stage === "Test" && a.status === "Completed" && (a.metadata?.verificationOutcome === "NoNewRegressions" || a.metadata?.baselineClassification === "PreExisting"))
               const hasValidationResults = activities.some((a) => a.stage === "Build" || a.stage === "Test")
-              const validationPassed = !hasValidationResults || (buildPassed && !buildFailed && testPassed && !testFailed)
+              const validationPassed = !hasValidationResults || (buildPassed && !buildFailed && (testPassed || isNoNewRegressions) && !testFailed) || review.test.status === "NoNewRegressions"
 
               return (
                 <div className="space-y-2">

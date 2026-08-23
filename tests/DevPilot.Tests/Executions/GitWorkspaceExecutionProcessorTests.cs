@@ -546,7 +546,7 @@ public class GitWorkspaceExecutionProcessorTests
 
         // Developer Agent called twice: initial generation + compile repair
         agent.CallCount.Should().Be(2);
-        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
         validationRunner.BuildCallCount.Should().Be(2);
         validationRunner.TestCallCount.Should().Be(1);
 
@@ -678,7 +678,7 @@ public class GitWorkspaceExecutionProcessorTests
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
         agent.CallCount.Should().Be(2);
         runner.BuildRequests.Should().HaveCount(1, "a no-diff repair should stop before another build");
-        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
     }
 
     [Fact]
@@ -704,7 +704,7 @@ public class GitWorkspaceExecutionProcessorTests
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Build validation failed*");
         agent.CallCount.Should().Be(2, "the identical diagnostic must stop before a second repair");
         runner.BuildRequests.Should().HaveCount(2);
-        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
     }
 
     [Fact]
@@ -727,10 +727,10 @@ public class GitWorkspaceExecutionProcessorTests
         await processor.ProcessAsync(CreateContext(taskId));
 
         agent.CallCount.Should().Be(3);
-        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/App.cs");
-        agent.Requests[2].ImpactedFilePaths.Should().Equal("src/Other.cs");
-        agent.Requests[1].ImpactedFilePaths.Should().NotContain("src/Valid.cs");
-        agent.Requests[2].ImpactedFilePaths.Should().NotContain("src/Valid.cs");
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[1].RepairFiles.Should().Equal("src/Other.cs");
+        agent.FocusedRepairRequests[0].RepairFiles.Should().NotContain("src/Valid.cs");
+        agent.FocusedRepairRequests[1].RepairFiles.Should().NotContain("src/Valid.cs");
     }
 
     [Fact]
@@ -751,7 +751,7 @@ public class GitWorkspaceExecutionProcessorTests
         await processor.ProcessAsync(CreateContext(taskId));
 
         agent.CallCount.Should().Be(2);
-        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/TodoService.cs");
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/TodoService.cs");
         runner.TestRequests.Should().HaveCount(3);
         runner.TestRequests[0].SkipBuild.Should().BeTrue();
         runner.TestRequests[0].TestFilter.Should().BeNull();
@@ -817,7 +817,7 @@ public class GitWorkspaceExecutionProcessorTests
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Test validation failed*");
         agent.CallCount.Should().Be(2);
-        agent.Requests[1].ImpactedFilePaths.Should().Equal("src/TodoService.cs");
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/TodoService.cs");
         runner.TestRequests.Should().HaveCount(2, "the same targeted failure stops before another repair");
     }
 
@@ -1019,6 +1019,7 @@ public class GitWorkspaceExecutionProcessorTests
         public DeveloperAgentResult ResultToReturn { get; set; } = DeveloperAgentResult.Ok(new List<string> { "Modified.cs" });
         public int CallCount { get; private set; }
         public List<DeveloperAgentRequest> Requests { get; } = new();
+        public List<FocusedRepairRequest> FocusedRepairRequests { get; } = new();
 
         public Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(DeveloperAgentRequest request, CancellationToken cancellationToken = default)
         {
@@ -1030,6 +1031,7 @@ public class GitWorkspaceExecutionProcessorTests
         public Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(FocusedRepairRequest request, CancellationToken cancellationToken = default)
         {
             CallCount++;
+            FocusedRepairRequests.Add(request);
             return Task.FromResult(ResultToReturn);
         }
     }

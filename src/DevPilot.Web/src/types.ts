@@ -362,6 +362,13 @@ export interface ExecutionActivityMetadata {
   verificationUnresolved?: boolean | null;
   discoveredCheckEvidence?: string[] | null;
   repositoryCheckEvidence?: string | null;
+  baselineClassification?: string | null;
+  baseCommitSha?: string | null;
+  baselineCacheHit?: boolean | null;
+  preExistingFailureCount?: number | null;
+  newRegressionCount?: number | null;
+  targetedTestFilter?: string | null;
+  verificationOutcome?: string | null;
 }
 
 export interface ExecutionActivityItem {
@@ -377,10 +384,13 @@ export interface ExecutionActivityItem {
 // ---------------------------------------------------------------------------
 // Execution Review — DTOs
 // ---------------------------------------------------------------------------
-export type ExecutionReviewStageResult = "Passed" | "Failed" | "Unknown";
+export type ExecutionReviewStageResult = "Passed" | "NoNewRegressions" | "Failed" | "Unknown";
 
 export interface ExecutionReviewStageStatus {
   status: ExecutionReviewStageResult;
+  preExistingFailureCount?: number | null;
+  newRegressionCount?: number | null;
+  detailSummary?: string | null;
 }
 
 export interface ExecutionReviewFile {
