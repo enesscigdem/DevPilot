@@ -429,6 +429,172 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task NodeRepository_DiscoversNpmRunBuild()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{}");
+
+        var profile = await DiscoverAsync();
+
+        profile.Checks.Should().ContainSingle(check =>
+            check.Kind == RepositoryCheckKind.Build &&
+            check.Executable == "npm" &&
+            check.Arguments.SequenceEqual(new[] { "run", "build" }));
+    }
+
+    [Fact]
+    public async Task NpmLockfile_MissingNodeModules_RunsCiOnceThenBuild()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        var lockHash = FileHash("package-lock.json");
+        var runner = CreateUnixRunner();
+
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks.Single();
+        var result = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", check));
+
+        result.Success.Should().BeTrue();
+        _processRunner.Invocations.Should().HaveCount(2);
+        _processRunner.Invocations[0].Executable.Should().Be("npm");
+        _processRunner.Invocations[0].Arguments.Should().Equal("ci");
+        _processRunner.Invocations[1].Executable.Should().Be("npm");
+        _processRunner.Invocations[1].Arguments.Should().Equal("run", "build");
+        FileHash("package-lock.json").Should().Be(lockHash);
+        _processRunner.Invocations.Should().NotContain(invocation =>
+            invocation.Arguments.Contains("install") && !invocation.Arguments.Contains("--frozen-lockfile"));
+    }
+
+    [Fact]
+    public async Task ExistingNodeModules_SkipsNpmCi()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        Directory.CreateDirectory(Path.Combine(_workspace, "node_modules", ".bin"));
+        File.WriteAllText(Path.Combine(_workspace, "node_modules", ".bin", "tsc"), string.Empty);
+        var runner = CreateUnixRunner();
+
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks.Single();
+        await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", check));
+
+        _processRunner.Invocations.Should().ContainSingle();
+        _processRunner.Invocations[0].Arguments.Should().Equal("run", "build");
+    }
+
+    [Fact]
+    public async Task BuildThenSecondNodeCheck_DoesNotRunNpmCiTwice()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc", "lint": "eslint ." } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        var runner = CreateUnixRunner();
+        var checks = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks;
+        var build = checks.Single(check => check.Kind == RepositoryCheckKind.Build);
+        var lint = checks.Single(check => check.Kind == RepositoryCheckKind.Lint);
+
+        (await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", build))).Success.Should().BeTrue();
+        (await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", lint))).Success.Should().BeTrue();
+
+        _processRunner.Invocations.Count(invocation => invocation.Arguments.SequenceEqual(new[] { "ci" })).Should().Be(1);
+        _processRunner.Invocations.Select(invocation => invocation.Arguments).Should().ContainEquivalentOf(new[] { "run", "build" });
+        _processRunner.Invocations.Select(invocation => invocation.Arguments).Should().ContainEquivalentOf(new[] { "run", "lint" });
+    }
+
+    [Fact]
+    public async Task NpmCiFailure_IsInfrastructureFailure_NotVerificationFailure()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        _processRunner.Results.Enqueue(Result(exitCode: 1, error: "npm ci failed"));
+        var runner = CreateUnixRunner();
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks.Single();
+
+        var result = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", check));
+
+        result.FailureCategory.Should().Be(RepositoryCheckFailureCategory.InfrastructureFailure);
+        result.ErrorMessage.Should().Contain("dependency preparation");
+        result.ErrorMessage.Should().Contain("npm ci");
+        _processRunner.Invocations.Should().ContainSingle();
+        _processRunner.Invocations[0].Arguments.Should().Equal("ci");
+    }
+
+    [Fact]
+    public async Task MissingPackageLock_DoesNotInventNpmInstall()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        var runner = CreateUnixRunner();
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks.Single();
+
+        await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", check));
+
+        _processRunner.Invocations.Should().ContainSingle();
+        _processRunner.Invocations[0].Arguments.Should().Equal("run", "build");
+        _processRunner.Invocations.Should().NotContain(invocation => invocation.Arguments.Contains("install") || invocation.Arguments.Contains("ci"));
+    }
+
+    [Fact]
+    public async Task WindowsNpmBuild_UsesStructuredNodeCliLauncher()
+    {
+        var nodejs = Path.Combine(_workspace, "fake-nodejs");
+        Directory.CreateDirectory(Path.Combine(nodejs, "node_modules", "npm", "bin"));
+        File.WriteAllText(Path.Combine(nodejs, "node.exe"), string.Empty);
+        File.WriteAllText(Path.Combine(nodejs, "node_modules", "npm", "bin", "npm-cli.js"), string.Empty);
+        File.WriteAllText(Path.Combine(nodejs, "npm"), "#!/bin/sh");
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        var runner = new RepositoryNativeCheckRunner(
+            _workspaceManager,
+            _processRunner,
+            NullLogger<RepositoryNativeCheckRunner>.Instance,
+            new PackageManagerProcessResolver(isWindows: true, new[] { nodejs }));
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks.Single();
+
+        var result = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", check));
+
+        result.Success.Should().BeTrue();
+        check.Executable.Should().Be("npm");
+        check.Arguments.Should().Equal("run", "build");
+        _processRunner.Invocations.Should().HaveCount(2);
+        _processRunner.Invocations.Should().OnlyContain(invocation =>
+            Path.GetFileName(invocation.Executable) == "node.exe" &&
+            !PackageManagerProcessResolver.IsInvalidWindowsNpmShim(invocation.Executable) &&
+            !PackageManagerProcessResolver.IsForbiddenLauncher(invocation.Executable));
+        _processRunner.Invocations[0].Arguments.Should().EndWith("ci");
+        _processRunner.Invocations[1].Arguments.Should().EndWith(new[] { "run", "build" });
+    }
+
+    [Fact]
+    public async Task IsolatedBaselineWorktree_PreparesDependenciesBeforeNodeCheck()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        Directory.Exists(Path.Combine(_workspace, "node_modules")).Should().BeFalse();
+        var runner = CreateUnixRunner();
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "HEAD"))).Checks.Single();
+
+        var result = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "HEAD", check));
+
+        result.Success.Should().BeTrue();
+        _processRunner.Invocations[0].Arguments.Should().Equal("ci");
+        _processRunner.Invocations[1].Arguments.Should().Equal("run", "build");
+        Directory.Exists(Path.Combine(_workspace, "node_modules")).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task TraversalWorkingDirectory_IsRejectedBeforeProcessExecution()
     {
         WriteFile("App.sln", string.Empty);
@@ -443,8 +609,21 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
         _processRunner.Invocations.Should().BeEmpty();
     }
 
+    private RepositoryNativeCheckRunner CreateUnixRunner() =>
+        new(
+            _workspaceManager,
+            _processRunner,
+            NullLogger<RepositoryNativeCheckRunner>.Instance,
+            new PackageManagerProcessResolver(isWindows: false, Array.Empty<string>()));
+
     private Task<RepositoryProfile> DiscoverAsync() =>
         _runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"));
+
+    private string FileHash(string relativePath)
+    {
+        var fullPath = Path.Combine(_workspace, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(fullPath)));
+    }
 
     private void WriteFile(string relativePath, string content)
     {
@@ -506,7 +685,37 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
             CancellationToken cancellationToken = default)
         {
             Invocations.Add((fileName, arguments.ToList(), workingDirectory));
-            return Task.FromResult(Results.Count > 0 ? Results.Dequeue() : Result(0));
+            var result = Results.Count > 0 ? Results.Dequeue() : Result(0);
+            if (result.ExitCode == 0 &&
+                string.IsNullOrWhiteSpace(result.ErrorMessage) &&
+                IsDependencyPreparation(arguments))
+            {
+                Directory.CreateDirectory(Path.Combine(workingDirectory, "node_modules", ".bin"));
+                File.WriteAllText(Path.Combine(workingDirectory, "node_modules", ".bin", "tsc"), string.Empty);
+            }
+
+            return Task.FromResult(result);
+        }
+
+        private static bool IsDependencyPreparation(IReadOnlyList<string> arguments)
+        {
+            if (arguments.Count == 0)
+            {
+                return false;
+            }
+
+            if (arguments[0] == "ci")
+            {
+                return true;
+            }
+
+            if (arguments[0] == "install" && arguments.Contains("--frozen-lockfile"))
+            {
+                return true;
+            }
+
+            return arguments.Any(argument => Path.GetFileName(argument).Equals("npm-cli.js", StringComparison.OrdinalIgnoreCase)) &&
+                   arguments.Contains("ci");
         }
     }
 }

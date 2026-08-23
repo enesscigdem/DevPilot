@@ -46,16 +46,19 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
 
     private readonly IExecutionWorkspaceManager _workspaceManager;
     private readonly IProcessRunner _processRunner;
+    private readonly PackageManagerProcessResolver _packageManagerResolver;
     private readonly ILogger<RepositoryNativeCheckRunner> _logger;
 
     public RepositoryNativeCheckRunner(
         IExecutionWorkspaceManager workspaceManager,
         IProcessRunner processRunner,
-        ILogger<RepositoryNativeCheckRunner> logger)
+        ILogger<RepositoryNativeCheckRunner> logger,
+        PackageManagerProcessResolver? packageManagerResolver = null)
     {
         _workspaceManager = workspaceManager ?? throw new ArgumentNullException(nameof(workspaceManager));
         _processRunner = processRunner ?? throw new ArgumentNullException(nameof(processRunner));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _packageManagerResolver = packageManagerResolver ?? new PackageManagerProcessResolver();
     }
 
     public async Task<RepositoryProfile> DiscoverAsync(
@@ -202,6 +205,20 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
             arguments.Add($"FullyQualifiedName={request.TestFilter}");
         }
 
+        var preparationFailure = await TryPrepareNodeDependenciesAsync(
+            check,
+            workingDirectory,
+            cancellationToken).ConfigureAwait(false);
+        if (preparationFailure != null)
+        {
+            return preparationFailure;
+        }
+
+        if (!TryResolveProcessInvocation(check, arguments, out var fileName, out var processArguments, out var resolveError))
+        {
+            return InfrastructureFailure(check.Id, check.DisplayName, check.Kind, resolveError!);
+        }
+
         _logger.LogInformation(
             "Executing repository check {CheckId} ({CheckKind}) in '{WorkingDirectory}'.",
             check.Id,
@@ -209,8 +226,8 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
             workingDirectory);
 
         var processResult = await _processRunner.RunProcessAsync(
-            check.Executable,
-            arguments,
+            fileName,
+            processArguments,
             workingDirectory,
             check.Timeout,
             cancellationToken).ConfigureAwait(false);
@@ -983,6 +1000,193 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
         }
 
         return true;
+    }
+
+    private bool TryResolveProcessInvocation(
+        RepositoryCheck check,
+        IReadOnlyList<string> arguments,
+        out string fileName,
+        out IReadOnlyList<string> processArguments,
+        out string? errorMessage)
+    {
+        fileName = check.Executable;
+        processArguments = arguments;
+        errorMessage = null;
+
+        if (check.Source != RepositoryCheckSource.PackageJsonScript)
+        {
+            return true;
+        }
+
+        if (!_packageManagerResolver.TryResolve(check.Executable, arguments, out fileName, out processArguments, out errorMessage))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private async Task<RepositoryCheckResult?> TryPrepareNodeDependenciesAsync(
+        RepositoryCheck check,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        if (check.Source != RepositoryCheckSource.PackageJsonScript)
+        {
+            return null;
+        }
+
+        if (!PackageManagerProcessResolver.SupportedManagers.Contains(check.Executable))
+        {
+            return null;
+        }
+
+        if (HasUsableNodeModules(workingDirectory))
+        {
+            return null;
+        }
+
+        if (!TryGetDeterministicInstallArguments(check.Executable, workingDirectory, out var installArguments, out var lockfilePath))
+        {
+            return null;
+        }
+
+        if (!_packageManagerResolver.TryResolve(check.Executable, installArguments, out var fileName, out var processArguments, out var resolveError))
+        {
+            return InfrastructureFailure(
+                check.Id,
+                check.DisplayName,
+                check.Kind,
+                resolveError ?? "Node dependency preparation could not resolve a process-safe package-manager launcher.");
+        }
+
+        var lockHashBefore = ComputeFileHash(lockfilePath);
+        var packageJsonPath = Path.Combine(workingDirectory, "package.json");
+        var packageHashBefore = File.Exists(packageJsonPath) ? ComputeFileHash(packageJsonPath) : null;
+
+        _logger.LogInformation(
+            "Preparing Node dependencies for check {CheckId} with {Manager} {Arguments} in '{WorkingDirectory}'.",
+            check.Id,
+            check.Executable,
+            string.Join(' ', installArguments),
+            workingDirectory);
+
+        var result = await _processRunner.RunProcessAsync(
+            fileName,
+            processArguments,
+            workingDirectory,
+            DefaultBuildTimeout,
+            cancellationToken).ConfigureAwait(false);
+
+        if (lockHashBefore != ComputeFileHash(lockfilePath) ||
+            (packageHashBefore != null && packageHashBefore != ComputeFileHash(packageJsonPath)))
+        {
+            return InfrastructureFailure(
+                check.Id,
+                check.DisplayName,
+                check.Kind,
+                "Node dependency preparation mutated package.json or the lockfile. DevPilot refuses to continue after a non-deterministic package mutation.");
+        }
+
+        if (result.IsTimedOut ||
+            result.ExitCode != 0 ||
+            !string.IsNullOrWhiteSpace(result.ErrorMessage))
+        {
+            var detail = result.ErrorMessage
+                ?? (result.IsTimedOut ? "dependency preparation timed out." : $"exit {result.ExitCode}.");
+            return InfrastructureFailure(
+                check.Id,
+                check.DisplayName,
+                check.Kind,
+                $"Node dependency preparation failed ({check.Executable} {string.Join(' ', installArguments)}): {detail} This is a repository prerequisite infrastructure failure.");
+        }
+
+        return null;
+    }
+
+    private static bool HasUsableNodeModules(string packageDirectory)
+    {
+        var nodeModules = Path.Combine(packageDirectory, "node_modules");
+        return Directory.Exists(nodeModules) &&
+               Directory.EnumerateFileSystemEntries(nodeModules).Any();
+    }
+
+    private static bool TryGetDeterministicInstallArguments(
+        string manager,
+        string packageDirectory,
+        out IReadOnlyList<string> arguments,
+        out string lockfilePath)
+    {
+        arguments = Array.Empty<string>();
+        lockfilePath = string.Empty;
+
+        switch (manager)
+        {
+            case "npm":
+                var npmLock = Path.Combine(packageDirectory, "package-lock.json");
+                var shrinkwrap = Path.Combine(packageDirectory, "npm-shrinkwrap.json");
+                if (File.Exists(npmLock))
+                {
+                    arguments = new[] { "ci" };
+                    lockfilePath = npmLock;
+                    return true;
+                }
+
+                if (File.Exists(shrinkwrap))
+                {
+                    arguments = new[] { "ci" };
+                    lockfilePath = shrinkwrap;
+                    return true;
+                }
+
+                return false;
+            case "pnpm":
+                var pnpmLock = Path.Combine(packageDirectory, "pnpm-lock.yaml");
+                if (!File.Exists(pnpmLock))
+                {
+                    return false;
+                }
+
+                arguments = new[] { "install", "--frozen-lockfile" };
+                lockfilePath = pnpmLock;
+                return true;
+            case "yarn":
+                var yarnLock = Path.Combine(packageDirectory, "yarn.lock");
+                if (!File.Exists(yarnLock))
+                {
+                    return false;
+                }
+
+                arguments = new[] { "install", "--frozen-lockfile" };
+                lockfilePath = yarnLock;
+                return true;
+            case "bun":
+                var bunLock = Path.Combine(packageDirectory, "bun.lock");
+                var bunLockb = Path.Combine(packageDirectory, "bun.lockb");
+                if (File.Exists(bunLock))
+                {
+                    arguments = new[] { "install", "--frozen-lockfile" };
+                    lockfilePath = bunLock;
+                    return true;
+                }
+
+                if (File.Exists(bunLockb))
+                {
+                    arguments = new[] { "install", "--frozen-lockfile" };
+                    lockfilePath = bunLockb;
+                    return true;
+                }
+
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    private static string ComputeFileHash(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     }
 
     private static string? DetectPackageManager(JsonElement packageJson, string packageDirectory, out string? errorMessage)
