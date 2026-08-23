@@ -167,6 +167,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return Math.Min(budget, _maxOutputTokens);
     }
 
+    public int DetermineFocusedRepairBudget()
+    {
+        // Lightweight verification repair is always a compact SEARCH/REPLACE response.
+        // Do not use the small-file full-file budget and do not escalate tokens.
+        return Math.Min(Math.Min(_budgetModifyPatch, 8192), _maxOutputTokens);
+    }
+
     public int DetermineCompactRetryBudget(int initialBudget, string? targetContent, ManifestFileEntry fileEntry, bool isRepair = false)
     {
         if (fileEntry.Action == FileEditAction.Modify)
@@ -242,16 +249,20 @@ public sealed class DeveloperAgent : IDeveloperAgent
             var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
 
             var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
-            var useFullFileReplacement = currentContent != null && WorktreeEditApplier.IsSmallTextFile(currentContent);
-            var budget = DetermineInitialBudget(filePath, FileEditAction.Modify, currentContent);
+            const bool useFullFileReplacement = false;
+            var budget = DetermineFocusedRepairBudget();
+            var peerContext = CollectFocusedRepairPeerContext(
+                request.WorkspacePath,
+                filePath,
+                request,
+                currentContent ?? string.Empty);
 
-            var systemPrompt = BuildSingleFileSystemPrompt(manifestEntry, useFullFileReplacement);
+            var systemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath);
             var userPrompt = BuildFocusedDiagnosticRepairUserPrompt(
                 filePath,
                 currentContent ?? string.Empty,
                 request,
-                lockedContracts: null,
-                useFullFileReplacement: useFullFileReplacement);
+                peerContext);
 
             var aiRequest = new AiRequest
             {
@@ -281,6 +292,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             {
                 editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
                 ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
+                ValidateFocusedRepairSearchAnchors(editSpec, filePath);
             }
             catch (Exception parseEx)
             {
@@ -1841,12 +1853,29 @@ public sealed class DeveloperAgent : IDeveloperAgent
     public static string BuildSingleFileRepairUserPrompt(string parseError, string previousResponse, ManifestFileEntry fileEntry) =>
         BuildSingleFileRepairUserPrompt(parseError, previousResponse, fileEntry, currentTargetContent: null, relevantGeneratedDependencies: null, lockedContracts: null, applicabilityFailure: null);
 
+    public static string BuildFocusedDiagnosticRepairSystemPrompt(string filePath)
+    {
+        return $$"""
+            You are performing lightweight focused verification repair for a single existing file: '{{filePath}}'.
+
+            CRITICAL RULES:
+            1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+            2. This is an existing-file Modify. NEVER return 'newContent' or reproduce the entire file.
+            3. Return ONLY compact 'searchReplaceEdits'. Prefer 1 edit; emit a few only when the same diagnostic requires them.
+            4. Each search anchor must be an exact existing 2-5 line unique excerpt from the current target. Never use a bare closing brace alone as the anchor.
+            5. Change only the diagnostic line or the immediately related method. Do not reproduce unrelated methods or code not implicated by the supplied diagnostics.
+            6. Preserve all code not implicated by diagnostics.
+
+            Required JSON shape:
+            {"filePath":"{{filePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact 2-5 line unique anchor","replace":"replacement"}]}
+            """;
+    }
+
     public static string BuildFocusedDiagnosticRepairUserPrompt(
         string filePath,
         string currentContent,
         FocusedRepairRequest request,
-        IReadOnlyDictionary<string, string>? lockedContracts = null,
-        bool useFullFileReplacement = false)
+        IReadOnlyDictionary<string, string>? peerContext = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
@@ -1881,32 +1910,366 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
-        if (lockedContracts != null && lockedContracts.Count > 0)
+        if (peerContext != null && peerContext.Count > 0)
         {
-            sb.AppendLine("=== Authoritative Upstream Contracts (LOCKED) ===");
-            foreach (var (cPath, cSig) in lockedContracts)
+            sb.AppendLine("=== Authoritative Peer Contract Context (execution-local generated files) ===");
+            sb.AppendLine("Use these current generated signatures/method names as the contract to preserve. Do not rewrite these files in this call.");
+            foreach (var (peerPath, peerContent) in peerContext)
             {
-                sb.AppendLine($"--- Locked Contract: {cPath} ---");
-                sb.AppendLine(cSig);
-                sb.AppendLine("--- End Locked Contract ---");
+                sb.AppendLine($"--- Peer File: {peerPath} ---");
+                sb.AppendLine(peerContent);
+                sb.AppendLine("--- End Peer File ---");
             }
             sb.AppendLine();
         }
 
-        sb.AppendLine(useFullFileReplacement
-            ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content once in newContent."
-            : "Edit Strategy: surgical patch. Use the smallest verbatim search anchors that each match once.");
-
+        sb.AppendLine("Edit Strategy: surgical SEARCH/REPLACE only. Use an exact existing unique 2-5 line anchor. Never use a bare closing brace alone. Never return full newContent.");
+        sb.AppendLine();
         sb.AppendLine("=== Current Content of Target File ===");
         sb.AppendLine(currentContent);
         sb.AppendLine("=== End Current Content ===");
         sb.AppendLine();
-
-        sb.AppendLine(useFullFileReplacement
-            ? $"Output ONLY the corrected small-file replacement JSON for '{filePath}'."
-            : $"Output ONLY the corrected surgical edit JSON for '{filePath}'.");
+        sb.AppendLine($"Output ONLY the corrected surgical searchReplaceEdits JSON for '{filePath}'. Do not reproduce the entire file or unrelated methods.");
 
         return sb.ToString();
+    }
+
+    public static Dictionary<string, string> CollectFocusedRepairPeerContext(
+        string workspacePath,
+        string targetFilePath,
+        FocusedRepairRequest request,
+        string currentContent,
+        int maxPeerFiles = 4,
+        int maxCharsPerFile = 2500)
+    {
+        var peers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
+        {
+            return peers;
+        }
+
+        var candidates = new List<string>();
+        if (request.RepairFiles != null)
+        {
+            candidates.AddRange(request.RepairFiles);
+        }
+
+        if (request.DiagnosticLocations != null)
+        {
+            foreach (var location in request.DiagnosticLocations)
+            {
+                var path = ExtractPathFromDiagnosticLocation(location);
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    candidates.Add(path);
+                }
+            }
+        }
+
+        candidates.AddRange(ExtractReferencedSourcePaths(currentContent, targetFilePath));
+        candidates.AddRange(ExtractReferencedSourcePaths(request.DiagnosticEvidence ?? string.Empty, targetFilePath));
+
+        foreach (var candidate in candidates)
+        {
+            if (peers.Count >= maxPeerFiles)
+            {
+                break;
+            }
+
+            TryAddFocusedRepairPeer(
+                peers,
+                workspacePath,
+                targetFilePath,
+                candidate,
+                maxCharsPerFile);
+        }
+
+        return peers;
+    }
+
+    public static void ValidateFocusedRepairSearchAnchors(FileEditSpec spec, string filePath)
+    {
+        if (spec.NewContent != null)
+        {
+            throw new FormatException($"Focused repair for '{filePath}' must not return full-file newContent.");
+        }
+
+        if (spec.SearchReplaceEdits == null || spec.SearchReplaceEdits.Count == 0)
+        {
+            throw new FormatException($"Focused repair for '{filePath}' requires compact searchReplaceEdits.");
+        }
+
+        if (spec.SearchReplaceEdits.Count > 6)
+        {
+            throw new FormatException($"Focused repair for '{filePath}' emitted too many edit blocks ({spec.SearchReplaceEdits.Count}); keep edits to the diagnostic lines.");
+        }
+
+        foreach (var edit in spec.SearchReplaceEdits)
+        {
+            if (IsBareClosingBraceAnchor(edit.Search))
+            {
+                throw new FormatException($"Focused repair for '{filePath}' must not use a bare closing brace as the search anchor.");
+            }
+        }
+    }
+
+    public static bool IsBareClosingBraceAnchor(string? search)
+    {
+        if (string.IsNullOrWhiteSpace(search))
+        {
+            return false;
+        }
+
+        var trimmed = search.Trim();
+        return trimmed is "}" or "};" or "}," or "})" or "});" or "};," ||
+               Regex.IsMatch(trimmed, @"^\}[;,)\}]*\s*$");
+    }
+
+    public static string NormalizeFocusedRepairPath(string path)
+    {
+        return (path ?? string.Empty).Replace('\\', '/').Trim().TrimStart('/');
+    }
+
+    public static string? ExtractPathFromDiagnosticLocation(string? location)
+    {
+        if (string.IsNullOrWhiteSpace(location))
+        {
+            return null;
+        }
+
+        var trimmed = location.Trim().Trim('"', '\'');
+        var match = Regex.Match(
+            trimmed,
+            @"((?:[A-Za-z]:)?[^:(]+?\.(?:ts|tsx|js|jsx|mjs|cjs|cs))\s*(?:[:\(]\d)",
+            RegexOptions.IgnoreCase);
+        if (match.Success)
+        {
+            return NormalizeFocusedRepairPath(match.Groups[1].Value);
+        }
+
+        match = Regex.Match(
+            trimmed,
+            @"((?:src|lib|app|tests|test)/[A-Za-z0-9_./\\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|cs))\b",
+            RegexOptions.IgnoreCase);
+        return match.Success ? NormalizeFocusedRepairPath(match.Groups[1].Value) : null;
+    }
+
+    public static IReadOnlyList<string> ExtractReferencedSourcePaths(string content, string targetFilePath)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return results;
+        }
+
+        var targetDir = NormalizeFocusedRepairPath(Path.GetDirectoryName(targetFilePath) ?? string.Empty);
+        foreach (Match match in Regex.Matches(
+                     content,
+                     @"(?:from|require\s*\()\s*['""](\.\.?/[^'""]+)['""]"))
+        {
+            var combined = CombineWorkspaceRelativePath(targetDir, match.Groups[1].Value);
+            if (!string.IsNullOrWhiteSpace(combined))
+            {
+                results.Add(combined);
+            }
+        }
+
+        foreach (Match match in Regex.Matches(
+                     content,
+                     @"(?<![\w./\\])((?:src|lib|app|tests|test)/[A-Za-z0-9_./\\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|cs))\b",
+                     RegexOptions.IgnoreCase))
+        {
+            results.Add(NormalizeFocusedRepairPath(match.Groups[1].Value));
+        }
+
+        return results;
+    }
+
+    public static string BoundPeerContractExcerpt(string content, int maxChars)
+    {
+        if (string.IsNullOrEmpty(content) || maxChars <= 0)
+        {
+            return string.Empty;
+        }
+
+        var normalized = content.Replace("\r\n", "\n");
+        if (normalized.Length <= maxChars)
+        {
+            return normalized;
+        }
+
+        var selected = new List<string>();
+        var used = 0;
+        foreach (var line in normalized.Split('\n'))
+        {
+            if (!LooksLikePeerContractLine(line))
+            {
+                continue;
+            }
+
+            var addition = selected.Count == 0 ? line : "\n" + line;
+            if (used + addition.Length > maxChars)
+            {
+                break;
+            }
+
+            selected.Add(line);
+            used += addition.Length;
+        }
+
+        if (selected.Count > 0)
+        {
+            return string.Join('\n', selected);
+        }
+
+        return normalized[..maxChars];
+    }
+
+    private static void TryAddFocusedRepairPeer(
+        Dictionary<string, string> peers,
+        string workspacePath,
+        string targetFilePath,
+        string candidate,
+        int maxCharsPerFile)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return;
+        }
+
+        var normalizedTarget = NormalizeFocusedRepairPath(targetFilePath);
+        foreach (var expanded in ExpandPeerPathCandidates(candidate))
+        {
+            if (string.IsNullOrWhiteSpace(expanded) ||
+                expanded.Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase) ||
+                IsUnsafeFocusedRepairPeerPath(expanded) ||
+                peers.ContainsKey(expanded))
+            {
+                continue;
+            }
+
+            string resolved;
+            try
+            {
+                resolved = WorktreeEditApplier.ValidateAndResolvePath(workspacePath, expanded);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (!File.Exists(resolved))
+            {
+                continue;
+            }
+
+            try
+            {
+                var bytes = File.ReadAllBytes(resolved);
+                var content = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
+                if (string.IsNullOrWhiteSpace(content))
+                {
+                    continue;
+                }
+
+                peers[expanded] = BoundPeerContractExcerpt(content, maxCharsPerFile);
+                return;
+            }
+            catch
+            {
+                // Skip unreadable peers; the target file remains the only required context.
+            }
+        }
+    }
+
+    private static IEnumerable<string> ExpandPeerPathCandidates(string candidate)
+    {
+        var normalized = NormalizeFocusedRepairPath(candidate);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            yield break;
+        }
+
+        yield return normalized;
+        if (Path.HasExtension(normalized))
+        {
+            yield break;
+        }
+
+        foreach (var extension in new[] { ".ts", ".tsx", ".js", ".jsx", ".cs" })
+        {
+            yield return normalized + extension;
+        }
+    }
+
+    private static bool IsUnsafeFocusedRepairPeerPath(string path)
+    {
+        var normalized = NormalizeFocusedRepairPath(path);
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return true;
+        }
+
+        var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Any(segment =>
+                segment.Equals("node_modules", StringComparison.OrdinalIgnoreCase) ||
+                segment.Equals("bin", StringComparison.OrdinalIgnoreCase) ||
+                segment.Equals("obj", StringComparison.OrdinalIgnoreCase) ||
+                segment.Equals("dist", StringComparison.OrdinalIgnoreCase) ||
+                segment.Equals(".git", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        var extension = Path.GetExtension(normalized);
+        return !string.IsNullOrEmpty(extension) &&
+               extension is not (".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs" or ".cs");
+    }
+
+    private static string CombineWorkspaceRelativePath(string directory, string relativeSpec)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            parts.AddRange(NormalizeFocusedRepairPath(directory).Split('/', StringSplitOptions.RemoveEmptyEntries));
+        }
+
+        foreach (var segment in NormalizeFocusedRepairPath(relativeSpec).Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment == ".")
+            {
+                continue;
+            }
+
+            if (segment == "..")
+            {
+                if (parts.Count > 0)
+                {
+                    parts.RemoveAt(parts.Count - 1);
+                }
+
+                continue;
+            }
+
+            parts.Add(segment);
+        }
+
+        return string.Join('/', parts);
+    }
+
+    private static bool LooksLikePeerContractLine(string line)
+    {
+        var trimmed = line.TrimStart();
+        return trimmed.StartsWith("export ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("import ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("public ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("internal ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("interface ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("type ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("class ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("router.", StringComparison.Ordinal) ||
+               trimmed.Contains(" function ", StringComparison.Ordinal) ||
+               Regex.IsMatch(trimmed, @"^(?:async\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(");
     }
 
     public static string BuildSingleFileUserPrompt(
