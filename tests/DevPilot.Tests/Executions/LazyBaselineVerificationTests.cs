@@ -9,8 +9,10 @@ using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Domain.ValueObjects;
 using DevPilot.Infrastructure.Executions;
+using DevPilot.Infrastructure.RepositoryClone;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace DevPilot.Tests.Executions;
@@ -389,6 +391,94 @@ C:\app\Controllers\OrderController.cs(10,5): error CS0246: The type or namespace
         comparison.NewRegressionCount.Should().Be(0);
         comparison.NewRegressions.Should().BeEmpty();
         comparison.PreExistingCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task BaselineCheckExecution_UsesDetachedHeadBranchName()
+    {
+        var checkRunner = new MockRepositoryCheckRunner();
+        var coordinator = new BaselineVerificationCoordinator(NullLogger<BaselineVerificationCoordinator>.Instance);
+        var processRunner = new MockProcessRunner();
+        var service = new BaselineVerificationService(
+            coordinator,
+            checkRunner,
+            processRunner,
+            NullLogger<BaselineVerificationService>.Instance);
+
+        var taskResult = new RepositoryCheckResult
+        {
+            Success = false,
+            ExitCode = 1,
+            StdOut = "Failed TestSuite.UnitTests.ExistingFailingTest\n Error Message:\n Assert.Equal() Failure"
+        };
+
+        var comparison = await service.EvaluateTestFailureAsync(
+            workspacePath: "C:/tmp/executions/abc",
+            sourceRepositoryPath: "C:/tmp/repo",
+            baseCommitSha: "abc1234567890",
+            check: _testCheck,
+            taskCheckResult: taskResult);
+
+        checkRunner.ExecuteCount.Should().Be(1);
+        checkRunner.LastExecutedRequest.Should().NotBeNull();
+        checkRunner.LastExecutedRequest!.BranchName.Should().Be("HEAD");
+        comparison.Classification.Should().Be(BaselineFailureClassification.PreExisting);
+    }
+
+    [Fact]
+    public async Task WorkspaceVerification_EmptyBranch_FailsValidation()
+    {
+        var manager = new GitExecutionWorkspaceManager(
+            Options.Create(new RepositoryCloneOptions()),
+            NullLogger<GitExecutionWorkspaceManager>.Instance);
+
+        var result = await manager.VerifyWorkspaceStateAsync("C:/tmp/repo", expectedBranchName: "");
+        result.IsValid.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("Expected branch name is empty.");
+    }
+
+    [Fact]
+    public async Task EvaluateTestFailureAsync_BaselineInfrastructureFailure_ReturnsUnknown()
+    {
+        var checkRunner = new InfrastructureFailingCheckRunner();
+        var coordinator = new BaselineVerificationCoordinator(NullLogger<BaselineVerificationCoordinator>.Instance);
+        var processRunner = new MockProcessRunner();
+        var service = new BaselineVerificationService(
+            coordinator,
+            checkRunner,
+            processRunner,
+            NullLogger<BaselineVerificationService>.Instance);
+
+        var taskResult = new RepositoryCheckResult
+        {
+            Success = false,
+            ExitCode = 1,
+            StdOut = "Failed TestSuite.UnitTests.SomeTest"
+        };
+
+        var comparison = await service.EvaluateTestFailureAsync(
+            workspacePath: "C:/tmp/executions/abc",
+            sourceRepositoryPath: "C:/tmp/repo",
+            baseCommitSha: "abc1234567890",
+            check: _testCheck,
+            taskCheckResult: taskResult);
+
+        comparison.Classification.Should().Be(BaselineFailureClassification.Unknown);
+    }
+
+    private sealed class InfrastructureFailingCheckRunner : IRepositoryCheckRunner
+    {
+        public Task<RepositoryProfile> DiscoverAsync(RepositoryPreflightRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new RepositoryProfile(RepositoryVerificationState.Configured, new[] { "dotnet" }, Array.Empty<RepositoryCheck>()));
+
+        public Task<RepositoryCheckResult> ExecuteAsync(RepositoryCheckExecutionRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new RepositoryCheckResult
+            {
+                Success = false,
+                ExitCode = 128,
+                ErrorMessage = "Docker daemon is not running.",
+                FailureCategory = RepositoryCheckFailureCategory.InfrastructureFailure
+            });
     }
 
     private sealed class FakeBaselineService : IBaselineVerificationService

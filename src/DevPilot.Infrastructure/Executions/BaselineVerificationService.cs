@@ -220,7 +220,7 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
 
             var checkRequest = new RepositoryCheckExecutionRequest(
                 baselineWorktreePath,
-                BranchName: string.Empty,
+                BranchName: "HEAD",
                 Check: check,
                 SkipBuild: false,
                 TestFilter: targetedTestFilter);
@@ -276,7 +276,7 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
         CancellationToken cancellationToken)
     {
         var parentDir = Path.GetDirectoryName(baselineWorktreePath);
-        if (!string.IsNullOrEmpty(parentDir))
+        if (!string.IsNullOrWhiteSpace(parentDir) && !Directory.Exists(parentDir))
         {
             Directory.CreateDirectory(parentDir);
         }
@@ -284,7 +284,11 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
         if (Directory.Exists(baselineWorktreePath))
         {
             var gitHead = await RunGitAsync(baselineWorktreePath, new[] { "rev-parse", "HEAD" }, cancellationToken).ConfigureAwait(false);
-            if (gitHead.ExitCode == 0 && gitHead.StdOut?.Trim().Equals(baseCommitSha.Trim(), StringComparison.OrdinalIgnoreCase) == true)
+            var gitAbbrev = await RunGitAsync(baselineWorktreePath, new[] { "rev-parse", "--abbrev-ref", "HEAD" }, cancellationToken).ConfigureAwait(false);
+            var isCorrectSha = gitHead.ExitCode == 0 && gitHead.StdOut?.Trim().Equals(baseCommitSha.Trim(), StringComparison.OrdinalIgnoreCase) == true;
+            var isDetached = gitAbbrev.ExitCode == 0 && gitAbbrev.StdOut?.Trim().Equals("HEAD", StringComparison.OrdinalIgnoreCase) == true;
+
+            if (isCorrectSha && isDetached)
             {
                 // Clean worktree state back to clean base
                 await RunGitAsync(baselineWorktreePath, new[] { "reset", "--hard", "HEAD" }, cancellationToken).ConfigureAwait(false);
@@ -292,8 +296,8 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
                 return;
             }
 
-            // Checkout correct commit
-            var checkoutResult = await RunGitAsync(baselineWorktreePath, new[] { "checkout", "--detach", baseCommitSha }, cancellationToken).ConfigureAwait(false);
+            // Checkout correct commit detached
+            var checkoutResult = await RunGitAsync(baselineWorktreePath, new[] { "checkout", "--detach", baseCommitSha.Trim() }, cancellationToken).ConfigureAwait(false);
             if (checkoutResult.ExitCode == 0)
             {
                 await RunGitAsync(baselineWorktreePath, new[] { "reset", "--hard", "HEAD" }, cancellationToken).ConfigureAwait(false);
