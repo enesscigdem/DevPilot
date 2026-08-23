@@ -134,7 +134,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     ExecutionStage.DeveloperAgent,
                     ExecutionActivityStatus.Failed,
                     error,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    new ExecutionActivityMetadata(EventKind: "GeneratingChange"),
+                    cancellationToken).ConfigureAwait(false);
                 throw new InvalidOperationException(error);
             }
 
@@ -203,7 +204,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     ExecutionStage.DeveloperAgent,
                     ExecutionActivityStatus.Failed,
                     error,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    new ExecutionActivityMetadata(EventKind: "GeneratingChange"),
+                    cancellationToken).ConfigureAwait(false);
                 throw new InvalidOperationException(error);
             }
 
@@ -278,7 +280,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     ExecutionStage.DeveloperAgent,
                     ExecutionActivityStatus.Failed,
                     error,
-                    actualModel != null ? new ExecutionActivityMetadata(Model: actualModel) : null,
+                    new ExecutionActivityMetadata(Model: actualModel, EventKind: "GeneratingChange"),
                     cancellationToken).ConfigureAwait(false);
                 throw new InvalidOperationException(error);
             }
@@ -291,7 +293,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     ExecutionStage.DeveloperAgent,
                     ExecutionActivityStatus.Failed,
                     error,
-                    actualModel != null ? new ExecutionActivityMetadata(Model: actualModel) : null,
+                    new ExecutionActivityMetadata(Model: actualModel, EventKind: "GeneratingChange"),
                     cancellationToken).ConfigureAwait(false);
                 throw new InvalidOperationException(error);
             }
