@@ -529,6 +529,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         var lastRepairChangedFile = false;
         var finalDiagnosticAttemptUsed = false;
         var attemptedForCurrentFailure = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var consecutiveNoProgressAppliedRepairs = 0;
+        string? lastNoProgressFile = null;
 
         while (!result.Success && repairRound < _maxCompileRepairRounds)
         {
@@ -551,6 +553,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 {
                     attemptedForCurrentFailure.Clear();
                     finalDiagnosticAttemptUsed = false;
+                    consecutiveNoProgressAppliedRepairs = 0;
+                    lastNoProgressFile = null;
                 }
             }
 
@@ -656,6 +660,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             var languageContext = _repairContextProvider?.GetCompileRepairContext(check, prepResult.WorkspacePath, repairFiles);
             var isFinalDiagnosticAttempt = selection.IsFinalDiagnosticAttempt;
+            var scopedDiagnostics = ExecutionDiagnosticEvidence.ScopeToFile(evidence, selection.FilePath);
             var repairRequest = new FocusedRepairRequest(
                 TaskId: context.TaskId,
                 ExecutionId: context.ExecutionId,
@@ -666,8 +671,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 WorkspacePath: prepResult.WorkspacePath,
                 BranchName: prepResult.BranchName,
                 RepairFiles: repairFiles,
-                DiagnosticEvidence: string.Join("\n", evidence.DiagnosticLines.Take(10)),
-                DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
+                DiagnosticEvidence: string.Join("\n", scopedDiagnostics.DiagnosticLines),
+                DiagnosticLocations: scopedDiagnostics.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
                 LanguageContext: languageContext,
                 Model: actualModel,
                 IsFinalDiagnosticAttempt: isFinalDiagnosticAttempt);
@@ -791,8 +796,77 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             result = await _repositoryCheckRunner.ExecuteAsync(
                 new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, check),
                 cancellationToken).ConfigureAwait(false);
-            previousFailureFingerprint = evidence.FailureFingerprint;
-            previousErrorCount = errorCount;
+
+            string retryProgress;
+            CompilerFailureEvidence? freshEvidence = null;
+            var freshCount = 0;
+            if (result.Success)
+            {
+                retryProgress = "Passed";
+                consecutiveNoProgressAppliedRepairs = 0;
+                lastNoProgressFile = null;
+            }
+            else
+            {
+                freshEvidence = (actionableFailures != null && actionableFailures.Count > 0)
+                    ? ExecutionDiagnosticEvidence.CreateActionableCompilerEvidence(actionableFailures, result.StdOut, result.StdErr, result.ErrorMessage)
+                    : ExecutionDiagnosticEvidence.ParseVerificationFailure(result.StdOut, result.StdErr, result.ErrorMessage);
+                freshCount = freshEvidence.DiagnosticLines.Count;
+                var sameFailureSet = string.Equals(evidence.FailureFingerprint, freshEvidence.FailureFingerprint, StringComparison.Ordinal) &&
+                                     freshCount == errorCount;
+                if (sameFailureSet)
+                {
+                    retryProgress = "NoDiagnosticProgress";
+                    if (lastRepairChangedFile)
+                    {
+                        var isDistinctFile = lastNoProgressFile != null &&
+                                             !string.Equals(lastNoProgressFile, selection.FilePath, StringComparison.OrdinalIgnoreCase);
+                        consecutiveNoProgressAppliedRepairs++;
+                        if (consecutiveNoProgressAppliedRepairs >= 2 && isDistinctFile)
+                        {
+                            await SafeRecordActivityAsync(
+                                context.ExecutionId,
+                                ExecutionStage.Build,
+                                ExecutionActivityStatus.Failed,
+                                "Focused repairs changed files but compiler diagnostics did not improve.",
+                                CheckMetadata(
+                                    check,
+                                    "StoppedWithEvidence",
+                                    result,
+                                    repairKind: "Compile",
+                                    repairRound: repairRound,
+                                    repairFiles: repairFiles,
+                                    failureFingerprint: freshEvidence.FailureFingerprint,
+                                    progressResult: "NoDiagnosticProgress",
+                                    diagnosticErrorCount: freshCount,
+                                    distinctDiagnosticFileCount: selection.ImplicatedFiles.Count,
+                                    selectedRepairTarget: selection.FilePath,
+                                    attemptedRepairTargets: attemptedForCurrentFailure.ToList()),
+                                cancellationToken).ConfigureAwait(false);
+                            previousFailureFingerprint = freshEvidence.FailureFingerprint;
+                            previousErrorCount = freshCount;
+                            break;
+                        }
+
+                        lastNoProgressFile = selection.FilePath;
+                    }
+                }
+                else if (freshCount < errorCount)
+                {
+                    retryProgress = "Improved";
+                    consecutiveNoProgressAppliedRepairs = 0;
+                    lastNoProgressFile = null;
+                }
+                else
+                {
+                    retryProgress = "ChangedFailure";
+                    consecutiveNoProgressAppliedRepairs = 0;
+                    lastNoProgressFile = null;
+                }
+            }
+
+            previousFailureFingerprint = result.Success ? null : (freshEvidence?.FailureFingerprint ?? evidence.FailureFingerprint);
+            previousErrorCount = result.Success ? 0 : (freshEvidence != null ? freshCount : errorCount);
 
             if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
             {
@@ -811,7 +885,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     : result.Success
                         ? $"{check.DisplayName} retry passed."
                         : $"{check.DisplayName} retry failed (round {repairRound}).",
-                CheckMetadata(check, "VerifyingRepository", result, repairKind: "Compile", repairRound: repairRound),
+                CheckMetadata(
+                    check,
+                    "VerifyingRepository",
+                    result,
+                    repairKind: "Compile",
+                    repairRound: repairRound,
+                    progressResult: retryProgress),
                 cancellationToken).ConfigureAwait(false);
         }
 

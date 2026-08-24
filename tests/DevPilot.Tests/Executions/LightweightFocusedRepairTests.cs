@@ -265,7 +265,9 @@ public class LightweightFocusedRepairTests : IDisposable
         var controllerRequest = _fakeAiProvider.ReceivedRequests[0];
         AssertFocusedRepairIsSurgical(controllerRequest, "src/controllers/issueController.ts");
 
-        controllerRequest.UserPrompt.Should().Contain(diagnosticEvidence);
+        controllerRequest.UserPrompt.Should().Contain("src/controllers/issueController.ts(6,44): error TS2554: Expected 1 arguments, but got 2.");
+        controllerRequest.UserPrompt.Should().Contain("src/controllers/issueController.ts(11,42): error TS2551: Property 'updateIssueStatus' does not exist on type 'IssueService'. Did you mean 'updateStatus'?");
+        controllerRequest.UserPrompt.Should().NotContain("src/routes/issueRoutes.ts(5,48): error TS2551");
         controllerRequest.UserPrompt.Should().Contain("error TS2554: Expected 1 arguments, but got 2.");
         controllerRequest.UserPrompt.Should().Contain("Authoritative Peer Contract Context");
         controllerRequest.UserPrompt.Should().Contain("src/routes/issueRoutes.ts");

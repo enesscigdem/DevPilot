@@ -550,6 +550,59 @@ public sealed class ExecutionDiagnosticEvidenceTests
         }
     }
 
+    [Fact]
+    public void ScopeToFile_AppTsRepair_ReceivesOnlyAppTsDiagnostics()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(MixedLabelsDiagnostics(), null, "build failed");
+        var scoped = ExecutionDiagnosticEvidence.ScopeToFile(evidence, "src/app.ts");
+
+        scoped.DiagnosticLines.Should().ContainSingle();
+        scoped.DiagnosticLines[0].Should().Be("src/app.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.");
+        scoped.DiagnosticLines[0].Should().Contain("src/app.ts(12,3)");
+        scoped.DiagnosticLines[0].Should().Contain("TS2322");
+        scoped.DiagnosticLines[0].Should().Contain("Type 'string' is not assignable to type 'number'.");
+        scoped.Locations.Should().ContainSingle(location =>
+            location.FilePath.Contains("app.ts", StringComparison.OrdinalIgnoreCase) &&
+            location.Line == 12 &&
+            location.Column == 3);
+        scoped.DiagnosticLines.Should().NotContain(line => line.Contains("issueController.ts", StringComparison.OrdinalIgnoreCase));
+        scoped.Locations.Should().NotContain(location =>
+            location.FilePath.Contains("issueController.ts", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ScopeToFile_PreservesMultipleDiagnosticsForTheSameSelectedFile()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+            """
+            src/app.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.
+            src/app.ts(18,1): error TS2304: Cannot find name 'Issue'.
+            src/controllers/issueController.ts(6,44): error TS2554: Expected 1 arguments, but got 2.
+            """,
+            null,
+            "build failed");
+
+        var scoped = ExecutionDiagnosticEvidence.ScopeToFile(evidence, "src/app.ts");
+
+        scoped.DiagnosticLines.Should().HaveCount(2);
+        scoped.DiagnosticLines[0].Should().Contain("TS2322");
+        scoped.DiagnosticLines[0].Should().Contain("src/app.ts(12,3)");
+        scoped.DiagnosticLines[1].Should().Contain("TS2304");
+        scoped.DiagnosticLines[1].Should().Contain("src/app.ts(18,1)");
+        scoped.DiagnosticLines.Should().NotContain(line => line.Contains("issueController.ts", StringComparison.OrdinalIgnoreCase));
+        scoped.Locations.Should().HaveCount(2);
+    }
+
+    private static string MixedLabelsDiagnostics() =>
+        """
+        src/app.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.
+        src/controllers/issueController.ts(6,44): error TS2554: Expected 1 arguments, but got 2.
+        src/repositories/issueRepository.ts(10,5): error TS2304: Cannot find name 'Issue'.
+        src/routes/issueRoutes.ts(5,48): error TS2551: Property 'updateStatus' does not exist.
+        src/services/issueService.ts(8,3): error TS2339: Property 'createIssue' does not exist.
+        src/stores/jsonIssueStore.ts(4,1): error TS2307: Cannot find module './issue'.
+        """;
+
     private static string CreateTempWorkspace()
     {
         var path = Path.Combine(Path.GetTempPath(), "DevPilotExpand_" + Guid.NewGuid().ToString("N"));

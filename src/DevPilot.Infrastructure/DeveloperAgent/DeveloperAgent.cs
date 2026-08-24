@@ -7,6 +7,7 @@ using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Infrastructure.Executions;
 using DevPilot.Domain.Constants;
 using DevPilot.Domain.Enums;
 using Microsoft.CodeAnalysis.CSharp;
@@ -241,6 +242,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
         var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _) ?? string.Empty;
+
+        request = BoundFocusedRepairToSelectedFile(request, filePath);
 
         var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
         var budget = DetermineFocusedRepairBudget();
@@ -494,25 +497,34 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return request;
         }
 
-        var fileName = Path.GetFileName(filePath);
         var evidenceLines = (request.DiagnosticEvidence ?? string.Empty)
             .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-            .Where(line =>
-                line.Contains(filePath, StringComparison.OrdinalIgnoreCase) ||
-                (!string.IsNullOrWhiteSpace(fileName) && line.Contains(fileName, StringComparison.OrdinalIgnoreCase)))
             .ToList();
-        var locations = (request.DiagnosticLocations ?? Array.Empty<string>())
-            .Where(location =>
-                location.Contains(filePath, StringComparison.OrdinalIgnoreCase) ||
-                (!string.IsNullOrWhiteSpace(fileName) && location.Contains(fileName, StringComparison.OrdinalIgnoreCase)))
-            .ToList();
+        if (evidenceLines.Any(ExecutionDiagnosticEvidence.IsCompilerDiagnosticLine))
+        {
+            evidenceLines = evidenceLines
+                .Where(line => ExecutionDiagnosticEvidence.DiagnosticLineBelongsToFile(line, filePath))
+                .Take(ExecutionDiagnosticEvidence.MaxScopedDiagnosticsPerFile)
+                .ToList();
+        }
+
+        var locations = (request.DiagnosticLocations ?? Array.Empty<string>()).ToList();
+        if (locations.Any(location => !string.IsNullOrWhiteSpace(ExtractPathFromDiagnosticLocation(location))))
+        {
+            locations = locations
+                .Where(location =>
+                {
+                    var path = ExtractPathFromDiagnosticLocation(location);
+                    return path != null && ExecutionDiagnosticEvidence.PathMatchesFile(path, filePath);
+                })
+                .Take(ExecutionDiagnosticEvidence.MaxScopedDiagnosticsPerFile)
+                .ToList();
+        }
 
         return request with
         {
-            DiagnosticEvidence = evidenceLines.Count > 0
-                ? string.Join('\n', evidenceLines)
-                : request.DiagnosticEvidence ?? string.Empty,
-            DiagnosticLocations = locations.Count > 0 ? locations : request.DiagnosticLocations
+            DiagnosticEvidence = string.Join('\n', evidenceLines),
+            DiagnosticLocations = locations
         };
     }
 

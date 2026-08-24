@@ -14,6 +14,10 @@ public sealed record CompilerFailureEvidence(
     IReadOnlyList<string> DiagnosticLines,
     IReadOnlyList<DiagnosticSourceLocation> Locations);
 
+public sealed record FileScopedCompilerDiagnostics(
+    IReadOnlyList<string> DiagnosticLines,
+    IReadOnlyList<DiagnosticSourceLocation> Locations);
+
 public sealed record CompilerRepairSelection(
     string? FilePath,
     bool ScopeExpanded,
@@ -251,6 +255,81 @@ public static class ExecutionDiagnosticEvidence
             errorSummary,
             relevant,
             locations);
+    }
+
+    public const int MaxScopedDiagnosticsPerFile = 8;
+
+    public static FileScopedCompilerDiagnostics ScopeToFile(
+        CompilerFailureEvidence evidence,
+        string filePath,
+        int maxLines = MaxScopedDiagnosticsPerFile)
+    {
+        if (evidence == null || string.IsNullOrWhiteSpace(filePath))
+        {
+            return new FileScopedCompilerDiagnostics(Array.Empty<string>(), Array.Empty<DiagnosticSourceLocation>());
+        }
+
+        var target = new[] { filePath };
+        var locations = evidence.Locations
+            .Where(location => MatchModifiedFile(location.FilePath, target) != null)
+            .Take(Math.Max(1, maxLines))
+            .ToList();
+
+        var lines = new List<string>();
+        foreach (var line in evidence.DiagnosticLines)
+        {
+            if (!DiagnosticLineBelongsToFile(line, filePath))
+            {
+                continue;
+            }
+
+            lines.Add(line);
+            if (lines.Count >= maxLines)
+            {
+                break;
+            }
+        }
+
+        return new FileScopedCompilerDiagnostics(lines, locations);
+    }
+
+    public static bool IsCompilerDiagnosticLine(string diagnosticLine)
+    {
+        if (string.IsNullOrWhiteSpace(diagnosticLine))
+        {
+            return false;
+        }
+
+        return ParenthesizedDiagnosticRegex.IsMatch(diagnosticLine) ||
+               ColonDiagnosticRegex.IsMatch(diagnosticLine);
+    }
+
+    public static bool PathMatchesFile(string diagnosticPath, string filePath) =>
+        !string.IsNullOrWhiteSpace(diagnosticPath) &&
+        !string.IsNullOrWhiteSpace(filePath) &&
+        MatchModifiedFile(diagnosticPath, new[] { filePath }) != null;
+
+    public static bool DiagnosticLineBelongsToFile(string diagnosticLine, string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(diagnosticLine) || string.IsNullOrWhiteSpace(filePath))
+        {
+            return false;
+        }
+
+        var match = ParenthesizedDiagnosticRegex.Match(diagnosticLine);
+        if (!match.Success)
+        {
+            match = ColonDiagnosticRegex.Match(diagnosticLine);
+        }
+
+        if (match.Success)
+        {
+            return MatchModifiedFile(match.Groups["path"].Value, new[] { filePath }) != null;
+        }
+
+        var normalizedTarget = NormalizePath(filePath);
+        var normalizedLine = diagnosticLine.Replace('\\', '/');
+        return normalizedLine.Contains(normalizedTarget, StringComparison.OrdinalIgnoreCase);
     }
 
     public static IReadOnlyList<string> SelectCompilerRepairFiles(

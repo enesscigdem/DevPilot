@@ -1010,8 +1010,8 @@ export function ExecutionWorkspace() {
                                     )}
                                   </div>
                                   <div className="min-w-0 flex-1 font-mono">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-foreground truncate">{act.message}</span>
+                                    <div className="flex items-start justify-between gap-2">
+                                      <span className="text-foreground whitespace-pre-wrap break-words min-w-0">{act.message}</span>
                                       <span className="text-[10px] text-subtle-foreground shrink-0">{formattedTime}</span>
                                     </div>
                                     {metaText && (

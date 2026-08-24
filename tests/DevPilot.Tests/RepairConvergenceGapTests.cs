@@ -201,6 +201,77 @@ public sealed class RepairConvergenceGapTests : IDisposable
     }
 
     [Fact]
+    public void BoundFocusedRepair_ExcludesUnrelatedCompilerDiagnostics()
+    {
+        var request = MixedRepairRequest("src/app.ts");
+        var bounded = DeveloperAgent.BoundFocusedRepairToSelectedFile(request, "src/app.ts");
+
+        bounded.DiagnosticEvidence.Should().Contain("src/app.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.");
+        bounded.DiagnosticEvidence.Should().NotContain("issueController.ts");
+        bounded.DiagnosticEvidence.Should().NotContain("issueRepository.ts");
+        bounded.DiagnosticLocations.Should().ContainSingle(location => location.Contains("app.ts", StringComparison.OrdinalIgnoreCase));
+        bounded.DiagnosticLocations.Should().NotContain(location => location.Contains("issueController.ts", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task FocusedVerificationRepair_UsesFileBoundedDiagnosticsOnly()
+    {
+        WriteWorktree("src/app.ts", "export const value = 1;");
+        _fakeAiProvider.ResponsesToReturn.Enqueue(ModifyJson("src/app.ts", "export const value = 1;", "export const value = 2;"));
+
+        var result = await _agent.ExecuteFocusedRepairAsync(MixedRepairRequest("src/app.ts"));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _activityRecorder.ProviderKinds.Should().Equal("FocusedVerificationRepair");
+        AssertPromptIsFileBounded(_fakeAiProvider.ReceivedRequests[0].UserPrompt, "src/app.ts");
+    }
+
+    [Fact]
+    public async Task FinalDiagnosticRepair_UsesFileBoundedDiagnosticsOnly()
+    {
+        WriteWorktree("src/app.ts", "export const value = 1;");
+        _fakeAiProvider.ResponsesToReturn.Enqueue(ModifyJson("src/app.ts", "export const value = 1;", "export const value = 2;"));
+
+        var result = await _agent.ExecuteFocusedRepairAsync(MixedRepairRequest("src/app.ts", isFinal: true));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _activityRecorder.ProviderKinds.Should().Equal("FinalDiagnosticRepair");
+        AssertPromptIsFileBounded(_fakeAiProvider.ReceivedRequests[0].UserPrompt, "src/app.ts");
+        _fakeAiProvider.ReceivedRequests[0].UserPrompt.Should().Contain("FINAL DIAGNOSTIC-DIRECTED ATTEMPT");
+    }
+
+    [Fact]
+    public async Task AnchorRefreshRepair_RemainsFileBounded()
+    {
+        const string current = "export const CURRENT_MARKER = 1;";
+        WriteWorktree("src/app.ts", current);
+        _fakeAiProvider.ResponsesToReturn.Enqueue(ModifyJson("src/app.ts", "export const STALE_ANCHOR = 99;", "export const CURRENT_MARKER = 2;"));
+        _fakeAiProvider.ResponsesToReturn.Enqueue(ModifyJson("src/app.ts", current, "export const CURRENT_MARKER = 2;"));
+
+        var result = await _agent.ExecuteFocusedRepairAsync(MixedRepairRequest("src/app.ts"));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _activityRecorder.ProviderKinds.Should().Equal("FocusedVerificationRepair", "AnchorRefreshRepair");
+        AssertPromptIsFileBounded(_fakeAiProvider.ReceivedRequests[0].UserPrompt, "src/app.ts");
+        AssertPromptIsFileBounded(_fakeAiProvider.ReceivedRequests[1].UserPrompt, "src/app.ts");
+    }
+
+    [Fact]
+    public async Task MicroDiagnosticRepair_RemainsFileBounded()
+    {
+        WriteWorktree("src/app.ts", "export const value = 1;");
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(TokenLimit());
+        _fakeAiProvider.ResponsesToReturn.Enqueue(ModifyJson("src/app.ts", "export const value = 1;", "export const value = 2;"));
+
+        var result = await _agent.ExecuteFocusedRepairAsync(MixedRepairRequest("src/app.ts"));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _activityRecorder.ProviderKinds.Should().Equal("FocusedVerificationRepair", "MicroDiagnosticRepair");
+        AssertPromptIsFileBounded(_fakeAiProvider.ReceivedRequests[0].UserPrompt, "src/app.ts");
+        AssertPromptIsFileBounded(_fakeAiProvider.ReceivedRequests[1].UserPrompt, "src/app.ts");
+    }
+
+    [Fact]
     public void TestCreate_MayRetainBounded8192_AndModifyPatchFirstRemainsUnchanged()
     {
         var testEntry = new ManifestFileEntry("tests/issueService.test.ts", FileEditAction.Create);
@@ -213,6 +284,44 @@ public sealed class RepairConvergenceGapTests : IDisposable
         DeveloperAgent.BuildSingleFileSystemPrompt(modifyEntry).Should().Contain("searchReplaceEdits");
         DeveloperAgent.BuildSingleFileSystemPrompt(modifyEntry).Should().NotContain("complete resulting file once");
     }
+
+    private static void AssertPromptIsFileBounded(string? prompt, string selectedFile)
+    {
+        prompt.Should().NotBeNull();
+        prompt.Should().Contain($"{selectedFile}(12,3): error TS2322: Type 'string' is not assignable to type 'number'.");
+        prompt.Should().NotContain("issueController.ts");
+        prompt.Should().NotContain("issueRepository.ts");
+        prompt.Should().NotContain("issueRoutes.ts");
+        prompt.Should().NotContain("issueService.ts");
+        prompt.Should().NotContain("jsonIssueStore.ts");
+    }
+
+    private FocusedRepairRequest MixedRepairRequest(string filePath, bool isFinal = false) => new(
+        TaskId: Guid.NewGuid(),
+        ExecutionId: Guid.NewGuid(),
+        TaskTitle: "Fix file",
+        AcceptanceCriteria: "Compile",
+        WorkspacePath: _worktreeDir,
+        BranchName: _branchName,
+        RepairFiles: new[] { filePath },
+        DiagnosticEvidence: """
+            src/app.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.
+            src/controllers/issueController.ts(6,44): error TS2554: Expected 1 arguments, but got 2.
+            src/repositories/issueRepository.ts(10,5): error TS2304: Cannot find name 'Issue'.
+            src/routes/issueRoutes.ts(5,48): error TS2551: Property 'updateStatus' does not exist.
+            src/services/issueService.ts(8,3): error TS2339: Property 'createIssue' does not exist.
+            src/stores/jsonIssueStore.ts(4,1): error TS2307: Cannot find module './issue'.
+            """,
+        DiagnosticLocations: new[]
+        {
+            "src/app.ts:12:3",
+            "src/controllers/issueController.ts:6:44",
+            "src/repositories/issueRepository.ts:10:5",
+            "src/routes/issueRoutes.ts:5:48",
+            "src/services/issueService.ts:8:3",
+            "src/stores/jsonIssueStore.ts:4:1"
+        },
+        IsFinalDiagnosticAttempt: isFinal);
 
     private FocusedRepairRequest RepairRequest(string filePath, bool isFinal = false) => new(
         TaskId: Guid.NewGuid(),
