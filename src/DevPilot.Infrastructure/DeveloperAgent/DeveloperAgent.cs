@@ -734,7 +734,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
         GenerationRunState runTelemetry,
         CancellationToken cancellationToken)
     {
-        var prerequisites = GenerationDependencyAnalyzer.BuildPrerequisiteMap(sortedFiles, contextFiles);
+        var prerequisites = GenerationDependencyAnalyzer.BuildPrerequisiteMap(
+            sortedFiles,
+            contextFiles,
+            request.WorkspacePath);
         var inDegree = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var dependents = new Dictionary<string, List<ManifestFileEntry>>(StringComparer.OrdinalIgnoreCase);
         var fileByPath = sortedFiles.ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase);
@@ -2410,6 +2413,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
+        AppendSameRoleExemplarSection(sb, filePath, request.WorkspacePath, peerContext);
+
         sb.AppendLine("Edit Strategy: surgical SEARCH/REPLACE only. Use an exact existing unique 2-5 line anchor. Never use a bare closing brace alone. Never return full newContent.");
         sb.AppendLine();
         sb.AppendLine("=== Current Content of Target File ===");
@@ -2946,6 +2951,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             sb.AppendLine("Create Strategy: emit the smallest compile-complete source file in newContent. No prose, no duplicated explanations, no unnecessary comments, no speculative extra functionality.");
             sb.AppendLine();
+            AppendSameRoleExemplarSection(sb, fileEntry.FilePath, request.WorkspacePath, contextFiles);
         }
         else if (fileEntry.Action == FileEditAction.Modify)
         {
@@ -3013,7 +3019,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         // Include relevant in-memory generated dependency specs from earlier completed waves (excluding any already directly referenced)
         var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace);
-        AppendPrerequisiteWorkspaceContent(fileEntry, contextFiles, completedEdits, virtualWorkspace, relevantGenerated);
+        AppendPrerequisiteWorkspaceContent(
+            fileEntry,
+            contextFiles,
+            completedEdits,
+            virtualWorkspace,
+            relevantGenerated,
+            request.WorkspacePath);
         var nonRedundantGenerated = relevantGenerated
             .Where(kvp => !directlyReferenced.Contains(kvp.Key))
             .ToList();
@@ -3352,16 +3364,75 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return proposedPlan.Trim();
     }
 
+    private static void AppendSameRoleExemplarSection(
+        System.Text.StringBuilder sb,
+        string targetPath,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? alreadyLoaded)
+    {
+        var neighbors = GenerationDependencyAnalyzer.CollectNeighborFileContents(
+            workspacePath,
+            new[] { targetPath });
+        var repositoryContents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (alreadyLoaded != null)
+        {
+            foreach (var (path, content) in alreadyLoaded)
+            {
+                if (!string.IsNullOrWhiteSpace(content) &&
+                    !string.Equals(path, targetPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    repositoryContents[path] = content;
+                }
+            }
+        }
+
+        foreach (var (path, content) in neighbors)
+        {
+            repositoryContents.TryAdd(path, content);
+        }
+
+        var exemplar = GenerationDependencyAnalyzer.SelectSameRoleExemplar(targetPath, repositoryContents);
+        if (exemplar == null)
+        {
+            return;
+        }
+
+        sb.AppendLine("=== Same-Role Repository Exemplar ===");
+        sb.AppendLine($"Preserve repository conventions from this bounded structural evidence in {exemplar.FilePath}. Match export shape, construction, and request handling. Do not copy unrelated feature behavior or expand beyond the existing file's size.");
+        sb.AppendLine($"--- Exemplar: {exemplar.FilePath} ---");
+        sb.AppendLine(exemplar.BoundedExcerpt);
+        sb.AppendLine("--- End Exemplar ---");
+        sb.AppendLine();
+    }
+
     private static void AppendPrerequisiteWorkspaceContent(
         ManifestFileEntry fileEntry,
         IReadOnlyDictionary<string, string> contextFiles,
         IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
         IReadOnlyDictionary<string, string>? virtualWorkspace,
-        IDictionary<string, string> relevantGenerated)
+        IDictionary<string, string> relevantGenerated,
+        string? workspacePath = null)
     {
         if (virtualWorkspace == null || virtualWorkspace.Count == 0 || completedEdits == null)
         {
             return;
+        }
+
+        var neighbors = GenerationDependencyAnalyzer.CollectNeighborFileContents(
+            workspacePath,
+            completedEdits.Keys.Append(fileEntry.FilePath));
+        var repositoryContents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (path, content) in contextFiles)
+        {
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                repositoryContents[path] = content;
+            }
+        }
+
+        foreach (var (path, content) in neighbors)
+        {
+            repositoryContents.TryAdd(path, content);
         }
 
         foreach (var (path, content) in virtualWorkspace)
@@ -3375,7 +3446,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
 
             var producer = new ManifestFileEntry(path, FileEditAction.Create);
-            if (GenerationDependencyAnalyzer.DependsOn(fileEntry, producer, existingFileContents: contextFiles))
+            var planned = completedEdits.Keys
+                .Append(fileEntry.FilePath)
+                .Select(plannedPath => new ManifestFileEntry(plannedPath, FileEditAction.Create))
+                .ToList();
+            if (GenerationDependencyAnalyzer.DependsOn(fileEntry, producer, existingFileContents: contextFiles) ||
+                GenerationDependencyAnalyzer.HasAnalogousRepositoryDependency(fileEntry, producer, planned, repositoryContents))
             {
                 relevantGenerated[path] = content.Length <= 3000
                     ? content

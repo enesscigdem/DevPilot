@@ -4,6 +4,8 @@ using DevPilot.Infrastructure.Executions;
 
 namespace DevPilot.Infrastructure.DeveloperAgent;
 
+public sealed record SameRoleExemplar(string FilePath, string BoundedExcerpt);
+
 /// <summary>
 /// Builds a conservative generation prerequisite graph from explicit manifest
 /// dependencies, feature/name affinity, and repository-native import/wiring evidence.
@@ -25,13 +27,37 @@ public static class GenerationDependencyAnalyzer
         @"^\s*using\s+(?:static\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*;",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
+    private static readonly Regex PythonImportRegex = new(
+        @"^\s*(?:from\s+(\.*[A-Za-z0-9_./]+)\s+import|import\s+(\.*[A-Za-z0-9_./]+))",
+        RegexOptions.Compiled | RegexOptions.Multiline);
+
+    private static readonly Regex GoImportRegex = new(
+        @"import\s+(?:\w+\s+)?""([^""]+)""",
+        RegexOptions.Compiled);
+
+    private static readonly Regex JavaImportRegex = new(
+        @"^\s*import\s+(?:static\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*;",
+        RegexOptions.Compiled | RegexOptions.Multiline);
+
+    private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".py", ".go", ".java", ".kt"
+    };
+
+    public const int MaxExemplarChars = 1200;
+    public const int MaxExemplarLines = 24;
+    private const int MaxNeighborFilesPerDirectory = 16;
+    private const int MaxNeighborDirectories = 12;
+    private const int MaxNeighborFileBytes = 16_384;
+
     private static readonly Regex WiringEvidenceRegex = new(
         @"\b(app\.use|app\.map|app\.listen|express\s*\(|createServer|router\.|register\w*Route|UseMiddleware|UseRouting|UseEndpoints|MapControllers|MapGet|MapPost|builder\.Services|AddSingleton|AddScoped|AddTransient|IApplicationBuilder|WebApplication)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static IReadOnlyDictionary<string, IReadOnlyList<string>> BuildPrerequisiteMap(
         IReadOnlyList<ManifestFileEntry> files,
-        IReadOnlyDictionary<string, string>? existingFileContents = null)
+        IReadOnlyDictionary<string, string>? existingFileContents = null,
+        string? workspacePath = null)
     {
         var map = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         if (files == null || files.Count == 0)
@@ -39,10 +65,18 @@ public static class GenerationDependencyAnalyzer
             return map.ToDictionary(item => item.Key, item => (IReadOnlyList<string>)item.Value, StringComparer.OrdinalIgnoreCase);
         }
 
+        var repositoryContents = MergeContents(
+            existingFileContents,
+            CollectNeighborFileContents(workspacePath, files.Select(file => file.FilePath)));
+
         foreach (var file in files)
         {
             map[file.FilePath] = new List<string>();
         }
+
+        var hardEdges = new HashSet<(string Consumer, string Producer)>(StringPairComparer.Instance);
+        var layerEdges = new HashSet<(string Consumer, string Producer)>(StringPairComparer.Instance);
+        var inferredEdges = new HashSet<(string Consumer, string Producer)>(StringPairComparer.Instance);
 
         for (var i = 0; i < files.Count; i++)
         {
@@ -55,16 +89,46 @@ public static class GenerationDependencyAnalyzer
                 }
 
                 var producer = files[j];
-                if (DependsOn(consumer, producer, files, existingFileContents))
+                if (HasHardDependency(consumer, producer, existingFileContents))
                 {
-                    map[consumer.FilePath].Add(producer.FilePath);
+                    hardEdges.Add((consumer.FilePath, producer.FilePath));
                 }
+                else if (HasAnalogousRepositoryDependency(consumer, producer, files, repositoryContents))
+                {
+                    inferredEdges.Add((consumer.FilePath, producer.FilePath));
+                }
+                else if (HasLayerAffinityDependency(consumer, producer))
+                {
+                    layerEdges.Add((consumer.FilePath, producer.FilePath));
+                }
+            }
+        }
+
+        foreach (var (consumer, producer) in inferredEdges)
+        {
+            layerEdges.Remove((producer, consumer));
+        }
+
+        var explicitEdges = new HashSet<(string Consumer, string Producer)>(hardEdges, StringPairComparer.Instance);
+        foreach (var layerEdge in layerEdges)
+        {
+            explicitEdges.Add(layerEdge);
+        }
+
+        inferredEdges = RemoveCyclicInferredEdges(files.Select(file => file.FilePath), explicitEdges, inferredEdges);
+
+        foreach (var (consumer, producer) in explicitEdges.Concat(inferredEdges))
+        {
+            if (map.TryGetValue(consumer, out var producers) &&
+                !producers.Contains(producer, StringComparer.OrdinalIgnoreCase))
+            {
+                producers.Add(producer);
             }
         }
 
         return map.ToDictionary(
             item => item.Key,
-            item => (IReadOnlyList<string>)item.Value.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            item => (IReadOnlyList<string>)item.Value,
             StringComparer.OrdinalIgnoreCase);
     }
 
@@ -80,6 +144,15 @@ public static class GenerationDependencyAnalyzer
             return false;
         }
 
+        return HasHardDependency(consumer, producer, existingFileContents) ||
+               HasLayerAffinityDependency(consumer, producer);
+    }
+
+    internal static bool HasHardDependency(
+        ManifestFileEntry consumer,
+        ManifestFileEntry producer,
+        IReadOnlyDictionary<string, string>? existingFileContents)
+    {
         if (consumer.Dependencies != null &&
             consumer.Dependencies.Contains(producer.FilePath, StringComparer.OrdinalIgnoreCase))
         {
@@ -93,22 +166,25 @@ public static class GenerationDependencyAnalyzer
             return true;
         }
 
-        var consumerLayer = DeveloperAgent.GetSemanticLayerScore(consumer.FilePath);
-        var producerLayer = DeveloperAgent.GetSemanticLayerScore(producer.FilePath);
-        var consumerStem = FeatureStem(consumer.FilePath);
-        var producerStem = FeatureStem(producer.FilePath);
-
-        if (consumerLayer > producerLayer && HasFeatureAffinity(consumerStem, producerStem, consumer.FilePath, producer.FilePath))
-        {
-            return true;
-        }
-
-        if (IsInterfaceImplementationPair(consumer.FilePath, producer.FilePath) && consumerLayer >= producerLayer)
+        if (IsInterfaceImplementationPair(consumer.FilePath, producer.FilePath) &&
+            DeveloperAgent.GetSemanticLayerScore(consumer.FilePath) >= DeveloperAgent.GetSemanticLayerScore(producer.FilePath))
         {
             return true;
         }
 
         return HasRepositoryWiringDependency(consumer, producer, existingFileContents);
+    }
+
+    internal static bool HasLayerAffinityDependency(ManifestFileEntry consumer, ManifestFileEntry producer)
+    {
+        var consumerLayer = DeveloperAgent.GetSemanticLayerScore(consumer.FilePath);
+        var producerLayer = DeveloperAgent.GetSemanticLayerScore(producer.FilePath);
+        return consumerLayer > producerLayer &&
+               HasFeatureAffinity(
+                   FeatureStem(consumer.FilePath),
+                   FeatureStem(producer.FilePath),
+                   consumer.FilePath,
+                   producer.FilePath);
     }
 
     public static bool HasFeatureAffinity(string consumerStem, string producerStem, string consumerPath, string producerPath)
@@ -177,6 +253,242 @@ public static class GenerationDependencyAnalyzer
         return false;
     }
 
+    public static bool HasAnalogousRepositoryDependency(
+        ManifestFileEntry consumer,
+        ManifestFileEntry producer,
+        IReadOnlyList<ManifestFileEntry>? allFiles = null,
+        IReadOnlyDictionary<string, string>? repositoryContents = null)
+    {
+        if (consumer == null || producer == null || repositoryContents == null || repositoryContents.Count == 0)
+        {
+            return false;
+        }
+
+        if (string.Equals(consumer.FilePath, producer.FilePath, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var consumerStem = GetFeatureStem(consumer.FilePath);
+        var producerStem = GetFeatureStem(producer.FilePath);
+        if (!HasFeatureAffinity(consumerStem, producerStem, consumer.FilePath, producer.FilePath))
+        {
+            return false;
+        }
+
+        var consumerDir = ParentDirectory(consumer.FilePath);
+        var producerDir = ParentDirectory(producer.FilePath);
+        if (string.IsNullOrWhiteSpace(consumerDir) ||
+            string.IsNullOrWhiteSpace(producerDir) ||
+            string.Equals(consumerDir, producerDir, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var planned = new HashSet<string>(
+            (allFiles ?? Array.Empty<ManifestFileEntry>()).Select(file => Normalize(file.FilePath)),
+            StringComparer.OrdinalIgnoreCase)
+        {
+            Normalize(consumer.FilePath),
+            Normalize(producer.FilePath)
+        };
+
+        var forward = CountAnalogousDirectoryEvidence(consumerDir, producerDir, planned, repositoryContents);
+        var reverse = CountAnalogousDirectoryEvidence(producerDir, consumerDir, planned, repositoryContents);
+        return forward > 0 && reverse == 0;
+    }
+
+    public static IReadOnlyDictionary<string, string> CollectNeighborFileContents(
+        string? workspacePath,
+        IEnumerable<string> filePaths)
+    {
+        var contents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath) || filePaths == null)
+        {
+            return contents;
+        }
+
+        var directories = filePaths
+            .Select(ParentDirectory)
+            .Where(dir => !string.IsNullOrWhiteSpace(dir))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(MaxNeighborDirectories)
+            .ToList();
+
+        foreach (var relativeDir in directories)
+        {
+            var absoluteDir = Path.Combine(workspacePath, relativeDir.Replace('/', Path.DirectorySeparatorChar));
+            if (!Directory.Exists(absoluteDir))
+            {
+                continue;
+            }
+
+            var files = Directory.GetFiles(absoluteDir)
+                .Where(path => SourceExtensions.Contains(Path.GetExtension(path)))
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .Take(MaxNeighborFilesPerDirectory);
+
+            foreach (var absolutePath in files)
+            {
+                var relative = DeveloperAgent.NormalizeFocusedRepairPath(
+                    Path.GetRelativePath(workspacePath, absolutePath));
+                if (contents.ContainsKey(relative))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var info = new FileInfo(absolutePath);
+                    if (info.Length <= 0 || info.Length > MaxNeighborFileBytes)
+                    {
+                        continue;
+                    }
+
+                    var bytes = File.ReadAllBytes(absolutePath);
+                    if (WorktreeEditApplier.IsBinaryContent(bytes))
+                    {
+                        continue;
+                    }
+
+                    var text = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        contents[relative] = text;
+                    }
+                }
+                catch
+                {
+                    // Neighbor scan is best-effort and must not fail generation.
+                }
+            }
+        }
+
+        return contents;
+    }
+
+    public static SameRoleExemplar? SelectSameRoleExemplar(
+        string targetPath,
+        IReadOnlyDictionary<string, string>? repositoryContents)
+    {
+        if (string.IsNullOrWhiteSpace(targetPath) || repositoryContents == null || repositoryContents.Count == 0)
+        {
+            return null;
+        }
+
+        var targetExt = Path.GetExtension(targetPath);
+        var targetDir = ParentDirectory(targetPath);
+        var targetDirName = DirectoryName(targetDir);
+        var targetStem = GetFeatureStem(targetPath);
+        var targetRemainder = RoleRemainder(targetPath);
+        SameRoleExemplar? selected = null;
+        var selectedScore = 0;
+        string? selectedPath = null;
+
+        foreach (var (path, content) in repositoryContents.OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            if (string.Equals(path, targetPath, StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(content) ||
+                !string.Equals(Path.GetExtension(path), targetExt, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var candidateStem = GetFeatureStem(path);
+            if (IsSignificantStem(targetStem) &&
+                string.Equals(candidateStem, targetStem, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var score = 0;
+            var candidateDir = ParentDirectory(path);
+            if (string.Equals(candidateDir, targetDir, StringComparison.OrdinalIgnoreCase))
+            {
+                score += 3;
+            }
+            else if (string.Equals(DirectoryName(candidateDir), targetDirName, StringComparison.OrdinalIgnoreCase) &&
+                     !string.IsNullOrWhiteSpace(targetDirName))
+            {
+                score += 2;
+            }
+
+            if (!string.IsNullOrWhiteSpace(targetRemainder) &&
+                string.Equals(RoleRemainder(path), targetRemainder, StringComparison.OrdinalIgnoreCase))
+            {
+                score += 2;
+            }
+
+            if (score < 3)
+            {
+                continue;
+            }
+
+            if (selected == null ||
+                score > selectedScore ||
+                (score == selectedScore && string.Compare(path, selectedPath, StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                var excerpt = BoundStructuralExemplar(content, MaxExemplarChars);
+                if (string.IsNullOrWhiteSpace(excerpt))
+                {
+                    continue;
+                }
+
+                selected = new SameRoleExemplar(path, excerpt);
+                selectedScore = score;
+                selectedPath = path;
+            }
+        }
+
+        return selected;
+    }
+
+    public static string BoundStructuralExemplar(string content, int maxChars = MaxExemplarChars)
+    {
+        if (string.IsNullOrWhiteSpace(content) || maxChars <= 0)
+        {
+            return string.Empty;
+        }
+
+        var lines = content.Replace("\r\n", "\n").Split('\n');
+        var selected = new List<string>();
+        var used = 0;
+        var followOn = 0;
+        foreach (var raw in lines)
+        {
+            var line = raw.TrimEnd();
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            var structural = LooksLikeStructuralExemplarLine(line);
+            if (!structural && followOn <= 0)
+            {
+                continue;
+            }
+
+            var addition = selected.Count == 0 ? line.Trim() : "\n" + line.Trim();
+            if (used + addition.Length > maxChars || selected.Count >= MaxExemplarLines)
+            {
+                break;
+            }
+
+            selected.Add(line.Trim());
+            used += addition.Length;
+            followOn = structural ? 2 : followOn - 1;
+        }
+
+        if (selected.Count == 0)
+        {
+            return DeveloperAgent.BoundPeerContractExcerpt(content, Math.Min(maxChars, 400));
+        }
+
+        return string.Join('\n', selected);
+    }
+
+    public static string GetFeatureStem(string filePath) => FeatureStem(filePath);
+
     public static IReadOnlyList<string> ExtractImportSpecs(string content, string consumerPath)
     {
         var results = new List<string>();
@@ -205,6 +517,33 @@ public static class GenerationDependencyAnalyzer
             {
                 results.Add(ns.Replace('.', '/'));
             }
+        }
+
+        foreach (Match match in PythonImportRegex.Matches(content))
+        {
+            var spec = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
+            if (spec.StartsWith('.'))
+            {
+                var resolved = ResolveRelativeImport(consumerDir, spec.Replace('.', '/'));
+                if (!string.IsNullOrWhiteSpace(resolved))
+                {
+                    results.Add(resolved);
+                }
+            }
+            else
+            {
+                results.Add(spec.Replace('.', '/'));
+            }
+        }
+
+        foreach (Match match in GoImportRegex.Matches(content))
+        {
+            results.Add(match.Groups[1].Value.TrimStart('/'));
+        }
+
+        foreach (Match match in JavaImportRegex.Matches(content))
+        {
+            results.Add(match.Groups[1].Value.Replace('.', '/'));
         }
 
         return results
@@ -310,6 +649,8 @@ public static class GenerationDependencyAnalyzer
         var importWithoutExt = StripSourceExtension(normalizedImport);
         if (string.Equals(importWithoutExt, producerWithoutExt, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(importWithoutExt, Path.GetFileName(producerWithoutExt), StringComparison.OrdinalIgnoreCase) ||
+            producerWithoutExt.EndsWith('/' + normalizedImport.TrimStart('/'), StringComparison.OrdinalIgnoreCase) ||
+            producerWithoutExt.EndsWith('/' + importWithoutExt.TrimStart('/'), StringComparison.OrdinalIgnoreCase) ||
             normalizedProducer.EndsWith('/' + normalizedImport.TrimStart('/'), StringComparison.OrdinalIgnoreCase) ||
             normalizedProducer.EndsWith('/' + importWithoutExt.TrimStart('/'), StringComparison.OrdinalIgnoreCase))
         {
@@ -401,7 +742,7 @@ public static class GenerationDependencyAnalyzer
 
     private static string StripSourceExtension(string path)
     {
-        foreach (var ext in new[] { ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs" })
+        foreach (var ext in new[] { ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".py", ".go", ".java", ".kt" })
         {
             if (path.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
             {
@@ -410,5 +751,237 @@ public static class GenerationDependencyAnalyzer
         }
 
         return path;
+    }
+
+    private static int CountAnalogousDirectoryEvidence(
+        string consumerDir,
+        string producerDir,
+        ISet<string> plannedFiles,
+        IReadOnlyDictionary<string, string> repositoryContents)
+    {
+        var evidence = 0;
+        foreach (var (path, content) in repositoryContents)
+        {
+            if (plannedFiles.Contains(Normalize(path)) ||
+                !string.Equals(ParentDirectory(path), consumerDir, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var import in ExtractImportSpecs(content, path))
+            {
+                var resolved = ResolveExistingImport(import, producerDir, repositoryContents);
+                if (resolved == null || plannedFiles.Contains(Normalize(resolved)))
+                {
+                    continue;
+                }
+
+                if (HasFeatureAffinity(GetFeatureStem(path), GetFeatureStem(resolved), path, resolved))
+                {
+                    evidence++;
+                }
+            }
+        }
+
+        return evidence;
+    }
+
+    private static string? ResolveExistingImport(
+        string importSpec,
+        string expectedProducerDir,
+        IReadOnlyDictionary<string, string> repositoryContents)
+    {
+        foreach (var existing in repositoryContents.Keys)
+        {
+            if (!string.Equals(ParentDirectory(existing), expectedProducerDir, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (PathsReferToSameSource(importSpec, existing))
+            {
+                return existing;
+            }
+        }
+
+        var normalized = Normalize(importSpec);
+        if (string.Equals(ParentDirectory(normalized), expectedProducerDir, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(DirectoryName(normalized), DirectoryName(expectedProducerDir), StringComparison.OrdinalIgnoreCase))
+        {
+            return normalized;
+        }
+
+        return null;
+    }
+
+    private static HashSet<(string Consumer, string Producer)> RemoveCyclicInferredEdges(
+        IEnumerable<string> files,
+        HashSet<(string Consumer, string Producer)> explicitEdges,
+        HashSet<(string Consumer, string Producer)> inferredEdges)
+    {
+        var kept = new HashSet<(string Consumer, string Producer)>(inferredEdges, StringPairComparer.Instance);
+        if (kept.Count == 0)
+        {
+            return kept;
+        }
+
+        foreach (var inferred in inferredEdges)
+        {
+            var trial = new HashSet<(string Consumer, string Producer)>(explicitEdges, StringPairComparer.Instance);
+            foreach (var edge in kept)
+            {
+                trial.Add(edge);
+            }
+
+            if (CreatesCycle(files, trial))
+            {
+                kept.Remove(inferred);
+            }
+        }
+
+        if (CreatesCycle(files, explicitEdges.Concat(kept)))
+        {
+            return new HashSet<(string Consumer, string Producer)>(StringPairComparer.Instance);
+        }
+
+        return kept;
+    }
+
+    private static bool CreatesCycle(
+        IEnumerable<string> files,
+        IEnumerable<(string Consumer, string Producer)> edges)
+    {
+        var adjacency = files.ToDictionary(file => Normalize(file), _ => new List<string>(), StringComparer.OrdinalIgnoreCase);
+        foreach (var (consumer, producer) in edges)
+        {
+            if (!adjacency.ContainsKey(consumer))
+            {
+                adjacency[consumer] = new List<string>();
+            }
+
+            adjacency[consumer].Add(producer);
+        }
+
+        var state = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var node in adjacency.Keys)
+        {
+            if (HasCycle(node, adjacency, state))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasCycle(
+        string node,
+        IReadOnlyDictionary<string, List<string>> adjacency,
+        Dictionary<string, int> state)
+    {
+        if (state.TryGetValue(node, out var current))
+        {
+            return current == 1;
+        }
+
+        state[node] = 1;
+        if (adjacency.TryGetValue(node, out var next))
+        {
+            foreach (var child in next)
+            {
+                if (HasCycle(child, adjacency, state))
+                {
+                    return true;
+                }
+            }
+        }
+
+        state[node] = 2;
+        return false;
+    }
+
+    private static IReadOnlyDictionary<string, string> MergeContents(
+        IReadOnlyDictionary<string, string>? first,
+        IReadOnlyDictionary<string, string>? second)
+    {
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (first != null)
+        {
+            foreach (var (path, content) in first)
+            {
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    merged[path] = content;
+                }
+            }
+        }
+
+        if (second != null)
+        {
+            foreach (var (path, content) in second)
+            {
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    merged.TryAdd(path, content);
+                }
+            }
+        }
+
+        return merged;
+    }
+
+    private static string RoleRemainder(string filePath)
+    {
+        var name = Path.GetFileNameWithoutExtension(filePath) ?? string.Empty;
+        var stem = FeatureStem(filePath);
+        if (IsSignificantStem(stem) &&
+            name.StartsWith(stem, StringComparison.OrdinalIgnoreCase) &&
+            name.Length > stem.Length)
+        {
+            return name[stem.Length..];
+        }
+
+        return string.Empty;
+    }
+
+    private static string DirectoryName(string directory)
+    {
+        var normalized = Normalize(directory);
+        var slash = normalized.LastIndexOf('/');
+        return slash < 0 ? normalized : normalized[(slash + 1)..];
+    }
+
+    private static bool LooksLikeStructuralExemplarLine(string line)
+    {
+        var trimmed = line.Trim();
+        if (trimmed.Length == 0 || trimmed.StartsWith("//") || trimmed.StartsWith('#') || trimmed.StartsWith('*'))
+        {
+            return false;
+        }
+
+        return trimmed.StartsWith("import ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("export ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("from ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("using ", StringComparison.Ordinal) ||
+               trimmed.StartsWith("package ", StringComparison.Ordinal) ||
+               trimmed.Contains("require(") ||
+               trimmed.Contains("constructor(") ||
+               Regex.IsMatch(trimmed, @"\b(class|interface|function|def|func|public|internal|export)\b");
+    }
+
+    private static string Normalize(string path) => DeveloperAgent.NormalizeFocusedRepairPath(path);
+
+    private sealed class StringPairComparer : IEqualityComparer<(string Consumer, string Producer)>
+    {
+        public static readonly StringPairComparer Instance = new();
+
+        public bool Equals((string Consumer, string Producer) x, (string Consumer, string Producer) y) =>
+            string.Equals(x.Consumer, y.Consumer, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(x.Producer, y.Producer, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode((string Consumer, string Producer) obj) =>
+            HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Consumer),
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Producer));
     }
 }

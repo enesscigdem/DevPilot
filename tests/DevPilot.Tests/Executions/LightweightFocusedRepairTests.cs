@@ -274,8 +274,9 @@ public class LightweightFocusedRepairTests : IDisposable
         controllerRequest.UserPrompt.Should().Contain("src/services/issueService.ts");
         controllerRequest.UserPrompt.Should().Contain("createIssue(input: CreateIssueInput)");
         controllerRequest.UserPrompt.Should().Contain("updateStatus(id: string, status: string)");
-        controllerRequest.UserPrompt.Should().NotContain("UserController");
-        controllerRequest.UserPrompt.Should().NotContain("listUsers");
+        controllerRequest.UserPrompt.Should().Contain("=== Same-Role Repository Exemplar ===");
+        controllerRequest.UserPrompt.Should().Contain("src/controllers/userController.ts");
+        controllerRequest.UserPrompt.Should().NotContain("--- Peer File: src/controllers/userController.ts ---");
         controllerRequest.UserPrompt.Should().NotContain(UnrelatedUserController);
 
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "controllers", "issueController.ts"))
