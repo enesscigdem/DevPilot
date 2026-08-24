@@ -1,5 +1,6 @@
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Infrastructure.DeveloperAgent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -12,6 +13,15 @@ public sealed record CompilerFailureEvidence(
     string FailureFingerprint,
     IReadOnlyList<string> DiagnosticLines,
     IReadOnlyList<DiagnosticSourceLocation> Locations);
+
+public sealed record CompilerRepairSelection(
+    string? FilePath,
+    bool ScopeExpanded,
+    bool IsFinalDiagnosticAttempt,
+    IReadOnlyList<string> ImplicatedFiles,
+    IReadOnlyList<string> AttemptedFiles,
+    int ErrorCount,
+    string Decision);
 
 public sealed record TestFailureEvidence(
     string FailureFingerprint,
@@ -247,13 +257,217 @@ public static class ExecutionDiagnosticEvidence
         CompilerFailureEvidence evidence,
         IEnumerable<string> modifiedFiles)
     {
-        return evidence.Locations
-            .Select(location => MatchModifiedFile(location.FilePath, modifiedFiles))
+        var selection = SelectNextCompilerRepairTarget(
+            evidence,
+            modifiedFiles,
+            Array.Empty<string>(),
+            lastRepairChangedFile: false,
+            finalDiagnosticAttemptUsed: false);
+        return string.IsNullOrWhiteSpace(selection.FilePath) || selection.ScopeExpanded
+            ? Array.Empty<string>()
+            : new[] { selection.FilePath };
+    }
+
+    public static IReadOnlyList<string> ListImplicatedCompilerFiles(
+        CompilerFailureEvidence evidence,
+        IEnumerable<string>? modifiedFiles = null)
+    {
+        var modified = (modifiedFiles ?? Array.Empty<string>()).ToList();
+        var ordered = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var location in evidence.Locations)
+        {
+            if (string.IsNullOrWhiteSpace(location.FilePath))
+            {
+                continue;
+            }
+
+            var matched = modified.Count > 0
+                ? MatchModifiedFile(location.FilePath, modified)
+                : null;
+            var candidate = matched ?? NormalizePath(location.FilePath);
+            if (string.IsNullOrWhiteSpace(candidate) || !seen.Add(candidate))
+            {
+                continue;
+            }
+
+            ordered.Add(candidate);
+        }
+
+        return ordered;
+    }
+
+    public static CompilerRepairSelection SelectNextCompilerRepairTarget(
+        CompilerFailureEvidence evidence,
+        IEnumerable<string> modifiedFiles,
+        IEnumerable<string> attemptedForCurrentFailureSet,
+        bool lastRepairChangedFile,
+        bool finalDiagnosticAttemptUsed,
+        string? workspacePath = null)
+    {
+        var modified = modifiedFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var attempted = new HashSet<string>(
+            attemptedForCurrentFailureSet.Where(path => !string.IsNullOrWhiteSpace(path)),
+            StringComparer.OrdinalIgnoreCase);
+        var errorCount = evidence.DiagnosticLines.Count;
+        var implicated = ListImplicatedCompilerFiles(evidence, modified);
+
+        var matchedImplicated = implicated
+            .Select(path => MatchModifiedFile(path, modified) ?? (modified.Contains(path, StringComparer.OrdinalIgnoreCase) ? path : null))
             .Where(path => path != null)
             .Cast<string>()
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(1)
             .ToList();
+
+        var unattemptedMatched = matchedImplicated
+            .Where(path => !attempted.Contains(path))
+            .ToList();
+        if (unattemptedMatched.Count > 0)
+        {
+            return new CompilerRepairSelection(
+                unattemptedMatched[0],
+                ScopeExpanded: false,
+                IsFinalDiagnosticAttempt: false,
+                implicated,
+                attempted.ToList(),
+                errorCount,
+                "NextUnattemptedFile");
+        }
+
+        if (matchedImplicated.Count == 0 && !string.IsNullOrWhiteSpace(workspacePath))
+        {
+            var expanded = TryExpandCompilerRepairScope(evidence, modified, workspacePath);
+            if (!string.IsNullOrWhiteSpace(expanded) && !attempted.Contains(expanded))
+            {
+                var expandedImplicated = implicated.Count > 0 ? implicated : new[] { expanded };
+                return new CompilerRepairSelection(
+                    expanded,
+                    ScopeExpanded: true,
+                    IsFinalDiagnosticAttempt: false,
+                    expandedImplicated,
+                    attempted.ToList(),
+                    errorCount,
+                    "CompilerScopeExpanded");
+            }
+        }
+
+        var uniqueRemaining = matchedImplicated.Count == 1
+            ? matchedImplicated[0]
+            : matchedImplicated.Count == 0 && implicated.Count == 1
+                ? implicated[0]
+                : null;
+        var canFinal = lastRepairChangedFile &&
+                       !finalDiagnosticAttemptUsed &&
+                       uniqueRemaining != null &&
+                       (matchedImplicated.Count <= 1 || matchedImplicated.All(attempted.Contains));
+
+        if (canFinal)
+        {
+            return new CompilerRepairSelection(
+                uniqueRemaining,
+                ScopeExpanded: false,
+                IsFinalDiagnosticAttempt: true,
+                implicated,
+                attempted.ToList(),
+                errorCount,
+                "FinalSingleFile");
+        }
+
+        return new CompilerRepairSelection(
+            null,
+            ScopeExpanded: false,
+            IsFinalDiagnosticAttempt: false,
+            implicated,
+            attempted.ToList(),
+            errorCount,
+            matchedImplicated.Count == 0 ? "Uncorrelated" : "AllImplicatedFilesExhausted");
+    }
+
+    public static string? TryExpandCompilerRepairScope(
+        CompilerFailureEvidence evidence,
+        IEnumerable<string> modifiedFiles,
+        string workspacePath)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath) || !Directory.Exists(workspacePath))
+        {
+            return null;
+        }
+
+        var modified = modifiedFiles.ToList();
+        var unmatched = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var location in evidence.Locations)
+        {
+            if (string.IsNullOrWhiteSpace(location.FilePath))
+            {
+                continue;
+            }
+
+            if (MatchModifiedFile(location.FilePath, modified) != null)
+            {
+                continue;
+            }
+
+            var relative = MakeRepositoryRelative(location.FilePath, workspacePath);
+            if (string.IsNullOrWhiteSpace(relative) || !seen.Add(relative))
+            {
+                continue;
+            }
+
+            unmatched.Add(relative);
+        }
+
+        if (unmatched.Count != 1)
+        {
+            return null;
+        }
+
+        return TryResolveExactCompilerRepairPath(workspacePath, unmatched[0]);
+    }
+
+    public static string? TryResolveExactCompilerRepairPath(string workspacePath, string diagnosticPath)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath) || string.IsNullOrWhiteSpace(diagnosticPath))
+        {
+            return null;
+        }
+
+        var relative = MakeRepositoryRelative(diagnosticPath, workspacePath);
+        if (string.IsNullOrWhiteSpace(relative) ||
+            relative.Contains("..", StringComparison.Ordinal) ||
+            !IsSupportedCompilerSourcePath(relative))
+        {
+            return null;
+        }
+
+        try
+        {
+            var resolved = WorktreeEditApplier.ValidateAndResolvePath(workspacePath, relative);
+            if (!File.Exists(resolved))
+            {
+                return null;
+            }
+
+            var bytes = File.ReadAllBytes(resolved);
+            if (WorktreeEditApplier.IsBinaryContent(bytes))
+            {
+                return null;
+            }
+
+            return NormalizePath(relative);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static bool IsSupportedCompilerSourcePath(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return !string.IsNullOrEmpty(extension) &&
+               Regex.IsMatch(extension, $@"^\.{SourceExtensionPattern}$", RegexOptions.IgnoreCase);
     }
 
     public static IReadOnlyList<string> SelectTestRepairFiles(

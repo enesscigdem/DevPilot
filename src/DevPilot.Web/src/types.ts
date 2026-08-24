@@ -374,6 +374,11 @@ export interface ExecutionActivityMetadata {
   reasoningTokens?: number | null;
   responseContentCharCount?: number | null;
   requestedReasoningEffort?: string | null;
+  diagnosticErrorCount?: number | null;
+  distinctDiagnosticFileCount?: number | null;
+  selectedRepairTarget?: string | null;
+  scopeExpandedByCompilerEvidence?: boolean | null;
+  attemptedRepairTargets?: string[] | null;
 }
 
 export interface ExecutionActivityItem {

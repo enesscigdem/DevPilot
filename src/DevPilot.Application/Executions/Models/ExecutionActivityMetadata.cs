@@ -50,4 +50,9 @@ public sealed record ExecutionActivityMetadata(
     string? FailureKind = null,
     int? ReasoningTokens = null,
     int? ResponseContentCharCount = null,
-    string? RequestedReasoningEffort = null);
+    string? RequestedReasoningEffort = null,
+    int? DiagnosticErrorCount = null,
+    int? DistinctDiagnosticFileCount = null,
+    string? SelectedRepairTarget = null,
+    bool? ScopeExpandedByCompilerEvidence = null,
+    IReadOnlyList<string>? AttemptedRepairTargets = null);

@@ -7,6 +7,7 @@ using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure.Executions;
 using FluentAssertions;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -398,6 +399,7 @@ public class GitWorkspaceExecutionProcessorTests
     {
         public bool PrepareSuccess { get; set; } = true;
         public string PrepareErrorMessage { get; set; } = "";
+        public string PreparedWorkspacePath { get; set; } = "/workspace/path";
         public bool PrepareCalled { get; private set; }
         public bool VerifyCleanSuccess { get; set; } = true;
         public string VerifyErrorMessage { get; set; } = "";
@@ -408,7 +410,7 @@ public class GitWorkspaceExecutionProcessorTests
         {
             PrepareCalled = true;
             if (!PrepareSuccess) return Task.FromResult(new ExecutionWorkspaceResult("", "", Success: false, ErrorMessage: PrepareErrorMessage));
-            return Task.FromResult(new ExecutionWorkspaceResult("/workspace/path", "devpilot/branch", Success: true));
+            return Task.FromResult(new ExecutionWorkspaceResult(PreparedWorkspacePath, "devpilot/branch", Success: true));
         }
 
         public Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(
@@ -824,6 +826,189 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
+    public async Task CompileRepair_SeventeenDiagnostics_RepairsFirstImplicatedFileOnly()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Other.cs", "src/Valid.cs" })
+        };
+        var runner = new ScriptedValidationRunner(new[]
+        {
+            new BuildValidationResult { Success = false, ErrorMessage = "build failed", StdOut = SeventeenCompilerDiagnostics() },
+            new BuildValidationResult { Success = true }
+        });
+        var fingerprint = new TestFingerprintCalculator("before", "after");
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().ContainSingle();
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[0].IsFinalDiagnosticAttempt.Should().BeFalse();
+        recorder.RecordedActivities.Should().Contain(a =>
+            a.metadata != null &&
+            a.metadata.DiagnosticErrorCount == 17 &&
+            a.metadata.DistinctDiagnosticFileCount == 2 &&
+            a.metadata.SelectedRepairTarget == "src/App.cs");
+    }
+
+    [Fact]
+    public async Task CompileRepair_UnchangedDiagnosticsAfterFileA_SelectsExactFileBNotFinalA()
+    {
+        var taskId = Guid.NewGuid();
+        var failure = new BuildValidationResult
+        {
+            Success = false,
+            ErrorMessage = "build failed",
+            StdOut = SeventeenCompilerDiagnostics()
+        };
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Other.cs" })
+        };
+        var runner = new ScriptedValidationRunner(new[] { failure, failure, new BuildValidationResult { Success = true } });
+        var fingerprint = new TestFingerprintCalculator("a", "b", "c", "d");
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().HaveCount(2);
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[0].IsFinalDiagnosticAttempt.Should().BeFalse();
+        agent.FocusedRepairRequests[1].RepairFiles.Should().Equal("src/Other.cs");
+        agent.FocusedRepairRequests[1].IsFinalDiagnosticAttempt.Should().BeFalse();
+        recorder.RecordedActivities.Should().Contain(a =>
+            a.metadata != null &&
+            a.metadata.SelectedRepairTarget == "src/Other.cs" &&
+            a.metadata.AttemptedRepairTargets != null &&
+            a.metadata.AttemptedRepairTargets.Contains("src/App.cs"));
+    }
+
+    [Fact]
+    public async Task CompileRepair_CompilerRepairAttemptsAreBoundedAtFive()
+    {
+        var taskId = Guid.NewGuid();
+        var files = Enumerable.Range(1, 6).Select(i => $"src/File{i}.cs").ToArray();
+        var stdout = string.Join('\n', files.Select((file, index) => $"{file}({index + 1},1): error CS1002: ; expected"));
+        var failure = new BuildValidationResult { Success = false, ErrorMessage = "build failed", StdOut = stdout };
+        var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Ok(files) };
+        var runner = new ScriptedValidationRunner(Enumerable.Repeat(failure, 8));
+        var fingerprint = new TestFingerprintCalculator(Enumerable.Range(0, 16).Select(i => $"fp-{i}").ToArray());
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().HaveCount(5);
+        agent.FocusedRepairRequests.Should().OnlyContain(request => !request.IsFinalDiagnosticAttempt);
+        agent.FocusedRepairRequests.Select(request => request.RepairFiles.Single()).Should().Equal(
+            "src/File1.cs", "src/File2.cs", "src/File3.cs", "src/File4.cs", "src/File5.cs");
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
+    }
+
+    [Fact]
+    public async Task CompileRepair_UniqueCompilerPathOutsideModifiedFiles_ExpandsScopeThenRebuilds()
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "DevPilotScope_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(workspace, "src"));
+        File.WriteAllText(Path.Combine(workspace, "src", "app.ts"), "export const app = 1;");
+        File.WriteAllText(Path.Combine(workspace, "src", "config.ts"), "export const config = 1;");
+        try
+        {
+            var taskId = Guid.NewGuid();
+            var agent = new TestDeveloperAgent
+            {
+                ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/app.ts" })
+            };
+            agent.FocusedRepairResults.Enqueue(DeveloperAgentResult.Ok(new List<string> { "src/config.ts" }));
+            var runner = new ScriptedValidationRunner(new[]
+            {
+                new BuildValidationResult
+                {
+                    Success = false,
+                    ErrorMessage = "build failed",
+                    StdOut = "src/config.ts(1,14): error TS2322: Type 'number' is not assignable to type 'string'."
+                },
+                new BuildValidationResult { Success = true }
+            });
+            var fingerprint = new TestFingerprintCalculator("before", "after");
+            var recorder = new TestActivityRecorder();
+            var processor = CreateProcessor(
+                taskId,
+                agent,
+                runner,
+                fingerprint,
+                recorder,
+                new TestWorkspaceManager { PreparedWorkspacePath = workspace });
+
+            await processor.ProcessAsync(CreateContext(taskId));
+
+            agent.FocusedRepairRequests.Should().ContainSingle();
+            agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/config.ts");
+            agent.FocusedRepairRequests[0].IsFinalDiagnosticAttempt.Should().BeFalse();
+            runner.BuildRequests.Should().HaveCount(2);
+            recorder.RecordedActivities.Should().Contain(a =>
+                a.metadata != null &&
+                a.metadata.ScopeExpandedByCompilerEvidence == true &&
+                a.metadata.SelectedRepairTarget == "src/config.ts");
+        }
+        finally
+        {
+            try { Directory.Delete(workspace, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task CompileRepair_WebhookStyleOneFileRepair_StillConverges()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/app.ts", "src/webhookController.ts" })
+        };
+        var runner = new ScriptedValidationRunner(new[]
+        {
+            new BuildValidationResult
+            {
+                Success = false,
+                ErrorMessage = "build failed",
+                StdOut = "src/app.ts(12,4): error TS2322: Type 'string' is not assignable to type 'number'."
+            },
+            new BuildValidationResult { Success = true }
+        });
+        var fingerprint = new TestFingerprintCalculator("before", "after");
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().ContainSingle();
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/app.ts");
+        agent.FocusedRepairRequests[0].IsFinalDiagnosticAttempt.Should().BeFalse();
+        runner.BuildRequests.Should().HaveCount(2);
+        recorder.RecordedActivities.Should().Contain(a => a.message == "Build retry passed.");
+    }
+
+    private static string SeventeenCompilerDiagnostics()
+    {
+        var lines = new List<string>();
+        for (var i = 1; i <= 9; i++)
+        {
+            lines.Add($"src/App.cs({i},1): error CS1001: diagnostic {i}");
+        }
+
+        for (var i = 1; i <= 8; i++)
+        {
+            lines.Add($"src/Other.cs({i},1): error CS2001: diagnostic {i}");
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    [Fact]
     public async Task TestRepair_RerunsTargetedTestBeforeRequiredFullSuite_WithoutBuild()
     {
         var taskId = Guid.NewGuid();
@@ -956,10 +1141,12 @@ public class GitWorkspaceExecutionProcessorTests
         TestDeveloperAgent agent,
         IExecutionValidationRunner runner,
         IExecutionChangeFingerprintCalculator? fingerprint = null,
-        TestActivityRecorder? recorder = null)
+        TestActivityRecorder? recorder = null,
+        IExecutionWorkspaceManager? workspaceManager = null,
+        IConfiguration? configuration = null)
     {
         return new GitWorkspaceExecutionProcessor(
-            new TestWorkspaceManager(),
+            workspaceManager ?? new TestWorkspaceManager(),
             new TestExecutionRepository(),
             new TestImpactAnalysisRepository
             {
@@ -974,7 +1161,7 @@ public class GitWorkspaceExecutionProcessorTests
             new TestRepositoryCheckRunnerAdapter(runner),
             recorder ?? new TestActivityRecorder(),
             NullLogger<GitWorkspaceExecutionProcessor>.Instance,
-            configuration: null,
+            configuration,
             changeFingerprintCalculator: fingerprint);
     }
 

@@ -58,6 +58,110 @@ public sealed class ExecutionDiagnosticEvidenceTests
     }
 
     [Fact]
+    public void SelectNext_SeventeenDiagnosticsAcrossMultipleFiles_RepairsFirstFileOnly()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(SeventeenDiagnostics(), null, "build failed");
+        var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "src/App.cs", "src/Other.cs", "src/Valid.cs" },
+            Array.Empty<string>(),
+            lastRepairChangedFile: false,
+            finalDiagnosticAttemptUsed: false);
+
+        evidence.DiagnosticLines.Should().HaveCount(17);
+        selection.ImplicatedFiles.Should().Equal("src/App.cs", "src/Other.cs");
+        selection.FilePath.Should().Be("src/App.cs");
+        selection.IsFinalDiagnosticAttempt.Should().BeFalse();
+        selection.ScopeExpanded.Should().BeFalse();
+        selection.Decision.Should().Be("NextUnattemptedFile");
+    }
+
+    [Fact]
+    public void SelectNext_SameDiagnosticsAfterChangedFileA_SelectsExactFileBNotA()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(SeventeenDiagnostics(), null, "build failed");
+        var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "src/App.cs", "src/Other.cs" },
+            new[] { "src/App.cs" },
+            lastRepairChangedFile: true,
+            finalDiagnosticAttemptUsed: false);
+
+        selection.FilePath.Should().Be("src/Other.cs");
+        selection.IsFinalDiagnosticAttempt.Should().BeFalse();
+        selection.Decision.Should().Be("NextUnattemptedFile");
+    }
+
+    [Fact]
+    public void SelectNext_DoesNotUseFinalSameFileRepairWhileUnattemptedFileExists()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(SeventeenDiagnostics(), null, "build failed");
+        var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "src/App.cs", "src/Other.cs" },
+            new[] { "src/App.cs" },
+            lastRepairChangedFile: true,
+            finalDiagnosticAttemptUsed: false);
+
+        selection.FilePath.Should().NotBe("src/App.cs");
+        selection.IsFinalDiagnosticAttempt.Should().BeFalse();
+    }
+
+    [Fact]
+    public void SelectNext_SingleRemainingDiagnosticFile_MayReceiveFinalDiagnosticRepair()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+            "src/App.cs(8,3): error CS1002: ; expected",
+            null,
+            "build failed");
+        var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "src/App.cs", "src/Valid.cs" },
+            new[] { "src/App.cs" },
+            lastRepairChangedFile: true,
+            finalDiagnosticAttemptUsed: false);
+
+        selection.FilePath.Should().Be("src/App.cs");
+        selection.IsFinalDiagnosticAttempt.Should().BeTrue();
+        selection.Decision.Should().Be("FinalSingleFile");
+    }
+
+    [Fact]
+    public void SelectNext_ModelCannotIntroduceArbitraryRepairFiles()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+            "src/App.cs(8,3): error CS1002: ; expected",
+            null,
+            "build failed");
+        var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "src/App.cs", "src/GuessedByModel.cs", "src/AnotherGuess.cs" },
+            Array.Empty<string>(),
+            lastRepairChangedFile: false,
+            finalDiagnosticAttemptUsed: false);
+
+        selection.FilePath.Should().Be("src/App.cs");
+        selection.ImplicatedFiles.Should().NotContain("src/GuessedByModel.cs");
+        selection.ImplicatedFiles.Should().NotContain("src/AnotherGuess.cs");
+    }
+
+    private static string SeventeenDiagnostics()
+    {
+        var lines = new List<string>();
+        for (var i = 1; i <= 9; i++)
+        {
+            lines.Add($"src/App.cs({i},1): error CS100{i % 10}: diagnostic {i}");
+        }
+
+        for (var i = 1; i <= 8; i++)
+        {
+            lines.Add($"src/Other.cs({i},1): error CS200{i}: diagnostic {i}");
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    [Fact]
     public void TypeScriptDiagnostic_UsesTheSameFocusedFileCorrelationContract()
     {
         var evidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
@@ -361,5 +465,117 @@ public sealed class ExecutionDiagnosticEvidenceTests
         comparison.PreExistingCount.Should().Be(0);
         comparison.ChangedCount.Should().Be(1);
         comparison.ChangedFailures.Should().ContainSingle(f => f.TestName == "TodoApp.Tests.LegacyCalculatorTests.AlwaysFails");
+    }
+
+    [Fact]
+    public void SelectNext_UniqueCompilerPathOutsideModifiedFiles_ExpandsScopeByOne()
+    {
+        var workspace = CreateTempWorkspace();
+        try
+        {
+            WriteSource(workspace, "src/app.ts", "export const app = 1;");
+            WriteSource(workspace, "src/config.ts", "export const config = 1;");
+
+            var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+                "src/config.ts(1,14): error TS2322: Type 'number' is not assignable to type 'string'.",
+                null,
+                "npm build failed");
+            var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+                evidence,
+                new[] { "src/app.ts" },
+                Array.Empty<string>(),
+                lastRepairChangedFile: false,
+                finalDiagnosticAttemptUsed: false,
+                workspace);
+
+            selection.FilePath.Should().Be("src/config.ts");
+            selection.ScopeExpanded.Should().BeTrue();
+            selection.IsFinalDiagnosticAttempt.Should().BeFalse();
+            selection.Decision.Should().Be("CompilerScopeExpanded");
+        }
+        finally
+        {
+            TryDelete(workspace);
+        }
+    }
+
+    [Fact]
+    public void SelectNext_AmbiguousNonexistentOrOutsideWorkspacePath_CannotExpandScope()
+    {
+        var workspace = CreateTempWorkspace();
+        try
+        {
+            WriteSource(workspace, "src/app.ts", "export const app = 1;");
+            WriteSource(workspace, "src/a.ts", "export const a = 1;");
+            WriteSource(workspace, "src/b.ts", "export const b = 1;");
+
+            var ambiguous = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+                ExecutionDiagnosticEvidence.ParseCompilerFailure(
+                    "src/a.ts(1,1): error TS2322: a\nsrc/b.ts(1,1): error TS2322: b",
+                    null,
+                    "failed"),
+                new[] { "src/app.ts" },
+                Array.Empty<string>(),
+                lastRepairChangedFile: false,
+                finalDiagnosticAttemptUsed: false,
+                workspace);
+            ambiguous.FilePath.Should().BeNull();
+            ambiguous.ScopeExpanded.Should().BeFalse();
+            ambiguous.Decision.Should().Be("Uncorrelated");
+
+            var missing = ExecutionDiagnosticEvidence.TryExpandCompilerRepairScope(
+                ExecutionDiagnosticEvidence.ParseCompilerFailure(
+                    "src/missing.ts(1,1): error TS2322: missing",
+                    null,
+                    "failed"),
+                new[] { "src/app.ts" },
+                workspace);
+            missing.Should().BeNull();
+
+            var outside = ExecutionDiagnosticEvidence.TryExpandCompilerRepairScope(
+                ExecutionDiagnosticEvidence.ParseCompilerFailure(
+                    "../outside.ts(1,1): error TS2322: escaped",
+                    null,
+                    "failed"),
+                new[] { "src/app.ts" },
+                workspace);
+            outside.Should().BeNull();
+
+            var absolute = ExecutionDiagnosticEvidence.TryResolveExactCompilerRepairPath(workspace, "C:\\Windows\\System32\\kernel.ts");
+            absolute.Should().BeNull();
+        }
+        finally
+        {
+            TryDelete(workspace);
+        }
+    }
+
+    private static string CreateTempWorkspace()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "DevPilotExpand_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(path);
+        return path;
+    }
+
+    private static void WriteSource(string workspace, string relativePath, string content)
+    {
+        var full = Path.Combine(workspace, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        File.WriteAllText(full, content);
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch
+        {
+            // best-effort cleanup
+        }
     }
 }

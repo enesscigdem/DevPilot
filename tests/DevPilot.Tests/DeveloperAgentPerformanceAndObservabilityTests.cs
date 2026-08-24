@@ -94,7 +94,7 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
 
         var result = await agent.GenerateAndApplyEditsAsync(request);
         result.Success.Should().BeTrue();
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(8192);
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
     }
 
     [Fact]

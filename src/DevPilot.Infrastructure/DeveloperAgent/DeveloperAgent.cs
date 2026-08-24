@@ -149,21 +149,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return Math.Min(Math.Min(_budgetModifyPatch, 4096), _maxOutputTokens);
         }
 
-        var score = GetSemanticLayerScore(filePath);
-        var budget = score switch
+        if (ProjectGraphHelper.IsTestFileCandidate(filePath))
         {
-            5 => _budgetDtoOrModel,
-            10 => _budgetInterfaceOrContract,
-            20 => _budgetDtoOrModel,
-            25 => _budgetQueryOrCommand,
-            30 => _budgetHandlerOrService,
-            40 => _budgetHandlerOrService,
-            50 => _budgetController,
-            60 => _budgetTestFile,
-            _ => _budgetFallback
-        };
+            return Math.Min(_budgetTestFile, _maxOutputTokens);
+        }
 
-        return Math.Min(budget, _maxOutputTokens);
+        // Ordinary source Create stays a bounded compile-complete new file.
+        // Do not start at 8K merely because the semantic layer is a service/controller.
+        return Math.Min(4096, _maxOutputTokens);
     }
 
     public int DetermineFocusedRepairBudget()
@@ -188,7 +181,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var isTestFile = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
         var createCap = isTestFile
             ? Math.Min(_budgetTestFile, 8192)
-            : Math.Min(Math.Min(initialBudget, 8192), _maxOutputTokens);
+            : Math.Min(4096, _maxOutputTokens);
         return Math.Min(Math.Min(initialBudget, createCap), Math.Min(_maxOutputTokens, _maxCompactRetryOutputTokens));
     }
 
@@ -247,21 +240,21 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
-        var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
+        var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _) ?? string.Empty;
 
         var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
-        const bool useFullFileReplacement = false;
         var budget = DetermineFocusedRepairBudget();
         var peerContext = CollectFocusedRepairPeerContext(
             request.WorkspacePath,
             filePath,
             request,
-            currentContent ?? string.Empty);
+            currentContent);
         var boundedTarget = BuildFocusedRepairTargetWindow(
-            currentContent ?? string.Empty,
+            currentContent,
             request.DiagnosticLocations,
             request.DiagnosticEvidence);
 
+        var callKind = request.IsFinalDiagnosticAttempt ? "FinalDiagnosticRepair" : "FocusedVerificationRepair";
         var systemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath, request.IsFinalDiagnosticAttempt);
         var userPrompt = BuildFocusedDiagnosticRepairUserPrompt(
             filePath,
@@ -269,8 +262,174 @@ public sealed class DeveloperAgent : IDeveloperAgent
             request,
             peerContext);
 
-        var aiRequest = CreateMechanicalRequest(request.Model, systemPrompt, userPrompt, budget);
+        var primaryCall = await SendMechanicalRepairCallAsync(
+            request,
+            filePath,
+            callKind,
+            systemPrompt,
+            userPrompt,
+            budget,
+            cancellationToken).ConfigureAwait(false);
+        if (primaryCall.Error != null)
+        {
+            return DeveloperAgentResult.Fail(primaryCall.Error, request.Model);
+        }
 
+        var aiResponse = primaryCall.Response!;
+
+        if (request.IsFinalDiagnosticAttempt && aiResponse.FailureKind == AiFailureKind.TokenLimitExceeded)
+        {
+            return await ExecuteMicroDiagnosticRepairAsync(
+                request,
+                filePath,
+                resolvedPath,
+                manifestEntry,
+                budget,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
+        {
+            return DeveloperAgentResult.Fail($"Focused repair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
+        }
+
+        if (!TryBuildFocusedRepairPlan(aiResponse.Content, manifestEntry, currentContent, filePath, out var structuredPlan, out var parseError))
+        {
+            return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseError}", request.Model);
+        }
+
+        var applyResult = await _editApplier.ApplyEditsAsync(request.WorkspacePath, request.BranchName, structuredPlan, cancellationToken).ConfigureAwait(false);
+        if (applyResult.Success)
+        {
+            return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? new[] { filePath }, model: request.Model);
+        }
+
+        if (IsMissingSearchMatchFailure(applyResult.ErrorMessage))
+        {
+            return await ExecuteAnchorRefreshRepairAsync(
+                request,
+                filePath,
+                resolvedPath,
+                manifestEntry,
+                budget,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return DeveloperAgentResult.Fail(applyResult.ErrorMessage ?? "Focused repair apply failed.", request.Model);
+    }
+
+    private async Task<DeveloperAgentResult> ExecuteAnchorRefreshRepairAsync(
+        FocusedRepairRequest request,
+        string filePath,
+        string resolvedPath,
+        ManifestFileEntry manifestEntry,
+        int budget,
+        CancellationToken cancellationToken)
+    {
+        var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+        var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _) ?? string.Empty;
+        var boundedTarget = BuildFocusedRepairTargetWindow(
+            currentContent,
+            request.DiagnosticLocations,
+            request.DiagnosticEvidence);
+
+        var refreshCall = await SendMechanicalRepairCallAsync(
+            request,
+            filePath,
+            "AnchorRefreshRepair",
+            BuildAnchorRefreshRepairSystemPrompt(filePath),
+            BuildAnchorRefreshRepairUserPrompt(filePath, boundedTarget, request),
+            budget,
+            cancellationToken).ConfigureAwait(false);
+        if (refreshCall.Error != null)
+        {
+            return DeveloperAgentResult.Fail(refreshCall.Error, request.Model);
+        }
+
+        var aiResponse = refreshCall.Response!;
+
+        if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
+        {
+            return DeveloperAgentResult.Fail($"AnchorRefreshRepair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
+        }
+
+        if (!TryBuildFocusedRepairPlan(aiResponse.Content, manifestEntry, currentContent, filePath, out var structuredPlan, out var parseError))
+        {
+            return DeveloperAgentResult.Fail($"AnchorRefreshRepair output was invalid: {parseError}", request.Model);
+        }
+
+        var applyResult = await _editApplier.ApplyEditsAsync(request.WorkspacePath, request.BranchName, structuredPlan, cancellationToken).ConfigureAwait(false);
+        if (!applyResult.Success)
+        {
+            return DeveloperAgentResult.Fail(applyResult.ErrorMessage ?? "AnchorRefreshRepair apply failed.", request.Model);
+        }
+
+        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? new[] { filePath }, model: request.Model);
+    }
+
+    private async Task<DeveloperAgentResult> ExecuteMicroDiagnosticRepairAsync(
+        FocusedRepairRequest request,
+        string filePath,
+        string resolvedPath,
+        ManifestFileEntry manifestEntry,
+        int priorBudget,
+        CancellationToken cancellationToken)
+    {
+        var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+        var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _) ?? string.Empty;
+        var microBudget = Math.Min(priorBudget, DetermineFocusedRepairBudget());
+        var boundedTarget = BuildFocusedRepairTargetWindow(
+            currentContent,
+            request.DiagnosticLocations,
+            request.DiagnosticEvidence,
+            contextRadius: 6,
+            smallFileMaxLines: 36,
+            smallFileMaxChars: 1800);
+
+        var microCall = await SendMechanicalRepairCallAsync(
+            request,
+            filePath,
+            "MicroDiagnosticRepair",
+            BuildMicroDiagnosticRepairSystemPrompt(filePath),
+            BuildMicroDiagnosticRepairUserPrompt(filePath, boundedTarget, request),
+            microBudget,
+            cancellationToken).ConfigureAwait(false);
+        if (microCall.Error != null)
+        {
+            return DeveloperAgentResult.Fail(microCall.Error, request.Model);
+        }
+
+        var aiResponse = microCall.Response!;
+
+        if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
+        {
+            return DeveloperAgentResult.Fail($"MicroDiagnosticRepair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
+        }
+
+        if (!TryBuildFocusedRepairPlan(aiResponse.Content, manifestEntry, currentContent, filePath, out var structuredPlan, out var parseError))
+        {
+            return DeveloperAgentResult.Fail($"MicroDiagnosticRepair output was invalid: {parseError}", request.Model);
+        }
+
+        var applyResult = await _editApplier.ApplyEditsAsync(request.WorkspacePath, request.BranchName, structuredPlan, cancellationToken).ConfigureAwait(false);
+        if (!applyResult.Success)
+        {
+            return DeveloperAgentResult.Fail(applyResult.ErrorMessage ?? "MicroDiagnosticRepair apply failed.", request.Model);
+        }
+
+        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? new[] { filePath }, model: request.Model);
+    }
+
+    private async Task<(AiRequest? Request, AiResponse? Response, string? Error)> SendMechanicalRepairCallAsync(
+        FocusedRepairRequest request,
+        string filePath,
+        string callKind,
+        string systemPrompt,
+        string userPrompt,
+        int budget,
+        CancellationToken cancellationToken)
+    {
+        var aiRequest = CreateMechanicalRequest(request.Model, systemPrompt, userPrompt, budget);
         var repairSw = Stopwatch.StartNew();
         AiResponse aiResponse;
         try
@@ -279,54 +438,52 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
         catch (Exception ex)
         {
-            return DeveloperAgentResult.Fail($"Focused repair AI call failed: {ex.Message}", request.Model);
+            return (aiRequest, null, $"{callKind} AI call failed: {ex.Message}");
         }
         repairSw.Stop();
 
         await RecordProviderCallActivityAsync(
             request.ExecutionId,
             filePath,
-            request.IsFinalDiagnosticAttempt ? "FinalDiagnosticRepair" : "FocusedVerificationRepair",
+            callKind,
             aiRequest,
             aiResponse,
             repairSw.Elapsed,
             cancellationToken).ConfigureAwait(false);
 
-        if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
-        {
-            return DeveloperAgentResult.Fail($"Focused repair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
-        }
-
-        FileEditSpec editSpec;
-        try
-        {
-            editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
-            ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
-            ValidateFocusedRepairSearchAnchors(editSpec, filePath);
-        }
-        catch (Exception parseEx)
-        {
-            return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseEx.Message}", request.Model);
-        }
-
-        var structuredPlan = new StructuredEditPlan(new[] { editSpec });
-        try
-        {
-            ValidateStructuredPlan(structuredPlan);
-        }
-        catch (Exception planEx)
-        {
-            return DeveloperAgentResult.Fail($"Focused repair plan validation failed: {planEx.Message}", request.Model);
-        }
-
-        var applyResult = await _editApplier.ApplyEditsAsync(request.WorkspacePath, request.BranchName, structuredPlan, cancellationToken).ConfigureAwait(false);
-        if (!applyResult.Success)
-        {
-            return DeveloperAgentResult.Fail(applyResult.ErrorMessage ?? "Focused repair apply failed.", request.Model);
-        }
-
-        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? new[] { filePath }, model: request.Model);
+        return (aiRequest, aiResponse, null);
     }
+
+    private static bool TryBuildFocusedRepairPlan(
+        string? content,
+        ManifestFileEntry manifestEntry,
+        string currentContent,
+        string filePath,
+        out StructuredEditPlan plan,
+        out string error)
+    {
+        plan = new StructuredEditPlan(Array.Empty<FileEditSpec>());
+        error = string.Empty;
+        try
+        {
+            var editSpec = ParseSingleFileEditSpec(content ?? string.Empty, manifestEntry);
+            ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement: false);
+            ValidateFocusedRepairSearchAnchors(editSpec, filePath);
+            var structuredPlan = new StructuredEditPlan(new[] { editSpec });
+            ValidateStructuredPlan(structuredPlan);
+            plan = structuredPlan;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static bool IsMissingSearchMatchFailure(string? errorMessage) =>
+        !string.IsNullOrWhiteSpace(errorMessage) &&
+        errorMessage.Contains("Missing search match", StringComparison.OrdinalIgnoreCase);
 
     public async Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(
         DeveloperAgentRequest request,
@@ -1737,7 +1894,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
     public static string BuildFocusedRepairTargetWindow(
         string targetContent,
         IReadOnlyList<string>? diagnosticLocations,
-        string? diagnosticEvidence = null)
+        string? diagnosticEvidence = null,
+        int contextRadius = 12,
+        int smallFileMaxLines = 80,
+        int smallFileMaxChars = 4000)
     {
         if (string.IsNullOrWhiteSpace(targetContent))
         {
@@ -1745,7 +1905,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         var lines = targetContent.Replace("\r\n", "\n").Split('\n');
-        if (lines.Length <= 80 && targetContent.Length <= 4000)
+        if (lines.Length <= smallFileMaxLines && targetContent.Length <= smallFileMaxChars)
         {
             return targetContent;
         }
@@ -1776,8 +1936,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         foreach (var lineNumber in lineNumbers)
         {
             var index = Math.Clamp(lineNumber - 1, 0, lines.Length - 1);
-            var start = Math.Max(0, index - 12);
-            var end = Math.Min(lines.Length - 1, index + 12);
+            var radius = Math.Max(2, contextRadius);
+            var start = Math.Max(0, index - radius);
+            var end = Math.Min(lines.Length - 1, index + radius);
             for (var i = start; i <= end; i++)
             {
                 included[i] = true;
@@ -2151,6 +2312,113 @@ public sealed class DeveloperAgent : IDeveloperAgent
         sb.AppendLine();
         sb.AppendLine($"Output ONLY the corrected surgical searchReplaceEdits JSON for '{filePath}'. Do not reproduce the entire file or unrelated methods.");
 
+        return sb.ToString();
+    }
+
+    public static string BuildAnchorRefreshRepairSystemPrompt(string filePath)
+    {
+        return $$"""
+            You are refreshing a SEARCH/REPLACE repair for a single existing file: '{{filePath}}'.
+            The previous SEARCH no longer matches the CURRENT file text.
+
+            CRITICAL RULES:
+            1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+            2. Use ONLY the freshly supplied current file text. Do not reuse a stale search anchor.
+            3. Return ONLY compact 'searchReplaceEdits'. Prefer 1 edit.
+            4. Each search anchor must be an exact existing 2-5 line unique excerpt from the current target. Never use a bare closing brace alone.
+            5. Do not return 'newContent' or replace the entire file.
+            6. Change only the exact current compiler diagnostic line or the immediately related statement.
+
+            Required JSON shape:
+            {"filePath":"{{filePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact current unique anchor","replace":"replacement"}]}
+            """;
+    }
+
+    public static string BuildAnchorRefreshRepairUserPrompt(
+        string filePath,
+        string currentContent,
+        FocusedRepairRequest request)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("ANCHOR REFRESH REPAIR");
+        sb.AppendLine("The previous SEARCH/REPLACE was structurally valid but SEARCH no longer matches the current file.");
+        sb.AppendLine("Reread the current text below and emit an exact SEARCH/REPLACE against this current text only.");
+        sb.AppendLine("Do not guess anchors. Do not replace the entire file.");
+        sb.AppendLine();
+        sb.AppendLine($"Target File: {filePath}");
+        sb.AppendLine("Action: Modify");
+        sb.AppendLine();
+        sb.AppendLine("=== Exact Current Compiler Diagnostic ===");
+        sb.AppendLine(request.DiagnosticEvidence);
+        sb.AppendLine("=== End Compiler Diagnostic ===");
+        sb.AppendLine();
+        if (request.DiagnosticLocations != null && request.DiagnosticLocations.Count > 0)
+        {
+            sb.AppendLine("=== Diagnostic Failure Locations ===");
+            foreach (var loc in request.DiagnosticLocations)
+            {
+                sb.AppendLine($"- {loc}");
+            }
+            sb.AppendLine();
+        }
+        sb.AppendLine("=== Fresh Current Content of Target File ===");
+        sb.AppendLine(currentContent);
+        sb.AppendLine("=== End Current Content ===");
+        sb.AppendLine();
+        sb.AppendLine($"Output ONLY exact searchReplaceEdits JSON for '{filePath}' against the current text.");
+        return sb.ToString();
+    }
+
+    public static string BuildMicroDiagnosticRepairSystemPrompt(string filePath)
+    {
+        return $$"""
+            You are performing a MICRO diagnostic-directed repair for a single existing file: '{{filePath}}'.
+            The previous FINAL diagnostic repair exhausted its output budget.
+
+            CRITICAL RULES:
+            1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+            2. Return ONLY one compact 'searchReplaceEdits' block. Omit 'newContent'.
+            3. Use only the exact compiler diagnostic and the tightly bounded current window.
+            4. Each search anchor must be an exact existing 2-5 line unique excerpt. Never use a bare closing brace alone.
+            5. Change only the diagnostic statement. Do not add peer files, comments, or extra features.
+
+            Required JSON shape:
+            {"filePath":"{{filePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact 2-5 line unique anchor","replace":"replacement"}]}
+            """;
+    }
+
+    public static string BuildMicroDiagnosticRepairUserPrompt(
+        string filePath,
+        string currentContent,
+        FocusedRepairRequest request)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("MICRO DIAGNOSTIC REPAIR");
+        sb.AppendLine("The previous FinalDiagnosticRepair hit TokenLimitExceeded.");
+        sb.AppendLine("Emit one exact SEARCH/REPLACE for the current diagnostic only.");
+        sb.AppendLine("Do not include peer files or broad repository context.");
+        sb.AppendLine();
+        sb.AppendLine($"Target File: {filePath}");
+        sb.AppendLine("Action: Modify");
+        sb.AppendLine();
+        sb.AppendLine("=== Exact Current Compiler Diagnostic ===");
+        sb.AppendLine(request.DiagnosticEvidence);
+        sb.AppendLine("=== End Compiler Diagnostic ===");
+        sb.AppendLine();
+        if (request.DiagnosticLocations != null && request.DiagnosticLocations.Count > 0)
+        {
+            sb.AppendLine("=== Diagnostic Failure Locations ===");
+            foreach (var loc in request.DiagnosticLocations)
+            {
+                sb.AppendLine($"- {loc}");
+            }
+            sb.AppendLine();
+        }
+        sb.AppendLine("=== Tightly Bounded Current Source Window ===");
+        sb.AppendLine(currentContent);
+        sb.AppendLine("=== End Current Source Window ===");
+        sb.AppendLine();
+        sb.AppendLine($"Output ONLY one searchReplaceEdits JSON object for '{filePath}'.");
         return sb.ToString();
     }
 
