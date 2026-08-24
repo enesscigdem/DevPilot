@@ -386,11 +386,12 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
 
         var result = await agent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("src/F2.cs");
-
-        // F1 must remain untouched!
-        (await File.ReadAllTextAsync(f1)).Should().Be(initialF1);
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
+        result.GenerationSummary!.FileOutcomes!
+            .Single(outcome => outcome.FilePath == "src/F2.cs")
+            .Status.Should().Be(PlannedFileGenerationStatus.Failed);
+        (await File.ReadAllTextAsync(f1)).Should().Contain("int X = 1;");
         File.Exists(f2).Should().BeFalse();
     }
 
@@ -445,7 +446,7 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
         messages.Should().Contain(m => m.StartsWith("Generated edit") && m.Contains("Model1.cs"));
         messages.Should().Contain(m => m.StartsWith("Generating edit") && m.Contains("Model2.cs"));
         messages.Should().Contain(m => m.StartsWith("Generated edit") && m.Contains("Model2.cs"));
-        messages.Should().Contain("Validating 2 generated edits.");
+        messages.Should().Contain("Validating 2/2 generated edits.");
         messages.Should().Contain("Applying generated edits.");
 
         var providerCalls = _activityRecorder.RecordedMetadata

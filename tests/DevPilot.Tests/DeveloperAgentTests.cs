@@ -306,10 +306,9 @@ public class DeveloperAgentTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-
-        // Disk must be completely untouched! File1 must NOT have been changed.
-        (await File.ReadAllTextAsync(file1)).Should().Be(initial1, "File1 must remain untouched when File2 fails");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
+        (await File.ReadAllTextAsync(file1)).Should().Contain("int V = 100;");
         (await File.ReadAllTextAsync(file2)).Should().Be(initial2, "File2 must remain untouched");
     }
 
@@ -324,6 +323,21 @@ public class DeveloperAgentTests : IDisposable
         {
             IsSuccess = false,
             FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result."
+        });
+        customAiProvider.ResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result."
+        });
+        customAiProvider.ResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
             ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result."
         });
 
@@ -440,8 +454,11 @@ public class DeveloperAgentTests : IDisposable
 
         var result = await agent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("exceeded maximum generation call limit");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
+        result.GenerationSummary!.FailedCount.Should().BeGreaterThan(0);
+        (await File.ReadAllTextAsync(f1)).Should().Contain("int X = 1;");
+        (await File.ReadAllTextAsync(f2)).Should().Be("class F2 {}");
     }
 
     [Fact]
@@ -737,15 +754,12 @@ public class DeveloperAgentTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("Missing search match in 'src/Dtos/F1Dto.cs'");
-
-        // F2 was NEVER generated because F1 failed early!
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2, "F1 initial + F1 repair; F2 must not be generated");
-
-        // Disk must remain untouched
+        result.IsGenerationComplete.Should().BeFalse();
+        result.GenerationSummary!.FileOutcomes!
+            .Single(outcome => outcome.FilePath == "src/Dtos/F1Dto.cs")
+            .Status.Should().Be(PlannedFileGenerationStatus.Failed);
+        _fakeAiProvider.SendAsyncCallCount.Should().BeGreaterThanOrEqualTo(2);
         (await File.ReadAllTextAsync(f1)).Should().Be("public class F1Dto { public int A = 1; }");
-        (await File.ReadAllTextAsync(f2)).Should().Be("public class F2Controller { public int B = 1; }");
     }
 
     [Fact]
@@ -849,9 +863,10 @@ public class DeveloperAgentTests : IDisposable
 
         var result = await agent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("exceeded maximum generation call limit (2)");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
         _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+        (await File.ReadAllTextAsync(f1)).Should().Contain("int X = 2;");
     }
 
     [Fact]

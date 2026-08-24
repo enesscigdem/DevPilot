@@ -180,9 +180,9 @@ public sealed class IncrementalConvergenceTests : IDisposable
         controllerBudget.Should().Be(4096);
         testBudget.Should().BeLessThanOrEqualTo(8192);
 
-        _agent.DetermineCompactRetryBudget(serviceBudget, null, service).Should().Be(4096);
-        _agent.DetermineCompactRetryBudget(8192, null, service).Should().Be(4096);
-        _agent.DetermineCompactRetryBudget(16384, null, service).Should().Be(4096);
+        _agent.DetermineCompactRetryBudget(serviceBudget, null, service).Should().Be(2048);
+        _agent.DetermineCompactRetryBudget(8192, null, service).Should().Be(2048);
+        _agent.DetermineCompactRetryBudget(16384, null, service).Should().Be(2048);
         _agent.DetermineCompactRetryBudget(testBudget, null, testFile).Should().BeLessThanOrEqualTo(8192);
         _agent.DetermineCompactRetryBudget(testBudget, null, testFile).Should().BeLessThan(16384);
     }
@@ -220,8 +220,7 @@ public sealed class IncrementalConvergenceTests : IDisposable
         result.Success.Should().BeTrue(result.ErrorMessage);
         _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
         _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
-        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(4096);
-        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().BeLessThan(16384);
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(2048);
         _fakeAiProvider.ReceivedRequests[1].ReasoningEffort.Should().Be("low");
         _fakeAiProvider.ReceivedRequests[1].SystemPrompt.Should().Contain("smallest compile-complete");
         _fakeAiProvider.ReceivedRequests[1].SystemPrompt.Should().Contain("newContent");
@@ -251,7 +250,8 @@ public sealed class IncrementalConvergenceTests : IDisposable
 
         result.Success.Should().BeFalse();
         _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
-        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(_fakeAiProvider.ReceivedRequests[0].MaxTokens);
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(2048);
     }
 
     [Fact]

@@ -44,6 +44,8 @@ public static class GenerationDependencyAnalyzer
         ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".cs", ".py", ".go", ".java", ".kt"
     };
 
+    public static IReadOnlyCollection<string> SourceExtensionsPublic => SourceExtensions;
+
     public const int MaxExemplarChars = 1200;
     public const int MaxExemplarLines = 24;
     private const int MaxNeighborFilesPerDirectory = 16;
@@ -454,6 +456,66 @@ public static class GenerationDependencyAnalyzer
 
         return selected;
     }
+
+    public static string? BuildRepositorySizeHint(
+        string targetPath,
+        IReadOnlyDictionary<string, string>? repositoryContents)
+    {
+        var exemplar = SelectSameRoleExemplar(targetPath, repositoryContents);
+        if (exemplar == null)
+        {
+            return null;
+        }
+
+        var lineCount = EstimateSourceLineCount(
+            repositoryContents != null &&
+            repositoryContents.TryGetValue(exemplar.FilePath, out var fullContent) &&
+            !string.IsNullOrWhiteSpace(fullContent)
+                ? fullContent
+                : exemplar.BoundedExcerpt);
+
+        return $"The closest same-role repository exemplar is approximately {lineCount} source lines. Stay close to that size unless additional lines are required for correctness.";
+    }
+
+    public static int EstimateSourceLineCount(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return 0;
+        }
+
+        return content
+            .Replace("\r\n", "\n")
+            .Split('\n')
+            .Count(line => !string.IsNullOrWhiteSpace(line));
+    }
+
+    public static IReadOnlyList<string> ExtractLocalImportSpecs(string content, string consumerPath)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return results;
+        }
+
+        foreach (Match match in JsImportRegex.Matches(content))
+        {
+            var spec = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
+            if (!string.IsNullOrWhiteSpace(spec) && spec.StartsWith(".", StringComparison.Ordinal))
+            {
+                results.Add(spec);
+            }
+        }
+
+        return results
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    public static string ParentDirectoryPublic(string path) => ParentDirectory(path);
+
+    public static string ResolveRelativeImportPublic(string consumerDir, string spec) =>
+        ResolveRelativeImport(consumerDir, spec);
 
     public static string BoundStructuralExemplar(string content, int maxChars = MaxExemplarChars)
     {

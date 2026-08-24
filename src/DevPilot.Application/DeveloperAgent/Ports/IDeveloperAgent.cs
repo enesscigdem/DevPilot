@@ -8,6 +8,11 @@ public interface IDeveloperAgent
         DeveloperAgentRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<DeveloperAgentResult> GenerateAdditionalPlannedFilesAsync(
+        DeveloperAgentRequest request,
+        IReadOnlyList<ManifestFileEntry> additionalFiles,
+        CancellationToken cancellationToken = default);
+
     Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(
         FocusedRepairRequest request,
         CancellationToken cancellationToken = default);

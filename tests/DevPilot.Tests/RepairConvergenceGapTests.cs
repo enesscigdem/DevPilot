@@ -194,8 +194,8 @@ public sealed class RepairConvergenceGapTests : IDisposable
             var entry = new ManifestFileEntry(path, FileEditAction.Create);
             var initial = _agent.DetermineInitialBudget(path, FileEditAction.Create);
             initial.Should().Be(4096, path);
-            _agent.DetermineCompactRetryBudget(initial, null, entry).Should().Be(4096, path);
-            _agent.DetermineCompactRetryBudget(8192, null, entry).Should().Be(4096, path);
+            _agent.DetermineCompactRetryBudget(initial, null, entry).Should().Be(2048, path);
+            _agent.DetermineCompactRetryBudget(8192, null, entry).Should().Be(2048, path);
             DeveloperAgent.BuildSingleFileSystemPrompt(entry).Should().Contain("smallest compile-complete");
         }
     }

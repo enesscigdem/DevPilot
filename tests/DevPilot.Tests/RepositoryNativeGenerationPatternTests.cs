@@ -380,16 +380,25 @@ public sealed class RepositoryNativeGenerationPatternTests : IDisposable
     }
 
     [Fact]
-    public void MinimalCreateRetryPrompt_RemainsUnchanged()
+    public void MinimalCreateRetryPrompt_IncludesSameRoleExemplarAndSizeHint()
     {
         WriteWorktree("src/routes/featureARoutes.ts", LargeRouteFile());
+        WriteWorktree("src/services/featureAService.ts", """
+            import { FeatureARepository } from '../repositories/featureARepository';
+            export class FeatureAService {}
+            """);
         var request = CreatePromptRequest("src/routes/featureBRoutes.ts");
         var prompt = DeveloperAgent.BuildMinimalCreateRetryUserPrompt(
             request,
-            new ManifestFileEntry("src/routes/featureBRoutes.ts", FileEditAction.Create));
+            new ManifestFileEntry("src/routes/featureBRoutes.ts", FileEditAction.Create),
+            contextFiles: new Dictionary<string, string>(),
+            virtualWorkspace: new Dictionary<string, string>(),
+            completedEdits: new Dictionary<string, FileEditSpec>());
 
         prompt.Should().Contain("=== MINIMAL CREATE RETRY ===");
-        prompt.Should().NotContain("Same-Role Repository Exemplar");
+        prompt.Should().Contain("Same-Role Repository Exemplar");
+        prompt.Should().Contain("approximately");
+        prompt.Should().NotContain("Acceptance Criteria");
         prompt.Should().NotContain(FullBodyMarker);
     }
 

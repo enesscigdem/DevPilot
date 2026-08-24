@@ -168,14 +168,14 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("remained unavailable");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
+        result.GenerationSummary!.FailedCount.Should().BeGreaterThan(0);
 
-        // One logical call per reached file; DeveloperAgent does not retry the provider's exhausted failure.
         _fakeAiProvider.SendAsyncCallCount.Should().Be(3);
 
-        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeFalse();
-        File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeTrue();
+        File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeTrue();
         File.Exists(Path.Combine(_worktreeDir, file3)).Should().BeFalse();
         File.Exists(Path.Combine(_worktreeDir, file4)).Should().BeFalse();
     }
@@ -237,14 +237,12 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("AI provider Kimi remained unavailable (HTTP 503) while generating 'src/Services/PaymentService.cs' after bounded retries.");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
 
-        // Exactly 2 logical calls: File1 and one provider-owned exhausted attempt for File2.
         _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
 
-        // Atomic apply MUST NOT have occurred: File1 was never applied to disk
-        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeTrue();
         File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeFalse();
     }
 
@@ -347,10 +345,10 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("remained unavailable");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
         _fakeAiProvider.StructuredResponsesToReturn.Should().ContainSingle("DeveloperAgent must not consume a second transport response");
-        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeTrue();
         File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeFalse();
     }
 
@@ -415,10 +413,10 @@ public class ProviderResilienceTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("remained unavailable");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
         _fakeAiProvider.StructuredResponsesToReturn.Should().ContainSingle();
-        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeFalse();
+        File.Exists(Path.Combine(_worktreeDir, file1)).Should().BeTrue();
         File.Exists(Path.Combine(_worktreeDir, file2)).Should().BeFalse();
     }
 

@@ -40,18 +40,69 @@ public sealed record ImpactedFileDetail(
     string? EvidenceType = null,
     bool IsUncertain = false);
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum PlannedFileGenerationStatus
+{
+    Success,
+    Failed,
+    BlockedByDependency
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum FileGenerationFailureReason
+{
+    TokenTruncation,
+    ProviderFailure,
+    ValidationFailure,
+    Cancelled,
+    CallLimitExceeded
+}
+
+public sealed record PlannedFileGenerationOutcome(
+    string FilePath,
+    PlannedFileGenerationStatus Status,
+    FileGenerationFailureReason? FailureReason = null,
+    string? Detail = null,
+    string? BlockedByPrerequisite = null);
+
+public sealed record DeveloperAgentGenerationSummary(
+    int PlannedFileCount,
+    int SuccessCount,
+    int FailedCount,
+    int BlockedByDependencyCount,
+    bool IsComplete,
+    bool ManifestGapRecoveryUsed = false,
+    bool TransientRetryUsed = false,
+    IReadOnlyList<PlannedFileGenerationOutcome>? FileOutcomes = null,
+    IReadOnlyList<string>? PrerequisiteRelationships = null);
+
 public sealed record DeveloperAgentResult(
     bool Success,
     string? ErrorMessage,
     IReadOnlyList<string>? ModifiedFiles = null,
     string? RawAiResponse = null,
-    string? Model = null)
+    string? Model = null,
+    DeveloperAgentGenerationSummary? GenerationSummary = null)
 {
+    public bool HasUsefulWork => ModifiedFiles is { Count: > 0 };
+
+    public bool IsGenerationComplete => GenerationSummary?.IsComplete ?? Success;
+
     public static DeveloperAgentResult Fail(string message, string? model = null) =>
         new(Success: false, ErrorMessage: message, Model: model);
 
-    public static DeveloperAgentResult Ok(IReadOnlyList<string> modifiedFiles, string? rawAiResponse = null, string? model = null) =>
-        new(Success: true, ErrorMessage: null, ModifiedFiles: modifiedFiles, RawAiResponse: rawAiResponse, Model: model);
+    public static DeveloperAgentResult Ok(
+        IReadOnlyList<string> modifiedFiles,
+        string? rawAiResponse = null,
+        string? model = null,
+        DeveloperAgentGenerationSummary? generationSummary = null) =>
+        new(Success: true, ErrorMessage: null, ModifiedFiles: modifiedFiles, RawAiResponse: rawAiResponse, Model: model, GenerationSummary: generationSummary);
+
+    public static DeveloperAgentResult Incomplete(
+        IReadOnlyList<string> modifiedFiles,
+        DeveloperAgentGenerationSummary generationSummary,
+        string? model = null) =>
+        new(Success: true, ErrorMessage: null, ModifiedFiles: modifiedFiles, Model: model, GenerationSummary: generationSummary);
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]

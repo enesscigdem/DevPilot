@@ -183,11 +183,15 @@ public sealed class DependencyAwareGenerationTests : IDisposable
         WriteWorktree("src/Dtos/Keep.cs", "public class Keep {}");
         var provider = new FailingAfterFirstProvider();
         var agent = CreateAgent(provider, concurrency: 4);
-        var result = await agent.GenerateAndApplyEditsAsync(CreateRequest(
-            new[] { "src/Dtos/Keep.cs", "src/Dtos/Fail.cs", "src/Dtos/Other.cs" }));
+        var result = await agent.GenerateAndApplyEditsAsync(CreateTypedRequest(
+            new ImpactedFileDetail("src/Dtos/Keep.cs", "Modify"),
+            new ImpactedFileDetail("src/Dtos/Fail.cs", "Create"),
+            new ImpactedFileDetail("src/Dtos/Other.cs", "Create")));
 
-        result.Success.Should().BeFalse();
-        File.ReadAllText(Path.Combine(_worktreeDir, "src", "Dtos", "Keep.cs")).Should().Be("public class Keep {}");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
+        File.ReadAllText(Path.Combine(_worktreeDir, "src", "Dtos", "Keep.cs"))
+            .Should().Be("public class Keep { public int Id { get; set; } }");
         File.Exists(Path.Combine(_worktreeDir, "src", "Dtos", "Fail.cs")).Should().BeFalse();
     }
 
@@ -569,13 +573,18 @@ public sealed class DependencyAwareGenerationTests : IDisposable
         public Task<AiResponse> SendAsync(AiRequest request, CancellationToken cancellationToken = default)
         {
             var target = ExtractTarget(request.UserPrompt);
-            var n = Interlocked.Increment(ref _calls);
-            if (target.Contains("Fail", StringComparison.OrdinalIgnoreCase) || n > 1)
+            Interlocked.Increment(ref _calls);
+            if (target.Contains("Fail", StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidOperationException("simulated provider failure");
             }
 
-            return Task.FromResult(Modify(target, "public class Keep {}", "public class Keep { public int Id { get; set; } }"));
+            if (target.Contains("Keep", StringComparison.OrdinalIgnoreCase))
+            {
+                return Task.FromResult(Modify(target, "public class Keep {}", "public class Keep { public int Id { get; set; } }"));
+            }
+
+            return Task.FromResult(Success(target, $"public class {Path.GetFileNameWithoutExtension(target)} {{}}"));
         }
     }
 

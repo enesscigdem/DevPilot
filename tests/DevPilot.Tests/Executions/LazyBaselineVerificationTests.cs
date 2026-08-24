@@ -524,6 +524,12 @@ C:\app\Controllers\OrderController.cs(10,5): error CS0246: The type or namespace
             return Task.FromResult(DeveloperAgentResult.Ok(new[] { "src/File1.cs" }, model: "test-model"));
         }
 
+        public Task<DeveloperAgentResult> GenerateAdditionalPlannedFilesAsync(
+            DeveloperAgentRequest request,
+            IReadOnlyList<ManifestFileEntry> additionalFiles,
+            CancellationToken cancellationToken = default) =>
+            GenerateAndApplyEditsAsync(request, cancellationToken);
+
         public Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(FocusedRepairRequest request, CancellationToken cancellationToken = default)
         {
             RepairCalls++;

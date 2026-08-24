@@ -304,15 +304,33 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 modifiedFiles.Add(file);
             }
 
+            var generationIncomplete = agentResult.GenerationSummary != null && !agentResult.GenerationSummary.IsComplete;
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.DeveloperAgent,
                 ExecutionActivityStatus.Completed,
-                "Developer Agent completed.",
+                generationIncomplete
+                    ? $"Developer Agent completed with incomplete generation ({agentResult.GenerationSummary!.SuccessCount}/{agentResult.GenerationSummary.PlannedFileCount} files)."
+                    : "Developer Agent completed.",
                 new ExecutionActivityMetadata(
                     ModifiedFileCount: agentResult.ModifiedFiles.Count,
                     Model: actualModel,
-                    EventKind: "GeneratingChange"),
+                    EventKind: "GeneratingChange",
+                    VerificationOutcome: generationIncomplete ? nameof(ExecutionVerificationOutcome.NeedsReview) : null,
+                    GenerationSuccessCount: agentResult.GenerationSummary?.SuccessCount,
+                    GenerationFailedCount: agentResult.GenerationSummary?.FailedCount,
+                    GenerationBlockedCount: agentResult.GenerationSummary?.BlockedByDependencyCount,
+                    GenerationFailedFiles: agentResult.GenerationSummary?.FileOutcomes?
+                        .Where(outcome => outcome.Status == PlannedFileGenerationStatus.Failed)
+                        .Select(outcome => outcome.FilePath)
+                        .Take(12)
+                        .ToList(),
+                    GenerationBlockedFiles: agentResult.GenerationSummary?.FileOutcomes?
+                        .Where(outcome => outcome.Status == PlannedFileGenerationStatus.BlockedByDependency)
+                        .Select(outcome => outcome.FilePath)
+                        .Take(12)
+                        .ToList(),
+                    PrerequisiteRelationships: agentResult.GenerationSummary?.PrerequisiteRelationships),
                 cancellationToken).ConfigureAwait(false);
 
             var prerequisiteChecks = requiredChecks.Where(check => check.Kind != RepositoryCheckKind.Test).ToList();
@@ -340,6 +358,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
 
             var allPrerequisitesPassed = true;
+            var manifestGapRecoveryState = new ManifestGapRecoveryState();
             foreach (var check in prerequisiteChecks)
             {
                 var passed = await RunPrerequisiteCheckAsync(
@@ -347,8 +366,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     prepResult,
                     analysis,
                     actualModel,
+                    agentRequest,
                     check,
                     modifiedFiles,
+                    manifestGapRecoveryState,
                     cancellationToken).ConfigureAwait(false);
 
                 if (!passed)
@@ -444,8 +465,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         ExecutionWorkspaceResult prepResult,
         TaskImpactAnalysis analysis,
         string? actualModel,
+        DeveloperAgentRequest agentRequest,
         RepositoryCheck check,
         HashSet<string> modifiedFiles,
+        ManifestGapRecoveryState manifestGapRecoveryState,
         CancellationToken cancellationToken)
     {
         await SafeRecordActivityAsync(
@@ -521,6 +544,31 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         stageDurationMs: stopwatch.ElapsedMilliseconds),
                     cancellationToken).ConfigureAwait(false);
                 return false;
+            }
+        }
+
+        if (!result.Success &&
+            check.Kind == RepositoryCheckKind.Build &&
+            !manifestGapRecoveryState.Used)
+        {
+            var recovered = await TryManifestGapRecoveryAsync(
+                context,
+                prepResult,
+                analysis,
+                agentRequest,
+                actualModel,
+                check,
+                modifiedFiles,
+                result,
+                cancellationToken).ConfigureAwait(false);
+            if (recovered.Attempted)
+            {
+                manifestGapRecoveryState.Used = true;
+                stopwatch.Restart();
+                result = await _repositoryCheckRunner.ExecuteAsync(
+                    new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, check),
+                    cancellationToken).ConfigureAwait(false);
+                stopwatch.Stop();
             }
         }
 
@@ -1442,6 +1490,118 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         value >= 0
             ? value
             : defaultValue;
+
+    private sealed class ManifestGapRecoveryState
+    {
+        public bool Used { get; set; }
+    }
+
+    private sealed record ManifestGapRecoveryAttempt(bool Attempted, int AddedFileCount);
+
+    private async Task<ManifestGapRecoveryAttempt> TryManifestGapRecoveryAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        TaskImpactAnalysis analysis,
+        DeveloperAgentRequest agentRequest,
+        string? actualModel,
+        RepositoryCheck check,
+        HashSet<string> modifiedFiles,
+        RepositoryCheckResult result,
+        CancellationToken cancellationToken)
+    {
+        var plannedFiles = analysis.StructuredResult?.ImpactedFiles?
+            .Where(file => !string.IsNullOrWhiteSpace(file.FilePath))
+            .Select(file => new ManifestFileEntry(
+                file.FilePath,
+                string.Equals(file.ChangeType.ToString(), "Modify", StringComparison.OrdinalIgnoreCase)
+                    ? FileEditAction.Modify
+                    : FileEditAction.Create,
+                file.Reason))
+            .ToList() ?? new List<ManifestFileEntry>();
+
+        var generatedPaths = modifiedFiles.ToList();
+        var generatedContents = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in generatedPaths)
+        {
+            try
+            {
+                var resolved = WorktreeEditApplier.ValidateAndResolvePath(prepResult.WorkspacePath, path);
+                if (File.Exists(resolved))
+                {
+                    generatedContents[path] = await File.ReadAllTextAsync(resolved, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+                // best-effort content load
+            }
+        }
+
+        var evidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(result.StdOut, result.StdErr, result.ErrorMessage);
+        var diagnosticLines = evidence.DiagnosticLines;
+        var gapEntries = ManifestGapRecovery.DetectMissingLocalCreates(
+            prepResult.WorkspacePath,
+            plannedFiles,
+            generatedPaths,
+            generatedContents,
+            diagnosticLines);
+
+        if (gapEntries.Count == 0)
+        {
+            return new ManifestGapRecoveryAttempt(false, 0);
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Started,
+            $"Manifest gap recovery adding {gapEntries.Count} Create file(s).",
+            new ExecutionActivityMetadata(
+                EventKind: "ManifestGapRecovery",
+                ManifestGapRecoveryUsed: true,
+                Model: actualModel),
+            cancellationToken).ConfigureAwait(false);
+
+        var recoveryResult = await _developerAgent.GenerateAdditionalPlannedFilesAsync(
+            agentRequest,
+            gapEntries,
+            cancellationToken).ConfigureAwait(false);
+
+        if (!recoveryResult.Success || recoveryResult.ModifiedFiles == null || recoveryResult.ModifiedFiles.Count == 0)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Failed,
+                "Manifest gap recovery did not produce successful files.",
+                new ExecutionActivityMetadata(
+                    EventKind: "ManifestGapRecovery",
+                    ManifestGapRecoveryUsed: true,
+                    VerificationOutcome: nameof(ExecutionVerificationOutcome.NeedsReview),
+                    Model: actualModel),
+                cancellationToken).ConfigureAwait(false);
+            return new ManifestGapRecoveryAttempt(true, 0);
+        }
+
+        foreach (var file in recoveryResult.ModifiedFiles)
+        {
+            modifiedFiles.Add(file);
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Completed,
+            $"Manifest gap recovery applied {recoveryResult.ModifiedFiles.Count} file(s).",
+            new ExecutionActivityMetadata(
+                EventKind: "ManifestGapRecovery",
+                ManifestGapRecoveryUsed: true,
+                ModifiedFileCount: recoveryResult.ModifiedFiles.Count,
+                Model: actualModel),
+            cancellationToken).ConfigureAwait(false);
+
+        return new ManifestGapRecoveryAttempt(true, gapEntries.Count);
+    }
 
     private async Task SafeRecordActivityAsync(
         Guid executionId,

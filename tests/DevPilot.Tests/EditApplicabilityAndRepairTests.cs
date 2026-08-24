@@ -431,8 +431,9 @@ public class EditApplicabilityAndRepairTests : IDisposable
 
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
-        result.Success.Should().BeFalse();
-        (await File.ReadAllTextAsync(f1)).Should().Be("class F1 { public int A = 1; }");
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.IsGenerationComplete.Should().BeFalse();
+        (await File.ReadAllTextAsync(f1)).Should().Be("class F1 { public int A = 2; }");
         (await File.ReadAllTextAsync(f2)).Should().Be("class F2 { public int B = 1; }");
     }
 

@@ -250,7 +250,7 @@ public sealed class CompletionFirstModifyGenerationTests : IDisposable
         var result = await _agent.GenerateAndApplyEditsAsync(ModifyRequest("Service.cs"));
 
         result.Success.Should().BeFalse();
-        result.ErrorMessage.Should().Contain("exhausted the configured output token limit");
+        result.ErrorMessage.Should().Contain("exhausted the configured");
         _fakeAiProvider.SendAsyncCallCount.Should().Be(3, "Modify allows surgical retry plus one micro retry, then stops");
         (await File.ReadAllTextAsync(Path.Combine(_worktreeDir, "Service.cs"))).Should().Contain("Value => 1");
     }

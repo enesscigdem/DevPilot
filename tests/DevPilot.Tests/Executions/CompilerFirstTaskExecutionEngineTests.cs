@@ -708,6 +708,12 @@ public sealed class CompilerFirstTaskExecutionEngineTests
             return Task.FromResult(ResultToReturn);
         }
 
+        public Task<DeveloperAgentResult> GenerateAdditionalPlannedFilesAsync(
+            DeveloperAgentRequest request,
+            IReadOnlyList<ManifestFileEntry> additionalFiles,
+            CancellationToken cancellationToken = default) =>
+            GenerateAndApplyEditsAsync(request, cancellationToken);
+
         public Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(FocusedRepairRequest request, CancellationToken cancellationToken = default)
         {
             CallCount++;
