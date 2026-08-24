@@ -351,7 +351,7 @@ public class DeveloperAgentPerformanceAndObservabilityTests : IDisposable
 
         result.Success.Should().BeTrue();
         result.ModifiedFiles.Should().HaveCount(4);
-        concurrencyTracker.MaxObservedConcurrency.Should().BeInRange(2, 2);
+        concurrencyTracker.MaxObservedConcurrency.Should().Be(2);
     }
 
     [Fact]

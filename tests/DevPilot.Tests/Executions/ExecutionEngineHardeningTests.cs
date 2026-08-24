@@ -1361,6 +1361,17 @@ public class ExecutionEngineHardeningTests
         sanitizedForExecution.Should().Contain("after repair: Unsupported architectural namespace 'TodoApi.Models'");
     }
 
+    [Fact]
+    public void ActivityMessageSanitization_RemainsSingleLineAndBounded()
+    {
+        var raw = "Build failed — 17 compiler error(s)\nsrc/app.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.\n" + new string('x', 80);
+        var sanitized = DevPilot.Infrastructure.Executions.EfExecutionActivityRecorder.SanitizeMessage(raw);
+        sanitized.Should().Be("Build failed — 17 compiler error(s)");
+        sanitized.Should().NotContain("\n");
+        sanitized.Should().NotContain("TS2322");
+        sanitized.Length.Should().BeLessThanOrEqualTo(500);
+    }
+
     private class TestActivityRepo : IExecutionActivityRepository
     {
         public List<ExecutionActivity> Activities { get; } = new();

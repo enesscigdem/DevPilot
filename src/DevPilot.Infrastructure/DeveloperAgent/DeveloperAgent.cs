@@ -639,6 +639,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var generationStopwatch = Stopwatch.StartNew();
+        var runTelemetry = new GenerationRunState(_maxConcurrentFileGenerations);
 
         try
         {
@@ -654,6 +655,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 projectGraph,
                 callCounter,
                 capturedModels,
+                runTelemetry,
                 linkedCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -670,13 +672,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 "Generation technical summary.",
                 cancellationToken,
                 ExecutionActivityStatus.Failed,
-                new ExecutionActivityMetadata(
-                    EventKind: "GenerationSummary",
-                    LogicalProviderCallCount: callCounter.CurrentCount,
-                    CompactRetryCount: callCounter.CompactRetryCount,
-                    ApplicabilityRepairCount: callCounter.ApplicabilityRepairCount,
-                    TotalGenerationTimeMs: generationStopwatch.ElapsedMilliseconds,
-                    StageDurationMs: generationStopwatch.ElapsedMilliseconds)).ConfigureAwait(false);
+                BuildGenerationSummaryMetadata(callCounter, generationStopwatch, runTelemetry)).ConfigureAwait(false);
             return DeveloperAgentResult.Fail(ex.Message, model: capturedModels.FirstOrDefault() ?? request.Model);
         }
 
@@ -686,13 +682,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             "Generation technical summary.",
             cancellationToken,
             ExecutionActivityStatus.Completed,
-            new ExecutionActivityMetadata(
-                EventKind: "GenerationSummary",
-                LogicalProviderCallCount: callCounter.CurrentCount,
-                CompactRetryCount: callCounter.CompactRetryCount,
-                ApplicabilityRepairCount: callCounter.ApplicabilityRepairCount,
-                TotalGenerationTimeMs: generationStopwatch.ElapsedMilliseconds,
-                StageDurationMs: generationStopwatch.ElapsedMilliseconds)).ConfigureAwait(false);
+            BuildGenerationSummaryMetadata(callCounter, generationStopwatch, runTelemetry)).ConfigureAwait(false);
 
         // 5. Phase 3 — Atomically Validate and Apply Edits
         await SafeRecordActivityAsync(request.ExecutionId, $"Validating {totalFiles} generated edits.", cancellationToken).ConfigureAwait(false);
@@ -741,10 +731,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
         IReadOnlyList<DiscoveredProjectNode> projectGraph,
         ConcurrencyCallCounter callCounter,
         ConcurrentBag<string> capturedModels,
+        GenerationRunState runTelemetry,
         CancellationToken cancellationToken)
     {
+        var prerequisites = GenerationDependencyAnalyzer.BuildPrerequisiteMap(sortedFiles, contextFiles);
         var inDegree = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var dependents = new Dictionary<string, List<ManifestFileEntry>>(StringComparer.OrdinalIgnoreCase);
+        var fileByPath = sortedFiles.ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase);
 
         foreach (var file in sortedFiles)
         {
@@ -752,74 +745,84 @@ public sealed class DeveloperAgent : IDeveloperAgent
             dependents[file.FilePath] = new List<ManifestFileEntry>();
         }
 
-        for (int i = 0; i < sortedFiles.Count; i++)
+        foreach (var (consumerPath, producers) in prerequisites)
         {
-            var target = sortedFiles[i];
-            var targetScore = GetSemanticLayerScore(target.FilePath);
-
-            for (int j = 0; j < sortedFiles.Count; j++)
+            foreach (var producerPath in producers)
             {
-                if (i == j) continue;
-                var candidate = sortedFiles[j];
-                var candidateScore = GetSemanticLayerScore(candidate.FilePath);
-
-                bool dependsOn = false;
-                if (target.Dependencies != null && target.Dependencies.Contains(candidate.FilePath, StringComparer.OrdinalIgnoreCase))
+                if (!fileByPath.TryGetValue(producerPath, out var producer) ||
+                    !fileByPath.ContainsKey(consumerPath))
                 {
-                    dependsOn = true;
-                }
-                else if (targetScore > candidateScore)
-                {
-                    var targetBase = Path.GetFileNameWithoutExtension(target.FilePath)
-                        .Replace("Handler", "").Replace("Tests", "").Replace("Test", "").Replace("Controller", "").Trim();
-                    var candBase = Path.GetFileNameWithoutExtension(candidate.FilePath);
-
-                    if (string.IsNullOrEmpty(targetBase) || candBase.Contains(targetBase, StringComparison.OrdinalIgnoreCase) ||
-                        ProjectGraphHelper.IsTestFileCandidate(target.FilePath) ||
-                        targetScore >= 50)
-                    {
-                        dependsOn = true;
-                    }
+                    continue;
                 }
 
-                if (dependsOn)
-                {
-                    inDegree[target.FilePath]++;
-                    dependents[candidate.FilePath].Add(target);
-                }
+                inDegree[consumerPath]++;
+                dependents[producer.FilePath].Add(fileByPath[consumerPath]);
             }
         }
 
-        var readyQueue = new System.Collections.Concurrent.ConcurrentQueue<ManifestFileEntry>();
+        var readySet = new SortedSet<ManifestFileEntry>(new ReadyFileComparer());
+        var readyAt = new ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var schedulerStart = Stopwatch.StartNew();
         foreach (var file in sortedFiles)
         {
             if (inDegree[file.FilePath] == 0)
             {
-                readyQueue.Enqueue(file);
+                readySet.Add(file);
+                readyAt[file.FilePath] = 0;
             }
         }
 
         int remainingFiles = sortedFiles.Count;
-        var inDegreeLock = new object();
-        int activeConcurrency = _maxConcurrentFileGenerations;
-        using var concurrencySemaphore = new SemaphoreSlim(activeConcurrency, activeConcurrency);
+        var stateLock = new object();
+        using var concurrencySemaphore = new SemaphoreSlim(_maxConcurrentFileGenerations, _maxConcurrentFileGenerations);
         var activeTasks = new List<Task>();
+
+        ManifestFileEntry? TryTakeReadyFile()
+        {
+            lock (stateLock)
+            {
+                if (readySet.Count == 0)
+                {
+                    return null;
+                }
+
+                var next = readySet.Min!;
+                readySet.Remove(next);
+                return next;
+            }
+        }
+
+        void MarkReady(ManifestFileEntry file)
+        {
+            lock (stateLock)
+            {
+                if (readySet.Add(file))
+                {
+                    readyAt.TryAdd(file.FilePath, schedulerStart.ElapsedMilliseconds);
+                }
+            }
+        }
 
         while (remainingFiles > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (readyQueue.TryDequeue(out var nextFile))
+            var nextFile = TryTakeReadyFile();
+            if (nextFile != null)
             {
                 await concurrencySemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+                var queuedFile = nextFile;
+                var dependencyWaitMs = readyAt.TryGetValue(queuedFile.FilePath, out var becameReadyAt) ? becameReadyAt : 0;
+                var queueWaitMs = Math.Max(0, schedulerStart.ElapsedMilliseconds - dependencyWaitMs);
+                var activeAtStart = runTelemetry.BeginFile();
 
                 var task = Task.Run(async () =>
                 {
                     try
                     {
                         var editSpec = await GenerateSingleFileEditAsync(
-                            nextFile,
-                            fileIndexMap[nextFile.FilePath],
+                            queuedFile,
+                            fileIndexMap[queuedFile.FilePath],
                             totalFiles,
                             request,
                             contextFiles,
@@ -829,54 +832,61 @@ public sealed class DeveloperAgent : IDeveloperAgent
                             projectGraph,
                             callCounter,
                             capturedModels,
+                            runTelemetry,
+                            queueWaitMs,
+                            dependencyWaitMs,
+                            activeAtStart,
                             cancellationToken).ConfigureAwait(false);
 
-                        collectedEdits[nextFile.FilePath] = editSpec;
+                        collectedEdits[queuedFile.FilePath] = editSpec;
 
-                        lock (inDegreeLock)
+                        lock (stateLock)
                         {
                             Interlocked.Decrement(ref remainingFiles);
-                            foreach (var dep in dependents[nextFile.FilePath])
+                            foreach (var dep in dependents[queuedFile.FilePath])
                             {
                                 inDegree[dep.FilePath]--;
                                 if (inDegree[dep.FilePath] == 0)
                                 {
-                                    readyQueue.Enqueue(dep);
+                                    MarkReady(dep);
                                 }
                             }
                         }
                     }
                     finally
                     {
+                        runTelemetry.EndFile();
                         concurrencySemaphore.Release();
                     }
                 }, cancellationToken);
 
                 activeTasks.Add(task);
+                continue;
             }
-            else
-            {
-                if (activeTasks.Count > 0)
-                {
-                    var completedTask = await Task.WhenAny(activeTasks).ConfigureAwait(false);
-                    activeTasks.Remove(completedTask);
-                    await completedTask.ConfigureAwait(false);
-                }
-                else if (remainingFiles > 0)
-                {
-                    // Deadlock / Cycle break safety
-                    lock (inDegreeLock)
-                    {
-                        var lowest = sortedFiles
-                            .Where(f => !collectedEdits.ContainsKey(f.FilePath))
-                            .OrderBy(f => inDegree[f.FilePath])
-                            .FirstOrDefault();
 
-                        if (lowest != null)
-                        {
-                            inDegree[lowest.FilePath] = 0;
-                            readyQueue.Enqueue(lowest);
-                        }
+            if (activeTasks.Count > 0)
+            {
+                var completedTask = await Task.WhenAny(activeTasks).ConfigureAwait(false);
+                activeTasks.Remove(completedTask);
+                await completedTask.ConfigureAwait(false);
+                continue;
+            }
+
+            if (remainingFiles > 0)
+            {
+                lock (stateLock)
+                {
+                    var lowest = sortedFiles
+                        .Where(f => !collectedEdits.ContainsKey(f.FilePath) && !readySet.Contains(f))
+                        .OrderBy(f => inDegree[f.FilePath])
+                        .ThenBy(f => GetSemanticLayerScore(f.FilePath))
+                        .ThenBy(f => f.FilePath, StringComparer.OrdinalIgnoreCase)
+                        .FirstOrDefault();
+
+                    if (lowest != null)
+                    {
+                        inDegree[lowest.FilePath] = 0;
+                        MarkReady(lowest);
                     }
                 }
             }
@@ -900,6 +910,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
         IReadOnlyList<DiscoveredProjectNode> projectGraph,
         ConcurrencyCallCounter callCounter,
         ConcurrentBag<string> capturedModels,
+        GenerationRunState runTelemetry,
+        long queueWaitMs,
+        long dependencyWaitMs,
+        int activeGenerationCount,
         CancellationToken cancellationToken)
     {
         var fileName = Path.GetFileName(fileEntry.FilePath);
@@ -984,6 +998,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         LogGenerationAudit(fileEntry.FilePath, fileEntry.Action.ToString(), callNumber, fileAiRequest, fileResponse, fileSw.Elapsed);
+        runTelemetry.AddProviderDuration(fileSw.ElapsedMilliseconds);
         await RecordProviderCallActivityAsync(
             request.ExecutionId,
             fileEntry.FilePath,
@@ -991,7 +1006,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
             fileAiRequest,
             fileResponse,
             fileSw.Elapsed,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            queueWaitMs,
+            dependencyWaitMs,
+            activeGenerationCount,
+            retryOccurred: false).ConfigureAwait(false);
 
         // File-local token recovery: one bounded retry for this file only.
         // Modify: surgical retry, then one micro window retry. Create: one minimal retry at the same budget.
@@ -1039,6 +1058,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
 
                     LogGenerationAudit(fileEntry.FilePath, retryKind, escCallNumber, compactRequest, compactResponse, escSw.Elapsed, isCompactRetry: true);
+                    runTelemetry.AddProviderDuration(escSw.ElapsedMilliseconds);
+                    runTelemetry.RecordRetry();
                     await RecordProviderCallActivityAsync(
                         request.ExecutionId,
                         fileEntry.FilePath,
@@ -1046,7 +1067,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         compactRequest,
                         compactResponse,
                         escSw.Elapsed,
-                        cancellationToken).ConfigureAwait(false);
+                        cancellationToken,
+                        queueWaitMs,
+                        dependencyWaitMs,
+                        activeGenerationCount,
+                        retryOccurred: true).ConfigureAwait(false);
 
                     if (compactResponse.IsSuccess)
                     {
@@ -1110,6 +1135,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
 
                     LogGenerationAudit(fileEntry.FilePath, "MicroModifyRetry", microCallNumber, microRequest, microResponse, microSw.Elapsed, isCompactRetry: true);
+                    runTelemetry.AddProviderDuration(microSw.ElapsedMilliseconds);
+                    runTelemetry.RecordRetry();
                     await RecordProviderCallActivityAsync(
                         request.ExecutionId,
                         fileEntry.FilePath,
@@ -1117,7 +1144,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         microRequest,
                         microResponse,
                         microSw.Elapsed,
-                        cancellationToken).ConfigureAwait(false);
+                        cancellationToken,
+                        queueWaitMs,
+                        dependencyWaitMs,
+                        activeGenerationCount,
+                        retryOccurred: true).ConfigureAwait(false);
 
                     if (microResponse.IsSuccess)
                     {
@@ -1310,6 +1341,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
 
             LogGenerationAudit(fileEntry.FilePath, "Repair", repairCallNumber, repairRequest, repairResponse, repairSw.Elapsed);
+            runTelemetry.AddProviderDuration(repairSw.ElapsedMilliseconds);
+            runTelemetry.RecordRetry();
             await RecordProviderCallActivityAsync(
                 request.ExecutionId,
                 fileEntry.FilePath,
@@ -1317,7 +1350,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 repairRequest,
                 repairResponse,
                 repairSw.Elapsed,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                queueWaitMs,
+                dependencyWaitMs,
+                activeGenerationCount,
+                retryOccurred: true).ConfigureAwait(false);
 
             if (!repairResponse.IsSuccess)
             {
@@ -1415,11 +1452,25 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         fileGenerationStopwatch.Stop();
+        runTelemetry.RecordFileDuration(fileEntry.FilePath, fileGenerationStopwatch.ElapsedMilliseconds);
         var durationSec = (int)Math.Max(1, Math.Round(fileGenerationStopwatch.Elapsed.TotalSeconds));
         await SafeRecordActivityAsync(
             request.ExecutionId,
             $"Generated edit {fileIndex}/{totalFiles} · {fileName} · {durationSec}s",
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            ExecutionActivityStatus.Completed,
+            new ExecutionActivityMetadata(
+                EventKind: "FileGeneration",
+                TargetFile: fileEntry.FilePath,
+                ProviderCallKind: "Generation",
+                QueueWaitMs: queueWaitMs,
+                DependencyWaitMs: dependencyWaitMs,
+                TotalFileDurationMs: fileGenerationStopwatch.ElapsedMilliseconds,
+                ConfiguredConcurrency: runTelemetry.ConfiguredConcurrency,
+                ActiveGenerationCount: activeGenerationCount,
+                PeakConcurrentGenerationCount: runTelemetry.PeakConcurrent,
+                RetryOccurred: recoveryUsed,
+                RequestedReasoningEffort: _mechanicalReasoningEffort)).ConfigureAwait(false);
 
         return editSpec;
     }
@@ -1480,8 +1531,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
         AiRequest request,
         AiResponse response,
         TimeSpan duration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        long? queueWaitMs = null,
+        long? dependencyWaitMs = null,
+        int? activeGenerationCount = null,
+        bool? retryOccurred = null)
     {
+        var promptChars = (request.SystemPrompt?.Length ?? 0) + (request.UserPrompt?.Length ?? 0);
         var metadata = new ExecutionActivityMetadata(
             EventKind: "ProviderCall",
             LogicalProviderCallCount: 1,
@@ -1491,11 +1547,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
             InputTokens: response.InputTokens,
             OutputTokens: response.OutputTokens,
             StageDurationMs: (long)duration.TotalMilliseconds,
+            ProviderDurationMs: (long)duration.TotalMilliseconds,
             TargetFile: targetFile,
             FailureKind: response.FailureKind == AiFailureKind.None ? null : response.FailureKind.ToString(),
             ReasoningTokens: response.ReasoningTokens,
             ResponseContentCharCount: response.Content?.Length,
-            RequestedReasoningEffort: request.ReasoningEffort);
+            RequestedReasoningEffort: request.ReasoningEffort,
+            QueueWaitMs: queueWaitMs,
+            DependencyWaitMs: dependencyWaitMs,
+            ConfiguredConcurrency: _maxConcurrentFileGenerations,
+            ActiveGenerationCount: activeGenerationCount,
+            InputPromptCharCount: promptChars,
+            RetryOccurred: retryOccurred);
 
         await SafeRecordActivityAsync(
             executionId,
@@ -2950,6 +3013,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         // Include relevant in-memory generated dependency specs from earlier completed waves (excluding any already directly referenced)
         var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace);
+        AppendPrerequisiteWorkspaceContent(fileEntry, contextFiles, completedEdits, virtualWorkspace, relevantGenerated);
         var nonRedundantGenerated = relevantGenerated
             .Where(kvp => !directlyReferenced.Contains(kvp.Key))
             .ToList();
@@ -3286,6 +3350,38 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         return proposedPlan.Trim();
+    }
+
+    private static void AppendPrerequisiteWorkspaceContent(
+        ManifestFileEntry fileEntry,
+        IReadOnlyDictionary<string, string> contextFiles,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IDictionary<string, string> relevantGenerated)
+    {
+        if (virtualWorkspace == null || virtualWorkspace.Count == 0 || completedEdits == null)
+        {
+            return;
+        }
+
+        foreach (var (path, content) in virtualWorkspace)
+        {
+            if (string.IsNullOrWhiteSpace(content) ||
+                string.Equals(path, fileEntry.FilePath, StringComparison.OrdinalIgnoreCase) ||
+                relevantGenerated.ContainsKey(path) ||
+                !completedEdits.ContainsKey(path))
+            {
+                continue;
+            }
+
+            var producer = new ManifestFileEntry(path, FileEditAction.Create);
+            if (GenerationDependencyAnalyzer.DependsOn(fileEntry, producer, existingFileContents: contextFiles))
+            {
+                relevantGenerated[path] = content.Length <= 3000
+                    ? content
+                    : (RoslynContractExtractor.ExtractPublicContracts(path, content) ?? content);
+            }
+        }
     }
 
     public static Dictionary<string, string> GetRelevantGeneratedEdits(
@@ -4057,4 +4153,111 @@ public sealed class DeveloperAgent : IDeveloperAgent
         public void RecordCompactRetry() => Interlocked.Increment(ref _compactRetryCount);
         public void RecordApplicabilityRepair() => Interlocked.Increment(ref _applicabilityRepairCount);
     }
+
+    private sealed class ReadyFileComparer : IComparer<ManifestFileEntry>
+    {
+        public int Compare(ManifestFileEntry? x, ManifestFileEntry? y)
+        {
+            if (ReferenceEquals(x, y))
+            {
+                return 0;
+            }
+
+            if (x == null)
+            {
+                return -1;
+            }
+
+            if (y == null)
+            {
+                return 1;
+            }
+
+            var layer = GetSemanticLayerScore(x.FilePath).CompareTo(GetSemanticLayerScore(y.FilePath));
+            if (layer != 0)
+            {
+                return layer;
+            }
+
+            return string.Compare(x.FilePath, y.FilePath, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private sealed class GenerationRunState
+    {
+        private int _active;
+        private int _peak;
+        private long _sumProviderMs;
+        private int _retryCount;
+        private readonly ConcurrentBag<(string Path, long TotalMs)> _fileDurations = new();
+
+        public GenerationRunState(int configuredConcurrency)
+        {
+            ConfiguredConcurrency = configuredConcurrency;
+        }
+
+        public int ConfiguredConcurrency { get; }
+        public int PeakConcurrent => Volatile.Read(ref _peak);
+        public long SumProviderDurationMs => Interlocked.Read(ref _sumProviderMs);
+        public int RetryCount => Volatile.Read(ref _retryCount);
+
+        public int BeginFile()
+        {
+            var current = Interlocked.Increment(ref _active);
+            while (true)
+            {
+                var observedPeak = Volatile.Read(ref _peak);
+                if (current <= observedPeak ||
+                    Interlocked.CompareExchange(ref _peak, current, observedPeak) == observedPeak)
+                {
+                    break;
+                }
+            }
+
+            return current;
+        }
+
+        public void EndFile() => Interlocked.Decrement(ref _active);
+
+        public void AddProviderDuration(long milliseconds) =>
+            Interlocked.Add(ref _sumProviderMs, Math.Max(0, milliseconds));
+
+        public void RecordRetry() => Interlocked.Increment(ref _retryCount);
+
+        public void RecordFileDuration(string filePath, long totalMs) =>
+            _fileDurations.Add((filePath, totalMs));
+
+        public IReadOnlyList<string> FilesExceeding60s() =>
+            _fileDurations
+                .Where(item => item.TotalMs >= 60_000)
+                .Select(item => Path.GetFileName(item.Path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(8)
+                .ToList();
+
+        public IReadOnlyList<string> LongestGenerationCalls() =>
+            _fileDurations
+                .OrderByDescending(item => item.TotalMs)
+                .Take(3)
+                .Select(item => $"{item.Path}:{item.TotalMs}")
+                .ToList();
+    }
+
+    private static ExecutionActivityMetadata BuildGenerationSummaryMetadata(
+        ConcurrencyCallCounter callCounter,
+        Stopwatch generationStopwatch,
+        GenerationRunState runTelemetry) => new(
+            EventKind: "GenerationSummary",
+            LogicalProviderCallCount: callCounter.CurrentCount,
+            CompactRetryCount: callCounter.CompactRetryCount,
+            ApplicabilityRepairCount: callCounter.ApplicabilityRepairCount,
+            TotalGenerationTimeMs: generationStopwatch.ElapsedMilliseconds,
+            StageDurationMs: generationStopwatch.ElapsedMilliseconds,
+            ConfiguredConcurrency: runTelemetry.ConfiguredConcurrency,
+            PeakConcurrentGenerationCount: runTelemetry.PeakConcurrent,
+            SumProviderDurationMs: runTelemetry.SumProviderDurationMs,
+            GenerationCallCount: callCounter.CurrentCount,
+            RetryOccurred: runTelemetry.RetryCount > 0,
+            FilesExceeding60s: runTelemetry.FilesExceeding60s(),
+            LongestGenerationCalls: runTelemetry.LongestGenerationCalls());
 }

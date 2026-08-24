@@ -17,6 +17,18 @@ public sealed class ExecutionWorkspaceRawLogTests
     }
 
     [Fact]
+    public void RawTechnicalLog_RendersDiagnosticLinesFromMetadata()
+    {
+        var source = ReadExecutionWorkspaceSource();
+        source.Should().Contain("act.metadata?.diagnosticLines");
+        source.Should().Contain("act.metadata.diagnosticLines.join");
+        var rawSectionStart = source.IndexOf("Raw technical log", StringComparison.Ordinal);
+        rawSectionStart.Should().BeGreaterThan(0);
+        var rawSection = source[rawSectionStart..];
+        rawSection.Should().Contain("diagnosticLines");
+    }
+
+    [Fact]
     public void StructuredExecutionViewer_StillTruncatesItemMessages()
     {
         var source = ReadExecutionWorkspaceSource();

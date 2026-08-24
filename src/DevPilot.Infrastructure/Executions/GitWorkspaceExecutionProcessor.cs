@@ -6,6 +6,7 @@ using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
+using DevPilot.Infrastructure.DeveloperAgent;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -652,7 +653,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         distinctDiagnosticFileCount: selection.ImplicatedFiles.Count,
                         selectedRepairTarget: selection.FilePath,
                         scopeExpandedByCompilerEvidence: selection.ScopeExpanded,
-                        attemptedRepairTargets: attemptedForCurrentFailure.ToList()),
+                        attemptedRepairTargets: attemptedForCurrentFailure.ToList(),
+                        diagnosticLines: GenerationDependencyAnalyzer.SanitizeDiagnosticLinesForActivity(
+                            evidence.DiagnosticLines,
+                            prepResult.WorkspacePath)),
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -1369,7 +1373,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         int? distinctDiagnosticFileCount = null,
         string? selectedRepairTarget = null,
         bool? scopeExpandedByCompilerEvidence = null,
-        IReadOnlyList<string>? attemptedRepairTargets = null) => new(
+        IReadOnlyList<string>? attemptedRepairTargets = null,
+        IReadOnlyList<string>? diagnosticLines = null) => new(
             BuildPassed: buildPassed,
             TestPassed: testPassed,
             EventKind: eventKind,
@@ -1398,7 +1403,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             DistinctDiagnosticFileCount: distinctDiagnosticFileCount,
             SelectedRepairTarget: selectedRepairTarget,
             ScopeExpandedByCompilerEvidence: scopeExpandedByCompilerEvidence,
-            AttemptedRepairTargets: attemptedRepairTargets);
+            AttemptedRepairTargets: attemptedRepairTargets,
+            DiagnosticLines: diagnosticLines);
 
     private async Task<string?> GetChangeFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
     {

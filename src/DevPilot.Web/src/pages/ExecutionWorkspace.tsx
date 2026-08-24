@@ -1014,6 +1014,11 @@ export function ExecutionWorkspace() {
                                       <span className="text-foreground whitespace-pre-wrap break-words min-w-0">{act.message}</span>
                                       <span className="text-[10px] text-subtle-foreground shrink-0">{formattedTime}</span>
                                     </div>
+                                    {act.metadata?.diagnosticLines && act.metadata.diagnosticLines.length > 0 && (
+                                      <pre className="text-[10.5px] text-muted-foreground mt-1 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+                                        {act.metadata.diagnosticLines.join("\n")}
+                                      </pre>
+                                    )}
                                     {metaText && (
                                       <div className="text-[10.5px] text-muted-foreground mt-0.5">
                                         {metaText}

@@ -856,6 +856,12 @@ public class GitWorkspaceExecutionProcessorTests
             a.metadata.DiagnosticErrorCount == 17 &&
             a.metadata.DistinctDiagnosticFileCount == 2 &&
             a.metadata.SelectedRepairTarget == "src/App.cs");
+        recorder.RecordedActivities.Should().Contain(a =>
+            a.metadata != null &&
+            a.metadata.DiagnosticLines != null &&
+            a.metadata.DiagnosticLines.Count <= 5 &&
+            a.metadata.DiagnosticLines.Count > 0 &&
+            a.metadata.DiagnosticLines.All(line => line.Contains("src/App.cs") || line.Contains("src/Other.cs")));
     }
 
     [Fact]

@@ -379,6 +379,20 @@ export interface ExecutionActivityMetadata {
   selectedRepairTarget?: string | null;
   scopeExpandedByCompilerEvidence?: boolean | null;
   attemptedRepairTargets?: string[] | null;
+  queueWaitMs?: number | null;
+  providerDurationMs?: number | null;
+  totalFileDurationMs?: number | null;
+  dependencyWaitMs?: number | null;
+  configuredConcurrency?: number | null;
+  activeGenerationCount?: number | null;
+  peakConcurrentGenerationCount?: number | null;
+  inputPromptCharCount?: number | null;
+  retryOccurred?: boolean | null;
+  sumProviderDurationMs?: number | null;
+  generationCallCount?: number | null;
+  filesExceeding60s?: string[] | null;
+  longestGenerationCalls?: string[] | null;
+  diagnosticLines?: string[] | null;
 }
 
 export interface ExecutionActivityItem {
