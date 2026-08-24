@@ -888,7 +888,7 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
-    public async Task CompileRepair_CompilerRepairAttemptsAreBoundedAtFive()
+    public async Task CompileRepair_MoreThanFiveDistinctExactFiles_ContinuesUntilEvidenceIsExhausted()
     {
         var taskId = Guid.NewGuid();
         var files = Enumerable.Range(1, 6).Select(i => $"src/File{i}.cs").ToArray();
@@ -896,16 +896,96 @@ public class GitWorkspaceExecutionProcessorTests
         var failure = new BuildValidationResult { Success = false, ErrorMessage = "build failed", StdOut = stdout };
         var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Ok(files) };
         var runner = new ScriptedValidationRunner(Enumerable.Repeat(failure, 8));
-        var fingerprint = new TestFingerprintCalculator(Enumerable.Range(0, 16).Select(i => $"fp-{i}").ToArray());
+        var fingerprint = new TestFingerprintCalculator(Enumerable.Range(0, 20).Select(i => $"fp-{i}").ToArray());
         var recorder = new TestActivityRecorder();
         var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
 
         await processor.ProcessAsync(CreateContext(taskId));
 
-        agent.FocusedRepairRequests.Should().HaveCount(5);
+        agent.FocusedRepairRequests.Should().HaveCount(6);
         agent.FocusedRepairRequests.Should().OnlyContain(request => !request.IsFinalDiagnosticAttempt);
-        agent.FocusedRepairRequests.Select(request => request.RepairFiles.Single()).Should().Equal(
-            "src/File1.cs", "src/File2.cs", "src/File3.cs", "src/File4.cs", "src/File5.cs");
+        agent.FocusedRepairRequests.Select(request => request.RepairFiles.Single()).Should().Equal(files);
+        agent.FocusedRepairRequests.Select(request => request.RepairFiles.Single()).Distinct().Should().HaveCount(6);
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
+    }
+
+    [Fact]
+    public async Task CompileRepair_SixthExactFile_CanStillApplyAndRerunBuild()
+    {
+        var taskId = Guid.NewGuid();
+        var files = Enumerable.Range(1, 6).Select(i => $"src/File{i}.cs").ToArray();
+        var stdout = string.Join('\n', files.Select((file, index) => $"{file}({index + 1},1): error CS1002: ; expected"));
+        var failure = new BuildValidationResult { Success = false, ErrorMessage = "build failed", StdOut = stdout };
+        var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Ok(files) };
+        var runner = new ScriptedValidationRunner(new[]
+        {
+            failure, failure, failure, failure, failure, failure,
+            new BuildValidationResult { Success = true }
+        });
+        var fingerprint = new TestFingerprintCalculator(Enumerable.Range(0, 20).Select(i => $"fp-{i}").ToArray());
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().HaveCount(6);
+        agent.FocusedRepairRequests[^1].RepairFiles.Should().Equal("src/File6.cs");
+        runner.BuildRequests.Should().HaveCount(7);
+        recorder.RecordedActivities.Should().Contain(a => a.message == "Build retry passed.");
+    }
+
+    [Fact]
+    public async Task CompileRepair_FreshImprovedDiagnostics_RecomputeEligibleTargets()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/File1.cs", "src/File2.cs", "src/File3.cs" })
+        };
+        var runner = new ScriptedValidationRunner(new[]
+        {
+            new BuildValidationResult
+            {
+                Success = false,
+                ErrorMessage = "build failed",
+                StdOut = "src/File1.cs(1,1): error CS1002: ; expected\nsrc/File2.cs(2,1): error CS1002: ; expected"
+            },
+            new BuildValidationResult
+            {
+                Success = false,
+                ErrorMessage = "build failed",
+                StdOut = "src/File3.cs(3,1): error CS0103: Name is not defined"
+            },
+            new BuildValidationResult { Success = true }
+        });
+        var fingerprint = new TestFingerprintCalculator("a", "b", "c", "d");
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().HaveCount(2);
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/File1.cs");
+        agent.FocusedRepairRequests[1].RepairFiles.Should().Equal("src/File3.cs");
+        agent.FocusedRepairRequests[1].IsFinalDiagnosticAttempt.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task CompileRepair_GlobalSafetyCap_PreventsInfiniteConvergence()
+    {
+        var taskId = Guid.NewGuid();
+        var files = Enumerable.Range(1, 13).Select(i => $"src/File{i}.cs").ToArray();
+        var stdout = string.Join('\n', files.Select((file, index) => $"{file}({index + 1},1): error CS1002: ; expected"));
+        var failure = new BuildValidationResult { Success = false, ErrorMessage = "build failed", StdOut = stdout };
+        var agent = new TestDeveloperAgent { ResultToReturn = DeveloperAgentResult.Ok(files) };
+        var runner = new ScriptedValidationRunner(Enumerable.Repeat(failure, 16));
+        var fingerprint = new TestFingerprintCalculator(Enumerable.Range(0, 40).Select(i => $"fp-{i}").ToArray());
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().HaveCount(12);
+        agent.FocusedRepairRequests.Select(request => request.RepairFiles.Single()).Should().Equal(files.Take(12));
         recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 

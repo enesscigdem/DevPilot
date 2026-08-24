@@ -340,6 +340,7 @@ public sealed class IncrementalConvergenceTests : IDisposable
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "ServiceB.cs")).Should().Contain("old");
 
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(TokenLimit("TokenLimitExceeded"));
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(TokenLimit("TokenLimitExceeded"));
         var second = await _agent.ExecuteFocusedRepairAsync(new FocusedRepairRequest(
             TaskId: Guid.NewGuid(),
             ExecutionId: Guid.NewGuid(),

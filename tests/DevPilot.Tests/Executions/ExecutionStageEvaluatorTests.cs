@@ -413,4 +413,171 @@ public sealed class ExecutionStageEvaluatorTests
         Assert.Equal(ExecutionStageStepState.NeedsReview, stages[4].State);
         Assert.NotEqual(ExecutionStageStepState.Failed, stages[4].State);
     }
+
+    [Fact]
+    public void EvaluateStages_HistoricalFailedBuildThenTerminalPass_PartiallyVerified_IsDone()
+    {
+        var task = CreateTask(DevelopmentTaskStatus.Completed);
+        var execution = CreateExecution(task.Id, TaskExecutionStatus.Completed);
+        var activities = CreateHistoricalFailedThenPassedBuildActivities(execution.Id);
+
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        Assert.Equal(ExecutionStageStepState.Done, stages[4].State);
+        Assert.Contains(activities, a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Failed);
+        Assert.Contains(activities, a => a.Message == "Build retry failed.");
+    }
+
+    [Fact]
+    public void EvaluateStages_HistoricalFailedBuildThenTerminalPassAndTests_Verified_IsDone()
+    {
+        var task = CreateTask(DevelopmentTaskStatus.Completed);
+        var execution = CreateExecution(task.Id, TaskExecutionStatus.Completed, ExecutionReviewStatus.Pending);
+        var activities = CreateHistoricalFailedThenPassedBuildActivities(execution.Id);
+        activities.Add(new ExecutionActivity
+        {
+            Id = Guid.NewGuid(),
+            ExecutionId = execution.Id,
+            Stage = ExecutionStage.Test,
+            Status = ExecutionActivityStatus.Completed,
+            Message = "Tests passed.",
+            MetadataJson = "{\"RepositoryCheckId\":\"test\",\"BuildPassed\":null,\"TestPassed\":true,\"VerificationOutcome\":\"Verified\"}",
+            CreatedAt = DateTime.UtcNow.AddSeconds(5)
+        });
+
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        Assert.Equal(ExecutionStageStepState.Done, stages[4].State);
+        Assert.Equal(ExecutionStageStepState.Active, stages[5].State);
+        Assert.Contains(activities, a => a.Status == ExecutionActivityStatus.Failed);
+    }
+
+    [Fact]
+    public void EvaluateStages_FinalUnresolvedNeedsReview_IsAmberNotDone()
+    {
+        var task = CreateTask(DevelopmentTaskStatus.Completed);
+        var execution = CreateExecution(task.Id, TaskExecutionStatus.Completed);
+        var activities = new List<ExecutionActivity>
+        {
+            new() { Id = Guid.NewGuid(), ExecutionId = execution.Id, Stage = ExecutionStage.DeveloperAgent, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Failed,
+                Message = "Build retry failed.",
+                MetadataJson = "{\"RepositoryCheckId\":\"build\",\"VerificationOutcome\":\"NeedsReview\"}",
+                CreatedAt = DateTime.UtcNow.AddSeconds(1)
+            }
+        };
+
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        Assert.Equal(ExecutionStageStepState.NeedsReview, stages[4].State);
+        Assert.NotEqual(ExecutionStageStepState.Done, stages[4].State);
+        Assert.NotEqual(ExecutionStageStepState.Failed, stages[4].State);
+    }
+
+    [Fact]
+    public void EvaluateStages_TerminalFailedDeveloperAgent_IsFailed()
+    {
+        var task = CreateTask(DevelopmentTaskStatus.Failed);
+        var execution = CreateExecution(task.Id, TaskExecutionStatus.Failed);
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Id = Guid.NewGuid(),
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.DeveloperAgent,
+                Status = ExecutionActivityStatus.Failed,
+                Message = "Developer Agent failed.",
+                CreatedAt = DateTime.UtcNow
+            }
+        };
+
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        Assert.Equal(ExecutionStageStepState.Failed, stages[3].State);
+        Assert.NotEqual(ExecutionStageStepState.NeedsReview, stages[4].State);
+    }
+
+    [Fact]
+    public void EvaluateStages_NoNewRegressions_IsDone()
+    {
+        var task = CreateTask(DevelopmentTaskStatus.Completed);
+        var execution = CreateExecution(task.Id, TaskExecutionStatus.Completed);
+        var activities = new List<ExecutionActivity>
+        {
+            new() { Id = Guid.NewGuid(), ExecutionId = execution.Id, Stage = ExecutionStage.DeveloperAgent, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.Build,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "No new regressions: 2 pre-existing repository failure(s) remain.",
+                MetadataJson = "{\"RepositoryCheckId\":\"build\",\"VerificationOutcome\":\"NoNewRegressions\",\"BaselineClassification\":\"PreExisting\",\"PreExistingFailureCount\":2,\"NewRegressionCount\":0}",
+                CreatedAt = DateTime.UtcNow.AddSeconds(1)
+            }
+        };
+
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        Assert.Equal(ExecutionStageStepState.Done, stages[4].State);
+    }
+
+    private static List<ExecutionActivity> CreateHistoricalFailedThenPassedBuildActivities(Guid executionId) =>
+    [
+        new()
+        {
+            Id = Guid.NewGuid(),
+            ExecutionId = executionId,
+            Stage = ExecutionStage.DeveloperAgent,
+            Status = ExecutionActivityStatus.Completed,
+            Message = "Developer Agent completed.",
+            CreatedAt = DateTime.UtcNow
+        },
+        new()
+        {
+            Id = Guid.NewGuid(),
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Failed,
+            Message = "Build failed — 17 compiler error(s)",
+            MetadataJson = "{\"RepositoryCheckId\":\"build\",\"EventKind\":\"VerifyingRepository\"}",
+            CreatedAt = DateTime.UtcNow.AddSeconds(1)
+        },
+        new()
+        {
+            Id = Guid.NewGuid(),
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Failed,
+            Message = "Build retry failed.",
+            MetadataJson = "{\"RepositoryCheckId\":\"build\",\"EventKind\":\"VerifyingRepository\",\"RepairRound\":2}",
+            CreatedAt = DateTime.UtcNow.AddSeconds(2)
+        },
+        new()
+        {
+            Id = Guid.NewGuid(),
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Completed,
+            Message = "Build retry passed.",
+            MetadataJson = "{\"RepositoryCheckId\":\"build\",\"EventKind\":\"VerifyingRepository\",\"BuildPassed\":true,\"VerificationOutcome\":\"PartiallyVerified\"}",
+            CreatedAt = DateTime.UtcNow.AddSeconds(3)
+        },
+        new()
+        {
+            Id = Guid.NewGuid(),
+            ExecutionId = executionId,
+            Stage = ExecutionStage.Build,
+            Status = ExecutionActivityStatus.Completed,
+            Message = "Build passed.",
+            MetadataJson = "{\"RepositoryCheckId\":\"build\",\"BuildPassed\":true,\"VerificationOutcome\":\"PartiallyVerified\"}",
+            CreatedAt = DateTime.UtcNow.AddSeconds(4)
+        }
+    ];
 }

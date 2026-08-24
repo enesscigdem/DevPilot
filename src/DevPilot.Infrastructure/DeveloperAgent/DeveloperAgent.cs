@@ -277,7 +277,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var aiResponse = primaryCall.Response!;
 
-        if (request.IsFinalDiagnosticAttempt && aiResponse.FailureKind == AiFailureKind.TokenLimitExceeded)
+        if (aiResponse.FailureKind == AiFailureKind.TokenLimitExceeded)
         {
             return await ExecuteMicroDiagnosticRepairAsync(
                 request,
@@ -378,20 +378,21 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
         var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _) ?? string.Empty;
         var microBudget = Math.Min(priorBudget, DetermineFocusedRepairBudget());
+        var microRequest = BoundFocusedRepairToSelectedFile(request, filePath);
         var boundedTarget = BuildFocusedRepairTargetWindow(
             currentContent,
-            request.DiagnosticLocations,
-            request.DiagnosticEvidence,
+            microRequest.DiagnosticLocations,
+            microRequest.DiagnosticEvidence,
             contextRadius: 6,
             smallFileMaxLines: 36,
             smallFileMaxChars: 1800);
 
         var microCall = await SendMechanicalRepairCallAsync(
-            request,
+            microRequest,
             filePath,
             "MicroDiagnosticRepair",
             BuildMicroDiagnosticRepairSystemPrompt(filePath),
-            BuildMicroDiagnosticRepairUserPrompt(filePath, boundedTarget, request),
+            BuildMicroDiagnosticRepairUserPrompt(filePath, boundedTarget, microRequest),
             microBudget,
             cancellationToken).ConfigureAwait(false);
         if (microCall.Error != null)
@@ -484,6 +485,36 @@ public sealed class DeveloperAgent : IDeveloperAgent
     private static bool IsMissingSearchMatchFailure(string? errorMessage) =>
         !string.IsNullOrWhiteSpace(errorMessage) &&
         errorMessage.Contains("Missing search match", StringComparison.OrdinalIgnoreCase);
+
+    public static FocusedRepairRequest BoundFocusedRepairToSelectedFile(FocusedRepairRequest request, string filePath)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return request;
+        }
+
+        var fileName = Path.GetFileName(filePath);
+        var evidenceLines = (request.DiagnosticEvidence ?? string.Empty)
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Where(line =>
+                line.Contains(filePath, StringComparison.OrdinalIgnoreCase) ||
+                (!string.IsNullOrWhiteSpace(fileName) && line.Contains(fileName, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var locations = (request.DiagnosticLocations ?? Array.Empty<string>())
+            .Where(location =>
+                location.Contains(filePath, StringComparison.OrdinalIgnoreCase) ||
+                (!string.IsNullOrWhiteSpace(fileName) && location.Contains(fileName, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        return request with
+        {
+            DiagnosticEvidence = evidenceLines.Count > 0
+                ? string.Join('\n', evidenceLines)
+                : request.DiagnosticEvidence ?? string.Empty,
+            DiagnosticLocations = locations.Count > 0 ? locations : request.DiagnosticLocations
+        };
+    }
 
     public async Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(
         DeveloperAgentRequest request,
@@ -2373,7 +2404,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         return $$"""
             You are performing a MICRO diagnostic-directed repair for a single existing file: '{{filePath}}'.
-            The previous FINAL diagnostic repair exhausted its output budget.
+            The previous focused diagnostic repair exhausted its output budget.
 
             CRITICAL RULES:
             1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
@@ -2394,7 +2425,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("MICRO DIAGNOSTIC REPAIR");
-        sb.AppendLine("The previous FinalDiagnosticRepair hit TokenLimitExceeded.");
+        sb.AppendLine("The previous focused diagnostic repair hit TokenLimitExceeded.");
         sb.AppendLine("Emit one exact SEARCH/REPLACE for the current diagnostic only.");
         sb.AppendLine("Do not include peer files or broad repository context.");
         sb.AppendLine();

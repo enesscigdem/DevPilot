@@ -69,9 +69,11 @@ public sealed class RepairConvergenceGapTests : IDisposable
     }
 
     [Fact]
-    public void MaxCompileRepairRounds_DefaultsToFive()
+    public void MaxCompileRepairAttempts_DefaultsToTwelve()
     {
-        new ExecutionReliabilityOptions().MaxCompileRepairRounds.Should().Be(5);
+        var options = new ExecutionReliabilityOptions();
+        options.MaxCompileRepairAttempts.Should().Be(12);
+        options.MaxCompileRepairRounds.Should().Be(12);
     }
 
     [Fact]
@@ -116,6 +118,27 @@ public sealed class RepairConvergenceGapTests : IDisposable
         _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
         _activityRecorder.ProviderKinds.Should().Equal("FocusedVerificationRepair", "AnchorRefreshRepair");
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "app.ts")).Should().Be("export const value = 1;");
+    }
+
+    [Fact]
+    public async Task FocusedVerificationRepair_TokenLimitExceeded_TriggersExactlyOneMicroDiagnosticRepair()
+    {
+        WriteWorktree("src/routes/issueRoutes.ts", "export const value = 1;");
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(TokenLimit());
+        _fakeAiProvider.ResponsesToReturn.Enqueue(ModifyJson("src/routes/issueRoutes.ts", "export const value = 1;", "export const value = 2;"));
+
+        var result = await _agent.ExecuteFocusedRepairAsync(RepairRequest("src/routes/issueRoutes.ts"));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+        _activityRecorder.ProviderKinds.Should().Equal("FocusedVerificationRepair", "MicroDiagnosticRepair");
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().BeLessThanOrEqualTo(_fakeAiProvider.ReceivedRequests[0].MaxTokens ?? int.MaxValue);
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[1].ReasoningEffort.Should().Be("low");
+        _fakeAiProvider.ReceivedRequests[1].UserPrompt.Should().Contain("Tightly Bounded Current Source Window");
+        _fakeAiProvider.ReceivedRequests[1].UserPrompt.Should().Contain("src/routes/issueRoutes.ts(1,1): error TS2322");
+        _fakeAiProvider.ReceivedRequests[1].UserPrompt.Should().NotContain("Peer File");
+        File.ReadAllText(Path.Combine(_worktreeDir, "src", "routes", "issueRoutes.ts")).Should().Contain("value = 2");
     }
 
     [Fact]

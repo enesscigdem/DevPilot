@@ -57,9 +57,9 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
         _maxCompileRepairRounds = TryGetNonNegativeSetting(
             configuration,
+            "ExecutionReliability:MaxCompileRepairAttempts",
             "ExecutionReliability:MaxCompileRepairRounds",
-            "DeveloperAgent:MaxCompileRepairRounds",
-            5);
+            12);
         _maxTestRepairRounds = TryGetNonNegativeSetting(
             configuration,
             "ExecutionReliability:MaxTestRepairRounds",

@@ -287,10 +287,17 @@ public class LightweightFocusedRepairTests : IDisposable
     }
 
     [Fact]
-    public async Task ExecuteFocusedRepairAsync_TokenLimitExceeded_DoesNotRetryOrEscalate()
+    public async Task ExecuteFocusedRepairAsync_TokenLimitExceeded_DoesNotEscalateTokens()
     {
         WriteWorktreeFile("src/controllers/issueController.ts", SmallIssueController);
         var agent = CreateAgent();
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            Content = string.Empty,
+            ErrorMessage = "TokenLimitExceeded"
+        });
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
             IsSuccess = false,
@@ -303,8 +310,9 @@ public class LightweightFocusedRepairTests : IDisposable
 
         result.Success.Should().BeFalse();
         result.ErrorMessage.Should().Contain("TokenLimitExceeded");
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(1, "focused repair must not compact-retry or escalate tokens");
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(2, "ordinary focused repair may recover once via MicroDiagnosticRepair");
         _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(4096);
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "controllers", "issueController.ts"))
             .Should().Be(SmallIssueController);
     }

@@ -78,49 +78,8 @@ public static class ExecutionStageEvaluator
             implementState = ExecutionStageStepState.Todo;
         }
 
-        // Stage 5: Build & Test
-        var buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
-        var buildFailed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Failed);
-        var buildStarted = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Started);
-
-        var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
-        var testFailed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Failed);
-        var testStarted = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started);
-        var repositoryVerificationReady = activities.Any(a =>
-            a.Status == ExecutionActivityStatus.Completed &&
-            (a.Message.StartsWith("Repository checks passed", StringComparison.OrdinalIgnoreCase) ||
-             a.Message.StartsWith("Tests passed", StringComparison.OrdinalIgnoreCase) ||
-             a.Message.StartsWith("No new regressions", StringComparison.OrdinalIgnoreCase) ||
-             (a.MetadataJson != null && (a.MetadataJson.Contains("\"VerificationOutcome\":\"NoNewRegressions\"", StringComparison.OrdinalIgnoreCase) || a.MetadataJson.Contains("\"BaselineClassification\":\"PreExisting\"", StringComparison.OrdinalIgnoreCase)))));
-
-        var verificationOutcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
-
-        ExecutionStageStepState buildTestState;
-        if (repositoryVerificationReady || (buildPassed && testPassed))
-        {
-            buildTestState = ExecutionStageStepState.Done;
-        }
-        else if (execution.Status == TaskExecutionStatus.Completed &&
-                 verificationOutcome == ExecutionVerificationOutcome.NeedsReview)
-        {
-            buildTestState = ExecutionStageStepState.NeedsReview;
-        }
-        else if (buildFailed || testFailed)
-        {
-            buildTestState = ExecutionStageStepState.Failed;
-        }
-        else if (execution.Status == TaskExecutionStatus.Running && (buildStarted || testStarted || (hasDevAgentCompleted && !buildPassed)))
-        {
-            buildTestState = ExecutionStageStepState.Active;
-        }
-        else if (execution.Status == TaskExecutionStatus.Failed && hasDevAgentCompleted && (!buildPassed || !testPassed))
-        {
-            buildTestState = ExecutionStageStepState.Failed;
-        }
-        else
-        {
-            buildTestState = ExecutionStageStepState.Todo;
-        }
+        // Stage 5: Build & Test — terminal verification semantics, not historical Any(Failed).
+        var buildTestState = EvaluateBuildTestPipelineState(execution, activities, hasDevAgentCompleted);
 
         // Stage 6: Review
         ExecutionStageStepState reviewState;
@@ -170,6 +129,73 @@ public static class ExecutionStageEvaluator
             new() { StageKey = "review", Label = "Review", State = reviewState },
             new() { StageKey = "pr", Label = "Pull Request", State = prState },
         };
+    }
+
+    /// <summary>
+    /// Build &amp; Test pipeline summary uses the authoritative terminal verification outcome,
+    /// not whether any historical build/repair attempt failed.
+    /// </summary>
+    public static ExecutionStageStepState EvaluateBuildTestPipelineState(
+        TaskExecution execution,
+        IReadOnlyList<ExecutionActivity> activities,
+        bool? hasDeveloperAgentCompleted = null)
+    {
+        var hasDevAgentCompleted = hasDeveloperAgentCompleted ??
+            activities.Any(a => a.Stage == ExecutionStage.DeveloperAgent && a.Status == ExecutionActivityStatus.Completed);
+        var buildStarted = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Started);
+        var testStarted = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started);
+        var reachedBuildOrTest = activities.Any(a => a.Stage is ExecutionStage.Build or ExecutionStage.Test);
+        var verificationOutcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
+        var successful = verificationOutcome is ExecutionVerificationOutcome.Verified
+            or ExecutionVerificationOutcome.PartiallyVerified
+            or ExecutionVerificationOutcome.NoNewRegressions;
+        var buildInProgress = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Started) &&
+                              !activities.Any(a => a.Stage == ExecutionStage.Build && a.Status is ExecutionActivityStatus.Completed or ExecutionActivityStatus.Failed);
+        var testInProgress = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started) &&
+                             !activities.Any(a => a.Stage == ExecutionStage.Test && a.Status is ExecutionActivityStatus.Completed or ExecutionActivityStatus.Failed);
+
+        if (execution.Status == TaskExecutionStatus.Running &&
+            (hasDevAgentCompleted || buildStarted || testStarted) &&
+            (buildInProgress || testInProgress || !successful))
+        {
+            return ExecutionStageStepState.Active;
+        }
+
+        if (successful)
+        {
+            return ExecutionStageStepState.Done;
+        }
+
+        if (verificationOutcome == ExecutionVerificationOutcome.VerificationUnavailable &&
+            execution.Status == TaskExecutionStatus.Completed &&
+            reachedBuildOrTest)
+        {
+            return ExecutionStageStepState.Done;
+        }
+
+        if (verificationOutcome == ExecutionVerificationOutcome.NeedsReview &&
+            execution.Status != TaskExecutionStatus.Failed)
+        {
+            return ExecutionStageStepState.NeedsReview;
+        }
+
+        if (verificationOutcome == ExecutionVerificationOutcome.Blocked)
+        {
+            return execution.Status == TaskExecutionStatus.Cancelled
+                ? ExecutionStageStepState.Blocked
+                : ExecutionStageStepState.Todo;
+        }
+
+        if (reachedBuildOrTest &&
+            (execution.Status == TaskExecutionStatus.Failed ||
+             verificationOutcome is ExecutionVerificationOutcome.Failed
+                 or ExecutionVerificationOutcome.VerificationInfrastructureError
+                 or ExecutionVerificationOutcome.NeedsReview))
+        {
+            return ExecutionStageStepState.Failed;
+        }
+
+        return ExecutionStageStepState.Todo;
     }
 
     /// <summary>

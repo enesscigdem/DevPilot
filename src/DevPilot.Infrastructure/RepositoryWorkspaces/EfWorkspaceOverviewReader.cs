@@ -1,4 +1,6 @@
 using System.Text.RegularExpressions;
+using DevPilot.Application.Executions.Dtos;
+using DevPilot.Application.Executions.Services;
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
 using DevPilot.Application.RepositoryWorkspaces.Ports;
 using DevPilot.Domain.Entities;
@@ -354,32 +356,17 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
             implementState = WorkspaceStageState.Todo;
         }
 
-        // Stage 5: Build & Test (Collapsed)
-        var buildPassed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Completed);
-        var buildFailed = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Failed);
-        var buildStarted = activities.Any(a => a.Stage == ExecutionStage.Build && a.Status == ExecutionActivityStatus.Started);
-
-        var testPassed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Completed);
-        var testFailed = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Failed);
-        var testStarted = activities.Any(a => a.Stage == ExecutionStage.Test && a.Status == ExecutionActivityStatus.Started);
-
-        WorkspaceStageState buildTestState;
-        if (buildPassed && testPassed)
+        // Stage 5: Build & Test — terminal verification semantics, not historical Any(Failed).
+        var pipelineBuildTest = ExecutionStageEvaluator.EvaluateBuildTestPipelineState(execution, activities, hasDevAgentCompleted);
+        var buildTestState = pipelineBuildTest switch
         {
-            buildTestState = WorkspaceStageState.Done;
-        }
-        else if (buildFailed || testFailed)
-        {
-            buildTestState = WorkspaceStageState.Failed;
-        }
-        else if (execution.Status == TaskExecutionStatus.Running && (buildStarted || testStarted || (hasDevAgentCompleted && !buildPassed)))
-        {
-            buildTestState = WorkspaceStageState.Active;
-        }
-        else
-        {
-            buildTestState = WorkspaceStageState.Todo;
-        }
+            ExecutionStageStepState.Done => WorkspaceStageState.Done,
+            ExecutionStageStepState.Active => WorkspaceStageState.Active,
+            ExecutionStageStepState.Blocked => WorkspaceStageState.Blocked,
+            ExecutionStageStepState.NeedsReview => WorkspaceStageState.Failed,
+            ExecutionStageStepState.Failed => WorkspaceStageState.Failed,
+            _ => WorkspaceStageState.Todo
+        };
 
         // Stage 6: Review
         WorkspaceStageState reviewState;

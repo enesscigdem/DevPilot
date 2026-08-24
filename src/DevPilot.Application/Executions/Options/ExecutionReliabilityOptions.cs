@@ -4,7 +4,8 @@ public sealed class ExecutionReliabilityOptions
 {
     public const string SectionName = "ExecutionReliability";
 
-    public int MaxCompileRepairRounds { get; set; } = 5;
+    public int MaxCompileRepairRounds { get; set; } = 12;
+    public int MaxCompileRepairAttempts { get; set; } = 12;
     public int MaxTestRepairRounds { get; set; } = 2;
     public int MaxGenerationCalls { get; set; } = 15;
     public int MaxConcurrentFileGenerations { get; set; } = 1;
