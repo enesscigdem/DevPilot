@@ -109,6 +109,8 @@ public static class GenerationDependencyAnalyzer
             layerEdges.Remove((producer, consumer));
         }
 
+        SuppressSameStemLayerEdgesWhenAnalogEvidenceExists(inferredEdges, layerEdges);
+
         var explicitEdges = new HashSet<(string Consumer, string Producer)>(hardEdges, StringPairComparer.Instance);
         foreach (var layerEdge in layerEdges)
         {
@@ -323,16 +325,10 @@ public static class GenerationDependencyAnalyzer
                 continue;
             }
 
-            var files = Directory.GetFiles(absoluteDir)
-                .Where(path => SourceExtensions.Contains(Path.GetExtension(path)))
-                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-                .Take(MaxNeighborFilesPerDirectory);
-
-            foreach (var absolutePath in files)
+            var candidates = new List<(string AbsolutePath, int ImportScore, byte[] Bytes)>();
+            foreach (var absolutePath in Directory.GetFiles(absoluteDir))
             {
-                var relative = DeveloperAgent.NormalizeFocusedRepairPath(
-                    Path.GetRelativePath(workspacePath, absolutePath));
-                if (contents.ContainsKey(relative))
+                if (!SourceExtensions.Contains(Path.GetExtension(absolutePath)))
                 {
                     continue;
                 }
@@ -352,14 +348,30 @@ public static class GenerationDependencyAnalyzer
                     }
 
                     var text = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
-                    if (!string.IsNullOrWhiteSpace(text))
-                    {
-                        contents[relative] = text;
-                    }
+                    candidates.Add((absolutePath, LooksLikeImportEvidence(text) ? 1 : 0, bytes));
                 }
                 catch
                 {
                     // Neighbor scan is best-effort and must not fail generation.
+                }
+            }
+
+            foreach (var (absolutePath, _, bytes) in candidates
+                         .OrderByDescending(item => item.ImportScore)
+                         .ThenBy(item => item.AbsolutePath, StringComparer.OrdinalIgnoreCase)
+                         .Take(MaxNeighborFilesPerDirectory))
+            {
+                var relative = DeveloperAgent.NormalizeFocusedRepairPath(
+                    Path.GetRelativePath(workspacePath, absolutePath));
+                if (contents.ContainsKey(relative))
+                {
+                    continue;
+                }
+
+                var text = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    contents[relative] = text;
                 }
             }
         }
@@ -825,7 +837,7 @@ public static class GenerationDependencyAnalyzer
             return kept;
         }
 
-        foreach (var inferred in inferredEdges)
+        foreach (var inferred in inferredEdges.ToList())
         {
             var trial = new HashSet<(string Consumer, string Producer)>(explicitEdges, StringPairComparer.Instance);
             foreach (var edge in kept)
@@ -839,12 +851,59 @@ public static class GenerationDependencyAnalyzer
             }
         }
 
-        if (CreatesCycle(files, explicitEdges.Concat(kept)))
+        return kept;
+    }
+
+    private static void SuppressSameStemLayerEdgesWhenAnalogEvidenceExists(
+        HashSet<(string Consumer, string Producer)> inferredEdges,
+        HashSet<(string Consumer, string Producer)> layerEdges)
+    {
+        if (inferredEdges.Count == 0 || layerEdges.Count == 0)
         {
-            return new HashSet<(string Consumer, string Producer)>(StringPairComparer.Instance);
+            return;
         }
 
-        return kept;
+        var inferredStems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (consumer, _) in inferredEdges)
+        {
+            var stem = GetFeatureStem(consumer);
+            if (IsSignificantStem(stem))
+            {
+                inferredStems.Add(stem);
+            }
+        }
+
+        if (inferredStems.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var layerEdge in layerEdges.ToList())
+        {
+            var consumerStem = GetFeatureStem(layerEdge.Consumer);
+            if (!IsSignificantStem(consumerStem) ||
+                !inferredStems.Contains(consumerStem) ||
+                !string.Equals(consumerStem, GetFeatureStem(layerEdge.Producer), StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            layerEdges.Remove(layerEdge);
+        }
+    }
+
+    private static bool LooksLikeImportEvidence(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        return content.Contains("import ", StringComparison.Ordinal) ||
+               content.Contains("from ", StringComparison.Ordinal) ||
+               content.Contains("require(", StringComparison.Ordinal) ||
+               content.Contains("using ", StringComparison.Ordinal) ||
+               content.Contains("package ", StringComparison.Ordinal);
     }
 
     private static bool CreatesCycle(
