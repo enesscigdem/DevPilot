@@ -349,6 +349,8 @@ public sealed class TaskImpactAnalysisLifecycleTests
         sequentialAi.CallCount.Should().Be(2);
         sequentialAi.RecordedRequests[0].MaxTokens.Should().Be(2048);
         sequentialAi.RecordedRequests[1].MaxTokens.Should().Be(2048);
+        sequentialAi.RecordedRequests[0].ReasoningEffort.Should().BeNull("Impact Analysis reasoning behavior is unchanged");
+        sequentialAi.RecordedRequests[1].ReasoningEffort.Should().BeNull("Impact Analysis recovery must not receive mechanical low reasoning");
         sequentialAi.RecordedRequests[1].UserPrompt.Should().Contain("CRITICAL: The previous response was truncated");
 
         task.Status.Should().Be(DevelopmentTaskStatus.AwaitingApproval);

@@ -47,4 +47,7 @@ public sealed record ExecutionActivityMetadata(
     int? NewRegressionCount = null,
     string? BaseCommitSha = null,
     bool? BaselineCacheHit = null,
-    string? FailureKind = null);
+    string? FailureKind = null,
+    int? ReasoningTokens = null,
+    int? ResponseContentCharCount = null,
+    string? RequestedReasoningEffort = null);

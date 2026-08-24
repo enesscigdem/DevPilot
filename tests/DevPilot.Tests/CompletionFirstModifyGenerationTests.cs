@@ -91,7 +91,7 @@ public sealed class CompletionFirstModifyGenerationTests : IDisposable
         var createPrompt = DeveloperAgent.BuildSingleFileSystemPrompt(
             new ManifestFileEntry("Created.cs", FileEditAction.Create));
         createPrompt.Should().Contain("newContent");
-        createPrompt.Should().Contain("complete, valid file content");
+        createPrompt.Should().Contain("smallest compile-complete source file");
     }
 
     [Fact]
@@ -240,12 +240,18 @@ public sealed class CompletionFirstModifyGenerationTests : IDisposable
             FinishReason = "length",
             FailureKind = AiFailureKind.TokenLimitExceeded
         });
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded
+        });
 
         var result = await _agent.GenerateAndApplyEditsAsync(ModifyRequest("Service.cs"));
 
         result.Success.Should().BeFalse();
         result.ErrorMessage.Should().Contain("exhausted the configured output token limit");
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(3, "Modify allows surgical retry plus one micro retry, then stops");
         (await File.ReadAllTextAsync(Path.Combine(_worktreeDir, "Service.cs"))).Should().Contain("Value => 1");
     }
 

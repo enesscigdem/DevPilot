@@ -89,7 +89,7 @@ public class LightweightFocusedRepairTests : IDisposable
     }
 
     [Fact]
-    public async Task ExecuteFocusedRepairAsync_TwoCorrelatedFiles_RepairsBothSurgically()
+    public async Task ExecuteFocusedRepairAsync_TwoCorrelatedFiles_RepairsHighestConfidenceFileOnly()
     {
         var fileA = Path.Combine(_worktreeDir, "src", "ServiceA.cs");
         var fileB = Path.Combine(_worktreeDir, "src", "ServiceB.cs");
@@ -122,10 +122,11 @@ public class LightweightFocusedRepairTests : IDisposable
         var result = await agent.ExecuteFocusedRepairAsync(request, CancellationToken.None);
 
         result.Success.Should().BeTrue();
-        result.ModifiedFiles.Should().HaveCount(2);
+        result.ModifiedFiles.Should().ContainSingle(f => f == "src/ServiceA.cs");
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1, "file B must wait for a fresh build before repair");
 
         File.ReadAllText(fileA).Should().Contain("\"new\"");
-        File.ReadAllText(fileB).Should().Contain("\"new\"");
+        File.ReadAllText(fileB).Should().Contain("\"old\"");
     }
 
     [Fact]
@@ -258,13 +259,11 @@ public class LightweightFocusedRepairTests : IDisposable
         var result = await agent.ExecuteFocusedRepairAsync(request, CancellationToken.None);
 
         result.Success.Should().BeTrue();
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2, "exactly one provider call per repair target");
-        _fakeAiProvider.ReceivedRequests.Should().HaveCount(2);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1, "repair the highest-confidence file only before the next build");
+        _fakeAiProvider.ReceivedRequests.Should().ContainSingle();
 
         var controllerRequest = _fakeAiProvider.ReceivedRequests[0];
-        var routesRequest = _fakeAiProvider.ReceivedRequests[1];
         AssertFocusedRepairIsSurgical(controllerRequest, "src/controllers/issueController.ts");
-        AssertFocusedRepairIsSurgical(routesRequest, "src/routes/issueRoutes.ts");
 
         controllerRequest.UserPrompt.Should().Contain(diagnosticEvidence);
         controllerRequest.UserPrompt.Should().Contain("error TS2554: Expected 1 arguments, but got 2.");
@@ -277,12 +276,10 @@ public class LightweightFocusedRepairTests : IDisposable
         controllerRequest.UserPrompt.Should().NotContain("listUsers");
         controllerRequest.UserPrompt.Should().NotContain(UnrelatedUserController);
 
-        routesRequest.UserPrompt.Should().Contain(diagnosticEvidence);
-        routesRequest.UserPrompt.Should().Contain("src/controllers/issueController.ts");
-        routesRequest.UserPrompt.Should().Contain("updateIssueStatus");
-        routesRequest.UserPrompt.Should().NotContain("UserController");
-        routesRequest.UserPrompt.Should().NotContain("listUsers");
-
+        File.ReadAllText(Path.Combine(_worktreeDir, "src", "controllers", "issueController.ts"))
+            .Should().Contain("createIssue({ title: req.body.title, description: req.body.description })");
+        File.ReadAllText(Path.Combine(_worktreeDir, "src", "routes", "issueRoutes.ts"))
+            .Should().Be(SmallIssueRoutes);
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "controllers", "userController.ts"))
             .Should().Be(UnrelatedUserController);
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "services", "issueService.ts"))
@@ -347,7 +344,7 @@ public class LightweightFocusedRepairTests : IDisposable
     }
 
     [Fact]
-    public async Task ExecuteFocusedRepairAsync_MoreThanTwoRepairFiles_RepairsAtMostTwo()
+    public async Task ExecuteFocusedRepairAsync_MoreThanTwoRepairFiles_RepairsOnlyTheFirstFile()
     {
         WriteWorktreeFile("src/A.ts", "export const a = 1;");
         WriteWorktreeFile("src/B.ts", "export const b = 1;");
@@ -374,9 +371,9 @@ public class LightweightFocusedRepairTests : IDisposable
         var result = await agent.ExecuteFocusedRepairAsync(request, CancellationToken.None);
 
         result.Success.Should().BeTrue();
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2, "repair scope remains max 2 files");
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(1, "repair one highest-confidence file before the next build");
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "A.ts")).Should().Contain("a = 2");
-        File.ReadAllText(Path.Combine(_worktreeDir, "src", "B.ts")).Should().Contain("b = 2");
+        File.ReadAllText(Path.Combine(_worktreeDir, "src", "B.ts")).Should().Be("export const b = 1;");
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "C.ts")).Should().Be("export const c = 1;");
     }
 

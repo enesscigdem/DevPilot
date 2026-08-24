@@ -613,8 +613,10 @@ public class GitWorkspaceExecutionProcessorTests
         var act = () => processor.ProcessAsync(context);
         await act.Should().NotThrowAsync();
 
-        agent.CallCount.Should().Be(2);
-        validationRunner.BuildCallCount.Should().Be(2);
+        agent.CallCount.Should().Be(3, "generation + changed repair + one final diagnostic-directed attempt");
+        validationRunner.BuildCallCount.Should().Be(3);
+        agent.FocusedRepairRequests.Should().HaveCount(2);
+        agent.FocusedRepairRequests[1].IsFinalDiagnosticAttempt.Should().BeTrue();
 
         // Verify explicit compile repair activities recorded
         var messages = recorder.RecordedActivities.Select(a => a.message).ToList();
@@ -684,7 +686,7 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
-    public async Task CompileRepair_SameDiagnosticAfterChangedRepair_DoesNotLaunchAnotherRound()
+    public async Task CompileRepair_SameDiagnosticAfterChangedRepair_AllowsOneFinalDiagnosticAttemptThenStops()
     {
         var taskId = Guid.NewGuid();
         var failure = new BuildValidationResult
@@ -697,17 +699,23 @@ public class GitWorkspaceExecutionProcessorTests
         {
             ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Valid.cs" })
         };
-        var runner = new ScriptedValidationRunner(new[] { failure, failure });
-        var fingerprint = new TestFingerprintCalculator("before", "after");
+        var runner = new ScriptedValidationRunner(new[] { failure, failure, failure });
+        var fingerprint = new TestFingerprintCalculator("before", "after", "after-before", "after-after");
         var recorder = new TestActivityRecorder();
         var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
 
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
         await act.Should().NotThrowAsync();
-        agent.CallCount.Should().Be(2, "the identical diagnostic must stop before a second repair");
-        runner.BuildRequests.Should().HaveCount(2);
+        agent.CallCount.Should().Be(3, "one changed repair plus one final diagnostic-directed attempt");
+        runner.BuildRequests.Should().HaveCount(3);
+        agent.FocusedRepairRequests.Should().HaveCount(2);
         agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[0].IsFinalDiagnosticAttempt.Should().BeFalse();
+        agent.FocusedRepairRequests[1].RepairFiles.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[1].IsFinalDiagnosticAttempt.Should().BeTrue();
+        agent.FocusedRepairRequests[1].AcceptanceCriteria.Should().Contain("exact current compiler diagnostic");
+        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.ProgressResult == "SameFailure");
         recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
@@ -735,6 +743,84 @@ public class GitWorkspaceExecutionProcessorTests
         agent.FocusedRepairRequests[1].RepairFiles.Should().Equal("src/Other.cs");
         agent.FocusedRepairRequests[0].RepairFiles.Should().NotContain("src/Valid.cs");
         agent.FocusedRepairRequests[1].RepairFiles.Should().NotContain("src/Valid.cs");
+    }
+
+    [Fact]
+    public async Task CompileRepair_TwoFileDiagnostics_RepairsHighestConfidenceFileThenRebuildsBeforeNextFile()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Other.cs" })
+        };
+        var runner = new ScriptedValidationRunner(new[]
+        {
+            new BuildValidationResult
+            {
+                Success = false,
+                ErrorMessage = "build failed",
+                StdOut = "src/App.cs(8,3): error CS1002: ; expected\nsrc/Other.cs(9,4): error CS0103: Name is not defined"
+            },
+            new BuildValidationResult
+            {
+                Success = false,
+                ErrorMessage = "build failed",
+                StdOut = "src/Other.cs(9,4): error CS0103: Name is not defined"
+            },
+            new BuildValidationResult { Success = true }
+        });
+        var fingerprint = new TestFingerprintCalculator("a", "b", "c", "d");
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().HaveCount(2);
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[1].RepairFiles.Should().Equal("src/Other.cs");
+        runner.BuildRequests.Should().HaveCount(3, "build reruns after file A before file B is repaired");
+    }
+
+    [Fact]
+    public async Task CompileRepair_SecondFileProviderFailure_PreservesFirstAppliedRepair()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/App.cs", "src/Other.cs" })
+        };
+        agent.FocusedRepairResults.Enqueue(DeveloperAgentResult.Ok(new List<string> { "src/App.cs" }));
+        agent.FocusedRepairResults.Enqueue(DeveloperAgentResult.Fail("TokenLimitExceeded"));
+        var runner = new ScriptedValidationRunner(new[]
+        {
+            new BuildValidationResult
+            {
+                Success = false,
+                ErrorMessage = "build failed",
+                StdOut = "src/App.cs(8,3): error CS1002: ; expected\nsrc/Other.cs(9,4): error CS0103: Name is not defined"
+            },
+            new BuildValidationResult
+            {
+                Success = false,
+                ErrorMessage = "build failed",
+                StdOut = "src/Other.cs(9,4): error CS0103: Name is not defined"
+            }
+        });
+        var fingerprint = new TestFingerprintCalculator("a", "b");
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().HaveCount(2);
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/App.cs");
+        agent.FocusedRepairRequests[1].RepairFiles.Should().Equal("src/Other.cs");
+        recorder.RecordedActivities.Should().Contain(a =>
+            a.message.Contains("Compile repair completed") &&
+            a.metadata != null &&
+            a.metadata.RepairFiles != null &&
+            a.metadata.RepairFiles.Contains("src/App.cs"));
+        recorder.RecordedActivities.Should().Contain(a =>
+            a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
     [Fact]
@@ -812,17 +898,19 @@ public class GitWorkspaceExecutionProcessorTests
         };
         var runner = new ScriptedValidationRunner(
             new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
-            new[] { failedTest, failedTest });
-        var fingerprint = new TestFingerprintCalculator("before", "after");
+            new[] { failedTest, failedTest, failedTest });
+        var fingerprint = new TestFingerprintCalculator("before", "after", "final-before", "final-after");
         var recorder = new TestActivityRecorder();
         var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
 
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
         await act.Should().NotThrowAsync();
-        agent.CallCount.Should().Be(2);
+        agent.CallCount.Should().Be(3, "one changed test repair plus one final diagnostic-directed attempt");
+        agent.FocusedRepairRequests.Should().HaveCount(2);
         agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/TodoService.cs");
-        runner.TestRequests.Should().HaveCount(2, "the same targeted failure stops before another repair");
+        agent.FocusedRepairRequests[1].IsFinalDiagnosticAttempt.Should().BeTrue();
+        runner.TestRequests.Should().HaveCount(3, "same failure allows one final attempt then stops");
         recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 
@@ -1098,6 +1186,7 @@ public class GitWorkspaceExecutionProcessorTests
     private class TestDeveloperAgent : IDeveloperAgent
     {
         public DeveloperAgentResult ResultToReturn { get; set; } = DeveloperAgentResult.Ok(new List<string> { "Modified.cs" });
+        public Queue<DeveloperAgentResult> FocusedRepairResults { get; } = new();
         public int CallCount { get; private set; }
         public List<DeveloperAgentRequest> Requests { get; } = new();
         public List<FocusedRepairRequest> FocusedRepairRequests { get; } = new();
@@ -1113,7 +1202,8 @@ public class GitWorkspaceExecutionProcessorTests
         {
             CallCount++;
             FocusedRepairRequests.Add(request);
-            return Task.FromResult(ResultToReturn);
+            var result = FocusedRepairResults.Count > 0 ? FocusedRepairResults.Dequeue() : ResultToReturn;
+            return Task.FromResult(result);
         }
     }
 

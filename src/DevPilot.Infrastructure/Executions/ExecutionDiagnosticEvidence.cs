@@ -252,7 +252,7 @@ public static class ExecutionDiagnosticEvidence
             .Where(path => path != null)
             .Cast<string>()
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(2)
+            .Take(1)
             .ToList();
     }
 

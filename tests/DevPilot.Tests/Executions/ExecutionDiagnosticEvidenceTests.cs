@@ -24,7 +24,7 @@ public sealed class ExecutionDiagnosticEvidenceTests
     }
 
     [Fact]
-    public void CompilerErrors_ExplicitlyImplicatingTwoTouchedFiles_SelectBothAndNoMore()
+    public void CompilerErrors_ExplicitlyImplicatingTwoTouchedFiles_SelectsHighestConfidenceFileOnly()
     {
         var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
             """
@@ -39,7 +39,7 @@ public sealed class ExecutionDiagnosticEvidenceTests
             evidence,
             new[] { "src/Todos/ITodoService.cs", "src/Todos/TodoService.cs", "src/Todos/TodosController.cs" });
 
-        selected.Should().Equal("src/Todos/ITodoService.cs", "src/Todos/TodoService.cs");
+        selected.Should().Equal("src/Todos/ITodoService.cs");
     }
 
     [Fact]

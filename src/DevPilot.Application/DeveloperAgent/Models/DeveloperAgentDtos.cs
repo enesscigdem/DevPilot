@@ -30,7 +30,8 @@ public sealed record FocusedRepairRequest(
     string DiagnosticEvidence,
     IReadOnlyList<string>? DiagnosticLocations = null,
     string? LanguageContext = null,
-    string? Model = null);
+    string? Model = null,
+    bool IsFinalDiagnosticAttempt = false);
 
 public sealed record ImpactedFileDetail(
     string FilePath,

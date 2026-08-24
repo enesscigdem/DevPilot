@@ -525,6 +525,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
         var repairRound = 0;
         string? previousFailureFingerprint = null;
+        var lastRepairChangedFile = false;
+        var finalDiagnosticAttemptUsed = false;
 
         while (!result.Success && repairRound < _maxCompileRepairRounds)
         {
@@ -537,23 +539,29 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ? ExecutionDiagnosticEvidence.CreateActionableCompilerEvidence(actionableFailures, result.StdOut, result.StdErr, result.ErrorMessage)
                 : ExecutionDiagnosticEvidence.ParseVerificationFailure(result.StdOut, result.StdErr, result.ErrorMessage);
 
-            if (string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal))
+            var isSameFailure = string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal);
+            if (isSameFailure)
             {
-                await SafeRecordActivityAsync(
-                    context.ExecutionId,
-                    ExecutionStage.Build,
-                    ExecutionActivityStatus.Failed,
-                    "Stopped with evidence: focused repair made no diagnostic progress.",
-                    CheckMetadata(
-                        check,
-                        "StoppedWithEvidence",
-                        result,
-                        repairKind: "Compile",
-                        repairRound: repairRound,
-                        failureFingerprint: evidence.FailureFingerprint,
-                        progressResult: "SameFailure"),
-                    cancellationToken).ConfigureAwait(false);
-                break;
+                if (!lastRepairChangedFile || finalDiagnosticAttemptUsed)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Build,
+                        ExecutionActivityStatus.Failed,
+                        "Stopped with evidence: focused repair made no diagnostic progress.",
+                        CheckMetadata(
+                            check,
+                            "StoppedWithEvidence",
+                            result,
+                            repairKind: "Compile",
+                            repairRound: repairRound,
+                            failureFingerprint: evidence.FailureFingerprint,
+                            progressResult: "SameFailure"),
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                finalDiagnosticAttemptUsed = true;
             }
 
             var repairFiles = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, modifiedFiles).ToList();
@@ -625,18 +633,22 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
 
             var languageContext = _repairContextProvider?.GetCompileRepairContext(check, prepResult.WorkspacePath, repairFiles);
+            var isFinalDiagnosticAttempt = isSameFailure && finalDiagnosticAttemptUsed;
             var repairRequest = new FocusedRepairRequest(
                 TaskId: context.TaskId,
                 ExecutionId: context.ExecutionId,
                 TaskTitle: context.TaskTitle,
-                AcceptanceCriteria: "Resolve the authoritative repository check failure in the focused files without weakening existing tests or checks.",
+                AcceptanceCriteria: isFinalDiagnosticAttempt
+                    ? "Apply a final diagnostic-directed fix for the exact current compiler diagnostic only."
+                    : "Resolve the authoritative repository check failure in the focused files without weakening existing tests or checks.",
                 WorkspacePath: prepResult.WorkspacePath,
                 BranchName: prepResult.BranchName,
                 RepairFiles: repairFiles,
                 DiagnosticEvidence: string.Join("\n", evidence.DiagnosticLines.Take(10)),
                 DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
                 LanguageContext: languageContext,
-                Model: actualModel);
+                Model: actualModel,
+                IsFinalDiagnosticAttempt: isFinalDiagnosticAttempt);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();
@@ -709,8 +721,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             if (noDiff)
             {
+                lastRepairChangedFile = false;
                 break;
             }
+
+            lastRepairChangedFile = true;
 
             await SafeRecordActivityAsync(
                 context.ExecutionId,
@@ -881,6 +896,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
         var repairRound = 0;
         string? previousFailureFingerprint = null;
+        var lastRepairChangedFile = false;
+        var finalDiagnosticAttemptUsed = false;
         while (!result.Success && repairRound < _maxTestRepairRounds)
         {
             repairRound++;
@@ -892,26 +909,32 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ? ExecutionDiagnosticEvidence.CreateActionableTestEvidence(actionableFailures, result.StdOut, result.StdErr, result.ErrorMessage)
                 : ExecutionDiagnosticEvidence.ParseTestFailure(result.StdOut, result.StdErr, result.ErrorMessage);
 
-            if (string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal))
+            var isSameFailure = string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal);
+            if (isSameFailure)
             {
-                await SafeRecordActivityAsync(
-                    context.ExecutionId,
-                    ExecutionStage.Test,
-                    ExecutionActivityStatus.Failed,
-                    "Stopped with evidence: focused test repair made no diagnostic progress.",
-                    CheckMetadata(
-                        check,
-                        "StoppedWithEvidence",
-                        result,
-                        repairKind: "Test",
-                        repairRound: repairRound,
-                        failureFingerprint: evidence.FailureFingerprint,
-                        progressResult: "SameFailure"),
-                    cancellationToken).ConfigureAwait(false);
-                break;
+                if (!lastRepairChangedFile || finalDiagnosticAttemptUsed)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Test,
+                        ExecutionActivityStatus.Failed,
+                        "Stopped with evidence: focused test repair made no diagnostic progress.",
+                        CheckMetadata(
+                            check,
+                            "StoppedWithEvidence",
+                            result,
+                            repairKind: "Test",
+                            repairRound: repairRound,
+                            failureFingerprint: evidence.FailureFingerprint,
+                            progressResult: "SameFailure"),
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                finalDiagnosticAttemptUsed = true;
             }
 
-            var repairFiles = ExecutionDiagnosticEvidence.SelectTestRepairFiles(evidence, modifiedFiles).ToList();
+            var repairFiles = ExecutionDiagnosticEvidence.SelectTestRepairFiles(evidence, modifiedFiles).Take(1).ToList();
             if (repairFiles.Count == 0)
             {
                 await SafeRecordActivityAsync(
@@ -946,18 +969,22 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     failureFingerprint: evidence.FailureFingerprint),
                 cancellationToken).ConfigureAwait(false);
 
+            var isFinalDiagnosticAttempt = isSameFailure && finalDiagnosticAttemptUsed;
             var repairRequest = new FocusedRepairRequest(
                 TaskId: context.TaskId,
                 ExecutionId: context.ExecutionId,
                 TaskTitle: context.TaskTitle,
-                AcceptanceCriteria: "Resolve the failing test without weakening existing test assertions.",
+                AcceptanceCriteria: isFinalDiagnosticAttempt
+                    ? "Apply a final diagnostic-directed fix for the exact current test failure only."
+                    : "Resolve the failing test without weakening existing test assertions.",
                 WorkspacePath: prepResult.WorkspacePath,
                 BranchName: prepResult.BranchName,
                 RepairFiles: repairFiles,
                 DiagnosticEvidence: string.Join("\n", evidence.RelevantLines),
                 DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
                 LanguageContext: null,
-                Model: actualModel);
+                Model: actualModel,
+                IsFinalDiagnosticAttempt: isFinalDiagnosticAttempt);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();
@@ -1028,8 +1055,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             if (noDiff)
             {
+                lastRepairChangedFile = false;
                 break;
             }
+
+            lastRepairChangedFile = true;
 
             var prerequisiteFailed = false;
             foreach (var prerequisite in prerequisiteChecks)

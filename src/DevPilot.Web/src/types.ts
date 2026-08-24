@@ -371,6 +371,9 @@ export interface ExecutionActivityMetadata {
   newRegressionCount?: number | null;
   targetedTestFilter?: string | null;
   verificationOutcome?: string | null;
+  reasoningTokens?: number | null;
+  responseContentCharCount?: number | null;
+  requestedReasoningEffort?: string | null;
 }
 
 export interface ExecutionActivityItem {

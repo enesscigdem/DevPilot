@@ -506,7 +506,7 @@ public class TodoService : ITodoService
         var createTestEntry = new ManifestFileEntry("tests/DevPilot.Tests/NewControllerTests.cs", FileEditAction.Create, "Create new tests", null);
         var sysPrompt = DeveloperAgent.BuildSingleFileSystemPrompt(createTestEntry, useFullFileReplacement: false);
 
-        sysPrompt.Should().Contain("For 'Create' actions, specify 'newContent' containing the complete, valid file content");
+        sysPrompt.Should().Contain("For 'Create' actions, specify 'newContent' containing the smallest compile-complete source file");
         sysPrompt.Should().Contain("MINIMAL TESTS");
     }
 

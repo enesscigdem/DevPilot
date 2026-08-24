@@ -248,6 +248,14 @@ public class TokenLimitDisciplineTests : IDisposable
             FailureKind = AiFailureKind.TokenLimitExceeded,
             ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result."
         });
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            Provider = "Kimi",
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result."
+        });
 
         var request = new DeveloperAgentRequest(
             TaskId: Guid.NewGuid(),
@@ -268,8 +276,7 @@ public class TokenLimitDisciplineTests : IDisposable
         result.ErrorMessage.Should().Contain("exhausted the configured output token limit");
         result.ErrorMessage.Should().Contain(targetFile);
 
-        // Assert: EXACTLY 2 provider calls, NO 3rd call
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2, "Exactly 2 provider calls (1 initial + 1 compact retry), no 3rd call");
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(3, "Modify allows initial + surgical retry + one micro retry, then stops");
 
         // Assert: Zero disk mutation
         var onDisk = await File.ReadAllTextAsync(fullPath);
@@ -285,6 +292,13 @@ public class TokenLimitDisciplineTests : IDisposable
         await File.WriteAllTextAsync(fullPath, "public class OrderProcessor {}");
 
         // Both attempts return TokenLimitExceeded
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            Provider = "Kimi",
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded
+        });
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
             Provider = "Kimi",
@@ -316,8 +330,7 @@ public class TokenLimitDisciplineTests : IDisposable
         var result = await _developerAgent.GenerateAndApplyEditsAsync(request);
 
         result.Success.Should().BeFalse();
-        // If it had entered transient recovery, it would have made a 3rd call. It must NOT enter transient recovery.
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(3, "token-limit recovery stays local and must not enter transient 503 retry");
     }
 
     [Fact]

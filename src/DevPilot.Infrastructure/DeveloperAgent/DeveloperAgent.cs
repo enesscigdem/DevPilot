@@ -46,6 +46,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     private readonly int _maxManifestFiles;
     private readonly int _maxGenerationCalls;
     private readonly int _maxConcurrentFileGenerations;
+    private readonly string? _mechanicalReasoningEffort;
 
     public DeveloperAgent(
         IAiProvider aiProvider,
@@ -123,6 +124,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             _maxConcurrentFileGenerations = 1;
         }
+
+        var configuredReasoning = configuration?["DeveloperAgent:MechanicalReasoningEffort"];
+        _mechanicalReasoningEffort = string.IsNullOrWhiteSpace(configuredReasoning)
+            ? "low"
+            : configuredReasoning.Trim();
     }
 
     private int ParseConfigBudget(IConfiguration? config, string key, int defaultValue)
@@ -177,23 +183,25 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return Math.Min(initialBudget, boundedPatch);
         }
 
-        int targetLines = targetContent != null ? targetContent.Split('\n').Length : 0;
-        bool isLargeFile = targetLines > 100 || (targetContent?.Length ?? 0) > 4000;
-        bool isTestFile = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
+        // Create recovery stays a bounded newContent file. Never double 8K->16K->32K.
+        // Ordinary source and tests keep the same or a lower cap; tests may retain 8192.
+        var isTestFile = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
+        var createCap = isTestFile
+            ? Math.Min(_budgetTestFile, 8192)
+            : Math.Min(Math.Min(initialBudget, 8192), _maxOutputTokens);
+        return Math.Min(Math.Min(initialBudget, createCap), Math.Min(_maxOutputTokens, _maxCompactRetryOutputTokens));
+    }
 
-        int candidateBudget;
-        if (isLargeFile || isTestFile)
+    private AiRequest CreateMechanicalRequest(string? model, string? systemPrompt, string userPrompt, int? maxTokens)
+    {
+        return new AiRequest
         {
-            candidateBudget = (isTestFile && isLargeFile) || targetLines > 150 || (targetContent?.Length ?? 0) > 6000
-                ? _maxCompactRetryOutputTokens
-                : (isRepair ? 16384 : 12288);
-        }
-        else
-        {
-            candidateBudget = Math.Max(initialBudget * 2, 8192);
-        }
-
-        return Math.Min(Math.Max(candidateBudget, initialBudget), _maxCompactRetryOutputTokens);
+            Model = model ?? string.Empty,
+            SystemPrompt = systemPrompt,
+            UserPrompt = userPrompt,
+            MaxTokens = maxTokens,
+            ReasoningEffort = _mechanicalReasoningEffort
+        };
     }
 
     public async Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(
@@ -208,105 +216,100 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return DeveloperAgentResult.Fail("No repair files specified for focused repair.", request.Model);
         }
 
-        var filesToRepair = request.RepairFiles.Take(2).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var collectedEdits = new List<FileEditSpec>();
-
-        _logger.LogInformation(
-            "DeveloperAgent: starting lightweight focused repair for task {TaskId} on {Count} file(s) in workspace '{Workspace}'.",
-            request.TaskId,
-            filesToRepair.Count,
-            request.WorkspacePath);
-
-        foreach (var filePath in filesToRepair)
+        var filePath = request.RepairFiles
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(filePath))
         {
-            string resolvedPath;
-            try
-            {
-                resolvedPath = WorktreeEditApplier.ValidateAndResolvePath(request.WorkspacePath, filePath);
-            }
-            catch (Exception ex)
-            {
-                return DeveloperAgentResult.Fail($"Failed to resolve path for '{filePath}': {ex.Message}", request.Model);
-            }
-
-            if (!File.Exists(resolvedPath))
-            {
-                return DeveloperAgentResult.Fail($"Repair target file '{filePath}' does not exist on disk.", request.Model);
-            }
-
-            var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
-            var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
-
-            var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
-            const bool useFullFileReplacement = false;
-            var budget = DetermineFocusedRepairBudget();
-            var peerContext = CollectFocusedRepairPeerContext(
-                request.WorkspacePath,
-                filePath,
-                request,
-                currentContent ?? string.Empty);
-            var boundedTarget = BuildFocusedRepairTargetWindow(
-                currentContent ?? string.Empty,
-                request.DiagnosticLocations,
-                request.DiagnosticEvidence);
-
-            var systemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath);
-            var userPrompt = BuildFocusedDiagnosticRepairUserPrompt(
-                filePath,
-                boundedTarget,
-                request,
-                peerContext);
-
-            var aiRequest = new AiRequest
-            {
-                UserPrompt = userPrompt,
-                SystemPrompt = systemPrompt,
-                MaxTokens = budget,
-                Model = request.Model ?? string.Empty
-            };
-
-            var repairSw = Stopwatch.StartNew();
-            AiResponse aiResponse;
-            try
-            {
-                aiResponse = await _aiProvider.SendAsync(aiRequest, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                return DeveloperAgentResult.Fail($"Focused repair AI call failed: {ex.Message}", request.Model);
-            }
-            repairSw.Stop();
-
-            await RecordProviderCallActivityAsync(
-                request.ExecutionId,
-                filePath,
-                "FocusedVerificationRepair",
-                aiRequest,
-                aiResponse,
-                repairSw.Elapsed,
-                cancellationToken).ConfigureAwait(false);
-
-            if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
-            {
-                return DeveloperAgentResult.Fail($"Focused repair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
-            }
-
-            FileEditSpec editSpec;
-            try
-            {
-                editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
-                ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
-                ValidateFocusedRepairSearchAnchors(editSpec, filePath);
-            }
-            catch (Exception parseEx)
-            {
-                return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseEx.Message}", request.Model);
-            }
-
-            collectedEdits.Add(editSpec);
+            return DeveloperAgentResult.Fail("No repair files specified for focused repair.", request.Model);
         }
 
-        var structuredPlan = new StructuredEditPlan(collectedEdits);
+        _logger.LogInformation(
+            "DeveloperAgent: starting lightweight focused repair for task {TaskId} on '{FilePath}' in workspace '{Workspace}'.",
+            request.TaskId,
+            filePath,
+            request.WorkspacePath);
+
+        string resolvedPath;
+        try
+        {
+            resolvedPath = WorktreeEditApplier.ValidateAndResolvePath(request.WorkspacePath, filePath);
+        }
+        catch (Exception ex)
+        {
+            return DeveloperAgentResult.Fail($"Failed to resolve path for '{filePath}': {ex.Message}", request.Model);
+        }
+
+        if (!File.Exists(resolvedPath))
+        {
+            return DeveloperAgentResult.Fail($"Repair target file '{filePath}' does not exist on disk.", request.Model);
+        }
+
+        var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+        var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
+
+        var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
+        const bool useFullFileReplacement = false;
+        var budget = DetermineFocusedRepairBudget();
+        var peerContext = CollectFocusedRepairPeerContext(
+            request.WorkspacePath,
+            filePath,
+            request,
+            currentContent ?? string.Empty);
+        var boundedTarget = BuildFocusedRepairTargetWindow(
+            currentContent ?? string.Empty,
+            request.DiagnosticLocations,
+            request.DiagnosticEvidence);
+
+        var systemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath, request.IsFinalDiagnosticAttempt);
+        var userPrompt = BuildFocusedDiagnosticRepairUserPrompt(
+            filePath,
+            boundedTarget,
+            request,
+            peerContext);
+
+        var aiRequest = CreateMechanicalRequest(request.Model, systemPrompt, userPrompt, budget);
+
+        var repairSw = Stopwatch.StartNew();
+        AiResponse aiResponse;
+        try
+        {
+            aiResponse = await _aiProvider.SendAsync(aiRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return DeveloperAgentResult.Fail($"Focused repair AI call failed: {ex.Message}", request.Model);
+        }
+        repairSw.Stop();
+
+        await RecordProviderCallActivityAsync(
+            request.ExecutionId,
+            filePath,
+            request.IsFinalDiagnosticAttempt ? "FinalDiagnosticRepair" : "FocusedVerificationRepair",
+            aiRequest,
+            aiResponse,
+            repairSw.Elapsed,
+            cancellationToken).ConfigureAwait(false);
+
+        if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
+        {
+            return DeveloperAgentResult.Fail($"Focused repair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
+        }
+
+        FileEditSpec editSpec;
+        try
+        {
+            editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
+            ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
+            ValidateFocusedRepairSearchAnchors(editSpec, filePath);
+        }
+        catch (Exception parseEx)
+        {
+            return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseEx.Message}", request.Model);
+        }
+
+        var structuredPlan = new StructuredEditPlan(new[] { editSpec });
         try
         {
             ValidateStructuredPlan(structuredPlan);
@@ -322,7 +325,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return DeveloperAgentResult.Fail(applyResult.ErrorMessage ?? "Focused repair apply failed.", request.Model);
         }
 
-        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? filesToRepair, model: request.Model);
+        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? new[] { filePath }, model: request.Model);
     }
 
     public async Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(
@@ -752,13 +755,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var singleFileUserPrompt = BuildSingleFileUserPrompt(
             request, fileEntry, contextFiles, completedEdits, projectGraph, lockedContracts, referencePattern, useFullFileReplacement, virtualWorkspace);
 
-        var fileAiRequest = new AiRequest
-        {
-            Model = request.Model ?? string.Empty,
-            SystemPrompt = singleFileSystemPrompt,
-            UserPrompt = singleFileUserPrompt,
-            MaxTokens = initialBudget
-        };
+        var fileAiRequest = CreateMechanicalRequest(
+            request.Model,
+            singleFileSystemPrompt,
+            singleFileUserPrompt,
+            initialBudget);
 
         var fileSw = Stopwatch.StartNew();
         AiResponse fileResponse;
@@ -793,38 +794,38 @@ public sealed class DeveloperAgent : IDeveloperAgent
             cancellationToken).ConfigureAwait(false);
 
         // File-local token recovery: one bounded retry for this file only.
-        // Modify retries stay SEARCH/REPLACE with the same/smaller budget.
+        // Modify: surgical retry, then one micro window retry. Create: one minimal retry at the same budget.
         if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
             string.Equals(fileResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
         {
             int compactBudget = DetermineCompactRetryBudget(initialBudget, targetContent, fileEntry, isRepair: false);
             var isModify = fileEntry.Action == FileEditAction.Modify;
-            var attemptRetry = isModify || compactBudget > initialBudget;
-            if (attemptRetry && callCounter.TryIncrement(out var escCallNumber))
+            var isCreate = fileEntry.Action == FileEditAction.Create;
+            if ((isModify || isCreate) && callCounter.TryIncrement(out var escCallNumber))
             {
                 recoveryUsed = true;
                 callCounter.RecordCompactRetry();
-                var retryKind = isModify ? "SurgicalModifyRetry" : "CompactGenerationRetry";
+                var retryKind = isModify ? "SurgicalModifyRetry" : "MinimalCreateRetry";
                 await SafeRecordActivityAsync(
                     request.ExecutionId,
                     isModify
                         ? $"Performing surgical modify retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit."
-                        : $"Performing compact generation retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit.",
+                        : $"Performing minimal create retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit.",
                     cancellationToken).ConfigureAwait(false);
 
-                var compactUserPrompt = BuildCompactSingleFileUserPrompt(
-                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement, virtualWorkspace);
+                var compactUserPrompt = isCreate
+                    ? BuildMinimalCreateRetryUserPrompt(request, fileEntry, lockedContracts, virtualWorkspace)
+                    : BuildCompactSingleFileUserPrompt(
+                        request, fileEntry, targetContent, lockedContracts, useFullFileReplacement, virtualWorkspace);
                 var compactSystemPrompt = isModify
                     ? BuildSurgicalModifyRetrySystemPrompt(fileEntry)
-                    : BuildCompactSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
+                    : BuildMinimalCreateRetrySystemPrompt(fileEntry);
 
-                var compactRequest = new AiRequest
-                {
-                    Model = request.Model ?? string.Empty,
-                    SystemPrompt = compactSystemPrompt,
-                    UserPrompt = compactUserPrompt,
-                    MaxTokens = compactBudget
-                };
+                var compactRequest = CreateMechanicalRequest(
+                    request.Model,
+                    compactSystemPrompt,
+                    compactUserPrompt,
+                    compactBudget);
 
                 try
                 {
@@ -872,6 +873,77 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "DeveloperAgent: compact retry call failed for file '{FilePath}'.", fileEntry.FilePath);
+                    throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
+                }
+            }
+
+            var stillTruncated = fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
+                                 string.Equals(fileResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase);
+            if (isModify && stillTruncated && callCounter.TryIncrement(out var microCallNumber))
+            {
+                recoveryUsed = true;
+                callCounter.RecordCompactRetry();
+                await SafeRecordActivityAsync(
+                    request.ExecutionId,
+                    $"Performing micro modify retry for {fileName} using a bounded target window.",
+                    cancellationToken).ConfigureAwait(false);
+
+                var microSystemPrompt = BuildMicroModifyRetrySystemPrompt(fileEntry);
+                var microUserPrompt = BuildMicroModifyRetryUserPrompt(
+                    request, fileEntry, targetContent, lockedContracts, virtualWorkspace);
+                var microBudget = Math.Min(Math.Min(_budgetModifyPatch, 4096), _maxOutputTokens);
+                var microRequest = CreateMechanicalRequest(
+                    request.Model,
+                    microSystemPrompt,
+                    microUserPrompt,
+                    microBudget);
+
+                try
+                {
+                    var microSw = Stopwatch.StartNew();
+                    var microResponse = await _aiProvider.SendAsync(microRequest, cancellationToken).ConfigureAwait(false);
+                    microSw.Stop();
+
+                    if (!string.IsNullOrWhiteSpace(microResponse.Model))
+                    {
+                        capturedModels.Add(microResponse.Model);
+                    }
+
+                    LogGenerationAudit(fileEntry.FilePath, "MicroModifyRetry", microCallNumber, microRequest, microResponse, microSw.Elapsed, isCompactRetry: true);
+                    await RecordProviderCallActivityAsync(
+                        request.ExecutionId,
+                        fileEntry.FilePath,
+                        "MicroModifyRetry",
+                        microRequest,
+                        microResponse,
+                        microSw.Elapsed,
+                        cancellationToken).ConfigureAwait(false);
+
+                    if (microResponse.IsSuccess)
+                    {
+                        fileResponse = microResponse;
+                    }
+                    else if (string.Equals(microResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
+                             microResponse.FailureKind == AiFailureKind.TokenLimitExceeded)
+                    {
+                        fileResponse = microResponse;
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "DeveloperAgent: micro modify retry call failed for file '{FilePath}'.", fileEntry.FilePath);
                     throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
                 }
             }
@@ -1009,13 +1081,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 useFullFileReplacement);
 
             int repairBudget = DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent);
-            var repairRequest = new AiRequest
-            {
-                Model = request.Model ?? string.Empty,
-                SystemPrompt = BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement),
-                UserPrompt = repairUserPrompt,
-                MaxTokens = repairBudget
-            };
+            var repairRequest = CreateMechanicalRequest(
+                request.Model,
+                BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement),
+                repairUserPrompt,
+                repairBudget);
 
             var repairSw = Stopwatch.StartNew();
             AiResponse repairResponse;
@@ -1222,7 +1292,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
             OutputTokens: response.OutputTokens,
             StageDurationMs: (long)duration.TotalMilliseconds,
             TargetFile: targetFile,
-            FailureKind: response.FailureKind == AiFailureKind.None ? null : response.FailureKind.ToString());
+            FailureKind: response.FailureKind == AiFailureKind.None ? null : response.FailureKind.ToString(),
+            ReasoningTokens: response.ReasoningTokens,
+            ResponseContentCharCount: response.Content?.Length,
+            RequestedReasoningEffort: request.ReasoningEffort);
 
         await SafeRecordActivityAsync(
             executionId,
@@ -1754,7 +1827,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
 
         var actionSpecificRule = fileEntry.Action == FileEditAction.Create
-            ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
+            ? "For 'Create' actions, specify 'newContent' containing the smallest compile-complete source file. No prose, no duplicated explanations, no unnecessary comments, and no speculative extra functionality."
             : useFullFileReplacement
                 ? "This is a small-file Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
@@ -1793,7 +1866,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
 
         var actionSpecificRule = fileEntry.Action == FileEditAction.Create
-            ? "Provide complete file content in 'newContent'."
+            ? "Provide the smallest compile-complete file in 'newContent'. No prose, comments, or extra features."
             : useFullFileReplacement
                 ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
@@ -1823,6 +1896,29 @@ public sealed class DeveloperAgent : IDeveloperAgent
             """;
     }
 
+    public static string BuildMinimalCreateRetrySystemPrompt(ManifestFileEntry fileEntry)
+    {
+        return $$"""
+            Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+            The previous Create response was too verbose and exhausted the output budget.
+            Emit the smallest compile-complete source file in 'newContent'. No comments, no explanations, no unused helpers, no speculative extra functionality.
+            The file must be syntactically complete and compile on its own.
+            {"filePath":"{{fileEntry.FilePath}}","action":"Create","newContent":"smallest compile-complete source"}
+            """;
+    }
+
+    public static string BuildMicroModifyRetrySystemPrompt(ManifestFileEntry fileEntry)
+    {
+        return $$"""
+            Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
+            Previous Modify attempts exhausted the output budget. This is a MICRO repair of one required change.
+            Return ONE compact 'searchReplaceEdit' with an exact 2-5 line unique anchor from the supplied target window.
+            Change only the exact required statement. NEVER reproduce unchanged methods or the entire file.
+            Omit 'newContent'.
+            {"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact 2-5 line unique anchor","replace":"replacement"}]}
+            """;
+    }
+
     public static string BuildSingleFileRepairSystemPrompt(
         ManifestFileEntry fileEntry,
         bool useFullFileReplacement = false)
@@ -1830,7 +1926,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
 
         var actionSpecificRule = fileEntry.Action == FileEditAction.Create
-            ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
+            ? "For 'Create' actions, specify 'newContent' containing the smallest compile-complete source file. No prose or extra features."
             : useFullFileReplacement
                 ? "Return the complete resulting small file in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
@@ -1963,10 +2059,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
     public static string BuildSingleFileRepairUserPrompt(string parseError, string previousResponse, ManifestFileEntry fileEntry) =>
         BuildSingleFileRepairUserPrompt(parseError, previousResponse, fileEntry, currentTargetContent: null, relevantGeneratedDependencies: null, lockedContracts: null, applicabilityFailure: null);
 
-    public static string BuildFocusedDiagnosticRepairSystemPrompt(string filePath)
+    public static string BuildFocusedDiagnosticRepairSystemPrompt(string filePath, bool isFinalDiagnosticAttempt = false)
     {
+        var mission = isFinalDiagnosticAttempt
+            ? $"You are performing a FINAL diagnostic-directed repair for a single existing file: '{filePath}'. Use only the exact current compiler diagnostic, the exact file, the diagnostic line/window, and the supplied local contract evidence. Do not treat this as a generic fix-the-task request."
+            : $"You are performing lightweight focused verification repair for a single existing file: '{filePath}'.";
+
         return $$"""
-            You are performing lightweight focused verification repair for a single existing file: '{{filePath}}'.
+            {{mission}}
 
             CRITICAL RULES:
             1. Respond ONLY with the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
@@ -1988,12 +2088,22 @@ public sealed class DeveloperAgent : IDeveloperAgent
         IReadOnlyDictionary<string, string>? peerContext = null)
     {
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"Task Title: {request.TaskTitle}");
-        if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+        if (request.IsFinalDiagnosticAttempt)
         {
-            sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
+            sb.AppendLine("FINAL DIAGNOSTIC-DIRECTED ATTEMPT");
+            sb.AppendLine("Use only the exact current compiler diagnostic, the exact file, the diagnostic line/window, and the supplied local contract evidence.");
+            sb.AppendLine("Do not treat this as a generic fix-the-task request.");
+            sb.AppendLine();
         }
-        sb.AppendLine();
+        else
+        {
+            sb.AppendLine($"Task Title: {request.TaskTitle}");
+            if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+            {
+                sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
+            }
+            sb.AppendLine();
+        }
         sb.AppendLine($"Target File: {filePath}");
         sb.AppendLine("Action: Modify");
         sb.AppendLine();
@@ -2458,7 +2568,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
-        if (fileEntry.Action == FileEditAction.Modify)
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            sb.AppendLine("Create Strategy: emit the smallest compile-complete source file in newContent. No prose, no duplicated explanations, no unnecessary comments, no speculative extra functionality.");
+            sb.AppendLine();
+        }
+        else if (fileEntry.Action == FileEditAction.Modify)
         {
             var editStrategy = useFullFileReplacement
                 ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
@@ -2637,6 +2752,136 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         sb.AppendLine($"Output ONLY the compact JSON object for '{fileEntry.FilePath}'.");
+        return sb.ToString();
+    }
+
+    public static string BuildMinimalCreateRetryUserPrompt(
+        DeveloperAgentRequest request,
+        ManifestFileEntry fileEntry,
+        IReadOnlyDictionary<string, string>? lockedContracts = null,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("=== MINIMAL CREATE RETRY ===");
+        sb.AppendLine("The previous Create response exhausted the output budget. Emit the smallest compile-complete newContent.");
+        sb.AppendLine("No prose, no comments, no unused helpers, no speculative extra functionality.");
+        sb.AppendLine();
+        sb.AppendLine($"Task Title: {request.TaskTitle}");
+        sb.AppendLine($"Task Description: {request.TaskDescription}");
+        if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+        {
+            sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
+        }
+        sb.AppendLine();
+        sb.AppendLine($"Target File: {fileEntry.FilePath}");
+        sb.AppendLine("Action: Create");
+        if (!string.IsNullOrWhiteSpace(fileEntry.Purpose))
+        {
+            sb.AppendLine($"Purpose: {fileEntry.Purpose}");
+        }
+        sb.AppendLine();
+
+        if (lockedContracts != null && lockedContracts.Count > 0)
+        {
+            var relevantContracts = FilterRelevantContracts(fileEntry, lockedContracts, targetContent: null, request);
+            if (relevantContracts.Count > 0)
+            {
+                sb.AppendLine("=== Required Upstream Contracts (LOCKED) ===");
+                foreach (var (contractPath, contractSig) in relevantContracts)
+                {
+                    sb.AppendLine($"--- Locked Contract: {contractPath} ---");
+                    sb.AppendLine(contractSig);
+                    sb.AppendLine("--- End Locked Contract ---");
+                }
+                sb.AppendLine();
+            }
+        }
+
+        if (virtualWorkspace != null && virtualWorkspace.Count > 0)
+        {
+            sb.AppendLine("=== In-Memory Generated Dependency Snippets ===");
+            foreach (var (depPath, depContent) in virtualWorkspace.Take(5))
+            {
+                if (string.Equals(depPath, fileEntry.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                sb.AppendLine($"--- Generated Dependency: {depPath} ---");
+                sb.AppendLine(depContent.Length > 1200 ? depContent[..1200] + "\n...[truncated]" : depContent);
+                sb.AppendLine("--- End Generated Dependency ---");
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine($"Output ONLY the smallest compile-complete newContent JSON for '{fileEntry.FilePath}'.");
+        return sb.ToString();
+    }
+
+    public static string BuildMicroModifyRetryUserPrompt(
+        DeveloperAgentRequest request,
+        ManifestFileEntry fileEntry,
+        string? targetContent,
+        IReadOnlyDictionary<string, string>? lockedContracts = null,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("=== MICRO MODIFY RETRY ===");
+        sb.AppendLine("Previous Modify attempts were truncated. Change only the exact required statement using one SEARCH/REPLACE.");
+        sb.AppendLine();
+        sb.AppendLine($"Task Title: {request.TaskTitle}");
+        sb.AppendLine($"Task Description: {request.TaskDescription}");
+        if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+        {
+            sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
+        }
+        sb.AppendLine();
+        sb.AppendLine($"Target File: {fileEntry.FilePath}");
+        sb.AppendLine("Action: Modify");
+        sb.AppendLine();
+
+        if (!string.IsNullOrWhiteSpace(targetContent))
+        {
+            var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
+            var boundedContent = BuildBoundedTargetSourceWindow(targetContent, applicabilityFailure: null, isTest);
+            sb.AppendLine("=== Bounded Target Window ===");
+            sb.AppendLine(boundedContent);
+            sb.AppendLine("=== End Bounded Target Window ===");
+            sb.AppendLine();
+        }
+
+        if (lockedContracts != null && lockedContracts.Count > 0)
+        {
+            var relevantContracts = FilterRelevantContracts(fileEntry, lockedContracts, targetContent, request);
+            if (relevantContracts.Count > 0)
+            {
+                sb.AppendLine("=== Required Upstream Contracts (LOCKED) ===");
+                foreach (var (contractPath, contractSig) in relevantContracts)
+                {
+                    sb.AppendLine($"--- Locked Contract: {contractPath} ---");
+                    sb.AppendLine(contractSig);
+                    sb.AppendLine("--- End Locked Contract ---");
+                }
+                sb.AppendLine();
+            }
+        }
+
+        if (virtualWorkspace != null)
+        {
+            foreach (var (depPath, depContent) in virtualWorkspace.Take(3))
+            {
+                if (string.Equals(depPath, fileEntry.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                sb.AppendLine($"--- Generated Dependency: {depPath} ---");
+                sb.AppendLine(depContent.Length > 800 ? depContent[..800] + "\n...[truncated]" : depContent);
+                sb.AppendLine("--- End Generated Dependency ---");
+            }
+        }
+
+        sb.AppendLine($"Output ONLY one micro searchReplaceEdit JSON for '{fileEntry.FilePath}'.");
         return sb.ToString();
     }
 
