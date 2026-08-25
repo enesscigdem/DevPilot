@@ -804,7 +804,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     cancellationToken).ConfigureAwait(false);
 
                 var compactUserPrompt = BuildCompactSingleFileUserPrompt(
-                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement);
+                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement, contextFiles);
                 var compactSystemPrompt = BuildCompactSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
 
                 var compactRequest = new AiRequest
@@ -2257,6 +2257,36 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return string.Join('/', parts);
     }
 
+    internal static void AppendSameRoleExemplarSection(
+        System.Text.StringBuilder sb,
+        string targetPath,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? alreadyLoaded)
+    {
+        var repositoryContents = RepositoryGenerationExemplar.CollectAvailableRepositoryContents(
+            targetPath,
+            workspacePath,
+            alreadyLoaded);
+        var exemplar = RepositoryGenerationExemplar.SelectSameRoleExemplar(targetPath, repositoryContents);
+        if (exemplar == null)
+        {
+            return;
+        }
+
+        sb.AppendLine("=== Same-Role Repository Exemplar ===");
+        sb.AppendLine($"Preserve repository conventions from this bounded structural evidence in {exemplar.FilePath}.");
+        sb.AppendLine($"--- Exemplar: {exemplar.FilePath} ---");
+        sb.AppendLine(exemplar.BoundedExcerpt);
+        sb.AppendLine("--- End Exemplar ---");
+        var sizeHint = RepositoryGenerationExemplar.BuildRepositorySizeHint(targetPath, repositoryContents);
+        if (!string.IsNullOrWhiteSpace(sizeHint))
+        {
+            sb.AppendLine(sizeHint);
+        }
+
+        sb.AppendLine();
+    }
+
     private static bool LooksLikePeerContractLine(string line)
     {
         var trimmed = line.TrimStart();
@@ -2335,6 +2365,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 sb.AppendLine(referencePattern);
                 sb.AppendLine();
             }
+        }
+
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            AppendSameRoleExemplarSection(sb, fileEntry.FilePath, request.WorkspacePath, contextFiles);
         }
 
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
@@ -2447,7 +2482,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
         ManifestFileEntry fileEntry,
         string? targetContent,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        IReadOnlyDictionary<string, string>? contextFiles = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("=== COMPACT RETRY (TOKEN LIMIT DISCIPLINE) ===");
@@ -2465,6 +2501,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
         sb.AppendLine($"Target File: {fileEntry.FilePath}");
         sb.AppendLine($"Action: {fileEntry.Action}");
         sb.AppendLine();
+
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            AppendSameRoleExemplarSection(sb, fileEntry.FilePath, request.WorkspacePath, contextFiles);
+        }
 
         if (fileEntry.Action == FileEditAction.Modify)
         {
