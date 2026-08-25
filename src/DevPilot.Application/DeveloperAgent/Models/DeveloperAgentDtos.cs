@@ -30,7 +30,9 @@ public sealed record FocusedRepairRequest(
     string DiagnosticEvidence,
     IReadOnlyList<string>? DiagnosticLocations = null,
     string? LanguageContext = null,
-    string? Model = null);
+    string? Model = null,
+    IReadOnlyList<string>? TouchedFiles = null,
+    string? TestName = null);
 
 public sealed record ImpactedFileDetail(
     string FilePath,
@@ -44,13 +46,27 @@ public sealed record DeveloperAgentResult(
     string? ErrorMessage,
     IReadOnlyList<string>? ModifiedFiles = null,
     string? RawAiResponse = null,
-    string? Model = null)
+    string? Model = null,
+    IReadOnlyList<string>? ResolvedNoChangeFiles = null)
 {
     public static DeveloperAgentResult Fail(string message, string? model = null) =>
         new(Success: false, ErrorMessage: message, Model: model);
 
-    public static DeveloperAgentResult Ok(IReadOnlyList<string> modifiedFiles, string? rawAiResponse = null, string? model = null) =>
-        new(Success: true, ErrorMessage: null, ModifiedFiles: modifiedFiles, RawAiResponse: rawAiResponse, Model: model);
+    public static DeveloperAgentResult Ok(
+        IReadOnlyList<string> modifiedFiles,
+        string? rawAiResponse = null,
+        string? model = null,
+        IReadOnlyList<string>? resolvedNoChangeFiles = null) =>
+        new(
+            Success: true,
+            ErrorMessage: null,
+            ModifiedFiles: modifiedFiles,
+            RawAiResponse: rawAiResponse,
+            Model: model,
+            ResolvedNoChangeFiles: resolvedNoChangeFiles);
+
+    public bool HasResolvedNoChange =>
+        ResolvedNoChangeFiles is { Count: > 0 };
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -77,7 +93,9 @@ public sealed record FileEditSpec(
     [property: JsonPropertyName("action")] FileEditAction Action,
     [property: JsonPropertyName("newContent")] string? NewContent = null,
     [property: JsonPropertyName("searchReplaceEdits")] IReadOnlyList<SearchReplaceEdit>? SearchReplaceEdits = null,
-    [property: JsonPropertyName("targetContentHash")] string? TargetContentHash = null);
+    [property: JsonPropertyName("targetContentHash")] string? TargetContentHash = null,
+    [property: JsonPropertyName("noChange")] bool NoChange = false,
+    [property: JsonPropertyName("reason")] string? NoChangeReason = null);
 
 public sealed record SearchReplaceEdit(
     [property: JsonPropertyName("search")] string Search,

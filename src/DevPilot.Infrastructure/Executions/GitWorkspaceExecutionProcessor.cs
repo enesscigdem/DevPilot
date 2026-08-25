@@ -287,6 +287,34 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             if (agentResult.ModifiedFiles == null || agentResult.ModifiedFiles.Count == 0)
             {
+                if (agentResult.HasResolvedNoChange)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.DeveloperAgent,
+                        ExecutionActivityStatus.Completed,
+                        "Developer Agent completed.",
+                        new ExecutionActivityMetadata(
+                            ModifiedFileCount: 0,
+                            Model: actualModel,
+                            EventKind: "GeneratingChange",
+                            ResolvedNoChangeCount: agentResult.ResolvedNoChangeFiles!.Count),
+                        cancellationToken).ConfigureAwait(false);
+
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Execution,
+                        ExecutionActivityStatus.Completed,
+                        "No code changes were required by the generated plan.",
+                        new ExecutionActivityMetadata(
+                            Model: actualModel,
+                            EventKind: "ReadyForReview",
+                            VerificationOutcome: "NeedsReview",
+                            ResolvedNoChangeCount: agentResult.ResolvedNoChangeFiles.Count),
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
                 const string error = "Developer Agent failed: Developer Agent returned success but produced zero modified files.";
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
@@ -996,7 +1024,9 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 DiagnosticEvidence: string.Join("\n", evidence.RelevantLines),
                 DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
                 LanguageContext: null,
-                Model: actualModel);
+                Model: actualModel,
+                TouchedFiles: modifiedFiles.ToList(),
+                TestName: evidence.TestName);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();

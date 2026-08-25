@@ -115,6 +115,10 @@ function getMetadataDisplay(act: ExecutionActivityItem, verificationOutcome?: st
     if (m.eventKind === "GenerationSummary") {
       return `${m.logicalProviderCallCount ?? 0} calls · ${m.compactRetryCount ?? 0} compact · ${m.applicabilityRepairCount ?? 0} applicability · ${m.totalGenerationTimeMs ?? 0}ms`
     }
+    if (m.eventKind === "ResolvedNoChange") {
+      const reason = m.noChangeReason ? ` · ${m.noChangeReason}` : ""
+      return `No change required · ${m.targetFile ?? "target"}${reason}`
+    }
     if (m.eventKind === "RepositoryPreflight") {
       const ecosystems = m.detectedEcosystems?.join(", ") || "unknown ecosystem"
       const unresolved = m.verificationUnresolved ? " · partial discovery" : ""
@@ -166,6 +170,8 @@ function getPrimaryActivityLabel(act: ExecutionActivityItem): string {
       return "Ready for review"
     case "StoppedWithEvidence":
       return "Stopped with evidence"
+    case "ResolvedNoChange":
+      return "No change required"
     default:
       return act.message
   }

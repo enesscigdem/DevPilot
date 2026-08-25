@@ -967,8 +967,45 @@ public class GitWorkspaceExecutionProcessorTests
         await act.Should().NotThrowAsync();
         agent.CallCount.Should().Be(2);
         agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/TodoService.cs");
+        agent.FocusedRepairRequests[0].TouchedFiles.Should().Contain("src/TodoService.cs");
+        agent.FocusedRepairRequests[0].TestName.Should().NotBeNullOrWhiteSpace();
         runner.TestRequests.Should().HaveCount(2, "the same targeted failure stops before another repair");
-        recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
+        recorder.RecordedActivities.Should().Contain(a =>
+            a.metadata != null &&
+            a.metadata.ProgressResult == "SameFailure");
+        recorder.RecordedActivities.Should().Contain(a =>
+            a.metadata != null &&
+            a.metadata.VerificationOutcome == "NeedsReview");
+    }
+
+    [Fact]
+    public async Task AllNoChangeGeneration_DoesNotFailAsZeroModified_AndStaysReviewable()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(
+                Array.Empty<string>(),
+                resolvedNoChangeFiles: new[] { "src/Comments.cs", "src/ReadmeNotes.cs" })
+        };
+        var runner = new TestExecutionValidationRunner();
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, recorder: recorder);
+
+        var act = () => processor.ProcessAsync(CreateContext(taskId));
+
+        await act.Should().NotThrowAsync();
+        agent.CallCount.Should().Be(1);
+        runner.BuildCallCount.Should().Be(0);
+        runner.TestCallCount.Should().Be(0);
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.message == "No code changes were required by the generated plan." &&
+            activity.metadata != null &&
+            activity.metadata.EventKind == "ReadyForReview" &&
+            activity.metadata.VerificationOutcome == "NeedsReview" &&
+            activity.metadata.ResolvedNoChangeCount == 2);
+        recorder.RecordedActivities.Should().NotContain(activity =>
+            activity.message.Contains("zero modified files", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

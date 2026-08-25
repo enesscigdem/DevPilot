@@ -63,4 +63,6 @@ public sealed record ExecutionActivityMetadata(
     int? SuppressedCycleCount = null,
     int? StrongDependencyContractCount = null,
     int? HeuristicInjectedContextCount = null,
-    int? PromptSizeEstimate = null);
+    int? PromptSizeEstimate = null,
+    string? NoChangeReason = null,
+    int? ResolvedNoChangeCount = null);

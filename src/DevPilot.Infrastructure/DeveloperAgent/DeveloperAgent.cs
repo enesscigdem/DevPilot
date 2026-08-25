@@ -285,6 +285,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
             filePath,
             request,
             currentContent ?? string.Empty);
+        var behavioralEvidence = CollectFocusedRepairBehavioralEvidence(
+            filePath,
+            currentContent ?? string.Empty,
+            request);
+        var behavioralSignatures = BehavioralDependencyEvidence.CollectLockedSignatures(
+            behavioralEvidence,
+            workspacePath: request.WorkspacePath);
 
         var primaryRequest = new AiRequest
         {
@@ -292,7 +299,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 filePath,
                 currentContent ?? string.Empty,
                 request,
-                peerContext),
+                peerContext,
+                behavioralEvidence,
+                behavioralSignatures),
             SystemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath),
             MaxTokens = DetermineFocusedRepairBudget(),
             Model = request.Model ?? string.Empty,
@@ -317,7 +326,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     filePath,
                     currentContent ?? string.Empty,
                     request,
-                    peerContext),
+                    peerContext,
+                    behavioralEvidence,
+                    behavioralSignatures),
                 SystemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath),
                 MaxTokens = DetermineMicroDiagnosticRepairBudget(),
                 Model = request.Model ?? string.Empty,
@@ -410,6 +421,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             if (fileEntry.Action == FileEditAction.Modify)
             {
+                if (parsed.NoChange)
+                {
+                    editSpec = parsed;
+                    candidateCode = targetContent;
+                    return true;
+                }
+
                 if (parsed.NewContent != null)
                 {
                     editSpec = parsed;
@@ -1076,7 +1094,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 editSpec = ParseSingleFileEditSpec(fileResponse.Content, fileEntry);
                 ValidateSingleFileEditSpec(editSpec, fileEntry, targetContent, useFullFileReplacement);
 
-                if (fileEntry.Action == FileEditAction.Modify)
+                if (fileEntry.Action == FileEditAction.Modify && editSpec.NoChange)
+                {
+                    candidateCode = targetContent;
+                }
+                else if (fileEntry.Action == FileEditAction.Modify)
                 {
                     if (editSpec.NewContent != null)
                     {
@@ -1263,7 +1285,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 ValidateSingleFileEditSpec(repEditSpec, fileEntry, targetContent, useFullFileReplacement);
 
                 string? repCandidateCode = null;
-                if (fileEntry.Action == FileEditAction.Modify)
+                if (fileEntry.Action == FileEditAction.Modify && repEditSpec.NoChange)
+                {
+                    repCandidateCode = targetContent;
+                }
+                else if (fileEntry.Action == FileEditAction.Modify)
                 {
                     if (repEditSpec.NewContent != null)
                     {
@@ -1307,6 +1333,20 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (fileEntry.Action == FileEditAction.Modify)
         {
             editSpec = editSpec with { TargetContentHash = targetContentHash };
+        }
+
+        if (editSpec.NoChange)
+        {
+            await SafeRecordActivityAsync(
+                request.ExecutionId,
+                $"Resolved NoChange for {fileName}.",
+                cancellationToken,
+                ExecutionActivityStatus.Completed,
+                new ExecutionActivityMetadata(
+                    EventKind: "ResolvedNoChange",
+                    TargetFile: fileEntry.FilePath,
+                    NoChangeReason: BehavioralDependencyEvidence.BoundReason(editSpec.NoChangeReason),
+                    OutputContract: "ModifyNoChange")).ConfigureAwait(false);
         }
 
         // Store authoritative synthesized resulting content into the virtual workspace overlay
@@ -2030,12 +2070,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
 
         var actionSpecificRule = fileEntry.Action == FileEditAction.Create
-            ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
+            ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content. Create can never use NoChange."
             : useFullFileReplacement
                 ? "This is a near-empty Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
-                    ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'."
-                    : "This is a Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'.";
+                    ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult."
+                    : "This is a Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult.";
 
         var testGuidance = isTest
             ? fileEntry.Action == FileEditAction.Modify
@@ -2045,7 +2085,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
-            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"small exact unique anchor","replace":"replacement"}]}""";
+            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"small exact unique anchor","replace":"replacement"}]} or {"filePath":"{{fileEntry.FilePath}}","action":"Modify","noChange":true,"reason":"No matching change is required in the current target."}""";
 
         return $$"""
             You are a software developer agent implementing exact edits for a single target file: '{{fileEntry.FilePath}}' (Action: {{fileEntry.Action}}).
@@ -2073,12 +2113,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             : useFullFileReplacement
                 ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
-                    ? "Output was previously truncated because too much code was emitted. For this test file, return ONLY minimal 2-5 line 'searchReplaceEdits' inserting the new test method(s) using a unique 2-5 line anchor (never a bare closing brace alone). NEVER repeat existing tests or the test class. Omit 'newContent'."
-                    : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods. Omit 'newContent'.";
+                    ? "Output was previously truncated because too much code was emitted. For this test file, return ONLY minimal 2-5 line 'searchReplaceEdits' inserting the new test method(s) using a unique 2-5 line anchor (never a bare closing brace alone). NEVER repeat existing tests or the test class. Omit 'newContent'. If the target already satisfies the requested file-specific change, return explicit NoChange instead of inventing a patch."
+                    : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods. Omit 'newContent'. If the target already satisfies the requested file-specific change, return explicit NoChange instead of inventing a patch.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
-            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact anchor","replace":"replacement"}]}""";
+            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact anchor","replace":"replacement"}]} or {"filePath":"{{fileEntry.FilePath}}","action":"Modify","noChange":true,"reason":"No matching change is required in the current target."}""";
 
         return $$"""
             Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
@@ -2249,16 +2289,24 @@ public sealed class DeveloperAgent : IDeveloperAgent
         string filePath,
         string currentContent,
         FocusedRepairRequest request,
-        IReadOnlyDictionary<string, string>? peerContext = null)
+        IReadOnlyDictionary<string, string>? peerContext = null,
+        IReadOnlyList<VerificationContractExcerpt>? behavioralEvidence = null,
+        IReadOnlyDictionary<string, string>? behavioralSignatures = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Target File: {filePath}");
         sb.AppendLine("Action: Modify");
+        if (!string.IsNullOrWhiteSpace(request.TestName))
+        {
+            sb.AppendLine($"Failing Test: {request.TestName}");
+        }
         sb.AppendLine();
         sb.AppendLine("=== Exact Compiler Diagnostics ===");
         sb.AppendLine(request.DiagnosticEvidence);
         sb.AppendLine("=== End Exact Compiler Diagnostics ===");
         sb.AppendLine();
+
+        BehavioralDependencyEvidence.AppendPromptSection(sb, behavioralEvidence ?? Array.Empty<VerificationContractExcerpt>(), behavioralSignatures);
 
         if (peerContext != null && peerContext.Count > 0)
         {
@@ -2285,7 +2333,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         string filePath,
         string currentContent,
         FocusedRepairRequest request,
-        IReadOnlyDictionary<string, string>? peerContext = null)
+        IReadOnlyDictionary<string, string>? peerContext = null,
+        IReadOnlyList<VerificationContractExcerpt>? behavioralEvidence = null,
+        IReadOnlyDictionary<string, string>? behavioralSignatures = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
@@ -2296,11 +2346,17 @@ public sealed class DeveloperAgent : IDeveloperAgent
         sb.AppendLine();
         sb.AppendLine($"Target File: {filePath}");
         sb.AppendLine("Action: Modify");
+        if (!string.IsNullOrWhiteSpace(request.TestName))
+        {
+            sb.AppendLine($"Failing Test: {request.TestName}");
+        }
         sb.AppendLine();
         sb.AppendLine("=== Authoritative Verification Diagnostic Evidence ===");
         sb.AppendLine(request.DiagnosticEvidence);
         sb.AppendLine("=== End Verification Diagnostic Evidence ===");
         sb.AppendLine();
+
+        BehavioralDependencyEvidence.AppendPromptSection(sb, behavioralEvidence ?? Array.Empty<VerificationContractExcerpt>(), behavioralSignatures);
 
         if (request.DiagnosticLocations != null && request.DiagnosticLocations.Count > 0)
         {
@@ -2395,6 +2451,84 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         return peers;
+    }
+
+    public static IReadOnlyList<VerificationContractExcerpt> CollectFocusedRepairBehavioralEvidence(
+        string targetFilePath,
+        string currentContent,
+        FocusedRepairRequest request)
+    {
+        if (request == null || !VerificationContractEvidence.IsVerificationFile(targetFilePath))
+        {
+            return Array.Empty<VerificationContractExcerpt>();
+        }
+
+        return BehavioralDependencyEvidence.Collect(
+            targetFilePath,
+            currentContent,
+            request.TouchedFiles,
+            freshSources: null,
+            originalSnapshots: null,
+            request.WorkspacePath,
+            request.DiagnosticEvidence);
+    }
+
+    private static List<string> CollectBehavioralCandidatePaths(
+        DeveloperAgentRequest request,
+        ManifestFileEntry fileEntry,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
+        IReadOnlyDictionary<string, string>? contextFiles)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (request.ImpactedFilePaths != null)
+        {
+            foreach (var path in request.ImpactedFilePaths)
+            {
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    paths.Add(path);
+                }
+            }
+        }
+
+        if (fileEntry.Dependencies != null)
+        {
+            foreach (var path in fileEntry.Dependencies)
+            {
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    paths.Add(path);
+                }
+            }
+        }
+
+        if (virtualWorkspace != null)
+        {
+            foreach (var path in virtualWorkspace.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        if (completedEdits != null)
+        {
+            foreach (var path in completedEdits.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        if (contextFiles != null)
+        {
+            foreach (var path in contextFiles.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        paths.Remove(fileEntry.FilePath);
+        return paths.ToList();
     }
 
     public static void ValidateFocusedRepairSearchAnchors(FileEditSpec spec, string filePath)
@@ -2798,8 +2932,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             var editStrategy = useFullFileReplacement
                 ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
                 : isTest
-                    ? "Edit Strategy: surgical test patch. Add only the new or modified test method(s) using a concise 2-5 line unique search anchor from the target file (such as the tail of the preceding test method with surrounding structural lines, or the target test signature; never use a bare closing brace alone). NEVER repeat existing unchanged tests, fixtures, or the full test class."
-                    : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.";
+                    ? "Edit Strategy: surgical test patch. Add only the new or modified test method(s) using a concise 2-5 line unique search anchor from the target file (such as the tail of the preceding test method with surrounding structural lines, or the target test signature; never use a bare closing brace alone). NEVER repeat existing unchanged tests, fixtures, or the full test class. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch."
+                    : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult.";
 
             sb.AppendLine(editStrategy);
             sb.AppendLine("=== Current Content of Target File ===");
@@ -2825,6 +2959,31 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 contextFiles,
                 projectGraph);
             VerificationContractEvidence.AppendPromptSection(sb, verificationEvidence);
+
+            if (VerificationContractEvidence.IsVerificationFile(fileEntry.FilePath))
+            {
+                var behavioralCandidates = CollectBehavioralCandidatePaths(
+                    request,
+                    fileEntry,
+                    virtualWorkspace,
+                    completedEdits,
+                    contextFiles);
+                var behavioralEvidence = BehavioralDependencyEvidence.Collect(
+                    fileEntry.FilePath,
+                    verificationTargetSource,
+                    behavioralCandidates,
+                    virtualWorkspace,
+                    contextFiles,
+                    request.WorkspacePath,
+                    diagnosticEvidence: null,
+                    fileEntry.Dependencies);
+                var behavioralSignatures = BehavioralDependencyEvidence.CollectLockedSignatures(
+                    behavioralEvidence,
+                    virtualWorkspace,
+                    contextFiles,
+                    request.WorkspacePath);
+                BehavioralDependencyEvidence.AppendPromptSection(sb, behavioralEvidence, behavioralSignatures);
+            }
         }
 
         contextFiles.TryGetValue(fileEntry.FilePath, out var targetSourceForRefs);
@@ -3888,13 +4047,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
                     // Direct FileEditSpec object
                     if (root.TryGetProperty("filePath", out _) || root.TryGetProperty("action", out _) ||
-                        root.TryGetProperty("newContent", out _) || root.TryGetProperty("searchReplaceEdits", out _))
+                        root.TryGetProperty("newContent", out _) || root.TryGetProperty("searchReplaceEdits", out _) ||
+                        HasExplicitNoChangeProperty(root))
                     {
                         var spec = JsonSerializer.Deserialize<FileEditSpec>(candidate, JsonOpts);
                         if (spec != null)
                         {
-                            var normalizedPath = string.IsNullOrWhiteSpace(spec.FilePath) ? expectedEntry.FilePath : spec.FilePath;
-                            return new FileEditSpec(normalizedPath, spec.Action == default ? expectedEntry.Action : spec.Action, spec.NewContent, spec.SearchReplaceEdits);
+                            return NormalizeParsedEditSpec(spec, expectedEntry, root);
                         }
                     }
                 }
@@ -3916,6 +4075,71 @@ public sealed class DeveloperAgent : IDeveloperAgent
         throw lastException ?? new FormatException($"Failed to parse valid edit spec for '{expectedEntry.FilePath}'.");
     }
 
+    private static bool HasExplicitNoChangeProperty(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        foreach (var property in root.EnumerateObject())
+        {
+            if (string.Equals(property.Name, "noChange", StringComparison.OrdinalIgnoreCase) &&
+                property.Value.ValueKind == JsonValueKind.True)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static FileEditSpec NormalizeParsedEditSpec(
+        FileEditSpec spec,
+        ManifestFileEntry expectedEntry,
+        JsonElement root)
+    {
+        var normalizedPath = string.IsNullOrWhiteSpace(spec.FilePath) ? expectedEntry.FilePath : spec.FilePath;
+        var action = spec.Action == default ? expectedEntry.Action : spec.Action;
+        var explicitNoChange = HasExplicitNoChangeProperty(root);
+        return new FileEditSpec(
+            normalizedPath,
+            action,
+            spec.NewContent,
+            spec.SearchReplaceEdits,
+            spec.TargetContentHash,
+            explicitNoChange,
+            explicitNoChange ? spec.NoChangeReason : null);
+    }
+
+    public static void ValidateExplicitNoChange(FileEditSpec spec, ManifestFileEntry expectedEntry)
+    {
+        if (!spec.NoChange)
+        {
+            throw new FormatException($"NoChange was not explicit for '{expectedEntry.FilePath}'.");
+        }
+
+        if (expectedEntry.Action == FileEditAction.Create || spec.Action == FileEditAction.Create)
+        {
+            throw new FormatException($"Create action for '{expectedEntry.FilePath}' cannot use NoChange.");
+        }
+
+        if (spec.Action != FileEditAction.Modify)
+        {
+            throw new FormatException($"NoChange is only valid for Modify action '{expectedEntry.FilePath}'.");
+        }
+
+        if (spec.NewContent != null)
+        {
+            throw new FormatException($"NoChange for '{expectedEntry.FilePath}' must not include 'newContent'.");
+        }
+
+        if (spec.SearchReplaceEdits is { Count: > 0 })
+        {
+            throw new FormatException($"NoChange for '{expectedEntry.FilePath}' must not include 'searchReplaceEdits'.");
+        }
+    }
+
     public static void ValidateSingleFileEditSpec(
         FileEditSpec spec,
         ManifestFileEntry expectedEntry,
@@ -3925,6 +4149,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (spec == null)
         {
             throw new FormatException($"Edit spec is null for '{expectedEntry.FilePath}'.");
+        }
+
+        if (spec.NoChange)
+        {
+            ValidateExplicitNoChange(spec, expectedEntry);
+            return;
         }
 
         if (spec.Action == FileEditAction.Create)
@@ -4169,6 +4399,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             if (string.IsNullOrWhiteSpace(file.FilePath))
             {
                 throw new FormatException("FileEditSpec contains an empty or missing 'filePath'.");
+            }
+
+            if (file.NoChange)
+            {
+                ValidateExplicitNoChange(file, new ManifestFileEntry(file.FilePath, file.Action));
+                continue;
             }
 
             if (file.Action == FileEditAction.Create)

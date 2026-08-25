@@ -383,6 +383,8 @@ export interface ExecutionActivityMetadata {
   compactRetryReason?: string | null;
   repairSelectionReason?: string | null;
   testName?: string | null;
+  noChangeReason?: string | null;
+  resolvedNoChangeCount?: number | null;
 }
 
 export interface ExecutionActivityItem {
