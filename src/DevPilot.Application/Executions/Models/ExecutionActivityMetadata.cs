@@ -46,4 +46,5 @@ public sealed record ExecutionActivityMetadata(
     int? PreExistingFailureCount = null,
     int? NewRegressionCount = null,
     string? BaseCommitSha = null,
-    bool? BaselineCacheHit = null);
+    bool? BaselineCacheHit = null,
+    IReadOnlyList<string>? DiagnosticLines = null);

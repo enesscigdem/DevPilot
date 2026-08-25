@@ -557,6 +557,19 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
 
             var repairFiles = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, modifiedFiles).ToList();
+            var scopedDiagnostics = repairFiles.Count == 1
+                ? ExecutionDiagnosticEvidence.ScopeToFile(evidence, repairFiles[0])
+                : null;
+            var repairDiagnosticLines = scopedDiagnostics != null && scopedDiagnostics.DiagnosticLines.Count > 0
+                ? scopedDiagnostics.DiagnosticLines
+                : evidence.DiagnosticLines;
+            var repairDiagnosticLocations = scopedDiagnostics != null && scopedDiagnostics.Locations.Count > 0
+                ? scopedDiagnostics.Locations
+                : evidence.Locations;
+            var sanitizedDiagnosticLines = ExecutionDiagnosticEvidence.SanitizeDiagnosticLinesForActivity(
+                repairDiagnosticLines,
+                prepResult.WorkspacePath);
+
             if (repairFiles.Count == 0)
             {
                 await SafeRecordActivityAsync(
@@ -571,7 +584,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         repairKind: "Compile",
                         repairRound: repairRound,
                         failureFingerprint: evidence.FailureFingerprint,
-                        progressResult: "Uncorrelated"),
+                        progressResult: "Uncorrelated",
+                        diagnosticLines: sanitizedDiagnosticLines),
                     cancellationToken).ConfigureAwait(false);
                 break;
             }
@@ -590,16 +604,17 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     repairKind: "Compile",
                     repairRound: repairRound,
                     repairFiles: repairFiles,
-                    failureFingerprint: evidence.FailureFingerprint),
+                    failureFingerprint: evidence.FailureFingerprint,
+                    diagnosticLines: sanitizedDiagnosticLines),
                 cancellationToken).ConfigureAwait(false);
 
             if (check.Kind == RepositoryCheckKind.Build)
             {
                 var repairSummary = new StringBuilder()
                     .AppendLine($"Build failed — {evidence.DiagnosticLines.Count} compiler error(s)");
-                foreach (var diagnostic in evidence.DiagnosticLines.Take(5))
+                foreach (var diagnostic in sanitizedDiagnosticLines)
                 {
-                    repairSummary.AppendLine(diagnostic.Trim());
+                    repairSummary.AppendLine(diagnostic);
                 }
                 repairSummary.AppendLine($"Repair round {repairRound}/{_maxCompileRepairRounds}");
                 repairSummary.AppendLine("Repairing:");
@@ -620,7 +635,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         repairKind: "Compile",
                         repairRound: repairRound,
                         repairFiles: repairFiles,
-                        failureFingerprint: evidence.FailureFingerprint),
+                        failureFingerprint: evidence.FailureFingerprint,
+                        diagnosticLines: sanitizedDiagnosticLines),
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -633,8 +649,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 WorkspacePath: prepResult.WorkspacePath,
                 BranchName: prepResult.BranchName,
                 RepairFiles: repairFiles,
-                DiagnosticEvidence: string.Join("\n", evidence.DiagnosticLines.Take(10)),
-                DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
+                DiagnosticEvidence: string.Join("\n", repairDiagnosticLines.Take(10)),
+                DiagnosticLocations: repairDiagnosticLocations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
                 LanguageContext: languageContext,
                 Model: actualModel);
 
@@ -1202,7 +1218,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         int? preExistingFailureCount = null,
         int? newRegressionCount = null,
         string? baseCommitSha = null,
-        bool? baselineCacheHit = null) => new(
+        bool? baselineCacheHit = null,
+        IReadOnlyList<string>? diagnosticLines = null) => new(
             BuildPassed: buildPassed,
             TestPassed: testPassed,
             EventKind: eventKind,
@@ -1226,7 +1243,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             PreExistingFailureCount: preExistingFailureCount,
             NewRegressionCount: newRegressionCount,
             BaseCommitSha: baseCommitSha,
-            BaselineCacheHit: baselineCacheHit);
+            BaselineCacheHit: baselineCacheHit,
+            DiagnosticLines: diagnosticLines);
 
     private async Task<string?> GetChangeFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
     {

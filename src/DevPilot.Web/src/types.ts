@@ -371,6 +371,7 @@ export interface ExecutionActivityMetadata {
   newRegressionCount?: number | null;
   targetedTestFilter?: string | null;
   verificationOutcome?: string | null;
+  diagnosticLines?: string[] | null;
 }
 
 export interface ExecutionActivityItem {

@@ -362,4 +362,121 @@ public sealed class ExecutionDiagnosticEvidenceTests
         comparison.ChangedCount.Should().Be(1);
         comparison.ChangedFailures.Should().ContainSingle(f => f.TestName == "TodoApp.Tests.LegacyCalculatorTests.AlwaysFails");
     }
+
+    [Fact]
+    public void ScopeToFile_ExactTouchedFile_KeepsOnlyThatFilesDiagnostics()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+            """
+            src/app.ts(10,1): error TS2304: Cannot find name 'registerOrders'.
+            src/orders.ts(4,14): error TS2552: Cannot find name 'Order'.
+            src/app.ts(18,1): error TS2304: Cannot find name 'listen'.
+            """,
+            null,
+            "npm build failed");
+
+        var scoped = ExecutionDiagnosticEvidence.ScopeToFile(evidence, "src/app.ts");
+
+        scoped.DiagnosticLines.Should().HaveCount(2);
+        scoped.DiagnosticLines.Should().OnlyContain(line => line.Contains("src/app.ts"));
+        scoped.DiagnosticLines.Should().NotContain(line => line.Contains("src/orders.ts"));
+        scoped.Locations.Should().OnlyContain(location => location.FilePath.EndsWith("src/app.ts"));
+    }
+
+    [Fact]
+    public void SelectNextCompilerRepairTarget_OneExactTouchedFile_SelectsThatFile()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+            "src/Todos/TodoService.cs(42,17): error CS0103: The name 'filter' does not exist in the current context",
+            null,
+            "dotnet build failed");
+
+        var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "src/Todos/ITodoService.cs", "src/Todos/TodoService.cs", "src/Todos/TodosController.cs" });
+
+        selection.FilePath.Should().Be("src/Todos/TodoService.cs");
+        selection.Reason.Should().Be("NextUnattemptedFile");
+        ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(
+            evidence,
+            new[] { "src/Todos/ITodoService.cs", "src/Todos/TodoService.cs", "src/Todos/TodosController.cs" })
+            .Should().Equal("src/Todos/TodoService.cs");
+    }
+
+    [Fact]
+    public void SelectCompilerRepairFiles_TwoTouchedFiles_PreservesMasterTwoFileBehavior()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+            """
+            src/Todos/ITodoService.cs(9,12): error CS0246: The type 'TodoState' could not be found
+            src/Todos/TodoService.cs(31,20): error CS0535: 'TodoService' does not implement interface member
+            """,
+            null,
+            "dotnet build failed");
+
+        var selected = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(
+            evidence,
+            new[] { "src/Todos/ITodoService.cs", "src/Todos/TodoService.cs", "src/Todos/TodosController.cs" });
+
+        selected.Should().Equal("src/Todos/ITodoService.cs", "src/Todos/TodoService.cs");
+
+        var next = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "src/Todos/ITodoService.cs", "src/Todos/TodoService.cs", "src/Todos/TodosController.cs" });
+        next.FilePath.Should().Be("src/Todos/ITodoService.cs");
+        next.ImplicatedFiles.Should().Equal("src/Todos/ITodoService.cs", "src/Todos/TodoService.cs");
+    }
+
+    [Fact]
+    public void SelectNextCompilerRepairTarget_UncorrelatedDiagnostic_IsUncorrelated()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+            "src/Other/Startup.cs(10,5): error CS1002: ; expected",
+            null,
+            "dotnet build failed");
+
+        var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "src/Todos/TodoService.cs", "src/Todos/TodosController.cs" });
+
+        selection.FilePath.Should().BeNull();
+        selection.Reason.Should().Be("Uncorrelated");
+        ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(
+            evidence,
+            new[] { "src/Todos/TodoService.cs", "src/Todos/TodosController.cs" })
+            .Should().BeEmpty();
+    }
+
+    [Fact]
+    public void DiagnosticLineBelongsToFile_MatchesExactAndIgnoresOtherFiles()
+    {
+        const string appLine = "src/app.ts(10,1): error TS2304: Cannot find name 'registerOrders'.";
+        const string otherLine = "src/orders.ts(4,14): error TS2552: Cannot find name 'Order'.";
+
+        ExecutionDiagnosticEvidence.DiagnosticLineBelongsToFile(appLine, "src/app.ts").Should().BeTrue();
+        ExecutionDiagnosticEvidence.DiagnosticLineBelongsToFile(otherLine, "src/app.ts").Should().BeFalse();
+    }
+
+    [Fact]
+    public void SanitizeDiagnosticLinesForActivity_IsBoundedAndStripsWorkspaceRoot()
+    {
+        var lines = new[]
+        {
+            @"C:\work\repo\src\Todos\TodoService.cs(42,17): error CS0103: The name 'filter' does not exist in the current context " + new string('x', 80),
+            "this is not a diagnostic",
+            @"C:\work\repo\src\Todos\TodosController.cs(8,5): error CS0246: The type or namespace name 'TodoState' could not be found",
+            @"C:\work\repo\src\Todos\ITodoService.cs(3,1): error CS0246: missing",
+            @"C:\work\repo\src\A.cs(1,1): error CS0001: a",
+            @"C:\work\repo\src\B.cs(1,1): error CS0002: b",
+            @"C:\work\repo\src\C.cs(1,1): error CS0003: c"
+        };
+
+        var sanitized = ExecutionDiagnosticEvidence.SanitizeDiagnosticLinesForActivity(lines, @"C:\work\repo");
+
+        sanitized.Should().HaveCount(5);
+        sanitized.Should().OnlyContain(line => line.Length <= ExecutionDiagnosticEvidence.MaxSanitizedActivityDiagnosticChars);
+        sanitized.Should().OnlyContain(line => !line.Contains(@"C:\work\repo", StringComparison.OrdinalIgnoreCase));
+        sanitized[0].Should().Contain("src/Todos/TodoService.cs");
+        sanitized.Should().NotContain("this is not a diagnostic");
+    }
 }
