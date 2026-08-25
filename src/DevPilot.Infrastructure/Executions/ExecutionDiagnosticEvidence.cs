@@ -689,6 +689,16 @@ public static class ExecutionDiagnosticEvidence
             return productionFromUntouchedTest;
         }
 
+        var productionViaHelper = TrySelectProductionViaTestHelper(
+            evidence,
+            modified,
+            workspacePath,
+            fileContents);
+        if (productionViaHelper.FilePaths.Count > 0)
+        {
+            return productionViaHelper;
+        }
+
         var mentionedFile = modified.FirstOrDefault(path =>
             evidence.RelevantLines.Any(line =>
                 line.Contains(Path.GetFileName(path), StringComparison.OrdinalIgnoreCase)));
@@ -811,6 +821,273 @@ public static class ExecutionDiagnosticEvidence
             evidence.TestName,
             evidence.ErrorSummary,
             SanitizeTestEvidenceForActivity(evidence));
+    }
+
+    private static TestRepairSelection TrySelectProductionViaTestHelper(
+        TestFailureEvidence evidence,
+        IReadOnlyList<string> modifiedFiles,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var empty = new TestRepairSelection(
+            Array.Empty<string>(),
+            "Uncorrelated",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+
+        var failingTestPath = evidence.Locations
+            .Select(location => location.FilePath)
+            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && ProjectGraphHelper.IsTestFileCandidate(path));
+        if (string.IsNullOrWhiteSpace(failingTestPath) ||
+            MatchModifiedFile(failingTestPath, modifiedFiles) != null)
+        {
+            return empty;
+        }
+
+        var productionModified = modifiedFiles
+            .Where(path => !ProjectGraphHelper.IsTestFileCandidate(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (productionModified.Count == 0)
+        {
+            return empty;
+        }
+
+        var testSource = TryReadBoundedEvidenceText(failingTestPath, workspacePath, fileContents);
+        if (string.IsNullOrWhiteSpace(testSource))
+        {
+            return empty;
+        }
+
+        var helperCandidates = ResolveHelperCandidates(failingTestPath, testSource, workspacePath, fileContents);
+        if (helperCandidates.Count == 0)
+        {
+            return empty;
+        }
+
+        var implicated = new List<string>();
+        foreach (var helper in helperCandidates)
+        {
+            var helperSource = TryReadBoundedEvidenceText(helper, workspacePath, fileContents);
+            if (string.IsNullOrWhiteSpace(helperSource))
+            {
+                continue;
+            }
+
+            var hits = new List<string>();
+            foreach (var production in productionModified)
+            {
+                if (HelperUniquelyReferencesProduction(
+                        helper,
+                        helperSource,
+                        production,
+                        productionModified,
+                        workspacePath,
+                        fileContents))
+                {
+                    hits.Add(production);
+                }
+            }
+
+            if (hits.Count == 1)
+            {
+                implicated.Add(hits[0]);
+            }
+        }
+
+        var unique = implicated.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (unique.Count == 0 || unique.Count > 2)
+        {
+            return empty;
+        }
+
+        return new TestRepairSelection(
+            unique,
+            "TouchedProductionViaTestHelper",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+    }
+
+    private static IReadOnlyList<string> ResolveHelperCandidates(
+        string failingTestPath,
+        string testSource,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var available = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (fileContents != null)
+        {
+            foreach (var (path, source) in fileContents)
+            {
+                if (!string.IsNullOrWhiteSpace(source))
+                {
+                    available[NormalizePath(path)] = source;
+                }
+            }
+        }
+
+        CollectSiblingHelperSources(failingTestPath, workspacePath, available);
+
+        var planned = available.Keys
+            .Where(path => !string.Equals(NormalizePath(path), NormalizePath(failingTestPath), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var helpers = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var localRef in PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                     failingTestPath, testSource, planned))
+        {
+            if (IsHelperOrFixturePath(localRef) && seen.Add(localRef))
+            {
+                helpers.Add(localRef);
+            }
+        }
+
+        foreach (var owner in PlannedFileDependencyResolver.ResolveUniqueCsharpTypeOwners(
+                     failingTestPath, testSource, available))
+        {
+            if (IsHelperOrFixturePath(owner) && seen.Add(owner))
+            {
+                helpers.Add(owner);
+            }
+        }
+
+        return helpers
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Take(2)
+            .ToList();
+    }
+
+    private static void CollectSiblingHelperSources(
+        string failingTestPath,
+        string? workspacePath,
+        IDictionary<string, string> available)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath))
+        {
+            return;
+        }
+
+        var relativeTest = MakeRepositoryRelative(failingTestPath, workspacePath);
+        var directory = Path.GetDirectoryName(relativeTest)?.Replace('\\', '/') ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return;
+        }
+
+        string resolvedDir;
+        try
+        {
+            resolvedDir = WorktreeEditApplier.ValidateAndResolvePath(workspacePath, directory);
+        }
+        catch
+        {
+            return;
+        }
+
+        if (!Directory.Exists(resolvedDir))
+        {
+            return;
+        }
+
+        foreach (var fullPath in Directory.GetFiles(resolvedDir)
+                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                     .Take(16))
+        {
+            string relative;
+            try
+            {
+                relative = NormalizePath(Path.GetRelativePath(workspacePath, fullPath));
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (!IsHelperOrFixturePath(relative) || available.ContainsKey(relative))
+            {
+                continue;
+            }
+
+            try
+            {
+                var info = new FileInfo(fullPath);
+                if (!info.Exists || info.Length <= 0 || info.Length > 16_384)
+                {
+                    continue;
+                }
+
+                var bytes = File.ReadAllBytes(fullPath);
+                if (WorktreeEditApplier.IsBinaryContent(bytes))
+                {
+                    continue;
+                }
+
+                var content = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    available[relative] = content;
+                }
+            }
+            catch
+            {
+                // Best-effort helper discovery only.
+            }
+        }
+    }
+
+    private static bool HelperUniquelyReferencesProduction(
+        string helperPath,
+        string helperSource,
+        string productionPath,
+        IReadOnlyList<string> productionModified,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        if (PlannedFileDependencyResolver.HasDirectLocalReference(
+                helperPath,
+                helperSource,
+                productionPath,
+                productionModified))
+        {
+            return true;
+        }
+
+        var productionSources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in productionModified)
+        {
+            var source = TryReadBoundedEvidenceText(path, workspacePath, fileContents);
+            if (!string.IsNullOrWhiteSpace(source))
+            {
+                productionSources[path] = source;
+            }
+        }
+
+        if (PlannedFileDependencyResolver.ResolveUniqueCsharpTypeOwners(
+                helperPath,
+                helperSource,
+                productionSources)
+            .Any(path => string.Equals(path, productionPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(productionPath);
+        return IsSignificantIdentifier(stem) &&
+               ContainsIdentifier(helperSource, stem) &&
+               productionModified.Count(path =>
+                   string.Equals(Path.GetFileNameWithoutExtension(path), stem, StringComparison.OrdinalIgnoreCase)) == 1;
+    }
+
+    private static bool IsHelperOrFixturePath(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        return fileName.Contains("Factory", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Contains("Fixture", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Contains("Helper", StringComparison.OrdinalIgnoreCase) ||
+               ProjectGraphHelper.IsTestFileCandidate(path);
     }
 
     private static int ScoreProductionImplication(string productionPath, string combinedEvidence, string? testSource)

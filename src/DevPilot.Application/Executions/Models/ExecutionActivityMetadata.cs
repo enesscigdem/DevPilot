@@ -54,4 +54,10 @@ public sealed record ExecutionActivityMetadata(
     string? TestName = null,
     string? PrerequisiteProducer = null,
     string? PrerequisiteConsumer = null,
-    string? PrerequisiteReason = null);
+    string? PrerequisiteReason = null,
+    string? ReasoningEffort = null,
+    int? ManifestPrerequisiteCount = null,
+    int? DirectPrerequisiteCount = null,
+    int? HeuristicPrerequisiteCount = null,
+    int? SuppressedConflictCount = null,
+    int? SuppressedCycleCount = null);

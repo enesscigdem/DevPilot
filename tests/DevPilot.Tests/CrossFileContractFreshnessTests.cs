@@ -141,14 +141,14 @@ public sealed class CrossFileContractFreshnessTests : IDisposable
         var files = new[]
         {
             new ManifestFileEntry("src/Application/Dtos/TaskDto.cs", FileEditAction.Create),
-            new ManifestFileEntry("src/Api/Controllers/TasksController.cs", FileEditAction.Create)
+            new ManifestFileEntry("src/Api/Controllers/TaskController.cs", FileEditAction.Create)
         };
 
         var prerequisites = DeveloperAgent.CollectGenerationPrerequisites(files);
 
         prerequisites.Should().ContainSingle(item =>
             item.ProducerPath == "src/Application/Dtos/TaskDto.cs" &&
-            item.ConsumerPath == "src/Api/Controllers/TasksController.cs" &&
+            item.ConsumerPath == "src/Api/Controllers/TaskController.cs" &&
             item.Reason == GenerationPrerequisiteReason.ExistingHeuristic);
     }
 

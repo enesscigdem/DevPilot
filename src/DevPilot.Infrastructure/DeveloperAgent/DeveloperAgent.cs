@@ -47,6 +47,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     private readonly int _maxGenerationCalls;
     private readonly int _maxConcurrentFileGenerations;
     private readonly string _mechanicalReasoningEffort;
+    private readonly string _modifyReasoningEffort;
 
     public DeveloperAgent(
         IAiProvider aiProvider,
@@ -129,6 +130,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
         _mechanicalReasoningEffort = string.IsNullOrWhiteSpace(configuredReasoning)
             ? "low"
             : configuredReasoning.Trim();
+
+        var configuredModifyReasoning = configuration?["DeveloperAgent:ModifyReasoningEffort"];
+        _modifyReasoningEffort = string.IsNullOrWhiteSpace(configuredModifyReasoning)
+            ? "low"
+            : configuredModifyReasoning.Trim();
     }
 
     private int ParseConfigBudget(IConfiguration? config, string key, int defaultValue)
@@ -178,6 +184,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
     }
 
     public string DetermineMechanicalReasoningEffort() => _mechanicalReasoningEffort;
+
+    public string DetermineModifyReasoningEffort() => _modifyReasoningEffort;
+
+    public int DetermineMicroApplicabilityRepairBudget() => Math.Min(2048, DetermineFocusedRepairBudget());
 
     public int DetermineCompactRetryBudget(int initialBudget, string? targetContent, ManifestFileEntry fileEntry, bool isRepair = false)
     {
@@ -372,8 +382,69 @@ public sealed class DeveloperAgent : IDeveloperAgent
     }
 
     private static bool IsFocusedRepairTokenLimit(AiResponse response) =>
+        IsTokenLimitResponse(response);
+
+    internal static bool IsTokenLimitResponse(AiResponse response) =>
         response.FailureKind == AiFailureKind.TokenLimitExceeded ||
         string.Equals(response.FinishReason, "length", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool TryMaterializeCompletedEdit(
+        string? content,
+        ManifestFileEntry fileEntry,
+        string? targetContent,
+        bool useFullFileReplacement,
+        out FileEditSpec? editSpec,
+        out string? candidateCode)
+    {
+        editSpec = null;
+        candidateCode = null;
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        try
+        {
+            var parsed = ParseSingleFileEditSpec(content, fileEntry);
+            ValidateSingleFileEditSpec(parsed, fileEntry, targetContent, useFullFileReplacement);
+
+            if (fileEntry.Action == FileEditAction.Modify)
+            {
+                if (parsed.NewContent != null)
+                {
+                    editSpec = parsed;
+                    candidateCode = parsed.NewContent;
+                    return true;
+                }
+
+                var appResult = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
+                    targetContent!,
+                    parsed.SearchReplaceEdits,
+                    fileEntry.FilePath);
+                if (!appResult.Success)
+                {
+                    return false;
+                }
+
+                editSpec = parsed;
+                candidateCode = appResult.ModifiedContent;
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(parsed.NewContent))
+            {
+                return false;
+            }
+
+            editSpec = parsed;
+            candidateCode = parsed.NewContent;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public async Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(
         DeveloperAgentRequest request,
@@ -600,8 +671,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             dependents[file.FilePath] = new List<ManifestFileEntry>();
         }
 
-        var prerequisites = CollectGenerationPrerequisites(sortedFiles, contextFiles);
-        foreach (var prerequisite in prerequisites)
+        var prerequisiteGraph = CollectGenerationPrerequisiteGraph(sortedFiles, contextFiles);
+        foreach (var prerequisite in prerequisiteGraph.Prerequisites)
         {
             if (!filesByPath.TryGetValue(prerequisite.ConsumerPath, out var consumer) ||
                 !dependents.ContainsKey(prerequisite.ProducerPath))
@@ -612,14 +683,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
             inDegree[consumer.FilePath]++;
             dependents[prerequisite.ProducerPath].Add(consumer);
             _logger.LogInformation(
-                "GenerationPrerequisite: {Producer} -> {Consumer} ({Reason})",
+                "GenerationPrerequisite: {Producer} -> {Consumer} · {Reason}",
                 prerequisite.ProducerPath,
                 prerequisite.ConsumerPath,
                 prerequisite.Reason);
 
             await SafeRecordActivityAsync(
                 request.ExecutionId,
-                $"GenerationPrerequisite: {prerequisite.ProducerPath} -> {prerequisite.ConsumerPath}",
+                $"GenerationPrerequisite: {prerequisite.ProducerPath} -> {prerequisite.ConsumerPath} · {prerequisite.Reason}",
                 cancellationToken,
                 ExecutionActivityStatus.Completed,
                 new ExecutionActivityMetadata(
@@ -628,6 +699,19 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     PrerequisiteConsumer: prerequisite.ConsumerPath,
                     PrerequisiteReason: prerequisite.Reason.ToString())).ConfigureAwait(false);
         }
+
+        await SafeRecordActivityAsync(
+            request.ExecutionId,
+            $"GenerationPrerequisiteSummary: {prerequisiteGraph.ManifestCount} manifest, {prerequisiteGraph.DirectCount} direct, {prerequisiteGraph.HeuristicCount} heuristic, {prerequisiteGraph.SuppressedConflictCount} suppressed-conflict, {prerequisiteGraph.SuppressedCycleCount} suppressed-cycle",
+            cancellationToken,
+            ExecutionActivityStatus.Completed,
+            new ExecutionActivityMetadata(
+                EventKind: "GenerationPrerequisiteSummary",
+                ManifestPrerequisiteCount: prerequisiteGraph.ManifestCount,
+                DirectPrerequisiteCount: prerequisiteGraph.DirectCount,
+                HeuristicPrerequisiteCount: prerequisiteGraph.HeuristicCount,
+                SuppressedConflictCount: prerequisiteGraph.SuppressedConflictCount,
+                SuppressedCycleCount: prerequisiteGraph.SuppressedCycleCount)).ConfigureAwait(false);
 
         var readyQueue = new System.Collections.Concurrent.ConcurrentQueue<ManifestFileEntry>();
         foreach (var file in sortedFiles)
@@ -801,7 +885,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             Model = request.Model ?? string.Empty,
             SystemPrompt = singleFileSystemPrompt,
             UserPrompt = singleFileUserPrompt,
-            MaxTokens = initialBudget
+            MaxTokens = initialBudget,
+            ReasoningEffort = fileEntry.Action == FileEditAction.Modify ? _modifyReasoningEffort : null
         };
 
         var fileSw = Stopwatch.StartNew();
@@ -838,8 +923,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
             outputContract: outputContract).ConfigureAwait(false);
 
         // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
-        if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
-            string.Equals(fileResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
+        // Salvage a length-truncated response only when it already parses and applies completely.
+        if (IsTokenLimitResponse(fileResponse) &&
+            !TryMaterializeCompletedEdit(
+                fileResponse.Content,
+                fileEntry,
+                targetContent,
+                useFullFileReplacement,
+                out _,
+                out _))
         {
             int compactBudget = DetermineCompactRetryBudget(initialBudget, targetContent, fileEntry, isRepair: false);
             if (compactBudget > initialBudget && callCounter.TryIncrement(out var escCallNumber))
@@ -867,7 +959,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     Model = request.Model ?? string.Empty,
                     SystemPrompt = compactSystemPrompt,
                     UserPrompt = compactUserPrompt,
-                    MaxTokens = compactBudget
+                    MaxTokens = compactBudget,
+                    ReasoningEffort = fileEntry.Action == FileEditAction.Modify ? _modifyReasoningEffort : null
                 };
 
                 try
@@ -923,7 +1016,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
         }
 
-        if (!fileResponse.IsSuccess)
+        var salvagedCompletedEdit = TryMaterializeCompletedEdit(
+            fileResponse.Content,
+            fileEntry,
+            targetContent,
+            useFullFileReplacement,
+            out var salvagedSpec,
+            out var salvagedCandidate);
+
+        if (!fileResponse.IsSuccess && !salvagedCompletedEdit)
         {
             if (cancellationToken.IsCancellationRequested || fileResponse.FailureKind == AiFailureKind.Cancelled)
             {
@@ -931,8 +1032,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 throw new OperationCanceledException(cancellationToken);
             }
 
-            if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
-                string.Equals(fileResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
+            if (IsTokenLimitResponse(fileResponse) ||
                 (fileResponse.ErrorMessage != null && fileResponse.ErrorMessage.Contains("exhausted the configured output token limit", StringComparison.OrdinalIgnoreCase)))
             {
                 throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
@@ -942,53 +1042,57 @@ public sealed class DeveloperAgent : IDeveloperAgent
             throw new InvalidOperationException(classifiedError);
         }
 
-        if (string.IsNullOrWhiteSpace(fileResponse.Content))
+        if (string.IsNullOrWhiteSpace(fileResponse.Content) && !salvagedCompletedEdit)
         {
             throw new InvalidOperationException($"AI provider returned empty edit response for file '{fileEntry.FilePath}'.");
         }
 
-        FileEditSpec? editSpec = null;
-        string? validationError = null;
+        FileEditSpec? editSpec = salvagedSpec;
+        string? validationError = salvagedCompletedEdit ? null : "Generated edit validation failed.";
         EditApplicabilityResult? applicabilityFailure = null;
-        string? candidateCode = null;
+        string? candidateCode = salvagedCandidate;
 
-        try
+        if (!salvagedCompletedEdit)
         {
-            editSpec = ParseSingleFileEditSpec(fileResponse.Content, fileEntry);
-            ValidateSingleFileEditSpec(editSpec, fileEntry, targetContent, useFullFileReplacement);
-
-            if (fileEntry.Action == FileEditAction.Modify)
+            validationError = null;
+            try
             {
-                if (editSpec.NewContent != null)
-                {
-                    candidateCode = editSpec.NewContent;
-                }
-                else
-                {
-                    var appResult = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
-                        targetContent!,
-                        editSpec.SearchReplaceEdits,
-                        fileEntry.FilePath);
+                editSpec = ParseSingleFileEditSpec(fileResponse.Content, fileEntry);
+                ValidateSingleFileEditSpec(editSpec, fileEntry, targetContent, useFullFileReplacement);
 
-                    if (!appResult.Success)
+                if (fileEntry.Action == FileEditAction.Modify)
+                {
+                    if (editSpec.NewContent != null)
                     {
-                        validationError = appResult.ErrorMessage;
-                        applicabilityFailure = appResult;
+                        candidateCode = editSpec.NewContent;
                     }
                     else
                     {
-                        candidateCode = appResult.ModifiedContent;
+                        var appResult = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
+                            targetContent!,
+                            editSpec.SearchReplaceEdits,
+                            fileEntry.FilePath);
+
+                        if (!appResult.Success)
+                        {
+                            validationError = appResult.ErrorMessage;
+                            applicabilityFailure = appResult;
+                        }
+                        else
+                        {
+                            candidateCode = appResult.ModifiedContent;
+                        }
                     }
                 }
+                else
+                {
+                    candidateCode = editSpec.NewContent;
+                }
             }
-            else
+            catch (Exception ex)
             {
-                candidateCode = editSpec.NewContent;
+                validationError = ex.Message;
             }
-        }
-        catch (Exception ex)
-        {
-            validationError = ex.Message;
         }
 
         if (validationError != null)
@@ -1008,8 +1112,16 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             await SafeRecordActivityAsync(
                 request.ExecutionId,
-                $"Repair triggered for {fileName}: {sanitizedReason}",
-                cancellationToken).ConfigureAwait(false);
+                $"ApplicabilityRepair for {fileName}: {sanitizedReason}",
+                cancellationToken,
+                ExecutionActivityStatus.Started,
+                new ExecutionActivityMetadata(
+                    EventKind: "ApplicabilityRepair",
+                    TargetFile: fileEntry.FilePath,
+                    RepairKind: "ApplicabilityRepair",
+                    RequestedOutputTokens: DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent),
+                    ReasoningEffort: _mechanicalReasoningEffort,
+                    FailureFingerprint: sanitizedReason)).ConfigureAwait(false);
 
             if (!callCounter.TryIncrement(out var repairCallNumber))
             {
@@ -1098,21 +1210,30 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             if (!repairResponse.IsSuccess)
             {
-                if (string.Equals(repairResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
-                    repairResponse.FailureKind == AiFailureKind.TokenLimitExceeded)
+                if (IsTokenLimitResponse(repairResponse))
                 {
-                    throw new InvalidOperationException($"AI response exhausted the configured output token limit while repairing edits for '{fileEntry.FilePath}'.");
+                    repairResponse = await ExecuteMicroApplicabilityRepairAsync(
+                        request,
+                        fileEntry,
+                        targetContent,
+                        validationError ?? "Generated edit validation failed.",
+                        applicabilityFailure,
+                        callCounter,
+                        capturedModels,
+                        cancellationToken).ConfigureAwait(false);
                 }
+                else
+                {
+                    var rawError = !string.IsNullOrWhiteSpace(repairResponse.ErrorMessage)
+                        ? repairResponse.ErrorMessage
+                        : "AI provider repair request failed";
 
-                var rawError = !string.IsNullOrWhiteSpace(repairResponse.ErrorMessage)
-                    ? repairResponse.ErrorMessage
-                    : "AI provider repair request failed";
+                    var msg = rawError.Contains(fileEntry.FilePath, StringComparison.OrdinalIgnoreCase)
+                        ? rawError
+                        : $"{rawError.TrimEnd('.')} while repairing '{fileEntry.FilePath}'.";
 
-                var msg = rawError.Contains(fileEntry.FilePath, StringComparison.OrdinalIgnoreCase)
-                    ? rawError
-                    : $"{rawError.TrimEnd('.')} while repairing '{fileEntry.FilePath}'.";
-
-                throw new InvalidOperationException(msg);
+                    throw new InvalidOperationException(msg);
+                }
             }
 
             if (string.IsNullOrWhiteSpace(repairResponse.Content))
@@ -1231,6 +1352,165 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return (content, WorktreeEditApplier.ComputeContentHash(content));
     }
 
+    private async Task<AiResponse> ExecuteMicroApplicabilityRepairAsync(
+        DeveloperAgentRequest request,
+        ManifestFileEntry fileEntry,
+        string? targetContent,
+        string validationReason,
+        EditApplicabilityResult? applicabilityFailure,
+        ConcurrencyCallCounter callCounter,
+        ConcurrentBag<string> capturedModels,
+        CancellationToken cancellationToken)
+    {
+        if (!callCounter.TryIncrement(out var microCallNumber))
+        {
+            throw new InvalidOperationException($"Developer Agent exceeded maximum generation call limit ({_maxGenerationCalls}) during micro applicability repair of file '{fileEntry.FilePath}'.");
+        }
+
+        callCounter.RecordApplicabilityRepair();
+        var microBudget = DetermineMicroApplicabilityRepairBudget();
+        var microRequest = new AiRequest
+        {
+            Model = request.Model ?? string.Empty,
+            SystemPrompt = BuildMicroApplicabilityRepairSystemPrompt(fileEntry),
+            UserPrompt = BuildMicroApplicabilityRepairUserPrompt(
+                fileEntry,
+                targetContent,
+                validationReason,
+                applicabilityFailure),
+            MaxTokens = microBudget,
+            ReasoningEffort = _mechanicalReasoningEffort
+        };
+
+        await SafeRecordActivityAsync(
+            request.ExecutionId,
+            $"MicroApplicabilityRepair for {Path.GetFileName(fileEntry.FilePath)}: {SanitizeForDiagnostics(validationReason)}",
+            cancellationToken,
+            ExecutionActivityStatus.Started,
+            new ExecutionActivityMetadata(
+                EventKind: "MicroApplicabilityRepair",
+                TargetFile: fileEntry.FilePath,
+                RepairKind: "MicroApplicabilityRepair",
+                RequestedOutputTokens: microBudget,
+                ReasoningEffort: _mechanicalReasoningEffort,
+                FailureFingerprint: SanitizeForDiagnostics(validationReason))).ConfigureAwait(false);
+
+        var microSw = Stopwatch.StartNew();
+        AiResponse microResponse;
+        try
+        {
+            microResponse = await _aiProvider.SendAsync(microRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"AI micro applicability repair call failed for file '{fileEntry.FilePath}': {ex.Message}", ex);
+        }
+        microSw.Stop();
+
+        if (!string.IsNullOrWhiteSpace(microResponse.Model))
+        {
+            capturedModels.Add(microResponse.Model);
+        }
+
+        LogGenerationAudit(fileEntry.FilePath, "MicroApplicabilityRepair", microCallNumber, microRequest, microResponse, microSw.Elapsed);
+        await RecordProviderCallActivityAsync(
+            request.ExecutionId,
+            fileEntry.FilePath,
+            "MicroApplicabilityRepair",
+            microRequest,
+            microResponse,
+            microSw.Elapsed,
+            cancellationToken,
+            outputContract: "ModifyPatch").ConfigureAwait(false);
+
+        if (!microResponse.IsSuccess)
+        {
+            if (IsTokenLimitResponse(microResponse))
+            {
+                throw new InvalidOperationException($"AI response exhausted the configured output token limit while repairing edits for '{fileEntry.FilePath}' after micro applicability repair.");
+            }
+
+            var rawError = !string.IsNullOrWhiteSpace(microResponse.ErrorMessage)
+                ? microResponse.ErrorMessage
+                : "AI provider micro applicability repair request failed";
+            throw new InvalidOperationException(
+                rawError.Contains(fileEntry.FilePath, StringComparison.OrdinalIgnoreCase)
+                    ? rawError
+                    : $"{rawError.TrimEnd('.')} while repairing '{fileEntry.FilePath}'.");
+        }
+
+        if (string.IsNullOrWhiteSpace(microResponse.Content))
+        {
+            throw new InvalidOperationException($"AI provider returned empty edit response for file '{fileEntry.FilePath}' during micro applicability repair.");
+        }
+
+        return microResponse;
+    }
+
+    public static string BuildMicroApplicabilityRepairSystemPrompt(ManifestFileEntry fileEntry) =>
+        $$"""
+        Output ONLY the smallest valid SEARCH/REPLACE JSON object for '{{fileEntry.FilePath}}'.
+        No markdown, prose, reasoning, task restatement, or extra fields.
+        {"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact failed or unique anchor","replace":"replacement"}]}
+        """;
+
+    public static string BuildMicroApplicabilityRepairUserPrompt(
+        ManifestFileEntry fileEntry,
+        string? targetContent,
+        string validationReason,
+        EditApplicabilityResult? applicabilityFailure)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"Target File: {fileEntry.FilePath}");
+        sb.AppendLine("Action: Modify");
+        sb.AppendLine("Emit only compact searchReplaceEdits.");
+        sb.AppendLine();
+        sb.AppendLine("=== Exact Validation / Applicability Reason ===");
+        sb.AppendLine(validationReason);
+        sb.AppendLine();
+
+        if (applicabilityFailure != null && !applicabilityFailure.Success)
+        {
+            if (!string.IsNullOrEmpty(applicabilityFailure.FailedSearch))
+            {
+                sb.AppendLine("=== Exact Failed SEARCH Anchor ===");
+                sb.AppendLine(applicabilityFailure.FailedSearch);
+                sb.AppendLine();
+            }
+
+            if (!string.IsNullOrEmpty(applicabilityFailure.SurroundingContext))
+            {
+                sb.AppendLine("=== Bounded Surrounding Source ===");
+                sb.AppendLine(applicabilityFailure.SurroundingContext);
+                sb.AppendLine();
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(targetContent))
+        {
+            var window = BuildBoundedTargetSourceWindow(
+                targetContent,
+                applicabilityFailure,
+                ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath));
+            if (window.Length > 2400)
+            {
+                window = window[..2400] + "\n...[truncated]";
+            }
+
+            sb.AppendLine("=== Bounded Target Source Window ===");
+            sb.AppendLine(window);
+            sb.AppendLine("=== End Bounded Target Source Window ===");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine($"Output ONLY the corrected surgical edit JSON for '{fileEntry.FilePath}'.");
+        return sb.ToString();
+    }
+
     private async Task SafeRecordActivityAsync(
         Guid executionId,
         string message,
@@ -1281,7 +1561,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
             StageDurationMs: (long)duration.TotalMilliseconds,
             TargetFile: targetFile,
             OutputContract: outputContract,
-            CompactRetryReason: compactRetryReason);
+            CompactRetryReason: compactRetryReason,
+            ReasoningEffort: request.ReasoningEffort,
+            RepairKind: callKind is "ApplicabilityRepair" or "MicroApplicabilityRepair" ? callKind : null);
 
         await SafeRecordActivityAsync(
             executionId,
@@ -2513,6 +2795,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
             sb.AppendLine("=== End Current Content ===");
             sb.AppendLine();
+
+            contextFiles.TryGetValue(fileEntry.FilePath, out var verificationTargetSource);
+            var verificationEvidence = VerificationContractEvidence.Collect(
+                fileEntry.FilePath,
+                verificationTargetSource,
+                request.WorkspacePath,
+                contextFiles,
+                projectGraph);
+            VerificationContractEvidence.AppendPromptSection(sb, verificationEvidence);
         }
 
         if (lockedContracts != null && lockedContracts.Count > 0)
@@ -2645,23 +2936,27 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "Emit only the JSON small-file replacement payload."
             : "Emit only the minimal JSON searchReplaceEdits payload.");
         sb.AppendLine();
-        sb.AppendLine($"Task Title: {request.TaskTitle}");
-        if (fileEntry.Action != FileEditAction.Create)
-        {
-            sb.AppendLine($"Task Description: {request.TaskDescription}");
-        }
-        if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
-        {
-            sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
-        }
-        sb.AppendLine();
         sb.AppendLine($"Target File: {fileEntry.FilePath}");
         sb.AppendLine($"Action: {fileEntry.Action}");
-        if (fileEntry.Action == FileEditAction.Create && !string.IsNullOrWhiteSpace(fileEntry.Purpose))
+        if (!string.IsNullOrWhiteSpace(fileEntry.Purpose))
         {
             sb.AppendLine($"Purpose: {fileEntry.Purpose}");
         }
+        if (fileEntry.Action == FileEditAction.Modify && !string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+        {
+            sb.AppendLine($"Acceptance requirement: {TrimToBound(request.AcceptanceCriteria, 280)}");
+        }
         sb.AppendLine();
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            sb.AppendLine($"Task Title: {request.TaskTitle}");
+            if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+            {
+                sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
+            }
+
+            sb.AppendLine();
+        }
 
         if (fileEntry.Action == FileEditAction.Create)
         {
@@ -2710,7 +3005,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
         }
 
-        sb.AppendLine($"Output ONLY the compact JSON object for '{fileEntry.FilePath}'.");
+        sb.AppendLine(fileEntry.Action == FileEditAction.Modify && !useFullFileReplacement
+            ? $"Output ONLY the compact SEARCH/REPLACE JSON object for '{fileEntry.FilePath}'."
+            : $"Output ONLY the compact JSON object for '{fileEntry.FilePath}'.");
         return sb.ToString();
     }
 
@@ -3109,16 +3406,23 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
     public static IReadOnlyList<GenerationPrerequisite> CollectGenerationPrerequisites(
         IReadOnlyList<ManifestFileEntry> files,
+        IReadOnlyDictionary<string, string>? repositorySources = null) =>
+        CollectGenerationPrerequisiteGraph(files, repositorySources).Prerequisites;
+
+    public static GenerationPrerequisiteGraph CollectGenerationPrerequisiteGraph(
+        IReadOnlyList<ManifestFileEntry> files,
         IReadOnlyDictionary<string, string>? repositorySources = null)
     {
-        var prerequisites = new List<GenerationPrerequisite>();
         if (files == null || files.Count <= 1)
         {
-            return prerequisites;
+            return GenerationPrerequisiteGraph.Empty;
         }
 
         var plannedPaths = files.Select(file => file.FilePath).ToList();
+        var strong = new List<GenerationPrerequisite>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var manifestCount = 0;
+        var directCount = 0;
 
         foreach (var target in files)
         {
@@ -3157,27 +3461,137 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 {
                     reason = GenerationPrerequisiteReason.DirectLocalReference;
                 }
-                else if (ExistingHeuristicDependsOn(target, candidate))
-                {
-                    reason = GenerationPrerequisiteReason.ExistingHeuristic;
-                }
 
                 if (reason == null)
                 {
                     continue;
                 }
 
-                var key = $"{candidate.FilePath}|{target.FilePath}";
+                var key = EdgeKey(candidate.FilePath, target.FilePath);
                 if (!seen.Add(key))
                 {
                     continue;
                 }
 
-                prerequisites.Add(new GenerationPrerequisite(candidate.FilePath, target.FilePath, reason.Value));
+                strong.Add(new GenerationPrerequisite(candidate.FilePath, target.FilePath, reason.Value));
+                if (reason == GenerationPrerequisiteReason.ManifestDependency)
+                {
+                    manifestCount++;
+                }
+                else
+                {
+                    directCount++;
+                }
             }
         }
 
-        return prerequisites;
+        var accepted = new List<GenerationPrerequisite>(strong);
+        var heuristicCount = 0;
+        var suppressedConflict = 0;
+        var suppressedCycle = 0;
+
+        foreach (var target in files)
+        {
+            foreach (var candidate in files)
+            {
+                if (string.Equals(target.FilePath, candidate.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (seen.Contains(EdgeKey(candidate.FilePath, target.FilePath)))
+                {
+                    continue;
+                }
+
+                if (!ExistingHeuristicDependsOn(target, candidate))
+                {
+                    continue;
+                }
+
+                if (seen.Contains(EdgeKey(target.FilePath, candidate.FilePath)))
+                {
+                    suppressedConflict++;
+                    continue;
+                }
+
+                if (HasPrerequisitePath(accepted, target.FilePath, candidate.FilePath))
+                {
+                    suppressedCycle++;
+                    continue;
+                }
+
+                seen.Add(EdgeKey(candidate.FilePath, target.FilePath));
+                accepted.Add(new GenerationPrerequisite(
+                    candidate.FilePath,
+                    target.FilePath,
+                    GenerationPrerequisiteReason.ExistingHeuristic));
+                heuristicCount++;
+            }
+        }
+
+        return new GenerationPrerequisiteGraph(
+            accepted,
+            manifestCount,
+            directCount,
+            heuristicCount,
+            suppressedConflict,
+            suppressedCycle);
+    }
+
+    private static string EdgeKey(string producer, string consumer) => $"{producer}|{consumer}";
+
+    private static bool HasPrerequisitePath(
+        IReadOnlyList<GenerationPrerequisite> edges,
+        string from,
+        string to)
+    {
+        if (string.Equals(from, to, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var adjacency = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var edge in edges)
+        {
+            if (!adjacency.TryGetValue(edge.ProducerPath, out var consumers))
+            {
+                consumers = new List<string>();
+                adjacency[edge.ProducerPath] = consumers;
+            }
+
+            consumers.Add(edge.ConsumerPath);
+        }
+
+        var queue = new Queue<string>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        queue.Enqueue(from);
+        visited.Add(from);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (!adjacency.TryGetValue(current, out var next))
+            {
+                continue;
+            }
+
+            foreach (var consumer in next)
+            {
+                if (!visited.Add(consumer))
+                {
+                    continue;
+                }
+
+                if (string.Equals(consumer, to, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                queue.Enqueue(consumer);
+            }
+        }
+
+        return false;
     }
 
     private static bool ExistingHeuristicDependsOn(ManifestFileEntry target, ManifestFileEntry candidate)
@@ -3196,11 +3610,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
             .Replace("Controller", "")
             .Trim();
         var candBase = Path.GetFileNameWithoutExtension(candidate.FilePath);
-
-        return string.IsNullOrEmpty(targetBase) ||
-               candBase.Contains(targetBase, StringComparison.OrdinalIgnoreCase) ||
-               ProjectGraphHelper.IsTestFileCandidate(target.FilePath) ||
-               targetScore >= 50;
+        return !string.IsNullOrWhiteSpace(targetBase) &&
+               targetBase.Length >= 3 &&
+               candBase.Contains(targetBase, StringComparison.OrdinalIgnoreCase);
     }
 
     public static IReadOnlyList<ManifestFileEntry> SortManifestEntries(
@@ -3679,6 +4091,17 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (string.IsNullOrWhiteSpace(input)) return string.Empty;
         var sanitized = input.Length > 300 ? input.Substring(0, 300) + "..." : input;
         return sanitized.Replace("\r", " ").Replace("\n", " ");
+    }
+
+    private static string TrimToBound(string? value, int maxChars)
+    {
+        if (string.IsNullOrWhiteSpace(value) || maxChars <= 0)
+        {
+            return string.Empty;
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.Length <= maxChars ? trimmed : trimmed[..maxChars];
     }
 
     private sealed class ConcurrencyCallCounter

@@ -96,6 +96,27 @@ public sealed record GenerationPrerequisite(
     string ConsumerPath,
     GenerationPrerequisiteReason Reason);
 
+public sealed record GenerationPrerequisiteGraph(
+    IReadOnlyList<GenerationPrerequisite> Prerequisites,
+    int ManifestCount,
+    int DirectCount,
+    int HeuristicCount,
+    int SuppressedConflictCount,
+    int SuppressedCycleCount)
+{
+    public static GenerationPrerequisiteGraph Empty { get; } = new(
+        Array.Empty<GenerationPrerequisite>(),
+        0,
+        0,
+        0,
+        0,
+        0);
+}
+
+public sealed record VerificationContractExcerpt(
+    string FilePath,
+    string Excerpt);
+
 public sealed record ContextLimits(
     int MaxFileCount = 20,
     long MaxFileSizeBytes = 100 * 1024, // 100 KB

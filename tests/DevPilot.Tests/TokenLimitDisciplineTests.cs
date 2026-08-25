@@ -477,12 +477,16 @@ public class TokenLimitDisciplineTests : IDisposable
 
         // Compact prompt retains required elements
         compactPrompt.Should().Contain(targetContent, "Target source must be retained for safe Modify grounding");
-        compactPrompt.Should().Contain("Fix Payment Service", "Task title must be retained");
-        compactPrompt.Should().Contain("Pay returns true", "Acceptance criteria must be retained");
+        compactPrompt.Should().Contain(targetFile, "Exact target path must be retained");
+        compactPrompt.Should().Contain("Pay returns true", "Acceptance requirement must be retained");
         compactPrompt.Should().Contain("COMPACT RETRY (TOKEN LIMIT DISCIPLINE)", "Must contain strict compact retry directive");
+        compactPrompt.Should().NotContain("Task Title:", "Modify compact retry must not resend full task prose");
+        compactPrompt.Should().NotContain("Task Description:", "Modify compact retry must not resend the task description");
+        compactPrompt.Should().NotContain("ProposedPlan", "Modify compact retry must not resend the plan");
+        compactPrompt.Should().NotContain("Comprehensive architectural analysis", "Unrelated analysis must not be resent");
 
         // Compact prompt removes redundant elements
-        compactPrompt.Should().NotContain("Step 1: Inspect payment architecture", "Broad proposed plan steps must be removed");
+        compactPrompt.Should().NotContain("Step 1: Inspect legacy payment gateway", "Broad proposed plan steps must be removed");
     }
 
     [Fact]

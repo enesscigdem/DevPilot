@@ -587,6 +587,89 @@ public sealed class ExecutionDiagnosticEvidenceTests
     }
 
     [Fact]
+    public void UntouchedFailingTest_ViaExactHelper_SelectsTouchedProduction()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed NetCase.Tests.ProductsApiTests.Get_Products_Should_Support_ETag_304 [18 ms]
+              Error Message:
+               Services for database providers Microsoft.EntityFrameworkCore.SqlServer and Microsoft.EntityFrameworkCore.InMemory have both been registered.
+              Stack Trace:
+                 at NetCase.Tests.ProductsApiTests.Get_Products_Should_Support_ETag_304() in /repo/tests/ProductsApiTests.cs:line 40
+            """,
+            null,
+            "dotnet test failed");
+
+        var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+            evidence,
+            new[] { "src/Program.cs", "src/appsettings.json" },
+            workspacePath: "/repo",
+            fileContents: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["tests/ProductsApiTests.cs"] = """
+                    using Xunit;
+                    public class ProductsApiTests : IClassFixture<CustomWebApplicationFactory>
+                    {
+                        private readonly CustomWebApplicationFactory _factory;
+                        public ProductsApiTests(CustomWebApplicationFactory factory) => _factory = factory;
+                    }
+                    """,
+                ["tests/CustomWebApplicationFactory.cs"] = """
+                    using Microsoft.AspNetCore.Mvc.Testing;
+                    public class CustomWebApplicationFactory : WebApplicationFactory<Program>
+                    {
+                        protected override void ConfigureWebHost(IWebHostBuilder builder) { }
+                    }
+                    """,
+                ["src/Program.cs"] = "public class Program { public static void Main() {} }"
+            });
+
+        selection.Reason.Should().Be("TouchedProductionViaTestHelper");
+        selection.FilePaths.Should().Equal("src/Program.cs");
+        selection.FilePaths.Should().NotContain("tests/ProductsApiTests.cs");
+    }
+
+    [Fact]
+    public void UntouchedFailingTest_AmbiguousHelperChain_RemainsUncorrelated()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed NetCase.Tests.ProductsApiTests.Get_Products [12 ms]
+              Error Message:
+               Assert.True() Failure
+              Stack Trace:
+                 at NetCase.Tests.ProductsApiTests.Get_Products() in /repo/tests/ProductsApiTests.cs:line 20
+            """,
+            null,
+            "dotnet test failed");
+
+        var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+            evidence,
+            new[] { "src/Program.cs", "src/Startup.cs" },
+            workspacePath: "/repo",
+            fileContents: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["tests/ProductsApiTests.cs"] = """
+                    public class ProductsApiTests
+                    {
+                        private readonly CustomWebApplicationFactory _factory;
+                    }
+                    """,
+                ["tests/CustomWebApplicationFactory.cs"] = """
+                    public class CustomWebApplicationFactory : WebApplicationFactory<Program>
+                    {
+                        public Startup Startup { get; set; }
+                    }
+                    """,
+                ["src/Program.cs"] = "public class Program {}",
+                ["src/Startup.cs"] = "public class Startup {}"
+            });
+
+        selection.Reason.Should().Be("Uncorrelated");
+        selection.FilePaths.Should().BeEmpty();
+    }
+
+    [Fact]
     public void SanitizeTestEvidenceForActivity_ExposesBoundedTestNameErrorAndStack()
     {
         var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
