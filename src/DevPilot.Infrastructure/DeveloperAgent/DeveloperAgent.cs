@@ -912,6 +912,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         LogGenerationAudit(fileEntry.FilePath, fileEntry.Action.ToString(), callNumber, fileAiRequest, fileResponse, fileSw.Elapsed);
+        var primaryPromptContext = MeasureGenerationPromptContext(
+            fileEntry, targetContent, lockedContracts, virtualWorkspace, completedEdits, compactRetry: false);
         await RecordProviderCallActivityAsync(
             request.ExecutionId,
             fileEntry.FilePath,
@@ -920,7 +922,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
             fileResponse,
             fileSw.Elapsed,
             cancellationToken,
-            outputContract: outputContract).ConfigureAwait(false);
+            outputContract: outputContract,
+            strongDependencyContractCount: primaryPromptContext.StrongCount,
+            heuristicInjectedContextCount: primaryPromptContext.HeuristicCount).ConfigureAwait(false);
 
         // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
         // Salvage a length-truncated response only when it already parses and applies completely.
@@ -948,10 +952,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         TargetFile: fileEntry.FilePath,
                         OutputContract: outputContract,
                         CompactRetryReason: "TokenTruncation",
-                        RequestedOutputTokens: compactBudget)).ConfigureAwait(false);
+                        RequestedOutputTokens: compactBudget,
+                        ReasoningEffort: fileEntry.Action == FileEditAction.Modify ? _modifyReasoningEffort : null)).ConfigureAwait(false);
 
                 var compactUserPrompt = BuildCompactSingleFileUserPrompt(
-                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement, contextFiles);
+                    request,
+                    fileEntry,
+                    targetContent,
+                    lockedContracts,
+                    useFullFileReplacement,
+                    contextFiles,
+                    completedEdits,
+                    virtualWorkspace);
                 var compactSystemPrompt = BuildCompactSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
 
                 var compactRequest = new AiRequest
@@ -975,6 +987,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
 
                     LogGenerationAudit(fileEntry.FilePath, "CompactRetry", escCallNumber, compactRequest, compactResponse, escSw.Elapsed, isCompactRetry: true);
+                    var compactPromptContext = MeasureGenerationPromptContext(
+                        fileEntry, targetContent, lockedContracts, virtualWorkspace, completedEdits, compactRetry: true);
                     await RecordProviderCallActivityAsync(
                         request.ExecutionId,
                         fileEntry.FilePath,
@@ -984,7 +998,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         escSw.Elapsed,
                         cancellationToken,
                         outputContract: outputContract,
-                        compactRetryReason: "TokenTruncation").ConfigureAwait(false);
+                        compactRetryReason: "TokenTruncation",
+                        strongDependencyContractCount: compactPromptContext.StrongCount,
+                        heuristicInjectedContextCount: compactPromptContext.HeuristicCount).ConfigureAwait(false);
 
                     if (compactResponse.IsSuccess)
                     {
@@ -1548,7 +1564,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         TimeSpan duration,
         CancellationToken cancellationToken,
         string? outputContract = null,
-        string? compactRetryReason = null)
+        string? compactRetryReason = null,
+        int? strongDependencyContractCount = null,
+        int? heuristicInjectedContextCount = null)
     {
         var metadata = new ExecutionActivityMetadata(
             EventKind: "ProviderCall",
@@ -1563,6 +1581,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
             OutputContract: outputContract,
             CompactRetryReason: compactRetryReason,
             ReasoningEffort: request.ReasoningEffort,
+            StrongDependencyContractCount: strongDependencyContractCount,
+            HeuristicInjectedContextCount: heuristicInjectedContextCount,
+            PromptSizeEstimate: EstimatePromptSize(request),
             RepairKind: callKind is "ApplicabilityRepair" or "MicroApplicabilityRepair" ? callKind : null);
 
         await SafeRecordActivityAsync(
@@ -2806,70 +2827,28 @@ public sealed class DeveloperAgent : IDeveloperAgent
             VerificationContractEvidence.AppendPromptSection(sb, verificationEvidence);
         }
 
-        if (lockedContracts != null && lockedContracts.Count > 0)
-        {
-            sb.AppendLine("=== Authoritative Upstream Contracts (LOCKED) ===");
-            sb.AppendLine("The following upstream signatures are strictly locked. You MUST adhere precisely to these constructor parameter counts, types, method names, and return types:");
-            foreach (var (contractPath, contractSig) in lockedContracts)
-            {
-                sb.AppendLine($"--- Locked Contract: {contractPath} ---");
-                sb.AppendLine(contractSig);
-                sb.AppendLine("--- End Locked Contract ---");
-            }
-            sb.AppendLine();
-        }
+        contextFiles.TryGetValue(fileEntry.FilePath, out var targetSourceForRefs);
+        var authoritativeContracts = CollectAuthoritativeDependencyContracts(
+            fileEntry,
+            targetSourceForRefs,
+            lockedContracts,
+            virtualWorkspace,
+            completedEdits);
+        AppendAuthoritativeContracts(sb, authoritativeContracts);
 
         var directlyReferenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        contextFiles.TryGetValue(fileEntry.FilePath, out var targetSourceForRefs);
-        var plannedOrGenerated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (fileEntry.Dependencies != null)
-        {
-            foreach (var depPath in fileEntry.Dependencies)
-            {
-                plannedOrGenerated.Add(depPath);
-            }
-        }
-
-        if (completedEdits != null)
-        {
-            foreach (var path in completedEdits.Keys)
-            {
-                plannedOrGenerated.Add(path);
-            }
-        }
-
-        if (virtualWorkspace != null)
-        {
-            foreach (var path in virtualWorkspace.Keys)
-            {
-                plannedOrGenerated.Add(path);
-            }
-        }
-
-        var localRefs = PlannedFileDependencyResolver.ResolveDirectLocalReferences(
-            fileEntry.FilePath,
+        var plannedOrGenerated = CollectAvailableDependencyPaths(fileEntry, lockedContracts, virtualWorkspace, completedEdits);
+        var strongDependencyPaths = CollectStrongDependencyPaths(
+            fileEntry,
             targetSourceForRefs,
-            plannedOrGenerated);
-
-        var dependencyPaths = new List<string>();
-        if (fileEntry.Dependencies != null)
-        {
-            dependencyPaths.AddRange(fileEntry.Dependencies);
-        }
-
-        foreach (var localRef in localRefs)
-        {
-            if (!dependencyPaths.Contains(localRef, StringComparer.OrdinalIgnoreCase))
-            {
-                dependencyPaths.Add(localRef);
-            }
-        }
+            plannedOrGenerated,
+            BuildContractSourceMap(lockedContracts, virtualWorkspace, completedEdits));
 
         // Include directly referenced dependency files: use authoritative virtual workspace if generated, else fallback to contextFiles
-        if (dependencyPaths.Count > 0)
+        if (strongDependencyPaths.Count > 0)
         {
             sb.AppendLine("=== Directly Referenced Dependency Snippets ===");
-            foreach (var depPath in dependencyPaths)
+            foreach (var depPath in strongDependencyPaths)
             {
                 if (virtualWorkspace != null && virtualWorkspace.TryGetValue(depPath, out var genDepContent) && !string.IsNullOrWhiteSpace(genDepContent))
                 {
@@ -2928,7 +2907,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         string? targetContent,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
         bool useFullFileReplacement = false,
-        IReadOnlyDictionary<string, string>? contextFiles = null)
+        IReadOnlyDictionary<string, string>? contextFiles = null,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits = null,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("=== COMPACT RETRY (TOKEN LIMIT DISCIPLINE) ===");
@@ -2988,22 +2969,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
-        // Filter locked contracts to only directly relevant ones
-        if (lockedContracts != null && lockedContracts.Count > 0)
-        {
-            var relevantContracts = FilterRelevantContracts(fileEntry, lockedContracts, targetContent, request);
-            if (relevantContracts.Count > 0)
-            {
-                sb.AppendLine("=== Required Upstream Contracts (LOCKED) ===");
-                foreach (var (contractPath, contractSig) in relevantContracts)
-                {
-                    sb.AppendLine($"--- Locked Contract: {contractPath} ---");
-                    sb.AppendLine(contractSig);
-                    sb.AppendLine("--- End Locked Contract ---");
-                }
-                sb.AppendLine();
-            }
-        }
+        var authoritativeContracts = CollectAuthoritativeDependencyContracts(
+            fileEntry,
+            targetContent,
+            lockedContracts,
+            virtualWorkspace,
+            completedEdits);
+        AppendAuthoritativeContracts(sb, authoritativeContracts);
 
         sb.AppendLine(fileEntry.Action == FileEditAction.Modify && !useFullFileReplacement
             ? $"Output ONLY the compact SEARCH/REPLACE JSON object for '{fileEntry.FilePath}'."
@@ -3017,85 +2989,258 @@ public sealed class DeveloperAgent : IDeveloperAgent
         string? targetContent = null,
         DeveloperAgentRequest? request = null)
     {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (lockedContracts == null || lockedContracts.Count == 0) return result;
+        _ = request;
+        return CollectAuthoritativeDependencyContracts(
+            fileEntry,
+            targetContent,
+            lockedContracts,
+            virtualWorkspace: null,
+            completedEdits: null);
+    }
 
-        // If locked contracts set is small (<= 5), retain all of them unconditionally
-        // to guarantee zero contract dropping for standard multi-file waves.
-        if (lockedContracts.Count <= 5)
+    public static IReadOnlyList<string> CollectStrongDependencyPaths(
+        ManifestFileEntry fileEntry,
+        string? targetSource,
+        IEnumerable<string> availablePaths,
+        IReadOnlyDictionary<string, string>? availableSources = null)
+    {
+        var available = (availablePaths ?? Array.Empty<string>())
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var strong = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void TryAdd(string? path)
         {
-            foreach (var (k, v) in lockedContracts)
+            if (string.IsNullOrWhiteSpace(path) ||
+                string.Equals(path, fileEntry.FilePath, StringComparison.OrdinalIgnoreCase) ||
+                !seen.Add(path))
             {
-                result[k] = v;
+                return;
             }
+
+            if (available.Any(candidate => string.Equals(candidate, path, StringComparison.OrdinalIgnoreCase)))
+            {
+                strong.Add(path);
+            }
+        }
+
+        if (fileEntry.Dependencies != null)
+        {
+            foreach (var dependency in fileEntry.Dependencies)
+            {
+                TryAdd(dependency);
+            }
+        }
+
+        foreach (var localRef in PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                     fileEntry.FilePath, targetSource, available))
+        {
+            TryAdd(localRef);
+        }
+
+        if (availableSources != null)
+        {
+            foreach (var owner in PlannedFileDependencyResolver.ResolveUniqueDeclaredTypeOwners(
+                         fileEntry.FilePath, targetSource, availableSources))
+            {
+                TryAdd(owner);
+            }
+        }
+
+        return strong;
+    }
+
+    public static Dictionary<string, string> CollectAuthoritativeDependencyContracts(
+        ManifestFileEntry fileEntry,
+        string? targetSource,
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits = null)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var availablePaths = CollectAvailableDependencyPaths(fileEntry, lockedContracts, virtualWorkspace, completedEdits);
+        if (availablePaths.Count == 0)
+        {
             return result;
         }
 
-        var targetFileName = Path.GetFileNameWithoutExtension(fileEntry.FilePath);
-        var targetBase = targetFileName
-            .Replace("Handler", "")
-            .Replace("Tests", "")
-            .Replace("Test", "")
-            .Replace("Controller", "")
-            .Replace("Repository", "")
-            .Replace("Service", "")
-            .Trim();
-
-        var combinedSearchText = string.Concat(
-            targetContent ?? string.Empty, " ",
-            fileEntry.Purpose ?? string.Empty, " ",
-            request?.TaskTitle ?? string.Empty, " ",
-            request?.TaskDescription ?? string.Empty, " ",
-            request?.AcceptanceCriteria ?? string.Empty);
-
-        var localContractRefs = new HashSet<string>(
-            PlannedFileDependencyResolver.ResolveDirectLocalReferences(
-                fileEntry.FilePath,
-                targetContent,
-                lockedContracts.Keys),
-            StringComparer.OrdinalIgnoreCase);
-
-        foreach (var (contractPath, contractSig) in lockedContracts)
+        var sources = BuildContractSourceMap(lockedContracts, virtualWorkspace, completedEdits);
+        foreach (var path in CollectStrongDependencyPaths(fileEntry, targetSource, availablePaths, sources))
         {
-            // 1. Explicit dependency in manifest or exact local repository reference
-            if (fileEntry.Dependencies != null && fileEntry.Dependencies.Contains(contractPath, StringComparer.OrdinalIgnoreCase))
+            if (virtualWorkspace != null &&
+                virtualWorkspace.TryGetValue(path, out var generated) &&
+                !string.IsNullOrWhiteSpace(generated))
             {
-                result[contractPath] = contractSig;
+                var fresh = PlannedFileDependencyResolver.ExtractLockedContractExcerpt(path, generated);
+                if (!string.IsNullOrWhiteSpace(fresh))
+                {
+                    result[path] = fresh;
+                    continue;
+                }
+            }
+
+            if (lockedContracts != null && lockedContracts.TryGetValue(path, out var locked) && !string.IsNullOrWhiteSpace(locked))
+            {
+                result[path] = locked;
                 continue;
             }
 
-            if (localContractRefs.Contains(contractPath))
+            if (completedEdits != null &&
+                completedEdits.TryGetValue(path, out var spec) &&
+                !string.IsNullOrWhiteSpace(spec.NewContent))
             {
-                result[contractPath] = contractSig;
-                continue;
-            }
-
-            var contractFileName = Path.GetFileNameWithoutExtension(contractPath);
-
-            // 2. Target file or prompt explicitly references the contract file name or type name
-            if (!string.IsNullOrWhiteSpace(contractFileName) &&
-                combinedSearchText.Contains(contractFileName, StringComparison.OrdinalIgnoreCase))
-            {
-                result[contractPath] = contractSig;
-                continue;
-            }
-
-            // 3. Name/feature correspondence
-            if (!string.IsNullOrWhiteSpace(targetBase) && targetBase.Length > 2 &&
-                contractFileName.Contains(targetBase, StringComparison.OrdinalIgnoreCase))
-            {
-                result[contractPath] = contractSig;
-                continue;
-            }
-
-            // 4. Test candidate files receive production contracts
-            if (ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath) && !ProjectGraphHelper.IsTestFileCandidate(contractPath))
-            {
-                result[contractPath] = contractSig;
+                var fromEdit = PlannedFileDependencyResolver.ExtractLockedContractExcerpt(path, spec.NewContent);
+                if (!string.IsNullOrWhiteSpace(fromEdit))
+                {
+                    result[path] = fromEdit;
+                }
             }
         }
 
         return result;
+    }
+
+    public static (int StrongCount, int HeuristicCount) MeasureGenerationPromptContext(
+        ManifestFileEntry fileEntry,
+        string? targetSource,
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
+        bool compactRetry)
+    {
+        var strong = CollectAuthoritativeDependencyContracts(
+            fileEntry,
+            targetSource,
+            lockedContracts,
+            virtualWorkspace,
+            completedEdits);
+        if (compactRetry)
+        {
+            return (strong.Count, 0);
+        }
+
+        var relevant = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace, targetSource);
+        var heuristicCount = relevant.Keys.Count(path => !strong.ContainsKey(path));
+        return (strong.Count, heuristicCount);
+    }
+
+    private static void AppendAuthoritativeContracts(System.Text.StringBuilder sb, IReadOnlyDictionary<string, string> contracts)
+    {
+        if (contracts == null || contracts.Count == 0)
+        {
+            return;
+        }
+
+        sb.AppendLine("=== Authoritative Upstream Contracts (LOCKED) ===");
+        sb.AppendLine("The following upstream signatures are strictly locked and authoritative.");
+        sb.AppendLine("Consumers MUST use the exact published method and type names. Do not invent aliases or alternate spellings.");
+        sb.AppendLine("You MUST adhere precisely to these constructor parameter counts, types, method names, and return types:");
+        foreach (var (contractPath, contractSig) in contracts)
+        {
+            sb.AppendLine($"--- Locked Contract: {contractPath} ---");
+            sb.AppendLine(contractSig);
+            sb.AppendLine("--- End Locked Contract ---");
+        }
+        sb.AppendLine();
+    }
+
+    private static List<string> CollectAvailableDependencyPaths(
+        ManifestFileEntry fileEntry,
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (fileEntry.Dependencies != null)
+        {
+            foreach (var dependency in fileEntry.Dependencies)
+            {
+                paths.Add(dependency);
+            }
+        }
+
+        if (lockedContracts != null)
+        {
+            foreach (var path in lockedContracts.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        if (virtualWorkspace != null)
+        {
+            foreach (var path in virtualWorkspace.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        if (completedEdits != null)
+        {
+            foreach (var path in completedEdits.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        return paths.ToList();
+    }
+
+    private static Dictionary<string, string> BuildContractSourceMap(
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits)
+    {
+        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (lockedContracts != null)
+        {
+            foreach (var (path, excerpt) in lockedContracts)
+            {
+                if (!string.IsNullOrWhiteSpace(excerpt))
+                {
+                    sources[path] = excerpt;
+                }
+            }
+        }
+
+        if (completedEdits != null)
+        {
+            foreach (var (path, spec) in completedEdits)
+            {
+                if (!string.IsNullOrWhiteSpace(spec.NewContent))
+                {
+                    sources[path] = spec.NewContent;
+                }
+            }
+        }
+
+        if (virtualWorkspace != null)
+        {
+            foreach (var (path, content) in virtualWorkspace)
+            {
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    sources[path] = content;
+                }
+            }
+        }
+
+        return sources;
+    }
+
+    private static int EstimatePromptSize(AiRequest request) =>
+        Math.Max(1, ((request.SystemPrompt?.Length ?? 0) + (request.UserPrompt?.Length ?? 0)) / 4);
+
+    private static string? ExtractGeneratedContract(string path, string content)
+    {
+        if (path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return RoslynContractExtractor.ExtractPublicContracts(path, content);
+        }
+
+        return PlannedFileDependencyResolver.ExtractLockedContractExcerpt(path, content);
     }
 
     private static string ExtractRelevantPlanSteps(string proposedPlan, string targetFilePath)
@@ -3202,7 +3347,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
                     else
                     {
-                        var contract = RoslynContractExtractor.ExtractPublicContracts(path, generatedContent);
+                        var contract = ExtractGeneratedContract(path, generatedContent);
                         relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : generatedContent;
                     }
                 }
@@ -3224,7 +3369,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         }
                         else if (spec.NewContent.Length > 2000)
                         {
-                            var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
+                            var contract = ExtractGeneratedContract(path, spec.NewContent);
                             relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
                         }
                         else
@@ -3247,7 +3392,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         }
                         else
                         {
-                            var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
+                            var contract = ExtractGeneratedContract(path, spec.NewContent);
                             relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
                         }
                     }
@@ -3594,8 +3739,28 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return false;
     }
 
+    private static readonly HashSet<string> NonSourceDataConfigExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".json", ".yml", ".yaml", ".toml", ".xml", ".env", ".properties", ".csv", ".ini", ".config"
+    };
+
+    public static bool IsNonSourceDataConfigFile(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return false;
+        }
+
+        return NonSourceDataConfigExtensions.Contains(Path.GetExtension(filePath));
+    }
+
     private static bool ExistingHeuristicDependsOn(ManifestFileEntry target, ManifestFileEntry candidate)
     {
+        if (IsNonSourceDataConfigFile(target.FilePath) || IsNonSourceDataConfigFile(candidate.FilePath))
+        {
+            return false;
+        }
+
         var targetScore = GetSemanticLayerScore(target.FilePath);
         var candidateScore = GetSemanticLayerScore(candidate.FilePath);
         if (targetScore <= candidateScore)

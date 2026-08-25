@@ -134,6 +134,17 @@ public static class PlannedFileDependencyResolver
             return string.IsNullOrWhiteSpace(contract) ? null : Bound(contract, maxChars);
         }
 
+        var extension = Path.GetExtension(filePath).ToLowerInvariant();
+        if (extension is ".ts" or ".tsx" or ".js" or ".jsx" or ".mjs" or ".cjs")
+        {
+            return ScriptContractExtractor.Extract(source, maxChars);
+        }
+
+        if (extension == ".py")
+        {
+            return ExtractPythonContractExcerpt(source, maxChars);
+        }
+
         var declared = ExtractDeclaredTypeNames(filePath, source);
         if (declared.Count == 0)
         {
@@ -161,6 +172,62 @@ public static class PlannedFileDependencyResolver
         }
 
         return selected.Count == 0 ? null : string.Join('\n', selected);
+    }
+
+    public static IReadOnlyList<string> ResolveUniqueDeclaredTypeOwners(
+        string targetPath,
+        string? targetSource,
+        IReadOnlyDictionary<string, string> plannedSources)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(targetSource) || plannedSources == null)
+        {
+            return results;
+        }
+
+        var ownersByType = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var (path, source) in plannedSources)
+        {
+            if (string.Equals(NormalizePath(path), NormalizePath(targetPath), StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var typeName in ExtractDeclaredTypeNames(path, source))
+            {
+                if (!ownersByType.TryGetValue(typeName, out var owners))
+                {
+                    owners = new List<string>();
+                    ownersByType[typeName] = owners;
+                }
+
+                if (!owners.Contains(path, StringComparer.OrdinalIgnoreCase))
+                {
+                    owners.Add(path);
+                }
+            }
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (typeName, owners) in ownersByType)
+        {
+            if (owners.Count != 1)
+            {
+                continue;
+            }
+
+            if (Regex.IsMatch(
+                    targetSource,
+                    $@"(?<![A-Za-z0-9_]){Regex.Escape(typeName)}(?![A-Za-z0-9_])"))
+            {
+                if (seen.Add(owners[0]))
+                {
+                    results.Add(owners[0]);
+                }
+            }
+        }
+
+        return results;
     }
 
     public static string? FindUniqueDeclarationOwner(
@@ -239,57 +306,13 @@ public static class PlannedFileDependencyResolver
         string? targetSource,
         IReadOnlyDictionary<string, string> plannedSources)
     {
-        var results = new List<string>();
-        if (string.IsNullOrWhiteSpace(targetSource) ||
-            !targetPath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ||
-            plannedSources == null)
+        if (string.IsNullOrWhiteSpace(targetPath) ||
+            !targetPath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
         {
-            return results;
+            return Array.Empty<string>();
         }
 
-        var ownersByType = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        foreach (var (path, source) in plannedSources)
-        {
-            if (string.Equals(NormalizePath(path), NormalizePath(targetPath), StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            foreach (var typeName in ExtractDeclaredTypeNames(path, source))
-            {
-                if (!ownersByType.TryGetValue(typeName, out var owners))
-                {
-                    owners = new List<string>();
-                    ownersByType[typeName] = owners;
-                }
-
-                if (!owners.Contains(path, StringComparer.OrdinalIgnoreCase))
-                {
-                    owners.Add(path);
-                }
-            }
-        }
-
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (typeName, owners) in ownersByType)
-        {
-            if (owners.Count != 1)
-            {
-                continue;
-            }
-
-            if (Regex.IsMatch(
-                    targetSource,
-                    $@"(?<![A-Za-z0-9_]){Regex.Escape(typeName)}(?![A-Za-z0-9_])"))
-            {
-                if (seen.Add(owners[0]))
-                {
-                    results.Add(owners[0]);
-                }
-            }
-        }
-
-        return results;
+        return ResolveUniqueDeclaredTypeOwners(targetPath, targetSource, plannedSources);
     }
 
     private static bool TryResolveExactPlannedFile(
@@ -424,4 +447,32 @@ public static class PlannedFileDependencyResolver
 
     private static string Bound(string value, int maxChars) =>
         value.Length <= maxChars ? value : value[..maxChars];
+
+    private static string? ExtractPythonContractExcerpt(string source, int maxChars)
+    {
+        var selected = new List<string>();
+        var used = 0;
+        foreach (var raw in source.Replace("\r\n", "\n").Split('\n'))
+        {
+            var trimmed = raw.TrimStart();
+            if (!trimmed.StartsWith("class ", StringComparison.Ordinal) &&
+                !trimmed.StartsWith("def ", StringComparison.Ordinal) &&
+                !trimmed.StartsWith("async def ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var signature = trimmed.TrimEnd().TrimEnd(':');
+            var addition = selected.Count == 0 ? signature : "\n" + signature;
+            if (used + addition.Length > maxChars)
+            {
+                break;
+            }
+
+            selected.Add(signature);
+            used += addition.Length;
+        }
+
+        return selected.Count == 0 ? null : string.Join('\n', selected);
+    }
 }
