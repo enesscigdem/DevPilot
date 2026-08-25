@@ -97,14 +97,20 @@ function formatTimeOnly(dateStr: string): string {
   }
 }
 
-function getMetadataDisplay(act: ExecutionActivityItem): string | null {
+function getMetadataDisplay(act: ExecutionActivityItem, verificationOutcome?: string | null): string | null {
   if (act.metadata) {
     const m = act.metadata
     if (m.eventKind === "ProviderCall") {
       const budget = m.requestedOutputTokens ? ` · budget ${m.requestedOutputTokens}` : ""
       const actual = m.outputTokens !== undefined && m.outputTokens !== null ? ` · output ${m.outputTokens}` : ""
       const duration = m.stageDurationMs !== undefined && m.stageDurationMs !== null ? ` · ${m.stageDurationMs}ms` : ""
-      return `${m.providerCallKind ?? "Provider call"}${budget}${actual}${duration}`
+      const contract = m.outputContract ? ` · ${m.outputContract}` : ""
+      const retry = m.compactRetryReason ? ` · ${m.compactRetryReason}` : ""
+      return `${m.providerCallKind ?? "Provider call"}${contract}${budget}${actual}${retry}${duration}`
+    }
+    if (m.eventKind === "CompactRetry") {
+      const budget = m.requestedOutputTokens ? ` · budget ${m.requestedOutputTokens}` : ""
+      return `Compact retry · ${m.compactRetryReason ?? "TokenTruncation"}${budget}`
     }
     if (m.eventKind === "GenerationSummary") {
       return `${m.logicalProviderCallCount ?? 0} calls · ${m.compactRetryCount ?? 0} compact · ${m.applicabilityRepairCount ?? 0} applicability · ${m.totalGenerationTimeMs ?? 0}ms`
@@ -121,11 +127,13 @@ function getMetadataDisplay(act: ExecutionActivityItem): string | null {
       return `${m.repositoryCheckKind ?? "Check"} · ${m.repositoryCheckId}${exitCode}${failure}${duration}`
     }
     if (m.repairKind && m.repairRound) {
-      const fileCount = m.repairFiles?.length ?? m.modifiedFileCount
-      const scope = fileCount ? ` · ${fileCount} ${fileCount === 1 ? "file" : "files"}` : ""
+      const targets = m.repairFiles?.length ? ` · ${m.repairFiles.join(", ")}` : ""
       const progress = m.progressResult ? ` · ${m.progressResult}` : ""
+      const reason = m.repairSelectionReason ? ` · ${m.repairSelectionReason}` : ""
+      const testName = m.testName ? ` · ${m.testName}` : ""
+      const evidence = m.diagnosticLines?.length ? ` · ${m.diagnosticLines.slice(0, 5).join(" | ")}` : ""
       const check = m.repositoryCheckKind ? ` · ${m.repositoryCheckKind}` : ""
-      return `${m.repairKind} repair ${m.repairRound}${scope}${progress}${check}`
+      return `${m.repairKind} repair ${m.repairRound}${targets}${reason}${testName}${progress}${check}${evidence}`
     }
     if (m.modifiedFileCount !== undefined && m.modifiedFileCount !== null) {
       return `${m.modifiedFileCount} ${m.modifiedFileCount === 1 ? "file" : "files"} modified`
@@ -135,7 +143,9 @@ function getMetadataDisplay(act: ExecutionActivityItem): string | null {
     }
   }
   if (act.stage === "Execution" && act.status === "Completed") {
-    return "Ready for review"
+    return verificationOutcome === "NeedsReview"
+      ? "Needs review — authoritative build or tests remain failed"
+      : "Ready for review"
   }
   return null
 }
@@ -345,7 +355,7 @@ export function ExecutionWorkspace() {
     )
   }
 
-  const statusMeta = getExecutionStatusMeta(execution.status)
+  const statusMeta = getExecutionStatusMeta(execution.status, execution.verificationOutcome)
   const isRunning = execution.status === TaskExecutionStatus.Running
   const isPending = execution.status === TaskExecutionStatus.Pending
   const isFailed = execution.status === TaskExecutionStatus.Failed
@@ -993,7 +1003,7 @@ export function ExecutionWorkspace() {
                               const isFailedStatus = act.status === "Failed"
                               const isRejectedStatus = act.status === "Rejected"
                               const formattedTime = formatTimeOnly(act.createdAt)
-                              const metaText = getMetadataDisplay(act)
+                              const metaText = getMetadataDisplay(act, execution.verificationOutcome)
 
                               return (
                                 <div

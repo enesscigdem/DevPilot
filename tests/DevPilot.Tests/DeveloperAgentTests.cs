@@ -573,8 +573,8 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeTrue();
         _fakeAiProvider.ReceivedRequests.Should().HaveCount(2);
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048, "small-file Modify uses an expected full-file output budget");
-        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(2048, "small-file applicability recovery keeps the same bounded budget");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096, "small-file Modify uses the compact patch budget");
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(4096, "small-file applicability recovery keeps the same bounded patch budget");
     }
 
     [Fact]
@@ -626,7 +626,7 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeTrue();
         _fakeAiProvider.ReceivedRequests.Should().HaveCount(1);
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048, "small-file Modify budget is based on expected output, not the global ceiling");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(8192, "Modify patch budget is capped at 8192 even when configured ceilings are higher");
     }
 
     [Fact]
@@ -936,7 +936,7 @@ public class DeveloperAgentTests : IDisposable
     }
 
     [Fact]
-    public async Task GenerateAndApplyEditsAsync_SmallFileModify_UsesHashGuardedFullReplacementInOneCall()
+    public async Task GenerateAndApplyEditsAsync_SmallFileModify_UsesSearchReplaceInOneCall()
     {
         const string relativePath = "SmallService.cs";
         var targetFile = Path.Combine(_worktreeDir, relativePath);
@@ -946,7 +946,9 @@ public class DeveloperAgentTests : IDisposable
             {
               "filePath": "SmallService.cs",
               "action": "Modify",
-              "newContent": "public class SmallService { public int Value => 2; }"
+              "searchReplaceEdits": [
+                { "search": "public int Value => 1;", "replace": "public int Value => 2;" }
+              ]
             }
             """);
 
@@ -954,9 +956,10 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeTrue(result.ErrorMessage);
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
-        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(2048);
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("small-file Modify");
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("newContent");
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("searchReplaceEdits");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().NotContain("small-file Modify");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().NotContain("complete resulting file");
         (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 2");
     }
 
@@ -984,8 +987,8 @@ public class DeveloperAgentTests : IDisposable
         result.Success.Should().BeTrue(result.ErrorMessage);
         _fakeAiProvider.SendAsyncCallCount.Should().Be(1);
         _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
-        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("large-file Modify");
         _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().Contain("searchReplaceEdits");
+        _fakeAiProvider.ReceivedRequests[0].SystemPrompt.Should().NotContain("complete resulting file");
         (await File.ReadAllTextAsync(targetFile)).Should().Contain("Value => 2");
     }
 
@@ -1140,7 +1143,9 @@ public class DeveloperAgentTests : IDisposable
                     {
                       "filePath": "CurrentSourceService.cs",
                       "action": "Modify",
-                      "newContent": "public class CurrentSourceService { public int Value => 20; }"
+                      "searchReplaceEdits": [
+                        { "search": "Value => 10", "replace": "Value => 20" }
+                      ]
                     }
                     """
             };

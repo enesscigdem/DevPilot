@@ -138,15 +138,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         if (action == FileEditAction.Modify)
         {
-            if (targetContent != null && WorktreeEditApplier.IsSmallTextFile(targetContent))
-            {
-                var estimatedFullFileTokens = (targetContent.Length + 2) / 3 + 512;
-                var roundedBudget = ((estimatedFullFileTokens + 511) / 512) * 512;
-                return Math.Min(Math.Clamp(roundedBudget, 2048, 4096), _maxOutputTokens);
-            }
-
-            // SEARCH/REPLACE output is expected to contain only the changed blocks,
-            // so its budget must not scale with the size or role of the target file.
+            // Modify is patch-first. Budget is for compact SEARCH/REPLACE, not a full-file rewrite.
             return Math.Min(Math.Min(_budgetModifyPatch, 8192), _maxOutputTokens);
         }
 
@@ -722,9 +714,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
             targetContentHash = WorktreeEditApplier.ComputeContentHash(targetContent);
         }
 
-        var useFullFileReplacement = fileEntry.Action == FileEditAction.Modify &&
-                                     targetContent != null &&
-                                     WorktreeEditApplier.IsSmallTextFile(targetContent);
+        var useFullFileReplacement = ShouldUseFullFileReplacement(fileEntry.Action, targetContent);
+        var outputContract = fileEntry.Action == FileEditAction.Create
+            ? "Create"
+            : useFullFileReplacement ? "ModifyFullReplacement" : "ModifyPatch";
         var recoveryUsed = false;
 
         if (!callCounter.TryIncrement(out var callNumber))
@@ -777,7 +770,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             fileAiRequest,
             fileResponse,
             fileSw.Elapsed,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            outputContract: outputContract).ConfigureAwait(false);
 
         // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
         if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
@@ -791,7 +785,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 await SafeRecordActivityAsync(
                     request.ExecutionId,
                     $"Performing compact generation retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit.",
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    ExecutionActivityStatus.Started,
+                    new ExecutionActivityMetadata(
+                        EventKind: "CompactRetry",
+                        TargetFile: fileEntry.FilePath,
+                        OutputContract: outputContract,
+                        CompactRetryReason: "TokenTruncation",
+                        RequestedOutputTokens: compactBudget)).ConfigureAwait(false);
 
                 var compactUserPrompt = BuildCompactSingleFileUserPrompt(
                     request, fileEntry, targetContent, lockedContracts, useFullFileReplacement, contextFiles);
@@ -824,7 +825,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         compactRequest,
                         compactResponse,
                         escSw.Elapsed,
-                        cancellationToken).ConfigureAwait(false);
+                        cancellationToken,
+                        outputContract: outputContract,
+                        compactRetryReason: "TokenTruncation").ConfigureAwait(false);
 
                     if (compactResponse.IsSuccess)
                     {
@@ -959,7 +962,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     cancellationToken).ConfigureAwait(false);
                 targetContent = currentTarget.Content;
                 targetContentHash = currentTarget.Hash;
-                useFullFileReplacement = WorktreeEditApplier.IsSmallTextFile(targetContent);
+                useFullFileReplacement = ShouldUseFullFileReplacement(fileEntry.Action, targetContent);
 
                 if (editSpec?.SearchReplaceEdits is { Count: > 0 })
                 {
@@ -1189,7 +1192,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
         AiRequest request,
         AiResponse response,
         TimeSpan duration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? outputContract = null,
+        string? compactRetryReason = null)
     {
         var metadata = new ExecutionActivityMetadata(
             EventKind: "ProviderCall",
@@ -1200,7 +1205,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
             InputTokens: response.InputTokens,
             OutputTokens: response.OutputTokens,
             StageDurationMs: (long)duration.TotalMilliseconds,
-            TargetFile: targetFile);
+            TargetFile: targetFile,
+            OutputContract: outputContract,
+            CompactRetryReason: compactRetryReason);
 
         await SafeRecordActivityAsync(
             executionId,
@@ -1648,10 +1655,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var actionSpecificRule = fileEntry.Action == FileEditAction.Create
             ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
             : useFullFileReplacement
-                ? "This is a small-file Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
+                ? "This is a near-empty Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
                     ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'."
-                    : "This is a large-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'.";
+                    : "This is a Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'.";
 
         var testGuidance = isTest
             ? fileEntry.Action == FileEditAction.Modify
@@ -2844,6 +2851,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         return sb.ToString().Trim();
+    }
+
+    public const int NearEmptyModifyReplacementChars = 50;
+
+    public static bool ShouldUseFullFileReplacement(FileEditAction action, string? targetContent)
+    {
+        if (action != FileEditAction.Modify || string.IsNullOrWhiteSpace(targetContent))
+        {
+            return false;
+        }
+
+        return targetContent.Trim().Length <= NearEmptyModifyReplacementChars;
     }
 
     public static int GetSemanticLayerScore(string filePath)

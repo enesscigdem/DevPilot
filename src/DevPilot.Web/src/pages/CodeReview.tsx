@@ -552,7 +552,7 @@ export function CodeReview() {
     )
   }
 
-  const statusMeta = getExecutionStatusMeta(review.executionStatus)
+  const statusMeta = getExecutionStatusMeta(review.executionStatus, review.verificationOutcome)
   const diffLines = parseGitDiff(review.diff)
 
   const isPendingDecision = review.reviewStatus === "Pending"

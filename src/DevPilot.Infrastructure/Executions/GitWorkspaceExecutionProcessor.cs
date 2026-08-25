@@ -927,7 +927,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 break;
             }
 
-            var repairFiles = ExecutionDiagnosticEvidence.SelectTestRepairFiles(evidence, modifiedFiles).ToList();
+            var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+                evidence,
+                modifiedFiles,
+                prepResult.WorkspacePath);
+            var repairFiles = selection.FilePaths.ToList();
+            var sanitizedTestEvidence = ExecutionDiagnosticEvidence.SanitizeTestEvidenceForActivity(evidence);
             if (repairFiles.Count == 0)
             {
                 await SafeRecordActivityAsync(
@@ -942,7 +947,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         repairKind: "Test",
                         repairRound: repairRound,
                         failureFingerprint: evidence.FailureFingerprint,
-                        progressResult: "Uncorrelated"),
+                        progressResult: "Uncorrelated",
+                        verificationOutcome: "NeedsReview",
+                        diagnosticLines: sanitizedTestEvidence,
+                        repairSelectionReason: selection.Reason,
+                        testName: evidence.TestName),
                     cancellationToken).ConfigureAwait(false);
                 break;
             }
@@ -959,7 +968,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     repairKind: "Test",
                     repairRound: repairRound,
                     repairFiles: repairFiles,
-                    failureFingerprint: evidence.FailureFingerprint),
+                    failureFingerprint: evidence.FailureFingerprint,
+                    diagnosticLines: sanitizedTestEvidence,
+                    repairSelectionReason: selection.Reason,
+                    testName: evidence.TestName),
                 cancellationToken).ConfigureAwait(false);
 
             var repairRequest = new FocusedRepairRequest(
@@ -1012,7 +1024,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 break;
             }
 
-            foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
+            var repairedThisRound = (repairResult.ModifiedFiles ?? Array.Empty<string>()).ToList();
+            foreach (var file in repairedThisRound)
             {
                 modifiedFiles.Add(file);
             }
@@ -1060,29 +1073,42 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 }
 
                 prerequisiteFailed = true;
-                var newEvidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
-                    prerequisiteResult.StdOut,
-                    prerequisiteResult.StdErr,
-                    prerequisiteResult.ErrorMessage);
-
                 var isInfra = prerequisiteResult.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure;
-                await SafeRecordActivityAsync(
-                    context.ExecutionId,
-                    ExecutionStage.Build,
-                    ExecutionActivityStatus.Failed,
-                    isInfra
-                        ? "Repository check infrastructure failure after test repair."
-                        : "Stopped with evidence: repository check failed after focused test repair.",
-                    CheckMetadata(
-                        prerequisite,
-                        "StoppedWithEvidence",
-                        prerequisiteResult,
-                        repairKind: "Compile",
-                        repairRound: repairRound,
-                        failureFingerprint: newEvidence.FailureFingerprint,
-                        progressResult: "NewBuildFailure",
-                        verificationOutcome: isInfra ? "VerificationInfrastructureError" : "NeedsReview"),
+                if (isInfra)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Build,
+                        ExecutionActivityStatus.Failed,
+                        "Repository check infrastructure failure after test repair.",
+                        CheckMetadata(
+                            prerequisite,
+                            "StoppedWithEvidence",
+                            prerequisiteResult,
+                            repairKind: "Compile",
+                            repairRound: repairRound,
+                            progressResult: "NewBuildFailure",
+                            verificationOutcome: "VerificationInfrastructureError"),
+                        cancellationToken).ConfigureAwait(false);
+                    return false;
+                }
+
+                var bridged = await TryCompilerConvergenceBridgeAfterTestRepairAsync(
+                    context,
+                    prepResult,
+                    actualModel,
+                    prerequisite,
+                    prerequisiteResult,
+                    modifiedFiles,
+                    repairedThisRound,
+                    repairRound,
                     cancellationToken).ConfigureAwait(false);
+                if (!bridged)
+                {
+                    return false;
+                }
+
+                prerequisiteFailed = false;
                 break;
             }
 
@@ -1199,6 +1225,233 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<bool> TryCompilerConvergenceBridgeAfterTestRepairAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        string? actualModel,
+        RepositoryCheck prerequisite,
+        RepositoryCheckResult prerequisiteResult,
+        HashSet<string> modifiedFiles,
+        IReadOnlyList<string> repairedThisRound,
+        int testRepairRound,
+        CancellationToken cancellationToken)
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
+            prerequisiteResult.StdOut,
+            prerequisiteResult.StdErr,
+            prerequisiteResult.ErrorMessage);
+        var implicated = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, modifiedFiles).ToList();
+        var repairedImplicated = implicated
+            .Where(path => repairedThisRound.Contains(path, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        string? target = null;
+        var reason = "Uncorrelated";
+        if (repairedImplicated.Count == 1)
+        {
+            target = repairedImplicated[0];
+            reason = "RepairedFileFromCompiler";
+        }
+        else if (implicated.Count == 1)
+        {
+            target = implicated[0];
+            reason = "TouchedFileFromCompiler";
+        }
+
+        var sanitized = ExecutionDiagnosticEvidence.SanitizeDiagnosticLinesForActivity(
+            evidence.DiagnosticLines,
+            prepResult.WorkspacePath);
+
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                "Stopped with evidence: repository check failed after focused test repair.",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    prerequisiteResult,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    failureFingerprint: evidence.FailureFingerprint,
+                    progressResult: "NewBuildFailure",
+                    verificationOutcome: "NeedsReview",
+                    diagnosticLines: sanitized,
+                    repairSelectionReason: reason),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        var scoped = ExecutionDiagnosticEvidence.ScopeToFile(evidence, target);
+        var diagnosticLines = scoped.DiagnosticLines.Count > 0 ? scoped.DiagnosticLines : evidence.DiagnosticLines;
+        var diagnosticLocations = scoped.Locations.Count > 0 ? scoped.Locations : evidence.Locations;
+        var languageContext = _repairContextProvider?.GetCompileRepairContext(
+            prerequisite,
+            prepResult.WorkspacePath,
+            new[] { target });
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Build,
+            ExecutionActivityStatus.Started,
+            "Compile repair started after test repair introduced a localized build failure.",
+            CheckMetadata(
+                prerequisite,
+                "FixingBuildIssue",
+                prerequisiteResult,
+                repairKind: "Compile",
+                repairRound: testRepairRound,
+                repairFiles: new[] { target },
+                failureFingerprint: evidence.FailureFingerprint,
+                progressResult: "CompilerConvergenceBridge",
+                diagnosticLines: sanitized,
+                repairSelectionReason: reason),
+            cancellationToken).ConfigureAwait(false);
+
+        var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+        DeveloperAgentResult repairResult;
+        try
+        {
+            repairResult = await _developerAgent.ExecuteFocusedRepairAsync(
+                new FocusedRepairRequest(
+                    TaskId: context.TaskId,
+                    ExecutionId: context.ExecutionId,
+                    TaskTitle: context.TaskTitle,
+                    AcceptanceCriteria: "Resolve the compiler failure introduced by the previous focused test repair without weakening existing tests.",
+                    WorkspacePath: prepResult.WorkspacePath,
+                    BranchName: prepResult.BranchName,
+                    RepairFiles: new[] { target },
+                    DiagnosticEvidence: string.Join("\n", diagnosticLines.Take(10)),
+                    DiagnosticLocations: diagnosticLocations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
+                    LanguageContext: languageContext,
+                    Model: actualModel),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                $"Compile convergence repair failed with exception: {ex.Message}",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    prerequisiteResult,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    progressResult: "NewBuildFailure",
+                    verificationOutcome: "NeedsReview"),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        if (!repairResult.Success)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                $"Compile convergence repair failed: {repairResult.ErrorMessage}",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    prerequisiteResult,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    progressResult: "NewBuildFailure",
+                    verificationOutcome: "NeedsReview",
+                    diagnosticLines: sanitized,
+                    repairSelectionReason: reason),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
+        {
+            modifiedFiles.Add(file);
+        }
+
+        var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+        if (beforeFingerprint != null && afterFingerprint != null &&
+            string.Equals(beforeFingerprint, afterFingerprint, StringComparison.Ordinal))
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                "Stopped with evidence: compile convergence repair produced no worktree change.",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    prerequisiteResult,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    repairFiles: new[] { target },
+                    progressResult: "NoDiff",
+                    verificationOutcome: "NeedsReview"),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        var rebuild = await _repositoryCheckRunner.ExecuteAsync(
+            new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, prerequisite),
+            cancellationToken).ConfigureAwait(false);
+
+        if (!rebuild.Success)
+        {
+            var rebuildEvidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
+                rebuild.StdOut,
+                rebuild.StdErr,
+                rebuild.ErrorMessage);
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                "Stopped with evidence: repository check failed after focused test repair.",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    rebuild,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    failureFingerprint: rebuildEvidence.FailureFingerprint,
+                    progressResult: "NewBuildFailure",
+                    verificationOutcome: "NeedsReview",
+                    diagnosticLines: ExecutionDiagnosticEvidence.SanitizeDiagnosticLinesForActivity(
+                        rebuildEvidence.DiagnosticLines,
+                        prepResult.WorkspacePath),
+                    repairSelectionReason: "BridgeRebuildFailed"),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Build,
+            ExecutionActivityStatus.Completed,
+            "Compile convergence repair restored the build after test repair.",
+            CheckMetadata(
+                prerequisite,
+                "VerifyingRepository",
+                rebuild,
+                repairKind: "Compile",
+                repairRound: testRepairRound,
+                repairFiles: new[] { target },
+                progressResult: "CompilerConvergenceBridge",
+                buildPassed: true,
+                repairSelectionReason: reason),
+            cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
     private static ExecutionActivityMetadata CheckMetadata(
         RepositoryCheck check,
         string? eventKind = null,
@@ -1219,7 +1472,9 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         int? newRegressionCount = null,
         string? baseCommitSha = null,
         bool? baselineCacheHit = null,
-        IReadOnlyList<string>? diagnosticLines = null) => new(
+        IReadOnlyList<string>? diagnosticLines = null,
+        string? repairSelectionReason = null,
+        string? testName = null) => new(
             BuildPassed: buildPassed,
             TestPassed: testPassed,
             EventKind: eventKind,
@@ -1244,7 +1499,9 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             NewRegressionCount: newRegressionCount,
             BaseCommitSha: baseCommitSha,
             BaselineCacheHit: baselineCacheHit,
-            DiagnosticLines: diagnosticLines);
+            DiagnosticLines: diagnosticLines,
+            RepairSelectionReason: repairSelectionReason,
+            TestName: testName);
 
     private async Task<string?> GetChangeFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
     {

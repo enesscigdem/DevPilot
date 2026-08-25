@@ -536,7 +536,7 @@ public class TodoService : ITodoService
             useFullFileReplacement: false,
             virtualWorkspace: null);
 
-        sysPrompt.Should().Contain("This is a large-file Modify. Return only compact 'searchReplaceEdits'");
+        sysPrompt.Should().Contain("This is a Modify. Return only compact 'searchReplaceEdits'");
         sysPrompt.Should().NotContain("TEST MODIFY DISCIPLINE");
         userPrompt.Should().Contain("Edit Strategy: surgical patch. Return only minimal searchReplaceEdits");
     }

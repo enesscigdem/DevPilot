@@ -479,4 +479,134 @@ public sealed class ExecutionDiagnosticEvidenceTests
         sanitized[0].Should().Contain("src/Todos/TodoService.cs");
         sanitized.Should().NotContain("this is not a diagnostic");
     }
+
+    [Fact]
+    public void UntouchedFailingTest_WithOneImplicatedProductionFile_SelectsProductionNotTheTest()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos [12 ms]
+              Error Message:
+               Expected result to contain 1 item, but found 2.
+              Stack Trace:
+                 at DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos() in /repo/tests/TodoServiceTests.cs:line 88
+            Failed! - Failed: 1, Passed: 42, Skipped: 0, Total: 43
+            """,
+            null,
+            "dotnet test failed");
+
+        var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+            evidence,
+            new[] { "src/Todos/TodoService.cs", "src/Todos/TodosController.cs" },
+            workspacePath: "/repo",
+            fileContents: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["tests/TodoServiceTests.cs"] = """
+                    using Xunit;
+                    public class TodoServiceTests
+                    {
+                        [Fact]
+                        public void Filters_completed_todos()
+                        {
+                            var service = new TodoService();
+                            Assert.Single(service.Filter(true));
+                        }
+                    }
+                    """
+            });
+
+        selection.Reason.Should().Be("TouchedProductionFromUntouchedTest");
+        selection.FilePaths.Should().Equal("src/Todos/TodoService.cs");
+        selection.FilePaths.Should().NotContain("tests/TodoServiceTests.cs");
+        selection.FailingTestName.Should().Be("DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos");
+        selection.EvidenceLines.Should().Contain(line => line.Contains("Failed test:"));
+    }
+
+    [Fact]
+    public void UntouchedFailingTest_AmbiguousProductionEvidence_RemainsUncorrelated()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed DevPilot.Tests.Todos.TodoFlowTests.Creates_todo [12 ms]
+              Error Message:
+               Assert.True() Failure
+              Stack Trace:
+                 at DevPilot.Tests.Todos.TodoFlowTests.Creates_todo() in /repo/tests/TodoFlowTests.cs:line 20
+            """,
+            null,
+            "dotnet test failed");
+
+        var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+            evidence,
+            new[] { "src/Todos/TodoService.cs", "src/Todos/TodosController.cs", "src/Todos/TodoRepository.cs" },
+            workspacePath: "/repo",
+            fileContents: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["tests/TodoFlowTests.cs"] = """
+                    public class TodoFlowTests
+                    {
+                        public void Creates_todo()
+                        {
+                            var service = new TodoService();
+                            var controller = new TodosController();
+                            var repository = new TodoRepository();
+                        }
+                    }
+                    """
+            });
+
+        selection.Reason.Should().Be("Uncorrelated");
+        selection.FilePaths.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void UntouchedFailingTest_DoesNotSelectTheTestFileJustToMakeItPass()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos [12 ms]
+              Error Message:
+               Expected result to contain 1 item, but found 2.
+              Stack Trace:
+                 at DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos() in /repo/tests/TodoServiceTests.cs:line 88
+            """,
+            null,
+            "dotnet test failed");
+
+        var selected = ExecutionDiagnosticEvidence.SelectTestRepairFiles(
+            evidence,
+            new[] { "src/Todos/TodoService.cs" },
+            workspacePath: "/repo",
+            fileContents: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["tests/TodoServiceTests.cs"] = "public class TodoServiceTests { var s = new TodoService(); }"
+            });
+
+        selected.Should().Equal("src/Todos/TodoService.cs");
+        selected.Should().NotContain(path => path.Contains("TodoServiceTests", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void SanitizeTestEvidenceForActivity_ExposesBoundedTestNameErrorAndStack()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos [12 ms]
+              Error Message:
+               Expected result to contain 1 item, but found 2.
+              Stack Trace:
+                 at DevPilot.Todos.TodoService.Filter(Boolean completed) in /repo/src/Todos/TodoService.cs:line 41
+                 at DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos() in /repo/tests/TodoServiceTests.cs:line 88
+            """,
+            null,
+            "dotnet test failed");
+
+        var sanitized = ExecutionDiagnosticEvidence.SanitizeTestEvidenceForActivity(evidence);
+
+        sanitized.Should().Contain(line => line.Contains("Failed test: DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos"));
+        sanitized.Should().Contain(line => line.Contains("Error: Expected result to contain 1 item, but found 2."));
+        sanitized.Should().Contain(line => line.Contains("TodoService.cs:line 41"));
+        sanitized.Should().HaveCountLessThanOrEqualTo(ExecutionDiagnosticEvidence.MaxSanitizedActivityDiagnosticLines);
+        sanitized.Should().OnlyContain(line => line.Length <= ExecutionDiagnosticEvidence.MaxSanitizedActivityDiagnosticChars);
+    }
 }

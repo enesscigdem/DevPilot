@@ -242,7 +242,14 @@ export const executionStatusMeta: Record<number, { label: string; tone: Tone }> 
   [TaskExecutionStatus.Cancelled]: { label: "Cancelled", tone: "gray" },
 };
 
-export function getExecutionStatusMeta(status: number | string): { label: string; tone: Tone } {
+export function getExecutionStatusMeta(
+  status: number | string,
+  verificationOutcome?: string | null,
+): { label: string; tone: Tone } {
+  const outcome = String(verificationOutcome || "").toLowerCase()
+  if (outcome === "needsreview" && (status === TaskExecutionStatus.Completed || String(status).toLowerCase() === "completed")) {
+    return { label: "Needs review", tone: "amber" }
+  }
   if (typeof status === "number") {
     return executionStatusMeta[status] ?? { label: `Status ${status}`, tone: "neutral" };
   }
@@ -372,6 +379,10 @@ export interface ExecutionActivityMetadata {
   targetedTestFilter?: string | null;
   verificationOutcome?: string | null;
   diagnosticLines?: string[] | null;
+  outputContract?: string | null;
+  compactRetryReason?: string | null;
+  repairSelectionReason?: string | null;
+  testName?: string | null;
 }
 
 export interface ExecutionActivityItem {

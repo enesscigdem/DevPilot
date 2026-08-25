@@ -391,7 +391,7 @@ public class LightweightFocusedRepairTests : IDisposable
         var repairBudget = agent.DetermineFocusedRepairBudget();
 
         WorktreeEditApplier.IsSmallTextFile(SmallIssueController).Should().BeTrue();
-        generationBudget.Should().Be(2048, "first-pass generation still uses the small-file full-file budget");
+        generationBudget.Should().Be(4096, "first-pass generation uses the compact Modify patch budget");
         repairBudget.Should().Be(4096, "focused repair uses the existing ModifyPatch budget only");
         repairBudget.Should().BeLessThan(8192);
         repairBudget.Should().BeLessThan(32768);
