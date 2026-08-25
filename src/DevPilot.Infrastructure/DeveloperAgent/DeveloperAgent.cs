@@ -81,15 +81,15 @@ public sealed class DeveloperAgent : IDeveloperAgent
             _maxCompactRetryOutputTokens = Math.Max(24576, _maxOutputTokens);
         }
 
-        // Adaptive category budgets
-        _budgetDtoOrModel = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:DtoOrModel", 4096);
-        _budgetInterfaceOrContract = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:InterfaceOrContract", 4096);
-        _budgetQueryOrCommand = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:QueryOrCommand", 4096);
-        _budgetHandlerOrService = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:HandlerOrService", 8192);
-        _budgetController = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:Controller", 8192);
+        // Adaptive category budgets. Create defaults are ~20% below master's historical buckets.
+        _budgetDtoOrModel = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:DtoOrModel", 3276);
+        _budgetInterfaceOrContract = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:InterfaceOrContract", 3276);
+        _budgetQueryOrCommand = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:QueryOrCommand", 3276);
+        _budgetHandlerOrService = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:HandlerOrService", 6553);
+        _budgetController = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:Controller", 6553);
         _budgetModifyPatch = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:ModifyPatch", 4096);
-        _budgetTestFile = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:TestFile", 8192);
-        _budgetFallback = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:Fallback", 8192);
+        _budgetTestFile = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:TestFile", 6553);
+        _budgetFallback = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:Fallback", 6553);
 
         if (configuration != null &&
             int.TryParse(configuration["DeveloperAgent:MaxManifestFiles"], out var cfgManifest) &&
@@ -188,23 +188,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return Math.Min(Math.Max(initialBudget * 2, 4096), Math.Min(8192, _maxCompactRetryOutputTokens));
         }
 
-        int targetLines = targetContent != null ? targetContent.Split('\n').Length : 0;
-        bool isLargeFile = targetLines > 100 || (targetContent?.Length ?? 0) > 4000;
-        bool isTestFile = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
-
-        int candidateBudget;
-        if (isLargeFile || isTestFile)
+        if (isRepair)
         {
-            candidateBudget = (isTestFile && isLargeFile) || targetLines > 150 || (targetContent?.Length ?? 0) > 6000
-                ? _maxCompactRetryOutputTokens
-                : (isRepair ? 16384 : 12288);
-        }
-        else
-        {
-            candidateBudget = Math.Max(initialBudget * 2, 8192);
+            return initialBudget;
         }
 
-        return Math.Min(Math.Max(candidateBudget, initialBudget), _maxCompactRetryOutputTokens);
+        var createRetryBudget = Math.Min(initialBudget * 2, Math.Min(8192, _maxOutputTokens));
+        return Math.Max(initialBudget, createRetryBudget);
     }
 
     public async Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(
@@ -2492,7 +2482,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
             : "Emit only the minimal JSON searchReplaceEdits payload.");
         sb.AppendLine();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
-        sb.AppendLine($"Task Description: {request.TaskDescription}");
+        if (fileEntry.Action != FileEditAction.Create)
+        {
+            sb.AppendLine($"Task Description: {request.TaskDescription}");
+        }
         if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
         {
             sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
@@ -2500,6 +2493,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
         sb.AppendLine();
         sb.AppendLine($"Target File: {fileEntry.FilePath}");
         sb.AppendLine($"Action: {fileEntry.Action}");
+        if (fileEntry.Action == FileEditAction.Create && !string.IsNullOrWhiteSpace(fileEntry.Purpose))
+        {
+            sb.AppendLine($"Purpose: {fileEntry.Purpose}");
+        }
         sb.AppendLine();
 
         if (fileEntry.Action == FileEditAction.Create)
