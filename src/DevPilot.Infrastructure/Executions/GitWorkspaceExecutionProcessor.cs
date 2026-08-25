@@ -102,7 +102,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             throw new InvalidOperationException(error);
         }
 
-        var modifiedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fileSets = new ExecutionFileSets();
 
         try
         {
@@ -328,7 +328,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             foreach (var file in agentResult.ModifiedFiles)
             {
-                modifiedFiles.Add(file);
+                fileSets.AddActuallyModified(file);
+            }
+
+            foreach (var file in agentResult.ResolvedNoChangeFiles ?? Array.Empty<string>())
+            {
+                fileSets.AddResolvedNoChange(file);
             }
 
             await SafeRecordActivityAsync(
@@ -337,9 +342,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ExecutionActivityStatus.Completed,
                 "Developer Agent completed.",
                 new ExecutionActivityMetadata(
-                    ModifiedFileCount: agentResult.ModifiedFiles.Count,
+                    ModifiedFileCount: fileSets.ActuallyModifiedFiles.Count,
                     Model: actualModel,
-                    EventKind: "GeneratingChange"),
+                    EventKind: "GeneratingChange",
+                    ResolvedNoChangeCount: fileSets.ResolvedNoChangeFiles.Count > 0
+                        ? fileSets.ResolvedNoChangeFiles.Count
+                        : null),
                 cancellationToken).ConfigureAwait(false);
 
             var prerequisiteChecks = requiredChecks.Where(check => check.Kind != RepositoryCheckKind.Test).ToList();
@@ -375,7 +383,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     analysis,
                     actualModel,
                     check,
-                    modifiedFiles,
+                    fileSets,
                     cancellationToken).ConfigureAwait(false);
 
                 if (!passed)
@@ -404,7 +412,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     prerequisiteChecks,
                     confirmedBuild,
                     index == testChecks.Count - 1,
-                    modifiedFiles,
+                    fileSets,
                     cancellationToken).ConfigureAwait(false);
 
                 if (!passed)
@@ -447,7 +455,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 {
                     var purged = await VerificationSideEffectCleaner.PurgeSideEffectsAsync(
                         prepResult.WorkspacePath,
-                        modifiedFiles,
+                        fileSets.ActuallyModifiedFiles,
                         CancellationToken.None).ConfigureAwait(false);
 
                     if (purged.Count > 0)
@@ -472,7 +480,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         TaskImpactAnalysis analysis,
         string? actualModel,
         RepositoryCheck check,
-        HashSet<string> modifiedFiles,
+        ExecutionFileSets fileSets,
         CancellationToken cancellationToken)
     {
         await SafeRecordActivityAsync(
@@ -586,10 +594,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             var touchedSources = ExecutionDiagnosticEvidence.LoadTouchedSourceSnapshots(
                 prepResult.WorkspacePath,
-                modifiedFiles);
+                fileSets.ActuallyModifiedFiles);
             var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
                 evidence,
-                modifiedFiles,
+                fileSets.ActuallyModifiedFiles,
                 attemptedForCurrentFailureSet: null,
                 touchedSources);
             var repairFiles = string.IsNullOrWhiteSpace(selection.FilePath)
@@ -732,7 +740,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
             {
-                modifiedFiles.Add(file);
+                fileSets.AddActuallyModified(file);
             }
 
             var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
@@ -849,7 +857,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IReadOnlyList<RepositoryCheck> prerequisiteChecks,
         bool confirmedBuild,
         bool isFinalTest,
-        HashSet<string> modifiedFiles,
+        ExecutionFileSets fileSets,
         CancellationToken cancellationToken)
     {
         await SafeRecordActivityAsync(
@@ -968,7 +976,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
                 evidence,
-                modifiedFiles,
+                fileSets.VerificationEligiblePlannedFiles,
                 prepResult.WorkspacePath);
             var repairFiles = selection.FilePaths.ToList();
             var sanitizedTestEvidence = ExecutionDiagnosticEvidence.SanitizeTestEvidenceForActivity(evidence);
@@ -1025,7 +1033,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
                 LanguageContext: null,
                 Model: actualModel,
-                TouchedFiles: modifiedFiles.ToList(),
+                TouchedFiles: fileSets.ActuallyModifiedFiles.ToList(),
                 TestName: evidence.TestName);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
@@ -1066,14 +1074,25 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
 
             var repairedThisRound = (repairResult.ModifiedFiles ?? Array.Empty<string>()).ToList();
-            foreach (var file in repairedThisRound)
-            {
-                modifiedFiles.Add(file);
-            }
-
             var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var noDiff = beforeFingerprint != null && afterFingerprint != null &&
                          string.Equals(beforeFingerprint, afterFingerprint, StringComparison.Ordinal);
+
+            IReadOnlyList<string> supersededNoChange = Array.Empty<string>();
+            if (noDiff)
+            {
+                foreach (var file in repairedThisRound)
+                {
+                    if (!fileSets.ResolvedNoChangeFiles.Contains(file))
+                    {
+                        fileSets.AddActuallyModified(file);
+                    }
+                }
+            }
+            else
+            {
+                supersededNoChange = fileSets.PromoteRepairedFiles(repairedThisRound);
+            }
 
             await SafeRecordActivityAsync(
                 context.ExecutionId,
@@ -1099,6 +1118,23 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             if (noDiff)
             {
                 break;
+            }
+
+            if (supersededNoChange.Count > 0)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Test,
+                    ExecutionActivityStatus.Completed,
+                    "NoChange overridden by authoritative verification evidence.",
+                    new ExecutionActivityMetadata(
+                        EventKind: "NoChangeOverridden",
+                        RepairKind: "Test",
+                        RepairRound: repairRound,
+                        RepairFiles: supersededNoChange,
+                        ModifiedFileCount: fileSets.ActuallyModifiedFiles.Count,
+                        ResolvedNoChangeCount: fileSets.ResolvedNoChangeFiles.Count),
+                    cancellationToken).ConfigureAwait(false);
             }
 
             var prerequisiteFailed = false;
@@ -1140,7 +1176,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     actualModel,
                     prerequisite,
                     prerequisiteResult,
-                    modifiedFiles,
+                    fileSets,
                     repairedThisRound,
                     repairRound,
                     cancellationToken).ConfigureAwait(false);
@@ -1272,7 +1308,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         string? actualModel,
         RepositoryCheck prerequisite,
         RepositoryCheckResult prerequisiteResult,
-        HashSet<string> modifiedFiles,
+        ExecutionFileSets fileSets,
         IReadOnlyList<string> repairedThisRound,
         int testRepairRound,
         CancellationToken cancellationToken)
@@ -1281,7 +1317,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             prerequisiteResult.StdOut,
             prerequisiteResult.StdErr,
             prerequisiteResult.ErrorMessage);
-        var implicated = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, modifiedFiles).ToList();
+        var implicated = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, fileSets.ActuallyModifiedFiles).ToList();
         var repairedImplicated = implicated
             .Where(path => repairedThisRound.Contains(path, StringComparer.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -1417,7 +1453,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
         foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
         {
-            modifiedFiles.Add(file);
+            fileSets.AddActuallyModified(file);
         }
 
         var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
@@ -1600,6 +1636,56 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Unexpected error recording activity for execution {ExecutionId}.", executionId);
+        }
+    }
+
+    private sealed class ExecutionFileSets
+    {
+        public HashSet<string> ActuallyModifiedFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> VerificationEligiblePlannedFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> ResolvedNoChangeFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public void AddActuallyModified(string file)
+        {
+            if (string.IsNullOrWhiteSpace(file))
+            {
+                return;
+            }
+
+            ActuallyModifiedFiles.Add(file);
+            VerificationEligiblePlannedFiles.Add(file);
+        }
+
+        public void AddResolvedNoChange(string file)
+        {
+            if (string.IsNullOrWhiteSpace(file) || ActuallyModifiedFiles.Contains(file))
+            {
+                return;
+            }
+
+            ResolvedNoChangeFiles.Add(file);
+            VerificationEligiblePlannedFiles.Add(file);
+        }
+
+        public IReadOnlyList<string> PromoteRepairedFiles(IEnumerable<string> files)
+        {
+            var superseded = new List<string>();
+            foreach (var file in files)
+            {
+                if (string.IsNullOrWhiteSpace(file))
+                {
+                    continue;
+                }
+
+                if (ResolvedNoChangeFiles.Remove(file))
+                {
+                    superseded.Add(file);
+                }
+
+                AddActuallyModified(file);
+            }
+
+            return superseded;
         }
     }
 }

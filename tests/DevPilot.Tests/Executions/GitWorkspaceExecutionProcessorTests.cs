@@ -979,6 +979,133 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
+    public async Task MixedNoChangeGeneration_DoesNotCountNoChangeAsActuallyModified()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(
+                new[] { "src/Program.cs" },
+                resolvedNoChangeFiles: new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" })
+        };
+        var runner = new TestExecutionValidationRunner();
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, recorder: recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.stage == ExecutionStage.DeveloperAgent &&
+            activity.status == ExecutionActivityStatus.Completed &&
+            activity.metadata != null &&
+            activity.metadata.EventKind == "GeneratingChange" &&
+            activity.metadata.ModifiedFileCount == 1 &&
+            activity.metadata.ResolvedNoChangeCount == 1);
+        recorder.RecordedActivities.Should().NotContain(activity =>
+            activity.metadata != null &&
+            activity.metadata.EventKind == "GeneratingChange" &&
+            activity.metadata.ModifiedFileCount == 2);
+    }
+
+    [Fact]
+    public async Task ResolvedNoChangeFile_WithExactStackEvidence_IsSelectedForTestRepair()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(
+                new[] { "src/Program.cs" },
+                resolvedNoChangeFiles: new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" }),
+            FocusedRepairResultToReturn = DeveloperAgentResult.Ok(
+                new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" })
+        };
+        var runner = new ScriptedValidationRunner(
+            new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
+            new[]
+            {
+                FailedFactoryHostTest(),
+                new TestValidationResult { Success = true },
+                new TestValidationResult { Success = true }
+            });
+        var fingerprint = new TestFingerprintCalculator("before", "after-repair");
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().ContainSingle();
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("tests/TestUtils/CustomWebApplicationFactory.cs");
+        agent.FocusedRepairRequests[0].TouchedFiles.Should().Equal("src/Program.cs");
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.metadata != null &&
+            activity.metadata.RepairSelectionReason == "TouchedFileFromStack");
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.message == "NoChange overridden by authoritative verification evidence." &&
+            activity.metadata != null &&
+            activity.metadata.EventKind == "NoChangeOverridden" &&
+            activity.metadata.ModifiedFileCount == 2 &&
+            activity.metadata.ResolvedNoChangeCount == 0 &&
+            activity.metadata.RepairFiles != null &&
+            activity.metadata.RepairFiles.Contains("tests/TestUtils/CustomWebApplicationFactory.cs"));
+    }
+
+    [Fact]
+    public async Task PlannedNoChangeAlone_DoesNotStartTestRepair()
+    {
+        var taskId = Guid.NewGuid();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(
+                new[] { "src/Program.cs" },
+                resolvedNoChangeFiles: new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" })
+        };
+        var runner = new ScriptedValidationRunner(
+            new[] { new BuildValidationResult { Success = true } },
+            new[] { FailedAmbiguousUntouchedTest() });
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, recorder: recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().BeEmpty();
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.metadata != null &&
+            activity.metadata.ProgressResult == "Uncorrelated" &&
+            activity.metadata.VerificationOutcome == "NeedsReview");
+    }
+
+    [Fact]
+    public async Task NoChangeTestRepair_SameAuthoritativeFailure_StopsWithoutBroadSecondRepair()
+    {
+        var taskId = Guid.NewGuid();
+        var failedTest = FailedFactoryHostTest();
+        var agent = new TestDeveloperAgent
+        {
+            ResultToReturn = DeveloperAgentResult.Ok(
+                new[] { "src/Program.cs" },
+                resolvedNoChangeFiles: new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" }),
+            FocusedRepairResultToReturn = DeveloperAgentResult.Ok(
+                new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" })
+        };
+        var runner = new ScriptedValidationRunner(
+            new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
+            new[] { failedTest, failedTest });
+        var fingerprint = new TestFingerprintCalculator("before", "after");
+        var recorder = new TestActivityRecorder();
+        var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
+
+        await processor.ProcessAsync(CreateContext(taskId));
+
+        agent.FocusedRepairRequests.Should().ContainSingle();
+        agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("tests/TestUtils/CustomWebApplicationFactory.cs");
+        agent.FocusedRepairRequests[0].TouchedFiles.Should().Contain("src/Program.cs");
+        runner.TestRequests.Should().HaveCount(2, "the same targeted failure stops before another repair");
+        recorder.RecordedActivities.Should().Contain(activity =>
+            activity.metadata != null &&
+            activity.metadata.ProgressResult == "SameFailure");
+    }
+
+    [Fact]
     public async Task AllNoChangeGeneration_DoesNotFailAsZeroModified_AndStaysReviewable()
     {
         var taskId = Guid.NewGuid();
@@ -1081,6 +1208,22 @@ public class GitWorkspaceExecutionProcessorTests
         Guid.NewGuid(),
         "/source",
         "Summary");
+
+    private static TestValidationResult FailedFactoryHostTest() => new()
+    {
+        Success = false,
+        ExitCode = 1,
+        ErrorMessage = "dotnet test failed.",
+        StdOut = """
+            Failed NetCaseStudy.Tests.PipelineTests.Boots [14 ms]
+              Error Message:
+               Services for database providers Microsoft.EntityFrameworkCore.SqlServer and Microsoft.EntityFrameworkCore.InMemory have been registered.
+              Stack Trace:
+                 at NetCaseStudy.Tests.TestUtils.CustomWebApplicationFactory.ConfigureWebHost() in /workspace/path/tests/TestUtils/CustomWebApplicationFactory.cs:line 24
+                 at NetCaseStudy.Tests.PipelineTests.Boots() in /workspace/path/tests/PipelineTests.cs:line 18
+            Failed! - Failed: 1, Passed: 10, Skipped: 0, Total: 11
+            """
+    };
 
     private static TestValidationResult FailedTodoTest() => new()
     {
@@ -1310,6 +1453,7 @@ public class GitWorkspaceExecutionProcessorTests
     private class TestDeveloperAgent : IDeveloperAgent
     {
         public DeveloperAgentResult ResultToReturn { get; set; } = DeveloperAgentResult.Ok(new List<string> { "Modified.cs" });
+        public DeveloperAgentResult? FocusedRepairResultToReturn { get; set; }
         public int CallCount { get; private set; }
         public List<DeveloperAgentRequest> Requests { get; } = new();
         public List<FocusedRepairRequest> FocusedRepairRequests { get; } = new();
@@ -1325,7 +1469,7 @@ public class GitWorkspaceExecutionProcessorTests
         {
             CallCount++;
             FocusedRepairRequests.Add(request);
-            return Task.FromResult(ResultToReturn);
+            return Task.FromResult(FocusedRepairResultToReturn ?? ResultToReturn);
         }
     }
 

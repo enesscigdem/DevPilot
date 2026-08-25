@@ -670,6 +670,193 @@ public sealed class ExecutionDiagnosticEvidenceTests
     }
 
     [Fact]
+    public void VerificationEligibleSet_IncludesResolvedNoChangeWithoutTreatingItAsModified()
+    {
+        var eligible = ExecutionDiagnosticEvidence.BuildVerificationEligiblePlannedFiles(
+            new[] { "src/Program.cs" },
+            new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" });
+
+        eligible.Should().Equal("src/Program.cs", "tests/TestUtils/CustomWebApplicationFactory.cs");
+        eligible.Should().Contain("tests/TestUtils/CustomWebApplicationFactory.cs");
+    }
+
+    [Fact]
+    public void PlannedNoChangeAlone_IsInsufficientToSelectVerificationFile()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed NetCaseStudy.Tests.PipelineTests.Boots [12 ms]
+              Error Message:
+               Assert.True() Failure
+              Stack Trace:
+                 at NetCaseStudy.Tests.PipelineTests.Boots() in /repo/tests/PipelineTests.cs:line 20
+            """,
+            null,
+            "dotnet test failed");
+
+        var eligible = ExecutionDiagnosticEvidence.BuildVerificationEligiblePlannedFiles(
+            new[] { "src/Program.cs" },
+            new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" });
+        var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+            evidence,
+            eligible,
+            workspacePath: "/repo",
+            fileContents: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["tests/PipelineTests.cs"] = """
+                    public class PipelineTests
+                    {
+                        public void Boots()
+                        {
+                            Assert.True(false);
+                        }
+                    }
+                    """
+            });
+
+        selection.Reason.Should().Be("Uncorrelated");
+        selection.FilePaths.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ExactFailingStack_CanSelectResolvedNoChangeVerificationFile()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed NetCaseStudy.Tests.PipelineTests.Boots [14 ms]
+              Error Message:
+               Services for database providers Microsoft.EntityFrameworkCore.SqlServer and Microsoft.EntityFrameworkCore.InMemory have been registered.
+              Stack Trace:
+                 at NetCaseStudy.Tests.TestUtils.CustomWebApplicationFactory.ConfigureWebHost() in /repo/tests/TestUtils/CustomWebApplicationFactory.cs:line 24
+                 at NetCaseStudy.Tests.PipelineTests.Boots() in /repo/tests/PipelineTests.cs:line 18
+            """,
+            null,
+            "dotnet test failed");
+
+        var eligible = ExecutionDiagnosticEvidence.BuildVerificationEligiblePlannedFiles(
+            new[] { "src/Program.cs" },
+            new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" });
+        var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(evidence, eligible);
+
+        selection.Reason.Should().Be("TouchedFileFromStack");
+        selection.FilePaths.Should().Equal("tests/TestUtils/CustomWebApplicationFactory.cs");
+    }
+
+    [Fact]
+    public void ExactFailingHelper_WithDirectLocalReference_CanSelectResolvedNoChangeFile()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed NetCaseStudy.Tests.PipelineTests.Boots [18 ms]
+              Error Message:
+               Services for database providers Microsoft.EntityFrameworkCore.SqlServer and Microsoft.EntityFrameworkCore.InMemory have been registered.
+              Stack Trace:
+                 at NetCaseStudy.Tests.PipelineTests.Boots() in /repo/tests/PipelineTests.cs:line 18
+            """,
+            null,
+            "dotnet test failed");
+
+        var eligible = ExecutionDiagnosticEvidence.BuildVerificationEligiblePlannedFiles(
+            new[] { "src/Program.cs" },
+            new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" });
+        var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+            evidence,
+            eligible,
+            workspacePath: "/repo",
+            fileContents: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["tests/PipelineTests.cs"] = """
+                    using Xunit;
+                    public class PipelineTests : IClassFixture<CustomWebApplicationFactory>
+                    {
+                        private readonly CustomWebApplicationFactory _factory;
+                        public PipelineTests(CustomWebApplicationFactory factory) => _factory = factory;
+                    }
+                    """,
+                ["tests/TestUtils/CustomWebApplicationFactory.cs"] = """
+                    using Microsoft.AspNetCore.Mvc.Testing;
+                    public class CustomWebApplicationFactory : WebApplicationFactory<Program>
+                    {
+                        protected override void ConfigureWebHost(IWebHostBuilder builder) { }
+                    }
+                    """,
+                ["src/Program.cs"] = "public class Program { public static void Main() {} }"
+            });
+
+        selection.Reason.Should().Be("TouchedTestHelper");
+        selection.FilePaths.Should().Equal("tests/TestUtils/CustomWebApplicationFactory.cs");
+        selection.FilePaths.Should().NotContain("src/Program.cs");
+    }
+
+    [Fact]
+    public void AmbiguousNoChangeCandidates_RemainUncorrelated()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed NetCaseStudy.Tests.PipelineTests.Boots [12 ms]
+              Error Message:
+               Assert.True() Failure
+              Stack Trace:
+                 at NetCaseStudy.Tests.PipelineTests.Boots() in /repo/tests/PipelineTests.cs:line 20
+            """,
+            null,
+            "dotnet test failed");
+
+        var eligible = ExecutionDiagnosticEvidence.BuildVerificationEligiblePlannedFiles(
+            new[] { "src/Program.cs" },
+            new[]
+            {
+                "tests/TestUtils/CustomWebApplicationFactory.cs",
+                "tests/TestUtils/OtherWebApplicationFactory.cs"
+            });
+        var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+            evidence,
+            eligible,
+            workspacePath: "/repo",
+            fileContents: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["tests/PipelineTests.cs"] = """
+                    public class PipelineTests
+                    {
+                        private readonly CustomWebApplicationFactory _factory;
+                        private readonly OtherWebApplicationFactory _other;
+                    }
+                    """,
+                ["tests/TestUtils/CustomWebApplicationFactory.cs"] = """
+                    public class CustomWebApplicationFactory : WebApplicationFactory<Program> { }
+                    """,
+                ["tests/TestUtils/OtherWebApplicationFactory.cs"] = """
+                    public class OtherWebApplicationFactory : WebApplicationFactory<Program> { }
+                    """,
+                ["src/Program.cs"] = "public class Program {}"
+            });
+
+        selection.Reason.Should().Be("Uncorrelated");
+        selection.FilePaths.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void OrdinaryModifiedFileTestRepair_RemainsUnchangedWhenNoChangeIsAbsent()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(
+            """
+            Failed DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos [12 ms]
+              Error Message:
+               Expected result to contain 1 item, but found 2.
+              Stack Trace:
+                 at DevPilot.Todos.TodoService.Filter(Boolean completed) in /repo/src/Todos/TodoService.cs:line 41
+            """,
+            null,
+            "dotnet test failed");
+
+        var selected = ExecutionDiagnosticEvidence.SelectTestRepairFiles(
+            evidence,
+            new[] { "src/Todos/TodoService.cs", "src/Todos/Valid.cs" });
+
+        selected.Should().Equal("src/Todos/TodoService.cs");
+    }
+
+    [Fact]
     public void SanitizeTestEvidenceForActivity_ExposesBoundedTestNameErrorAndStack()
     {
         var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(

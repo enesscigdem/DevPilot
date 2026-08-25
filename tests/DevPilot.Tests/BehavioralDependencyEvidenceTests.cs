@@ -172,6 +172,26 @@ public sealed class BehavioralDependencyEvidenceTests : IDisposable
     }
 
     [Fact]
+    public void FactoryRepair_WithActuallyModifiedProducerOnly_StillReceivesFreshProgramEvidence()
+    {
+        var factory = CustomWebApplicationFactorySource();
+        var freshProgram = FreshProgramSource("UseInMemoryDatabase(\"FreshDb\")");
+        var excerpts = BehavioralDependencyEvidence.Collect(
+            "tests/TestUtils/CustomWebApplicationFactory.cs",
+            factory,
+            new[] { "src/Program.cs" },
+            freshSources: new Dictionary<string, string>
+            {
+                ["src/Program.cs"] = freshProgram
+            },
+            diagnosticEvidence: "Microsoft.EntityFrameworkCore.SqlServer and Microsoft.EntityFrameworkCore.InMemory were both registered");
+
+        excerpts.Should().ContainSingle(item => item.FilePath == "src/Program.cs");
+        excerpts[0].Excerpt.Should().Contain("UseInMemoryDatabase(\"FreshDb\")");
+        excerpts.Should().HaveCountLessThanOrEqualTo(2);
+    }
+
+    [Fact]
     public void CollectFocusedRepairBehavioralEvidence_ReadsFreshWorkspaceOverMissingSnapshot()
     {
         var programPath = Path.Combine(_tempDir, "src");

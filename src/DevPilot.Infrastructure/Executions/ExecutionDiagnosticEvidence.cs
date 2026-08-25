@@ -618,6 +618,25 @@ public static class ExecutionDiagnosticEvidence
         return sanitized;
     }
 
+    public static IReadOnlyList<string> BuildVerificationEligiblePlannedFiles(
+        IEnumerable<string>? actuallyModifiedFiles,
+        IEnumerable<string>? resolvedNoChangeFiles)
+    {
+        var eligible = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in (actuallyModifiedFiles ?? Array.Empty<string>()).Concat(resolvedNoChangeFiles ?? Array.Empty<string>()))
+        {
+            if (string.IsNullOrWhiteSpace(file) || !seen.Add(file))
+            {
+                continue;
+            }
+
+            eligible.Add(file);
+        }
+
+        return eligible;
+    }
+
     public static IReadOnlyList<string> SelectTestRepairFiles(
         TestFailureEvidence evidence,
         IEnumerable<string> modifiedFiles,
@@ -677,6 +696,16 @@ public static class ExecutionDiagnosticEvidence
                     evidence.ErrorSummary,
                     evidenceLines);
             }
+        }
+
+        var helperFromFailingTest = TrySelectTouchedTestHelper(
+            evidence,
+            modified,
+            workspacePath,
+            fileContents);
+        if (helperFromFailingTest != null)
+        {
+            return helperFromFailingTest;
         }
 
         var productionFromUntouchedTest = TrySelectProductionFromUntouchedTest(
@@ -757,6 +786,80 @@ public static class ExecutionDiagnosticEvidence
         }
 
         return lines.Take(maxLines).ToList();
+    }
+
+    private static TestRepairSelection? TrySelectTouchedTestHelper(
+        TestFailureEvidence evidence,
+        IReadOnlyList<string> candidateFiles,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var failingTestPath = evidence.Locations
+            .Select(location => location.FilePath)
+            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && ProjectGraphHelper.IsTestFileCandidate(path));
+        if (string.IsNullOrWhiteSpace(failingTestPath))
+        {
+            return null;
+        }
+
+        var testSource = TryReadBoundedEvidenceText(failingTestPath, workspacePath, fileContents);
+        if (string.IsNullOrWhiteSpace(testSource))
+        {
+            return null;
+        }
+
+        var relativeFailingTest = !string.IsNullOrWhiteSpace(workspacePath)
+            ? MakeRepositoryRelative(failingTestPath, workspacePath)
+            : NormalizePath(failingTestPath);
+        if (fileContents != null)
+        {
+            var contentMatch = fileContents.Keys.FirstOrDefault(path =>
+                MatchModifiedFile(failingTestPath, new[] { path }) != null);
+            if (!string.IsNullOrWhiteSpace(contentMatch))
+            {
+                relativeFailingTest = contentMatch;
+            }
+        }
+
+        var helpers = ResolveHelperCandidates(
+            string.IsNullOrWhiteSpace(relativeFailingTest) ? failingTestPath : relativeFailingTest,
+            testSource,
+            workspacePath,
+            fileContents);
+        if (helpers.Count == 0)
+        {
+            return null;
+        }
+
+        var matched = helpers
+            .Select(helper => MatchModifiedFile(helper, candidateFiles))
+            .Where(path => path != null &&
+                           MatchModifiedFile(failingTestPath, new[] { path }) == null)
+            .Cast<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (matched.Count == 0)
+        {
+            return null;
+        }
+
+        if (matched.Count > 1)
+        {
+            return new TestRepairSelection(
+                Array.Empty<string>(),
+                "Uncorrelated",
+                evidence.TestName,
+                evidence.ErrorSummary,
+                SanitizeTestEvidenceForActivity(evidence));
+        }
+
+        return new TestRepairSelection(
+            matched,
+            "TouchedTestHelper",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
     }
 
     private static TestRepairSelection TrySelectProductionFromUntouchedTest(
