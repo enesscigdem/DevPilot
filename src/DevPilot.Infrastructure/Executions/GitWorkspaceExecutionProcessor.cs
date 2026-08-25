@@ -556,7 +556,17 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 break;
             }
 
-            var repairFiles = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, modifiedFiles).ToList();
+            var touchedSources = ExecutionDiagnosticEvidence.LoadTouchedSourceSnapshots(
+                prepResult.WorkspacePath,
+                modifiedFiles);
+            var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+                evidence,
+                modifiedFiles,
+                attemptedForCurrentFailureSet: null,
+                touchedSources);
+            var repairFiles = string.IsNullOrWhiteSpace(selection.FilePath)
+                ? new List<string>()
+                : new List<string> { selection.FilePath };
             var scopedDiagnostics = repairFiles.Count == 1
                 ? ExecutionDiagnosticEvidence.ScopeToFile(evidence, repairFiles[0])
                 : null;
@@ -605,7 +615,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     repairRound: repairRound,
                     repairFiles: repairFiles,
                     failureFingerprint: evidence.FailureFingerprint,
-                    diagnosticLines: sanitizedDiagnosticLines),
+                    diagnosticLines: sanitizedDiagnosticLines,
+                    repairSelectionReason: selection.Reason),
                 cancellationToken).ConfigureAwait(false);
 
             if (check.Kind == RepositoryCheckKind.Build)

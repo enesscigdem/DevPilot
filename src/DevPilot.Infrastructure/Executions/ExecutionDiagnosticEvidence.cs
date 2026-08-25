@@ -30,6 +30,8 @@ public sealed record TestRepairSelection(
     string? ErrorSummary = null,
     IReadOnlyList<string>? EvidenceLines = null);
 
+public sealed record MissingContractReference(string TypeName, string? MemberName = null);
+
 public sealed record TestFailureEvidence(
     string FailureFingerprint,
     string? TestName,
@@ -380,7 +382,8 @@ public static class ExecutionDiagnosticEvidence
     public static CompilerRepairSelection SelectNextCompilerRepairTarget(
         CompilerFailureEvidence evidence,
         IEnumerable<string> modifiedFiles,
-        IEnumerable<string>? attemptedForCurrentFailureSet = null)
+        IEnumerable<string>? attemptedForCurrentFailureSet = null,
+        IReadOnlyDictionary<string, string>? touchedFileContents = null)
     {
         var modified = modifiedFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var attempted = new HashSet<string>(
@@ -394,6 +397,15 @@ public static class ExecutionDiagnosticEvidence
             .Cast<string>()
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+        var contractOwner = TrySelectUniqueSharedContractOwner(evidence, modified, touchedFileContents);
+        if (!string.IsNullOrWhiteSpace(contractOwner) && !attempted.Contains(contractOwner))
+        {
+            return new CompilerRepairSelection(
+                contractOwner,
+                matchedImplicated.Count > 0 ? matchedImplicated : new[] { contractOwner },
+                "UniqueContractOwner");
+        }
 
         var unattemptedMatched = matchedImplicated
             .Where(path => !attempted.Contains(path))
@@ -410,6 +422,143 @@ public static class ExecutionDiagnosticEvidence
             null,
             matchedImplicated,
             matchedImplicated.Count == 0 ? "Uncorrelated" : "AllImplicatedFilesExhausted");
+    }
+
+    public static string? TrySelectUniqueSharedContractOwner(
+        CompilerFailureEvidence evidence,
+        IEnumerable<string> modifiedFiles,
+        IReadOnlyDictionary<string, string>? touchedFileContents)
+    {
+        if (evidence == null || touchedFileContents == null || touchedFileContents.Count == 0)
+        {
+            return null;
+        }
+
+        var shared = TryGetSharedMissingContract(evidence.DiagnosticLines);
+        if (shared == null)
+        {
+            return null;
+        }
+
+        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var modified in modifiedFiles.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var (path, content) in touchedFileContents)
+            {
+                if (MatchModifiedFile(path, new[] { modified }) != null ||
+                    string.Equals(path, modified, StringComparison.OrdinalIgnoreCase))
+                {
+                    sources[modified] = content;
+                    break;
+                }
+            }
+        }
+
+        return PlannedFileDependencyResolver.FindUniqueDeclarationOwner(shared.TypeName, sources);
+    }
+
+    public static MissingContractReference? TryGetSharedMissingContract(IEnumerable<string>? diagnosticLines)
+    {
+        if (diagnosticLines == null)
+        {
+            return null;
+        }
+
+        var parsed = diagnosticLines
+            .Select(TryParseMissingContract)
+            .Where(item => item != null)
+            .Cast<MissingContractReference>()
+            .ToList();
+        if (parsed.Count < 2)
+        {
+            return null;
+        }
+
+        var typeName = parsed[0].TypeName;
+        if (parsed.Any(item => !string.Equals(item.TypeName, typeName, StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        var members = parsed
+            .Select(item => item.MemberName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (members.Count > 1)
+        {
+            return null;
+        }
+
+        return new MissingContractReference(typeName, members.Count == 1 ? members[0] : parsed[0].MemberName);
+    }
+
+    public static MissingContractReference? TryParseMissingContract(string? diagnosticLine)
+    {
+        if (string.IsNullOrWhiteSpace(diagnosticLine))
+        {
+            return null;
+        }
+
+        var propertyMatch = Regex.Match(
+            diagnosticLine,
+            @"Property\s+'([A-Za-z_][\w]*)'\s+does not exist on type\s+'([A-Za-z_][\w]*)'",
+            RegexOptions.IgnoreCase);
+        if (propertyMatch.Success)
+        {
+            return new MissingContractReference(propertyMatch.Groups[2].Value, propertyMatch.Groups[1].Value);
+        }
+
+        var objectLiteralMatch = Regex.Match(
+            diagnosticLine,
+            @"'([A-Za-z_][\w]*)'\s+does not exist in type\s+'([A-Za-z_][\w]*)'",
+            RegexOptions.IgnoreCase);
+        if (objectLiteralMatch.Success)
+        {
+            return new MissingContractReference(objectLiteralMatch.Groups[2].Value, objectLiteralMatch.Groups[1].Value);
+        }
+
+        var definitionMatch = Regex.Match(
+            diagnosticLine,
+            @"'([A-Za-z_][\w]*)'\s+does not contain a definition for\s+'([A-Za-z_][\w]*)'",
+            RegexOptions.IgnoreCase);
+        if (definitionMatch.Success)
+        {
+            return new MissingContractReference(definitionMatch.Groups[1].Value, definitionMatch.Groups[2].Value);
+        }
+
+        return null;
+    }
+
+    public static IReadOnlyDictionary<string, string> LoadTouchedSourceSnapshots(
+        string? workspacePath,
+        IEnumerable<string> modifiedFiles,
+        int maxFiles = 20,
+        int maxCharsPerFile = 16_384)
+    {
+        var snapshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(workspacePath) || modifiedFiles == null)
+        {
+            return snapshots;
+        }
+
+        foreach (var filePath in modifiedFiles.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (snapshots.Count >= maxFiles || string.IsNullOrWhiteSpace(filePath))
+            {
+                break;
+            }
+
+            var content = TryReadBoundedEvidenceText(filePath, workspacePath, fileContents: null);
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                continue;
+            }
+
+            snapshots[filePath] = content.Length > maxCharsPerFile ? content[..maxCharsPerFile] : content;
+        }
+
+        return snapshots;
     }
 
     public static IReadOnlyList<string> SanitizeDiagnosticLinesForActivity(

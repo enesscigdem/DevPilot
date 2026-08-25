@@ -46,6 +46,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     private readonly int _maxManifestFiles;
     private readonly int _maxGenerationCalls;
     private readonly int _maxConcurrentFileGenerations;
+    private readonly string _mechanicalReasoningEffort;
 
     public DeveloperAgent(
         IAiProvider aiProvider,
@@ -123,6 +124,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             _maxConcurrentFileGenerations = 1;
         }
+
+        var configuredReasoning = configuration?["DeveloperAgent:MechanicalReasoningEffort"];
+        _mechanicalReasoningEffort = string.IsNullOrWhiteSpace(configuredReasoning)
+            ? "low"
+            : configuredReasoning.Trim();
     }
 
     private int ParseConfigBudget(IConfiguration? config, string key, int defaultValue)
@@ -166,6 +172,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return Math.Min(Math.Min(_budgetModifyPatch, 8192), _maxOutputTokens);
     }
 
+    public int DetermineMicroDiagnosticRepairBudget()
+    {
+        return Math.Min(2048, DetermineFocusedRepairBudget());
+    }
+
+    public string DetermineMechanicalReasoningEffort() => _mechanicalReasoningEffort;
+
     public int DetermineCompactRetryBudget(int initialBudget, string? targetContent, ManifestFileEntry fileEntry, bool isRepair = false)
     {
         if (fileEntry.Action == FileEditAction.Modify)
@@ -202,7 +215,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         var filesToRepair = request.RepairFiles.Take(2).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var collectedEdits = new List<FileEditSpec>();
+        var appliedFiles = new List<string>();
 
         _logger.LogInformation(
             "DeveloperAgent: starting lightweight focused repair for task {TaskId} on {Count} file(s) in workspace '{Workspace}'.",
@@ -212,79 +225,130 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         foreach (var filePath in filesToRepair)
         {
-            string resolvedPath;
-            try
-            {
-                resolvedPath = WorktreeEditApplier.ValidateAndResolvePath(request.WorkspacePath, filePath);
-            }
-            catch (Exception ex)
-            {
-                return DeveloperAgentResult.Fail($"Failed to resolve path for '{filePath}': {ex.Message}", request.Model);
-            }
-
-            if (!File.Exists(resolvedPath))
-            {
-                return DeveloperAgentResult.Fail($"Repair target file '{filePath}' does not exist on disk.", request.Model);
-            }
-
-            var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
-            var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
-
-            var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
-            const bool useFullFileReplacement = false;
-            var budget = DetermineFocusedRepairBudget();
-            var peerContext = CollectFocusedRepairPeerContext(
-                request.WorkspacePath,
-                filePath,
+            var fileResult = await RepairAndApplySingleFocusedFileAsync(
                 request,
-                currentContent ?? string.Empty);
+                filePath,
+                cancellationToken).ConfigureAwait(false);
+            if (!fileResult.Success)
+            {
+                return DeveloperAgentResult.Fail(fileResult.ErrorMessage ?? "Focused repair failed.", request.Model);
+            }
 
-            var systemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath);
-            var userPrompt = BuildFocusedDiagnosticRepairUserPrompt(
+            foreach (var applied in fileResult.ModifiedFiles ?? Array.Empty<string>())
+            {
+                if (!appliedFiles.Contains(applied, StringComparer.OrdinalIgnoreCase))
+                {
+                    appliedFiles.Add(applied);
+                }
+            }
+        }
+
+        return DeveloperAgentResult.Ok(appliedFiles, model: request.Model);
+    }
+
+    private async Task<DeveloperAgentResult> RepairAndApplySingleFocusedFileAsync(
+        FocusedRepairRequest request,
+        string filePath,
+        CancellationToken cancellationToken)
+    {
+        string resolvedPath;
+        try
+        {
+            resolvedPath = WorktreeEditApplier.ValidateAndResolvePath(request.WorkspacePath, filePath);
+        }
+        catch (Exception ex)
+        {
+            return DeveloperAgentResult.Fail($"Failed to resolve path for '{filePath}': {ex.Message}", request.Model);
+        }
+
+        if (!File.Exists(resolvedPath))
+        {
+            return DeveloperAgentResult.Fail($"Repair target file '{filePath}' does not exist on disk.", request.Model);
+        }
+
+        var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+        var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
+        var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
+        const bool useFullFileReplacement = false;
+        var peerContext = CollectFocusedRepairPeerContext(
+            request.WorkspacePath,
+            filePath,
+            request,
+            currentContent ?? string.Empty);
+
+        var primaryRequest = new AiRequest
+        {
+            UserPrompt = BuildFocusedDiagnosticRepairUserPrompt(
                 filePath,
                 currentContent ?? string.Empty,
                 request,
-                peerContext);
+                peerContext),
+            SystemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath),
+            MaxTokens = DetermineFocusedRepairBudget(),
+            Model = request.Model ?? string.Empty,
+            ReasoningEffort = _mechanicalReasoningEffort
+        };
 
-            var aiRequest = new AiRequest
+        AiResponse aiResponse;
+        try
+        {
+            aiResponse = await _aiProvider.SendAsync(primaryRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return DeveloperAgentResult.Fail($"Focused repair AI call failed: {ex.Message}", request.Model);
+        }
+
+        if (IsFocusedRepairTokenLimit(aiResponse))
+        {
+            var microRequest = new AiRequest
             {
-                UserPrompt = userPrompt,
-                SystemPrompt = systemPrompt,
-                MaxTokens = budget,
-                Model = request.Model ?? string.Empty
+                UserPrompt = BuildMicroDiagnosticRepairUserPrompt(
+                    filePath,
+                    currentContent ?? string.Empty,
+                    request,
+                    peerContext),
+                SystemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath),
+                MaxTokens = DetermineMicroDiagnosticRepairBudget(),
+                Model = request.Model ?? string.Empty,
+                ReasoningEffort = _mechanicalReasoningEffort
             };
 
-            AiResponse aiResponse;
             try
             {
-                aiResponse = await _aiProvider.SendAsync(aiRequest, cancellationToken).ConfigureAwait(false);
+                aiResponse = await _aiProvider.SendAsync(microRequest, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                return DeveloperAgentResult.Fail($"Focused repair AI call failed: {ex.Message}", request.Model);
+                return DeveloperAgentResult.Fail($"Micro diagnostic repair AI call failed: {ex.Message}", request.Model);
             }
 
-            if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
+            if (IsFocusedRepairTokenLimit(aiResponse))
             {
-                return DeveloperAgentResult.Fail($"Focused repair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
+                return DeveloperAgentResult.Fail(
+                    "Focused repair TokenLimitExceeded after one micro diagnostic fallback.",
+                    request.Model);
             }
-
-            FileEditSpec editSpec;
-            try
-            {
-                editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
-                ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
-                ValidateFocusedRepairSearchAnchors(editSpec, filePath);
-            }
-            catch (Exception parseEx)
-            {
-                return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseEx.Message}", request.Model);
-            }
-
-            collectedEdits.Add(editSpec);
         }
 
-        var structuredPlan = new StructuredEditPlan(collectedEdits);
+        if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
+        {
+            return DeveloperAgentResult.Fail($"Focused repair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
+        }
+
+        FileEditSpec editSpec;
+        try
+        {
+            editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
+            ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
+            ValidateFocusedRepairSearchAnchors(editSpec, filePath);
+        }
+        catch (Exception parseEx)
+        {
+            return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseEx.Message}", request.Model);
+        }
+
+        var structuredPlan = new StructuredEditPlan(new[] { editSpec });
         try
         {
             ValidateStructuredPlan(structuredPlan);
@@ -294,14 +358,22 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return DeveloperAgentResult.Fail($"Focused repair plan validation failed: {planEx.Message}", request.Model);
         }
 
-        var applyResult = await _editApplier.ApplyEditsAsync(request.WorkspacePath, request.BranchName, structuredPlan, cancellationToken).ConfigureAwait(false);
+        var applyResult = await _editApplier.ApplyEditsAsync(
+            request.WorkspacePath,
+            request.BranchName,
+            structuredPlan,
+            cancellationToken).ConfigureAwait(false);
         if (!applyResult.Success)
         {
             return DeveloperAgentResult.Fail(applyResult.ErrorMessage ?? "Focused repair apply failed.", request.Model);
         }
 
-        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? filesToRepair, model: request.Model);
+        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? new[] { filePath }, model: request.Model);
     }
+
+    private static bool IsFocusedRepairTokenLimit(AiResponse response) =>
+        response.FailureKind == AiFailureKind.TokenLimitExceeded ||
+        string.Equals(response.FinishReason, "length", StringComparison.OrdinalIgnoreCase);
 
     public async Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(
         DeveloperAgentRequest request,
@@ -520,6 +592,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         var inDegree = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var dependents = new Dictionary<string, List<ManifestFileEntry>>(StringComparer.OrdinalIgnoreCase);
+        var filesByPath = sortedFiles.ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase);
 
         foreach (var file in sortedFiles)
         {
@@ -527,42 +600,33 @@ public sealed class DeveloperAgent : IDeveloperAgent
             dependents[file.FilePath] = new List<ManifestFileEntry>();
         }
 
-        for (int i = 0; i < sortedFiles.Count; i++)
+        var prerequisites = CollectGenerationPrerequisites(sortedFiles, contextFiles);
+        foreach (var prerequisite in prerequisites)
         {
-            var target = sortedFiles[i];
-            var targetScore = GetSemanticLayerScore(target.FilePath);
-
-            for (int j = 0; j < sortedFiles.Count; j++)
+            if (!filesByPath.TryGetValue(prerequisite.ConsumerPath, out var consumer) ||
+                !dependents.ContainsKey(prerequisite.ProducerPath))
             {
-                if (i == j) continue;
-                var candidate = sortedFiles[j];
-                var candidateScore = GetSemanticLayerScore(candidate.FilePath);
-
-                bool dependsOn = false;
-                if (target.Dependencies != null && target.Dependencies.Contains(candidate.FilePath, StringComparer.OrdinalIgnoreCase))
-                {
-                    dependsOn = true;
-                }
-                else if (targetScore > candidateScore)
-                {
-                    var targetBase = Path.GetFileNameWithoutExtension(target.FilePath)
-                        .Replace("Handler", "").Replace("Tests", "").Replace("Test", "").Replace("Controller", "").Trim();
-                    var candBase = Path.GetFileNameWithoutExtension(candidate.FilePath);
-
-                    if (string.IsNullOrEmpty(targetBase) || candBase.Contains(targetBase, StringComparison.OrdinalIgnoreCase) ||
-                        ProjectGraphHelper.IsTestFileCandidate(target.FilePath) ||
-                        targetScore >= 50)
-                    {
-                        dependsOn = true;
-                    }
-                }
-
-                if (dependsOn)
-                {
-                    inDegree[target.FilePath]++;
-                    dependents[candidate.FilePath].Add(target);
-                }
+                continue;
             }
+
+            inDegree[consumer.FilePath]++;
+            dependents[prerequisite.ProducerPath].Add(consumer);
+            _logger.LogInformation(
+                "GenerationPrerequisite: {Producer} -> {Consumer} ({Reason})",
+                prerequisite.ProducerPath,
+                prerequisite.ConsumerPath,
+                prerequisite.Reason);
+
+            await SafeRecordActivityAsync(
+                request.ExecutionId,
+                $"GenerationPrerequisite: {prerequisite.ProducerPath} -> {prerequisite.ConsumerPath}",
+                cancellationToken,
+                ExecutionActivityStatus.Completed,
+                new ExecutionActivityMetadata(
+                    EventKind: "GenerationPrerequisite",
+                    PrerequisiteProducer: prerequisite.ProducerPath,
+                    PrerequisiteConsumer: prerequisite.ConsumerPath,
+                    PrerequisiteReason: prerequisite.Reason.ToString())).ConfigureAwait(false);
         }
 
         var readyQueue = new System.Collections.Concurrent.ConcurrentQueue<ManifestFileEntry>();
@@ -978,7 +1042,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 }
             }
 
-            var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace);
+            var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace, targetContent);
             var filteredLockedContracts = FilterRelevantContracts(fileEntry, lockedContracts, targetContent, request);
             var repairUserPrompt = BuildSingleFileRepairUserPrompt(
                 validationError ?? "Generated edit validation failed.",
@@ -996,7 +1060,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 Model = request.Model ?? string.Empty,
                 SystemPrompt = BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement),
                 UserPrompt = repairUserPrompt,
-                MaxTokens = repairBudget
+                MaxTokens = repairBudget,
+                ReasoningEffort = _mechanicalReasoningEffort
             };
 
             var repairSw = Stopwatch.StartNew();
@@ -1108,21 +1173,30 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         // Store authoritative synthesized resulting content into the virtual workspace overlay
+        // BEFORE dependents are released by the scheduler.
         if (!string.IsNullOrWhiteSpace(candidateCode))
         {
             virtualWorkspace[fileEntry.FilePath] = candidateCode;
-        }
-
-        // Lock Public Contract for downstream consumers if C# file
-        if (fileEntry.FilePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(candidateCode))
-        {
-            var role = RoslynPatternHelper.ClassifyRole(fileEntry.FilePath) ?? "General";
-            RoslynPatternHelper.DiscoverNearestPattern(request.WorkspacePath, fileEntry.FilePath, out var refFile);
-            var contractSig = RoslynContractExtractor.ExtractPublicContracts(fileEntry.FilePath, candidateCode);
-            if (!string.IsNullOrWhiteSpace(contractSig))
+            if (fileEntry.FilePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             {
-                var provenanceHeader = $"// Provenance: Role={role}, PatternReference={refFile ?? "None"}, Status=ValidatedAgainstRepositoryPattern\n";
-                lockedContracts[fileEntry.FilePath] = provenanceHeader + contractSig;
+                var role = RoslynPatternHelper.ClassifyRole(fileEntry.FilePath) ?? "General";
+                RoslynPatternHelper.DiscoverNearestPattern(request.WorkspacePath, fileEntry.FilePath, out var refFile);
+                var contractSig = RoslynContractExtractor.ExtractPublicContracts(fileEntry.FilePath, candidateCode);
+                if (!string.IsNullOrWhiteSpace(contractSig))
+                {
+                    var provenanceHeader = $"// Provenance: Role={role}, PatternReference={refFile ?? "None"}, Status=ValidatedAgainstRepositoryPattern\n";
+                    lockedContracts[fileEntry.FilePath] = provenanceHeader + contractSig;
+                }
+            }
+            else
+            {
+                var contractExcerpt = PlannedFileDependencyResolver.ExtractLockedContractExcerpt(
+                    fileEntry.FilePath,
+                    candidateCode);
+                if (!string.IsNullOrWhiteSpace(contractExcerpt))
+                {
+                    lockedContracts[fileEntry.FilePath] = contractExcerpt;
+                }
             }
         }
 
@@ -1864,8 +1938,44 @@ public sealed class DeveloperAgent : IDeveloperAgent
             6. Preserve all code not implicated by diagnostics.
 
             Required JSON shape:
-            {"filePath":"{{filePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact 2-5 line unique anchor","replace":"replacement"}]}
+            {"filePath":"{{filePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact 2-5 line unique excerpt","replace":"replacement"}]}
             """;
+    }
+
+    public static string BuildMicroDiagnosticRepairUserPrompt(
+        string filePath,
+        string currentContent,
+        FocusedRepairRequest request,
+        IReadOnlyDictionary<string, string>? peerContext = null)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"Target File: {filePath}");
+        sb.AppendLine("Action: Modify");
+        sb.AppendLine();
+        sb.AppendLine("=== Exact Compiler Diagnostics ===");
+        sb.AppendLine(request.DiagnosticEvidence);
+        sb.AppendLine("=== End Exact Compiler Diagnostics ===");
+        sb.AppendLine();
+
+        if (peerContext != null && peerContext.Count > 0)
+        {
+            sb.AppendLine("=== Direct Contract Evidence ===");
+            foreach (var (peerPath, peerContent) in peerContext.Take(2))
+            {
+                sb.AppendLine($"--- {peerPath} ---");
+                sb.AppendLine(BoundPeerContractExcerpt(peerContent, 800));
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("Edit Strategy: surgical SEARCH/REPLACE only. Use an exact existing unique 2-5 line anchor. Never use a bare closing brace alone. Never return full newContent.");
+        sb.AppendLine();
+        sb.AppendLine("=== Bounded Target Window ===");
+        sb.AppendLine(BuildBoundedTargetSourceWindow(currentContent ?? string.Empty, applicabilityFailure: null, isTestFile: false));
+        sb.AppendLine("=== End Bounded Target Window ===");
+        sb.AppendLine();
+        sb.AppendLine($"Output ONLY the corrected surgical searchReplaceEdits JSON for '{filePath}'.");
+        return sb.ToString();
     }
 
     public static string BuildFocusedDiagnosticRepairUserPrompt(
@@ -2419,12 +2529,56 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         var directlyReferenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        contextFiles.TryGetValue(fileEntry.FilePath, out var targetSourceForRefs);
+        var plannedOrGenerated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (fileEntry.Dependencies != null)
+        {
+            foreach (var depPath in fileEntry.Dependencies)
+            {
+                plannedOrGenerated.Add(depPath);
+            }
+        }
+
+        if (completedEdits != null)
+        {
+            foreach (var path in completedEdits.Keys)
+            {
+                plannedOrGenerated.Add(path);
+            }
+        }
+
+        if (virtualWorkspace != null)
+        {
+            foreach (var path in virtualWorkspace.Keys)
+            {
+                plannedOrGenerated.Add(path);
+            }
+        }
+
+        var localRefs = PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+            fileEntry.FilePath,
+            targetSourceForRefs,
+            plannedOrGenerated);
+
+        var dependencyPaths = new List<string>();
+        if (fileEntry.Dependencies != null)
+        {
+            dependencyPaths.AddRange(fileEntry.Dependencies);
+        }
+
+        foreach (var localRef in localRefs)
+        {
+            if (!dependencyPaths.Contains(localRef, StringComparer.OrdinalIgnoreCase))
+            {
+                dependencyPaths.Add(localRef);
+            }
+        }
 
         // Include directly referenced dependency files: use authoritative virtual workspace if generated, else fallback to contextFiles
-        if (fileEntry.Dependencies != null && fileEntry.Dependencies.Count > 0)
+        if (dependencyPaths.Count > 0)
         {
             sb.AppendLine("=== Directly Referenced Dependency Snippets ===");
-            foreach (var depPath in fileEntry.Dependencies)
+            foreach (var depPath in dependencyPaths)
             {
                 if (virtualWorkspace != null && virtualWorkspace.TryGetValue(depPath, out var genDepContent) && !string.IsNullOrWhiteSpace(genDepContent))
                 {
@@ -2433,19 +2587,22 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     sb.AppendLine(genDepContent);
                     sb.AppendLine("--- End Dependency File ---");
                 }
-                else if (contextFiles.TryGetValue(depPath, out var depContent))
+                else if (completedEdits == null || !completedEdits.ContainsKey(depPath))
                 {
-                    directlyReferenced.Add(depPath);
-                    sb.AppendLine($"--- Dependency File: {depPath} ---");
-                    sb.AppendLine(depContent);
-                    sb.AppendLine("--- End Dependency File ---");
+                    if (contextFiles.TryGetValue(depPath, out var depContent))
+                    {
+                        directlyReferenced.Add(depPath);
+                        sb.AppendLine($"--- Dependency File: {depPath} ---");
+                        sb.AppendLine(depContent);
+                        sb.AppendLine("--- End Dependency File ---");
+                    }
                 }
             }
             sb.AppendLine();
         }
 
         // Include relevant in-memory generated dependency specs from earlier completed waves (excluding any already directly referenced)
-        var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace);
+        var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace, targetSourceForRefs);
         var nonRedundantGenerated = relevantGenerated
             .Where(kvp => !directlyReferenced.Contains(kvp.Key))
             .ToList();
@@ -2594,10 +2751,23 @@ public sealed class DeveloperAgent : IDeveloperAgent
             request?.TaskDescription ?? string.Empty, " ",
             request?.AcceptanceCriteria ?? string.Empty);
 
+        var localContractRefs = new HashSet<string>(
+            PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                fileEntry.FilePath,
+                targetContent,
+                lockedContracts.Keys),
+            StringComparer.OrdinalIgnoreCase);
+
         foreach (var (contractPath, contractSig) in lockedContracts)
         {
-            // 1. Explicit dependency in manifest
+            // 1. Explicit dependency in manifest or exact local repository reference
             if (fileEntry.Dependencies != null && fileEntry.Dependencies.Contains(contractPath, StringComparer.OrdinalIgnoreCase))
+            {
+                result[contractPath] = contractSig;
+                continue;
+            }
+
+            if (localContractRefs.Contains(contractPath))
             {
                 result[contractPath] = contractSig;
                 continue;
@@ -2652,7 +2822,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
     public static Dictionary<string, string> GetRelevantGeneratedEdits(
         ManifestFileEntry fileEntry,
         IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
-        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null,
+        string? targetSource = null)
     {
         var relevant = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (completedEdits == null || completedEdits.Count == 0) return relevant;
@@ -2667,6 +2838,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             .Trim();
 
         bool isTestTarget = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
+        var localRefs = new HashSet<string>(
+            PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                fileEntry.FilePath,
+                targetSource,
+                completedEdits.Keys),
+            StringComparer.OrdinalIgnoreCase);
 
         foreach (var (path, spec) in completedEdits)
         {
@@ -2674,8 +2851,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             bool isRelevant = false;
 
-            // 1. Explicit dependency
+            // 1. Explicit dependency or exact local repository reference
             if (fileEntry.Dependencies != null && fileEntry.Dependencies.Contains(path, StringComparer.OrdinalIgnoreCase))
+            {
+                isRelevant = true;
+            }
+            else if (localRefs.Contains(path))
             {
                 isRelevant = true;
             }
@@ -2924,6 +3105,102 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         return 35;
+    }
+
+    public static IReadOnlyList<GenerationPrerequisite> CollectGenerationPrerequisites(
+        IReadOnlyList<ManifestFileEntry> files,
+        IReadOnlyDictionary<string, string>? repositorySources = null)
+    {
+        var prerequisites = new List<GenerationPrerequisite>();
+        if (files == null || files.Count <= 1)
+        {
+            return prerequisites;
+        }
+
+        var plannedPaths = files.Select(file => file.FilePath).ToList();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var target in files)
+        {
+            string? targetSource = null;
+            repositorySources?.TryGetValue(target.FilePath, out targetSource);
+            var localRefs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var resolved in PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                         target.FilePath, targetSource, plannedPaths))
+            {
+                localRefs.Add(resolved);
+            }
+
+            if (repositorySources != null)
+            {
+                foreach (var owner in PlannedFileDependencyResolver.ResolveUniqueCsharpTypeOwners(
+                             target.FilePath, targetSource, repositorySources))
+                {
+                    localRefs.Add(owner);
+                }
+            }
+
+            foreach (var candidate in files)
+            {
+                if (string.Equals(target.FilePath, candidate.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                GenerationPrerequisiteReason? reason = null;
+                if (target.Dependencies != null &&
+                    target.Dependencies.Contains(candidate.FilePath, StringComparer.OrdinalIgnoreCase))
+                {
+                    reason = GenerationPrerequisiteReason.ManifestDependency;
+                }
+                else if (localRefs.Contains(candidate.FilePath))
+                {
+                    reason = GenerationPrerequisiteReason.DirectLocalReference;
+                }
+                else if (ExistingHeuristicDependsOn(target, candidate))
+                {
+                    reason = GenerationPrerequisiteReason.ExistingHeuristic;
+                }
+
+                if (reason == null)
+                {
+                    continue;
+                }
+
+                var key = $"{candidate.FilePath}|{target.FilePath}";
+                if (!seen.Add(key))
+                {
+                    continue;
+                }
+
+                prerequisites.Add(new GenerationPrerequisite(candidate.FilePath, target.FilePath, reason.Value));
+            }
+        }
+
+        return prerequisites;
+    }
+
+    private static bool ExistingHeuristicDependsOn(ManifestFileEntry target, ManifestFileEntry candidate)
+    {
+        var targetScore = GetSemanticLayerScore(target.FilePath);
+        var candidateScore = GetSemanticLayerScore(candidate.FilePath);
+        if (targetScore <= candidateScore)
+        {
+            return false;
+        }
+
+        var targetBase = Path.GetFileNameWithoutExtension(target.FilePath)
+            .Replace("Handler", "")
+            .Replace("Tests", "")
+            .Replace("Test", "")
+            .Replace("Controller", "")
+            .Trim();
+        var candBase = Path.GetFileNameWithoutExtension(candidate.FilePath);
+
+        return string.IsNullOrEmpty(targetBase) ||
+               candBase.Contains(targetBase, StringComparison.OrdinalIgnoreCase) ||
+               ProjectGraphHelper.IsTestFileCandidate(target.FilePath) ||
+               targetScore >= 50;
     }
 
     public static IReadOnlyList<ManifestFileEntry> SortManifestEntries(

@@ -83,6 +83,19 @@ public sealed record SearchReplaceEdit(
     [property: JsonPropertyName("search")] string Search,
     [property: JsonPropertyName("replace")] string Replace);
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum GenerationPrerequisiteReason
+{
+    ManifestDependency,
+    DirectLocalReference,
+    ExistingHeuristic
+}
+
+public sealed record GenerationPrerequisite(
+    string ProducerPath,
+    string ConsumerPath,
+    GenerationPrerequisiteReason Reason);
+
 public sealed record ContextLimits(
     int MaxFileCount = 20,
     long MaxFileSizeBytes = 100 * 1024, // 100 KB

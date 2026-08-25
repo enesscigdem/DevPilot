@@ -290,7 +290,7 @@ public class LightweightFocusedRepairTests : IDisposable
     }
 
     [Fact]
-    public async Task ExecuteFocusedRepairAsync_TokenLimitExceeded_DoesNotRetryOrEscalate()
+    public async Task ExecuteFocusedRepairAsync_TokenLimitExceeded_AllowsExactlyOneMicroFallbackThenStops()
     {
         WriteWorktreeFile("src/controllers/issueController.ts", SmallIssueController);
         var agent = CreateAgent();
@@ -301,15 +301,84 @@ public class LightweightFocusedRepairTests : IDisposable
             Content = string.Empty,
             ErrorMessage = "TokenLimitExceeded"
         });
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            Content = string.Empty,
+            ErrorMessage = "TokenLimitExceeded"
+        });
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            Content = string.Empty,
+            ErrorMessage = "should-not-be-consumed"
+        });
 
         var result = await agent.ExecuteFocusedRepairAsync(CreateTypeScriptControllerRepairRequest(), CancellationToken.None);
 
         result.Success.Should().BeFalse();
         result.ErrorMessage.Should().Contain("TokenLimitExceeded");
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(1, "focused repair must not compact-retry or escalate tokens");
+        result.ErrorMessage.Should().Contain("micro");
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(2, "primary focused repair plus exactly one micro fallback");
         _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[0].ReasoningEffort.Should().Be("low");
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(2048);
+        _fakeAiProvider.ReceivedRequests[1].ReasoningEffort.Should().Be("low");
+        _fakeAiProvider.ReceivedRequests.Select(request => request.MaxTokens)
+            .Should().NotContain(tokens => tokens == 8192 || tokens == 16384 || tokens == 32768);
         File.ReadAllText(Path.Combine(_worktreeDir, "src", "controllers", "issueController.ts"))
             .Should().Be(SmallIssueController);
+        _fakeAiProvider.StructuredResponsesToReturn.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task ExecuteFocusedRepairAsync_FirstSuccessfulRepairIsKeptWhenLaterFileFails()
+    {
+        WriteWorktreeFile("src/A.ts", "export const a = 1;");
+        WriteWorktreeFile("src/B.ts", "export const b = 1;");
+        var agent = CreateAgent();
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = true,
+            Content = """{"filePath":"src/A.ts","action":"Modify","searchReplaceEdits":[{"search":"export const a = 1;","replace":"export const a = 2;"}]}"""
+        });
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            Content = string.Empty,
+            ErrorMessage = "TokenLimitExceeded"
+        });
+        _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            Content = string.Empty,
+            ErrorMessage = "TokenLimitExceeded"
+        });
+
+        var request = new FocusedRepairRequest(
+            TaskId: Guid.NewGuid(),
+            ExecutionId: Guid.NewGuid(),
+            TaskTitle: "Independent repairs",
+            AcceptanceCriteria: null,
+            WorkspacePath: _worktreeDir,
+            BranchName: _branchName,
+            RepairFiles: new[] { "src/A.ts", "src/B.ts" },
+            DiagnosticEvidence: "src/A.ts(1,1): error TS0001\nsrc/B.ts(1,1): error TS0001",
+            Model: "test-model");
+
+        var result = await agent.ExecuteFocusedRepairAsync(request, CancellationToken.None);
+
+        result.Success.Should().BeFalse();
+        File.ReadAllText(Path.Combine(_worktreeDir, "src", "A.ts")).Should().Contain("a = 2");
+        File.ReadAllText(Path.Combine(_worktreeDir, "src", "B.ts")).Should().Be("export const b = 1;");
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(3);
+        _fakeAiProvider.ReceivedRequests[0].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[2].MaxTokens.Should().Be(2048);
     }
 
     [Fact]
@@ -395,6 +464,8 @@ public class LightweightFocusedRepairTests : IDisposable
         repairBudget.Should().Be(4096, "focused repair uses the existing ModifyPatch budget only");
         repairBudget.Should().BeLessThan(8192);
         repairBudget.Should().BeLessThan(32768);
+        agent.DetermineMicroDiagnosticRepairBudget().Should().Be(2048);
+        agent.DetermineMechanicalReasoningEffort().Should().Be("low");
     }
 
     [Fact]
@@ -545,6 +616,7 @@ public class LightweightFocusedRepairTests : IDisposable
     private static void AssertFocusedRepairIsSurgical(AiRequest request, string filePath)
     {
         request.MaxTokens.Should().Be(4096);
+        request.ReasoningEffort.Should().Be("low");
         request.SystemPrompt.Should().Contain($"lightweight focused verification repair for a single existing file: '{filePath}'");
         request.SystemPrompt.Should().Contain("searchReplaceEdits");
         request.SystemPrompt.Should().Contain("NEVER return 'newContent'");

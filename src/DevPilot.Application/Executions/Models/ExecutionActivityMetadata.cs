@@ -51,4 +51,7 @@ public sealed record ExecutionActivityMetadata(
     string? OutputContract = null,
     string? CompactRetryReason = null,
     string? RepairSelectionReason = null,
-    string? TestName = null);
+    string? TestName = null,
+    string? PrerequisiteProducer = null,
+    string? PrerequisiteConsumer = null,
+    string? PrerequisiteReason = null);
