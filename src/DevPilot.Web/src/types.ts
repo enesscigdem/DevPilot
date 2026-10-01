@@ -1084,3 +1084,81 @@ export interface GitHubBranch {
   commitSha: string;
   isProtected: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Repository insights
+// ---------------------------------------------------------------------------
+export interface InsightOutcomeCount {
+  outcome: string;
+  count: number;
+}
+
+export interface InsightSignal {
+  key: string;
+  label: string;
+  description: string;
+  count: number;
+}
+
+export interface InsightFailureReason {
+  reason: string;
+  count: number;
+}
+
+export interface InsightExecutionRow {
+  executionId: string;
+  taskId: string;
+  taskTitle: string;
+  attemptNumber: number;
+  status: string;
+  outcome: string;
+  headline: string;
+  createdAt: string;
+  durationSeconds?: number | null;
+  repairRounds: number;
+  providerCalls: number;
+  totalTokens: number;
+  estimatedCostUsd?: number | null;
+}
+
+export interface InsightRetriedTask {
+  taskId: string;
+  taskTitle: string;
+  attempts: number;
+  firstExecutionId: string;
+  lastExecutionId: string;
+  firstOutcome: string;
+  lastOutcome: string;
+  improved: boolean;
+}
+
+export interface WorkspaceInsightsTotals {
+  executions: number;
+  cancelled: number;
+  measured: number;
+  deliveryReady: number;
+  deliveryReadyRate?: number | null;
+  verifiedRate?: number | null;
+  firstPass: number;
+  firstPassRate?: number | null;
+  repaired: number;
+  repairedRecovered: number;
+  repairRecoveryRate?: number | null;
+  avgDurationSeconds?: number | null;
+  medianDurationSeconds?: number | null;
+  totalTokens: number;
+  avgTokensPerExecution?: number | null;
+  avgProviderCalls?: number | null;
+  totalCostUsd?: number | null;
+}
+
+export interface WorkspaceInsights {
+  generatedAt: string;
+  windowSize: number;
+  totals: WorkspaceInsightsTotals;
+  outcomes: InsightOutcomeCount[];
+  signals: InsightSignal[];
+  topFailureReasons: InsightFailureReason[];
+  recent: InsightExecutionRow[];
+  retriedTasks: InsightRetriedTask[];
+}

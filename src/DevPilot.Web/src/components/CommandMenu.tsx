@@ -33,12 +33,14 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
   // Navigation entries mirror the real sidebar; task / execution entries come from the active repository.
   const commandItems = useMemo<CommandItem[]>(
     () => [
-      { label: "Go to Workspace", hint: repoHint, href: "/", group: "Navigate" },
-      { label: "Open Projects", hint: "Repository structure", href: "/projects", group: "Navigate" },
+      { label: "Go to Overview", hint: repoHint, href: "/", group: "Navigate" },
+      { label: "Open Repository", hint: "Structure and analyzer state", href: "/projects", group: "Navigate" },
       { label: "View Tasks", hint: "Plan and approve changes", href: "/tasks", group: "Navigate" },
       { label: "Open Project Brain", hint: "Ask the codebase", href: "/brain", group: "Navigate" },
       { label: "View Executions", hint: "Runs and review", href: "/executions", group: "Navigate" },
-      { label: "Architecture Map", hint: "Impact graph", href: "/architecture", group: "Navigate" },
+      { label: "Impact map", hint: "How changes ripple across layers", href: "/architecture", group: "Navigate" },
+      { label: "Insights", hint: "Success, repair, time and cost", href: "/insights", group: "Navigate" },
+      { label: "Compare executions", hint: "Original vs retry", href: "/executions/compare", group: "Navigate" },
       ...dynamicItems,
     ],
     [repoHint, dynamicItems],

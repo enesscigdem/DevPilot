@@ -220,8 +220,8 @@ export function Architecture() {
   return (
     <PageContainer>
       <PageHeading
-        eyebrow="Architecture"
-        title="Impact map"
+        eyebrow="Impact map"
+        title="Change impact map"
         description="A live dependency graph of the solution, derived from the Roslyn symbol graph. Highlighted nodes are touched by the active task — trace how a change ripples across layers."
         actions={
           <Button variant={onlyImpacted ? "primary" : "default"} size="sm" onClick={() => setOnlyImpacted((v) => !v)}>

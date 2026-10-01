@@ -11,6 +11,7 @@ using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspa
 using DevPilot.Application.RepositoryWorkspaces.Ports;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceArchitecture;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetWorkspaceInsights;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetWorkspaceOverview;
 using DevPilot.Infrastructure.RepositoryInspection;
 using DevPilot.Infrastructure.RepositoryWorkspaces;
@@ -175,6 +176,8 @@ public static class DependencyInjection
         services.AddScoped<IGetRepositoryWorkspaceAnalysisQueryHandler, GetRepositoryWorkspaceAnalysisQueryHandler>();
         services.AddScoped<IGetRepositoryWorkspaceArchitectureQueryHandler, GetRepositoryWorkspaceArchitectureQueryHandler>();
         services.AddScoped<IWorkspaceOverviewReader, EfWorkspaceOverviewReader>();
+        services.AddScoped<IWorkspaceInsightsReader, EfWorkspaceInsightsReader>();
+        services.AddScoped<IGetWorkspaceInsightsQueryHandler, GetWorkspaceInsightsQueryHandler>();
         services.AddScoped<IGetWorkspaceOverviewQueryHandler, GetWorkspaceOverviewQueryHandler>();
 
         return services;

@@ -22,6 +22,7 @@ import {
   Cpu,
 } from "lucide-react"
 import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
+import { ExecutionTabs } from "@/components/ExecutionTabs"
 import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { cn } from "@/lib/utils"
 import { getExecution, getExecutionActivity, retryExecution, cancelExecution, getExecutions } from "@/api"
@@ -500,6 +501,13 @@ export function ExecutionWorkspace() {
           </div>
         </div>
       </div>
+
+      <ExecutionTabs
+        executionId={execution.id}
+        taskId={execution.developmentTaskId}
+        active="run"
+        reviewAvailable={!isPending && !isRunning && execution.status === TaskExecutionStatus.Completed}
+      />
 
       <div className="mx-auto grid max-w-[1500px] grid-cols-1 gap-0 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
         {/* LEFT — stage rail */}

@@ -87,6 +87,7 @@ export function TaskImpact() {
   const [selectedFileIndex, setSelectedFileIndex] = useState(0)
 
   const [isApproving, setIsApproving] = useState(false)
+  const [acknowledgedRisks, setAcknowledgedRisks] = useState(false)
   const [isRejecting, setIsRejecting] = useState(false)
   const [approvalError, setApprovalError] = useState<string | null>(null)
 
@@ -413,6 +414,13 @@ export function TaskImpact() {
       : []
 
   const realFiles: ImpactedFile[] = structured?.impactedFiles || []
+
+  // Approval checklist: the facts a developer should have seen before approving, derived from the plan itself.
+  const uncertainFileCount = realFiles.filter((f) => f.isUncertain).length
+  const unknownCount = structured?.unknowns?.length ?? 0
+  const staleBase = structured?.baseSnapshot?.isStale ?? false
+  const expectedCheckCount = structured?.changeBrief?.expectedChecks?.length ?? 0
+  const requiresAcknowledgement = uncertainFileCount > 0 || staleBase
 
   const selectedFile =
     hasCompletedAnalysis && realFiles.length > 0
@@ -967,12 +975,52 @@ export function TaskImpact() {
                     </div>
                   )}
 
+                  <div className="mt-3 space-y-1.5 rounded-[var(--radius-md)] border border-border bg-surface-2 p-3 text-[11.5px]">
+                    <div className="tech-label mb-1">Before you approve</div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>Files in plan</span>
+                      <span className="font-mono text-foreground">{realFiles.length} / 20</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>Uncertain files</span>
+                      <span className={uncertainFileCount > 0 ? "font-mono text-amber-500" : "font-mono text-foreground"}>{uncertainFileCount}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>Open unknowns</span>
+                      <span className={unknownCount > 0 ? "font-mono text-amber-500" : "font-mono text-foreground"}>{unknownCount}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>Checks that will verify it</span>
+                      <span className="font-mono text-foreground">{expectedCheckCount > 0 ? expectedCheckCount : "none discovered"}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>Base vs origin</span>
+                      <span className={staleBase ? "font-mono text-amber-500" : "font-mono text-foreground"}>
+                        {structured?.baseSnapshot ? (staleBase ? `${structured.baseSnapshot.behindCount} behind` : structured.baseSnapshot.freshness) : "unknown"}
+                      </span>
+                    </div>
+                    {requiresAcknowledgement && (
+                      <label className="mt-2 flex cursor-pointer items-start gap-2 border-t border-border/60 pt-2 text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={acknowledgedRisks}
+                          onChange={(e) => setAcknowledgedRisks(e.target.checked)}
+                          className="mt-0.5 h-3.5 w-3.5 accent-[var(--color-primary)]"
+                        />
+                        <span className="leading-snug">
+                          I reviewed the {uncertainFileCount > 0 ? "uncertain files" : "stale base"}
+                          {uncertainFileCount > 0 && staleBase ? " and the stale base" : ""} and want to proceed.
+                        </span>
+                      </label>
+                    )}
+                  </div>
+
                   <div className="mt-3 flex flex-col gap-2">
                     <Button
                       variant="primary"
                       size="lg"
                       className="w-full"
-                      disabled={isApproving || isRejecting || realFiles.length > 20}
+                      disabled={isApproving || isRejecting || realFiles.length > 20 || (requiresAcknowledgement && !acknowledgedRisks)}
                       onClick={handleApprove}
                     >
                       {isApproving ? (
@@ -988,15 +1036,6 @@ export function TaskImpact() {
                       )}
                     </Button>
                     <div className="flex gap-2">
-                      <Button
-                        variant="default"
-                        size="md"
-                        className="flex-1"
-                        disabled={isApproving || isRejecting}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        Edit plan
-                      </Button>
                       <Button
                         variant="danger"
                         size="md"

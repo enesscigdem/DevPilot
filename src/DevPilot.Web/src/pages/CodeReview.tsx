@@ -19,6 +19,7 @@ import {
   Sparkles,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
+import { ExecutionTabs } from "@/components/ExecutionTabs"
 import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
 import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl, retryExecution } from "@/api"
@@ -745,6 +746,8 @@ export function CodeReview() {
           </div>
         </div>
       )}
+
+      <ExecutionTabs executionId={review.executionId} taskId={review.taskId} active="review" reviewAvailable />
 
       <div className="mx-auto grid max-w-[1600px] grid-cols-1 gap-0 lg:grid-cols-[260px_minmax(0,1fr)_360px]">
         {/* LEFT — file tree */}

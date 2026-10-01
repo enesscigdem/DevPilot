@@ -14,6 +14,7 @@ import {
   AlertCircle,
 } from "lucide-react"
 import { PageContainer, SectionHead } from "@/components/shared"
+import { PipelineStrip } from "@/components/PipelineStrip"
 import { Badge, Button, Meter, Panel, StatusDot } from "@/components/ui/primitives"
 import { useWorkspace } from "@/lib/workspace"
 import { cn } from "@/lib/utils"
@@ -296,6 +297,7 @@ export function Workspace() {
             <Boxes className="h-5 w-5" />
           </div>
           <div className="min-w-0">
+            <div className="tech-label mb-1">Overview · what needs you right now</div>
             <div className="flex items-center gap-2">
               <h1 className="truncate text-[18px] font-semibold tracking-tight text-foreground">{repoFullName}</h1>
               <Badge tone="neutral" mono>
@@ -313,6 +315,8 @@ export function Workspace() {
           </div>
         </div>
       </div>
+
+      <PipelineStrip />
 
       {/* Needs Attention */}
       <div className="mb-8 grid grid-cols-1 gap-3 md:grid-cols-3">

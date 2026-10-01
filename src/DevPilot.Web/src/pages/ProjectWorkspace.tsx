@@ -176,9 +176,9 @@ export function ProjectWorkspace() {
   return (
     <PageContainer>
       <PageHeading
-        eyebrow="Project workspace"
+        eyebrow="Repository"
         title={repoFullName}
-        description="Structure, detected technologies and analyzer state derived from Roslyn workspace analysis of the master branch."
+        description="What DevPilot knows about this codebase: structure, detected technologies and analyzer state. For what needs your attention right now, see Overview."
         actions={
           <>
             <div className="flex items-center gap-1.5 rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground">

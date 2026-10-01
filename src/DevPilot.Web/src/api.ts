@@ -24,6 +24,7 @@ import type {
   BrainConversation,
   BrainConversationDetail,
   WorkspaceOverview,
+  WorkspaceInsights,
   GitHubConnectionStatus,
   GitHubDiscoveredRepository,
   GitHubBranch,
@@ -311,6 +312,13 @@ export async function getWorkspaceOverview(
   init?: RequestInit,
 ): Promise<WorkspaceOverview> {
   return http<WorkspaceOverview>(`/repositoryworkspaces/${workspaceId}/overview`, init);
+}
+
+export async function getWorkspaceInsights(
+  workspaceId: string,
+  init?: RequestInit,
+): Promise<WorkspaceInsights> {
+  return http<WorkspaceInsights>(`/repositoryworkspaces/${workspaceId}/insights`, init);
 }
 
 export async function getGitHubStatus(): Promise<GitHubConnectionStatus> {

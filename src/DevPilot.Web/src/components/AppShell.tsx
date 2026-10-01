@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { NavLink, useLocation } from "react-router-dom"
 import {
+  BarChart3,
   Boxes,
   FolderGit2,
   ListChecks,
@@ -25,14 +26,70 @@ import { CommandMenu } from "./CommandMenu"
 import { RepositoryPickerModal } from "./RepositoryPickerModal"
 import { StatusDot } from "./ui/primitives"
 
-const nav = [
-  { to: "/", label: "Workspace", icon: Boxes, end: true },
-  { to: "/projects", label: "Projects", icon: FolderGit2 },
-  { to: "/tasks", label: "Tasks", icon: ListChecks },
-  { to: "/brain", label: "Project Brain", icon: Sparkles },
-  { to: "/executions", label: "Executions", icon: Activity },
-  { to: "/architecture", label: "Architecture", icon: Network },
+interface NavEntry {
+  to: string
+  label: string
+  icon: typeof Boxes
+  end?: boolean
+}
+
+// Grouped by the question each area answers, in the order work flows through DevPilot.
+const navOverview: NavEntry = { to: "/", label: "Overview", icon: Boxes, end: true }
+
+const navGroups: { label: string; items: NavEntry[] }[] = [
+  {
+    label: "Plan & run",
+    items: [
+      { to: "/tasks", label: "Tasks", icon: ListChecks },
+      { to: "/executions", label: "Executions", icon: Activity },
+    ],
+  },
+  {
+    label: "Understand",
+    items: [
+      { to: "/projects", label: "Repository", icon: FolderGit2 },
+      { to: "/architecture", label: "Impact map", icon: Network },
+      { to: "/brain", label: "Project Brain", icon: Sparkles },
+    ],
+  },
+  {
+    label: "Measure",
+    items: [{ to: "/insights", label: "Insights", icon: BarChart3 }],
+  },
 ]
+
+function NavItem({ item }: { item: NavEntry }) {
+  return (
+    <NavLink
+      to={item.to}
+      end={item.end}
+      className={({ isActive }) =>
+        cn(
+          "group relative flex items-center gap-2.5 rounded-[var(--radius-md)] px-2.5 py-[7px] text-[13px] font-medium transition-colors",
+          isActive
+            ? "bg-surface text-foreground shadow-[var(--shadow-sm)]"
+            : "text-muted-foreground hover:bg-surface-3 hover:text-foreground",
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <span
+            className={cn(
+              "absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-full bg-primary transition-opacity",
+              isActive ? "opacity-100" : "opacity-0",
+            )}
+          />
+          <item.icon
+            className={cn("h-4 w-4", isActive ? "text-primary" : "text-subtle-foreground group-hover:text-foreground")}
+            strokeWidth={2}
+          />
+          {item.label}
+        </>
+      )}
+    </NavLink>
+  )
+}
 
 function Logo() {
   return (
@@ -119,37 +176,14 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         <nav className="mt-4 flex flex-col gap-0.5 px-3">
-          <div className="tech-label px-2.5 pb-1.5">Workspace</div>
-          {nav.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              className={({ isActive }) =>
-                cn(
-                  "group relative flex items-center gap-2.5 rounded-[var(--radius-md)] px-2.5 py-[7px] text-[13px] font-medium transition-colors",
-                  isActive
-                    ? "bg-surface text-foreground shadow-[var(--shadow-sm)]"
-                    : "text-muted-foreground hover:bg-surface-3 hover:text-foreground",
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <span
-                    className={cn(
-                      "absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-full bg-primary transition-opacity",
-                      isActive ? "opacity-100" : "opacity-0",
-                    )}
-                  />
-                  <item.icon
-                    className={cn("h-4 w-4", isActive ? "text-primary" : "text-subtle-foreground group-hover:text-foreground")}
-                    strokeWidth={2}
-                  />
-                  {item.label}
-                </>
-              )}
-            </NavLink>
+          <NavItem item={navOverview} />
+          {navGroups.map((group) => (
+            <div key={group.label} className="mt-3 flex flex-col gap-0.5">
+              <div className="tech-label px-2.5 pb-1.5">{group.label}</div>
+              {group.items.map((item) => (
+                <NavItem key={item.to} item={item} />
+              ))}
+            </div>
           ))}
         </nav>
 
@@ -285,12 +319,14 @@ function formatElapsed(elapsedSeconds?: number | null, startedAt?: string | null
 }
 
 const routeTitles: Record<string, string> = {
-  "/": "Workspace",
-  "/projects": "Project Workspace",
+  "/": "Overview",
+  "/projects": "Repository",
   "/tasks": "Tasks",
   "/brain": "Project Brain",
   "/executions": "Executions",
-  "/architecture": "Architecture & Impact",
+  "/executions/compare": "Compare executions",
+  "/architecture": "Impact map",
+  "/insights": "Insights",
 }
 
 function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: string }) {
@@ -299,9 +335,9 @@ function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: stri
     (path.startsWith("/tasks/")
       ? "Task & Impact Analysis"
       : path.startsWith("/executions/")
-        ? "Execution Workspace"
+        ? "Execution"
         : path.startsWith("/review/")
-          ? "Code Review"
+          ? "Review & delivery"
           : "DevPilot")
 
   return (
