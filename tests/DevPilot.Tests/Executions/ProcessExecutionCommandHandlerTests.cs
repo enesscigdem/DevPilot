@@ -341,6 +341,72 @@ public class ProcessExecutionCommandHandlerTests
         public Task<int> ReconcileStaleAnalysesAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HandleAsync_RecordsVerificationSnapshot_OnSuccessAndOnFailure(bool processorFails)
+    {
+        var executionId = Guid.NewGuid();
+        var taskId = Guid.NewGuid();
+        var tempDir = Path.Combine(Path.GetTempPath(), "DevPilotTestDir_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var task = new DevelopmentTask
+            {
+                Id = taskId,
+                Title = "Task Title",
+                Description = "Task Desc",
+                RepositoryWorkspace = new RepositoryWorkspace { Id = Guid.NewGuid(), LocalPath = tempDir }
+            };
+            var execution = new TaskExecution
+            {
+                Id = executionId,
+                DevelopmentTaskId = taskId,
+                DevelopmentTask = task,
+                Status = TaskExecutionStatus.Pending
+            };
+
+            var repo = new TestExecutionRepository { ExecutionToReturn = execution, ClaimResult = true };
+            var impactRepo = new TestImpactAnalysisRepository
+            {
+                AnalysisToReturn = new TaskImpactAnalysis { Id = Guid.NewGuid(), DevelopmentTaskId = taskId, Status = ImpactAnalysisStatus.Completed, Summary = "Summary" }
+            };
+            var processor = new TestExecutionProcessor
+            {
+                ExceptionToThrow = processorFails ? new InvalidOperationException("boom") : null
+            };
+            var snapshotRecorder = new CapturingSnapshotRecorder();
+            var handler = new ProcessExecutionCommandHandler(
+                repo, impactRepo, processor, new TestActivityRecorder(), new TestHeartbeatService(), new TestCancellationRegistry(),
+                NullLogger<ProcessExecutionCommandHandler>.Instance,
+                snapshotRecorder);
+
+            await handler.HandleAsync(new ProcessExecutionCommand(executionId));
+
+            snapshotRecorder.RecordedExecutionIds.Should().Equal(executionId);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    private sealed class CapturingSnapshotRecorder : IExecutionVerificationSnapshotRecorder
+    {
+        public List<Guid> RecordedExecutionIds { get; } = new();
+
+        public Task RecordAsync(Guid executionId, CancellationToken cancellationToken = default)
+        {
+            RecordedExecutionIds.Add(executionId);
+            return Task.CompletedTask;
+        }
+    }
+
     private class TestExecutionProcessor : IExecutionProcessor
     {
         public Exception? ExceptionToThrow { get; set; }

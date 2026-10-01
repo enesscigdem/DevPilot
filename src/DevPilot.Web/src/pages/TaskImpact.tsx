@@ -859,6 +859,26 @@ export function TaskImpact() {
             </div>
           </div>
 
+          {/* Base freshness evidence captured when this analysis was produced */}
+          {structured?.baseSnapshot?.isStale && (
+            <div className="rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/5 p-3 min-w-0">
+              <div className="mb-1 flex items-center gap-1.5 text-[12px] font-semibold text-amber-500">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>Stale base</span>
+              </div>
+              <p className="text-[11.5px] leading-relaxed text-muted-foreground break-words">
+                {structured.baseSnapshot.message ??
+                  `The base was ${structured.baseSnapshot.behindCount} commit(s) behind origin when this plan was produced.`}
+                {structured.baseSnapshot.baseCommitSha && (
+                  <span className="mt-1 block font-mono text-[10.5px] text-subtle-foreground">
+                    base {structured.baseSnapshot.baseCommitSha.slice(0, 7)}
+                    {structured.baseSnapshot.remoteCommitSha ? ` · origin ${structured.baseSnapshot.remoteCommitSha.slice(0, 7)}` : ""}
+                  </span>
+                )}
+              </p>
+            </div>
+          )}
+
           {/* Unknowns section */}
           {structured?.unknowns && structured.unknowns.length > 0 && (
             <div className="rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/5 p-3 min-w-0">

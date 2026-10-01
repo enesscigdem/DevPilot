@@ -262,6 +262,55 @@ public class GetWorkspaceOverviewQueryHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task HandleAsync_ActiveExecution_AggregatesRealTokensAndConfiguredCost()
+    {
+        var ws = new RepositoryWorkspace
+        {
+            Id = Guid.NewGuid(), Owner = "owner", Repository = "repo", Branch = "main",
+            Status = RepositoryWorkspaceStatus.Completed, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        _db.RepositoryWorkspaces.Add(ws);
+        var task = new DevelopmentTask
+        {
+            Id = Guid.NewGuid(), RepositoryWorkspaceId = ws.Id, Title = "Running", Status = DevelopmentTaskStatus.Executing,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-5), UpdatedAt = DateTime.UtcNow.AddMinutes(-5),
+        };
+        var execution = new TaskExecution
+        {
+            Id = Guid.NewGuid(), DevelopmentTaskId = task.Id, Status = TaskExecutionStatus.Running,
+            StartedAt = DateTime.UtcNow.AddMinutes(-4), CreatedAt = DateTime.UtcNow.AddMinutes(-5),
+        };
+        _db.DevelopmentTasks.Add(task);
+        _db.TaskExecutions.Add(execution);
+        for (var i = 0; i < 2; i++)
+        {
+            _db.ExecutionActivities.Add(new ExecutionActivity
+            {
+                Id = Guid.NewGuid(), ExecutionId = execution.Id, Stage = ExecutionStage.DeveloperAgent,
+                Status = ExecutionActivityStatus.Completed, Message = "Provider call completed: Generation.",
+                CreatedAt = DateTime.UtcNow.AddSeconds(i),
+                MetadataJson = "{\"EventKind\":\"ProviderCall\",\"InputTokens\":1000,\"OutputTokens\":500,\"StageDurationMs\":900}",
+            });
+        }
+        await _db.SaveChangesAsync();
+
+        var withPricing = new GetWorkspaceOverviewQueryHandler(
+            new EfWorkspaceOverviewReader(
+                _db,
+                NullLogger<EfWorkspaceOverviewReader>.Instance,
+                new DevPilot.Application.Executions.Options.AiPricingOptions { InputPerMillionTokensUsd = 2m, OutputPerMillionTokensUsd = 10m }),
+            NullLogger<GetWorkspaceOverviewQueryHandler>.Instance);
+        var priced = await withPricing.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+
+        priced.Overview!.ActiveExecution!.TokensUsed.Should().Be(3000);
+        priced.Overview.ActiveExecution.EstimatedCost.Should().Be(0.014m);
+
+        var unpriced = await _handler.HandleAsync(new GetWorkspaceOverviewQuery(ws.Id));
+        unpriced.Overview!.ActiveExecution!.TokensUsed.Should().Be(3000);
+        unpriced.Overview.ActiveExecution.EstimatedCost.Should().BeNull("no price table configured");
+    }
+
+    [Fact]
     public async Task HandleAsync_ActiveExecutionStages_MapsRealEvidenceCorrectly()
     {
         var ws = new RepositoryWorkspace

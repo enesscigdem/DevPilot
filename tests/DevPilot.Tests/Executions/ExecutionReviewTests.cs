@@ -96,6 +96,9 @@ public class ExecutionReviewTests : IDisposable
         result.Review.ChangedFiles[0].ChangeType.Should().Be("Modified");
         result.Review.Diff.Should().Contain("Sub");
         result.Review.DiffTruncated.Should().BeFalse();
+        result.Review.Verdict.Should().NotBeNull("every review carries an explained verdict");
+        result.Review.Verdict!.Outcome.Should().Be(result.Review.VerificationOutcome);
+        result.Review.Usage.Should().NotBeNull();
     }
 
     [Fact]

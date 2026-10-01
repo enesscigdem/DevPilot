@@ -81,4 +81,6 @@ public sealed record ExecutionReviewDto(
     string? RepositoryOwner = null,
     string? RepositoryName = null,
     PredictedVsActualComparisonDto? PredictedVsActual = null,
-    string VerificationOutcome = "Verified");
+    string VerificationOutcome = "Verified",
+    ExecutionVerdictDto? Verdict = null,
+    ExecutionUsageDto? Usage = null);

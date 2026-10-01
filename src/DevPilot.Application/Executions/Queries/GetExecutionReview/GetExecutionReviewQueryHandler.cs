@@ -21,6 +21,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
     private readonly IImpactAnalysisRepository? _impactAnalysisRepository;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
     private readonly ILogger<GetExecutionReviewQueryHandler> _logger;
+    private readonly AiPricingOptions? _pricing;
 
     public GetExecutionReviewQueryHandler(
         IExecutionRepository executionRepository,
@@ -30,8 +31,10 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         IExecutionActivityRepository activityRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions,
         ILogger<GetExecutionReviewQueryHandler> logger,
-        IImpactAnalysisRepository? impactAnalysisRepository = null)
+        IImpactAnalysisRepository? impactAnalysisRepository = null,
+        AiPricingOptions? pricing = null)
     {
+        _pricing = pricing;
         _executionRepository = executionRepository;
         _workspaceManager = workspaceManager;
         _gitDiffReader = gitDiffReader;
@@ -90,6 +93,7 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         var activities = await _activityRepository.GetByExecutionIdAsync(execution.Id, cancellationToken).ConfigureAwait(false);
         var outcome = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
         var isDeliveryEligible = DevPilot.Application.Executions.Services.ExecutionVerificationEvaluator.IsDeliveryEligible(outcome);
+        var snapshot = ExecutionVerdictBuilder.Resolve(execution, activities, outcome, _pricing);
         var (buildDto, testDto) = ExecutionReviewStageClassifier.Classify(execution, activities);
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
         var (canRequestMerge, mergeBlockedReason) = ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks);
@@ -180,7 +184,9 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
                 RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository,
                 PredictedVsActual: null,
-                VerificationOutcome: outcome.ToString());
+                VerificationOutcome: outcome.ToString(),
+                Verdict: snapshot.Verdict,
+                Usage: snapshot.Usage);
 
             return GetExecutionReviewResult.Ok(committedReview);
         }
@@ -316,7 +322,9 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             RepositoryOwner: execution.DevelopmentTask?.RepositoryWorkspace?.Owner,
             RepositoryName: execution.DevelopmentTask?.RepositoryWorkspace?.Repository,
             PredictedVsActual: predictedVsActual,
-            VerificationOutcome: outcome.ToString());
+            VerificationOutcome: outcome.ToString(),
+                Verdict: snapshot.Verdict,
+                Usage: snapshot.Usage);
 
         return GetExecutionReviewResult.Ok(review);
     }

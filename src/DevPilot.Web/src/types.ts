@@ -339,6 +339,8 @@ export interface ExecutionDetail {
   mergedAt?: string | null;
   canRequestMerge?: boolean;
   verificationOutcome?: string;
+  verdict?: ExecutionVerdict | null;
+  usage?: ExecutionUsage | null;
   canRetry?: boolean;
   createdAt: string;
   startedAt: string | null;
@@ -523,6 +525,56 @@ export interface ExecutionReview {
   repositoryName?: string;
   predictedVsActual?: PredictedVsActualComparison | null;
   verificationOutcome?: ExecutionVerificationOutcome | string;
+  verdict?: ExecutionVerdict | null;
+  usage?: ExecutionUsage | null;
+}
+
+export interface VerdictFinding {
+  kind: string;
+  /** info | success | warning | danger */
+  severity: string;
+  message: string;
+}
+
+/** Explanation of an execution's verification outcome (what happened, why, what next). */
+export interface ExecutionVerdict {
+  outcome: string;
+  /** success | warning | danger | neutral */
+  severity: string;
+  headline: string;
+  recommendedAction?: string | null;
+  findings: VerdictFinding[];
+  baselineUnverified: boolean;
+  flakeConfirmed: boolean;
+  testWeakeningSuspected: boolean;
+  staleBase: boolean;
+  compileRepairRounds: number;
+  testRepairRounds: number;
+  compactRetries: number;
+  applicabilityRepairs: number;
+  checksNotRun: string[];
+  baseFreshness?: string | null;
+  baseBehindCount?: number | null;
+  baseCommitSha?: string | null;
+}
+
+export interface ExecutionStageTiming {
+  stage: string;
+  durationMs: number;
+}
+
+/** AI usage and latency aggregated from recorded provider calls. */
+export interface ExecutionUsage {
+  providerCalls: number;
+  failedProviderCalls: number;
+  callsWithoutTokenData: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  providerTimeMs: number;
+  /** Null unless an AiPricing table is configured on the server. */
+  estimatedCostUsd?: number | null;
+  stageTimings: ExecutionStageTiming[];
 }
 
 export type ExecutionVerificationOutcome =

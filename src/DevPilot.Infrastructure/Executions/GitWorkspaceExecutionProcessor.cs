@@ -5,6 +5,7 @@ using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Services;
 using DevPilot.Application.RepositoryClone;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
@@ -498,6 +499,80 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     _logger.LogWarning(ex, "Failed to purge verification side-effects in finally block for execution {ExecutionId}", context.ExecutionId);
                 }
             }
+        }
+    }
+
+    /// <summary>Reads the current content of the repair targets that are test files (best effort).</summary>
+    private static Dictionary<string, string> SnapshotTestFiles(string workspacePath, IEnumerable<string> repairFiles)
+    {
+        var snapshot = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in repairFiles)
+        {
+            if (!ProjectGraphHelper.IsTestFileCandidate(file))
+            {
+                continue;
+            }
+
+            try
+            {
+                var fullPath = Path.GetFullPath(Path.Combine(workspacePath, file));
+                if (File.Exists(fullPath))
+                {
+                    snapshot[file] = File.ReadAllText(fullPath);
+                }
+            }
+            catch (Exception)
+            {
+                // Best effort: an unreadable file simply cannot be compared.
+            }
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Guards the "repair must not weaken tests" rule in code (not just in the prompt): if a test repair removed
+    /// assertions, added skip/ignore markers or deleted tests, the run is flagged and ends in NeedsReview.
+    /// </summary>
+    private async Task FlagTestWeakeningAsync(
+        ExecutionProcessingContext context,
+        RepositoryCheck check,
+        string workspacePath,
+        IReadOnlyDictionary<string, string> before,
+        int repairRound,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (file, beforeContent) in before)
+        {
+            string afterContent;
+            try
+            {
+                var fullPath = Path.GetFullPath(Path.Combine(workspacePath, file));
+                afterContent = File.Exists(fullPath) ? File.ReadAllText(fullPath) : string.Empty;
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+
+            var result = TestWeakeningDetector.Analyze(beforeContent, afterContent);
+            if (!result.IsSuspected)
+            {
+                continue;
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Completed,
+                $"Test repair may have weakened tests ({result.Describe(file)}); flagged for review.",
+                CheckMetadata(
+                    check,
+                    "TestWeakeningSuspected",
+                    repairKind: "Test",
+                    repairRound: repairRound,
+                    repairFiles: new[] { file }) with { TestWeakeningSuspected = true },
+                cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -1156,6 +1231,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 TestName: evidence.TestName);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+            var testFilesBeforeRepair = SnapshotTestFiles(prepResult.WorkspacePath, repairFiles);
             var repairStopwatch = Stopwatch.StartNew();
             DeveloperAgentResult repairResult;
             try
@@ -1193,6 +1269,13 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
 
             var repairedThisRound = (repairResult.ModifiedFiles ?? Array.Empty<string>()).ToList();
+            await FlagTestWeakeningAsync(
+                context,
+                check,
+                prepResult.WorkspacePath,
+                testFilesBeforeRepair,
+                repairRound,
+                cancellationToken).ConfigureAwait(false);
             var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var noDiff = beforeFingerprint != null && afterFingerprint != null &&
                          string.Equals(beforeFingerprint, afterFingerprint, StringComparison.Ordinal);

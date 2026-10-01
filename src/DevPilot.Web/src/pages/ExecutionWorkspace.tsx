@@ -22,6 +22,7 @@ import {
   Cpu,
 } from "lucide-react"
 import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
+import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { cn } from "@/lib/utils"
 import { getExecution, getExecutionActivity, retryExecution, cancelExecution, getExecutions } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
@@ -1054,6 +1055,8 @@ export function ExecutionWorkspace() {
         <aside className="p-5 lg:border-l lg:border-border">
           <div className="tech-label mb-3">Run telemetry</div>
           <div className="space-y-3">
+            {execution.verdict && <VerdictCard verdict={execution.verdict} />}
+            {execution.usage && <UsagePanel usage={execution.usage} />}
             <Panel className="p-3.5 space-y-2 font-mono text-[11px]">
               <div className="flex items-center justify-between text-subtle-foreground">
                 <span>Created</span>

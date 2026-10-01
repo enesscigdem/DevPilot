@@ -70,4 +70,5 @@ public sealed record ExecutionActivityMetadata(
     string? BaseBranchName = null,
     string? RemoteBaseCommitSha = null,
     int? BaseBehindCount = null,
-    string? BaseFreshness = null);
+    string? BaseFreshness = null,
+    bool? TestWeakeningSuspected = null);

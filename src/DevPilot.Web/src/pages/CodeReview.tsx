@@ -19,6 +19,7 @@ import {
   Sparkles,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
+import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
 import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl, retryExecution } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
@@ -819,6 +820,12 @@ export function CodeReview() {
         <aside className="p-5 lg:border-l lg:border-border">
           <div className="tech-label mb-3">Reviewer verdict</div>
 
+          {review.verdict && (
+            <div className="mb-3">
+              <VerdictCard verdict={review.verdict} />
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-2.5">
             <Panel className="p-3">
               <div className="flex items-center gap-1.5">
@@ -886,6 +893,12 @@ export function CodeReview() {
               )}
             </Panel>
           </div>
+
+          {review.usage && (
+            <div className="mt-3">
+              <UsagePanel usage={review.usage} />
+            </div>
+          )}
 
           <div className="mt-5 space-y-3">
             <div className="tech-label">Review decision</div>

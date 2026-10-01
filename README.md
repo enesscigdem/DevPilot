@@ -72,3 +72,5 @@ The solution follows Clean Architecture / Modular Monolith principles:
   `RepositoryClone__WorkspaceRoot=/path/to/workspaces` (environment variable) or user secrets.
 - Execution and generation limits (repair rounds, flake confirmation, generation calls, concurrency, token budgets)
   live in the single `ExecutionReliability` section. Legacy `DeveloperAgent:*` keys are still honored as fallbacks.
+- `Hangfire:WorkerCount` (default 2) caps parallel executions; each one runs builds, tests and AI calls.
+- `AiPricing:InputPerMillionTokensUsd` / `OutputPerMillionTokensUsd` are optional. Without both, token counts are shown but no cost estimate is.

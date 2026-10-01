@@ -124,6 +124,12 @@ public static class ExecutionVerificationEvaluator
             return ExecutionVerificationOutcome.NeedsReview;
         }
 
+        // 3a. A test repair that removed assertions / added skips / deleted tests is never trusted as a pass.
+        if (parsedActivities.Any(p => p.Metadata?.TestWeakeningSuspected == true))
+        {
+            return ExecutionVerificationOutcome.NeedsReview;
+        }
+
         // 3b. BaselineUnverified: a failure was repaired while the baseline comparison was inconclusive.
         // Never report this as Verified/NoNewRegressions; it is delivery-eligible only as PartiallyVerified.
         if (parsedActivities.Any(p => p.Metadata?.BaselineUnverified == true))
