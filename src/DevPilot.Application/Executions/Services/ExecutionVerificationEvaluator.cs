@@ -124,6 +124,13 @@ public static class ExecutionVerificationEvaluator
             return ExecutionVerificationOutcome.NeedsReview;
         }
 
+        // 3b. BaselineUnverified: a failure was repaired while the baseline comparison was inconclusive.
+        // Never report this as Verified/NoNewRegressions; it is delivery-eligible only as PartiallyVerified.
+        if (parsedActivities.Any(p => p.Metadata?.BaselineUnverified == true))
+        {
+            return ExecutionVerificationOutcome.PartiallyVerified;
+        }
+
         // 4. NoNewRegressions: Pre-existing failure proven by baseline comparison on build or test
         if (terminalCheckResults.Any(t => t.IsPreExisting))
         {

@@ -112,6 +112,8 @@ public static class DependencyInjection
         services.AddScoped<IExecutionRepository, EfExecutionRepository>();
         services.AddScoped<IExecutionListReader, EfExecutionListReader>();
         services.AddScoped<IExecutionWorkspaceManager, GitExecutionWorkspaceManager>();
+        // Single authoritative reliability configuration shared by the processor, DeveloperAgent and impact analysis.
+        services.AddSingleton(_ => ExecutionReliabilityOptionsFactory.Create(configuration));
         services.AddScoped<IExecutionProcessor, GitWorkspaceExecutionProcessor>();
         services.AddScoped<IExecutionDispatcher, HangfireExecutionDispatcher>();
         services.AddScoped<IWorktreeEditApplier, WorktreeEditApplier>();
@@ -162,6 +164,7 @@ public static class DependencyInjection
             configuration.GetSection(RepositoryCloneOptions.SectionName));
 
         services.AddScoped<IRepositoryCloneService, RepositoryCloneService>();
+        services.AddScoped<IRepositoryFreshnessService, GitRepositoryFreshnessService>();
         services.AddScoped<ICreateRepositoryWorkspaceCommandHandler, CreateRepositoryWorkspaceCommandHandler>();
         services.AddScoped<IRepositoryStructureScanner, RepositoryStructureScanner>();
         services.AddScoped<IGetRepositoryWorkspaceAnalysisQueryHandler, GetRepositoryWorkspaceAnalysisQueryHandler>();

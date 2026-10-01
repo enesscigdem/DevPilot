@@ -6,9 +6,11 @@ using DevPilot.Application.AiProviders;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Domain.Constants;
 using DevPilot.Domain.Enums;
+using DevPilot.Infrastructure.Executions;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Extensions.Configuration;
@@ -54,34 +56,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
         IWorktreeEditApplier editApplier,
         ILogger<DeveloperAgent> logger,
         IConfiguration? configuration = null,
-        IExecutionActivityRecorder? activityRecorder = null)
+        IExecutionActivityRecorder? activityRecorder = null,
+        ExecutionReliabilityOptions? reliabilityOptions = null)
     {
         _aiProvider = aiProvider;
         _editApplier = editApplier;
         _logger = logger;
         _activityRecorder = activityRecorder;
 
-        if (configuration != null &&
-            int.TryParse(configuration["DeveloperAgent:MaxOutputTokens"], out var cfgTokens) &&
-            cfgTokens > 0)
-        {
-            _maxOutputTokens = cfgTokens;
-        }
-        else
-        {
-            _maxOutputTokens = 32768;
-        }
-
-        if (configuration != null &&
-            int.TryParse(configuration["DeveloperAgent:MaxCompactRetryOutputTokens"], out var cfgRetryTokens) &&
-            cfgRetryTokens > 0)
-        {
-            _maxCompactRetryOutputTokens = cfgRetryTokens;
-        }
-        else
-        {
-            _maxCompactRetryOutputTokens = Math.Max(24576, _maxOutputTokens);
-        }
+        // Single authoritative reliability source shared with the execution processor.
+        var reliability = reliabilityOptions ?? ExecutionReliabilityOptionsFactory.Create(configuration);
+        _maxOutputTokens = reliability.MaxOutputTokens;
+        _maxCompactRetryOutputTokens = reliability.EffectiveMaxCompactRetryOutputTokens;
 
         // Adaptive category budgets. Create defaults are ~20% below master's historical buckets.
         _budgetDtoOrModel = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:DtoOrModel", 3276);
@@ -104,27 +90,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             _maxManifestFiles = ExecutionCapacityPolicy.MaxImpactedFiles;
         }
 
-        if (configuration != null &&
-            int.TryParse(configuration["DeveloperAgent:MaxGenerationCalls"], out var cfgCalls) &&
-            cfgCalls > 0)
-        {
-            _maxGenerationCalls = cfgCalls;
-        }
-        else
-        {
-            _maxGenerationCalls = ExecutionCapacityPolicy.MaxGenerationCalls;
-        }
-
-        if (configuration != null &&
-            int.TryParse(configuration["DeveloperAgent:MaxConcurrentFileGenerations"], out var cfgConcurrent) &&
-            cfgConcurrent > 0)
-        {
-            _maxConcurrentFileGenerations = Math.Clamp(cfgConcurrent, 1, 4);
-        }
-        else
-        {
-            _maxConcurrentFileGenerations = 1;
-        }
+        _maxGenerationCalls = reliability.MaxGenerationCalls;
+        _maxConcurrentFileGenerations = reliability.MaxConcurrentFileGenerations;
 
         var configuredReasoning = configuration?["DeveloperAgent:MechanicalReasoningEffort"];
         _mechanicalReasoningEffort = string.IsNullOrWhiteSpace(configuredReasoning)

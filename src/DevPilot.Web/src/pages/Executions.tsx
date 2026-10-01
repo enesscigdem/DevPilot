@@ -11,7 +11,7 @@ import {
   type ExecutionListItem,
   type Tone,
 } from "@/types"
-import { stages as defaultStages } from "@/data/mock"
+import { stages as defaultStages } from "@/lib/executionStages"
 
 type FilterKey = "all" | "pending" | "running" | "completed" | "failed" | "cancelled"
 

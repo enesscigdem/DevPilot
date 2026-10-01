@@ -40,7 +40,6 @@ import {
   type ExecutionListItem,
   type Tone,
 } from "@/types"
-import { activeTask, affectedFiles as mockAffectedFiles, impactSummary as mockImpactSummary, riskMeta } from "@/data/mock"
 
 function getPriorityToneAndLabel(priority: number): { tone: Tone; label: string } {
   switch (priority) {
@@ -90,7 +89,6 @@ export function TaskImpact() {
   const [isApproving, setIsApproving] = useState(false)
   const [isRejecting, setIsRejecting] = useState(false)
   const [approvalError, setApprovalError] = useState<string | null>(null)
-  const [mockStatus, setMockStatus] = useState<string>("awaiting-approval")
 
   const [isStartingExecution, setIsStartingExecution] = useState(false)
   const [startExecutionError, setStartExecutionError] = useState<string | null>(null)
@@ -105,23 +103,16 @@ export function TaskImpact() {
     return () => clearInterval(ticker)
   }, [])
 
-  // Fallback to mock data if viewing mock task ID
-  const isMockView = !id || id === activeTask.id || id === "TASK-142"
-
   const lifecycleState = deriveTaskImpactLifecycle(
     task,
     analysis,
     activeExecution,
-    isMockView,
-    mockStatus,
     nowMs,
   )
 
   const actionState = deriveTaskImpactActionState(
     task?.status,
     activeExecution,
-    isMockView,
-    mockStatus,
   )
 
   const handleStartExecution = async () => {
@@ -157,7 +148,7 @@ export function TaskImpact() {
   }
 
   const loadData = useCallback(async () => {
-    if (!id || id === activeTask.id || id === "TASK-142") {
+    if (!id) {
       setIsLoading(false)
       return
     }
@@ -202,7 +193,7 @@ export function TaskImpact() {
   // Dedicated scoped polling while analysis is in progress
   const isPollingAnalysisRef = useRef(false)
   useEffect(() => {
-    if (!lifecycleState.isAnalyzing || !id || isMockView) return
+    if (!lifecycleState.isAnalyzing || !id) return
 
     const interval = setInterval(async () => {
       if (isPollingAnalysisRef.current) return
@@ -224,7 +215,7 @@ export function TaskImpact() {
     return () => {
       clearInterval(interval)
     }
-  }, [id, lifecycleState.isAnalyzing, isMockView])
+  }, [id, lifecycleState.isAnalyzing])
 
   // Scoped polling while task has an actual active execution OR task.status claims Executing
   const isPollingExecRef = useRef(false)
@@ -232,7 +223,7 @@ export function TaskImpact() {
     const isExecutingOrSyncing =
       activeExecution != null || task?.status === TaskStatus.Executing
 
-    if (!isExecutingOrSyncing || !id || isMockView) return
+    if (!isExecutingOrSyncing || !id) return
 
     const interval = setInterval(async () => {
       if (isPollingExecRef.current) return
@@ -257,7 +248,7 @@ export function TaskImpact() {
     }, 3500)
 
     return () => clearInterval(interval)
-  }, [id, activeWorkspaceId, activeExecution, task?.status, isMockView])
+  }, [id, activeWorkspaceId, activeExecution, task?.status])
 
   const handleStartAnalysis = async () => {
     if (!id || isAnalyzing) return
@@ -325,13 +316,9 @@ export function TaskImpact() {
     setIsApproving(true)
     setApprovalError(null)
     try {
-      if (isMockView) {
-        setMockStatus("approved")
-      } else {
-        await approveTask(id)
-        const updatedTask = await getTask(id)
-        setTask(updatedTask)
-      }
+      await approveTask(id)
+      const updatedTask = await getTask(id)
+      setTask(updatedTask)
     } catch (err) {
       setApprovalError(err instanceof Error ? err.message : "Failed to approve task.")
     } finally {
@@ -344,13 +331,9 @@ export function TaskImpact() {
     setIsRejecting(true)
     setApprovalError(null)
     try {
-      if (isMockView) {
-        setMockStatus("rejected")
-      } else {
-        await rejectTask(id)
-        const updatedTask = await getTask(id)
-        setTask(updatedTask)
-      }
+      await rejectTask(id)
+      const updatedTask = await getTask(id)
+      setTask(updatedTask)
     } catch (err) {
       setApprovalError(err instanceof Error ? err.message : "Failed to reject task.")
     } finally {
@@ -369,7 +352,7 @@ export function TaskImpact() {
     )
   }
 
-  if (error || (!isMockView && !task)) {
+  if (error || !task) {
     return (
       <PageContainer className="py-12">
         <div className="mx-auto max-w-md text-center">
@@ -385,25 +368,21 @@ export function TaskImpact() {
     )
   }
 
-  const displayTitle = isMockView ? activeTask.title : task?.title || "Untitled task"
-  const displayId = isMockView ? activeTask.id : `TASK-${task?.id.slice(0, 6).toUpperCase()}`
-  const displayBranch = isMockView ? activeTask.branch : `feature/${task?.title.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30)}`
+  const displayTitle = task?.title || "Untitled task"
+  const displayId = `TASK-${task?.id.slice(0, 6).toUpperCase()}`
+  const displayBranch = `feature/${task?.title.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30)}`
 
-  const priorityInfo = isMockView
-    ? { tone: riskMeta[activeTask.risk].tone, label: activeTask.risk === "low" ? "Low" : activeTask.risk === "high" ? "High" : "Medium" }
-    : task
-      ? getPriorityToneAndLabel(task.priority)
-      : { tone: "neutral" as Tone, label: "Normal" }
+  const priorityInfo = task
+    ? getPriorityToneAndLabel(task.priority)
+    : { tone: "neutral" as Tone, label: "Normal" }
 
   const structured = analysis?.structuredResult
 
   const hasCompletedAnalysis = lifecycleState.isSucceeded
 
-  // Risk badge comes ONLY from real persisted impact analysis data (or mock view)
+  // Risk badge comes ONLY from real persisted impact analysis data
   let analysisRiskInfo: { tone: Tone; label: string } | null = null
-  if (isMockView) {
-    analysisRiskInfo = { tone: riskMeta[activeTask.risk].tone, label: riskMeta[activeTask.risk].label }
-  } else if (hasCompletedAnalysis && structured?.risks && structured.risks.length > 0) {
+  if (hasCompletedAnalysis && structured?.risks && structured.risks.length > 0) {
     const levels = structured.risks.map((r) => r.level?.toLowerCase())
     let topLevel = "low"
     if (levels.includes("critical") || levels.includes("high")) topLevel = "high"
@@ -415,21 +394,17 @@ export function TaskImpact() {
     }
   }
 
-  const confidence = isMockView
-    ? activeTask.confidence
-    : structured?.confidence ?? analysis?.confidence ?? null
+  const confidence = structured?.confidence ?? analysis?.confidence ?? null
 
-  const requirementText = isMockView ? activeTask.requirement : task?.description || "No description provided."
+  const requirementText = task?.description || "No description provided."
 
-  const acceptanceList = isMockView
-    ? activeTask.acceptance
-    : task?.acceptanceCriteria && task.acceptanceCriteria.trim().length > 0
+  const acceptanceList =
+    task?.acceptanceCriteria && task.acceptanceCriteria.trim().length > 0
       ? task.acceptanceCriteria.split("\n").filter((line) => line.trim().length > 0)
       : []
 
-  const planSteps = isMockView
-    ? activeTask.planSteps
-    : structured?.proposedPlan && structured.proposedPlan.length > 0
+  const planSteps =
+    structured?.proposedPlan && structured.proposedPlan.length > 0
       ? structured.proposedPlan.map((s) => ({
           title: s.title,
           detail: s.description,
@@ -439,9 +414,8 @@ export function TaskImpact() {
 
   const realFiles: ImpactedFile[] = structured?.impactedFiles || []
 
-  const selectedFile = isMockView
-    ? mockAffectedFiles[selectedFileIndex] || mockAffectedFiles[0]
-    : hasCompletedAnalysis && realFiles.length > 0
+  const selectedFile =
+    hasCompletedAnalysis && realFiles.length > 0
       ? realFiles[selectedFileIndex] || realFiles[0]
       : null
 
@@ -683,7 +657,7 @@ export function TaskImpact() {
                 <div className="flex items-center gap-2">
                   <h2 className="text-[13px] font-semibold text-foreground">Impacted files</h2>
                   <span className="rounded-full bg-surface-3 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-                    {isMockView ? mockAffectedFiles.length : realFiles.length} files
+                    {realFiles.length} files
                   </span>
                 </div>
               </div>
@@ -691,47 +665,7 @@ export function TaskImpact() {
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)] min-w-0">
                 {/* file list */}
                 <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border min-w-0">
-                  {isMockView
-                    ? mockAffectedFiles.map((f, idx) => {
-                        const isSel = idx === selectedFileIndex
-                        return (
-                          <button
-                            key={f.path}
-                            onClick={() => setSelectedFileIndex(idx)}
-                            className={
-                              "flex w-full items-center gap-2.5 border-b border-border px-3 py-2.5 text-left transition-colors last:border-b-0 min-w-0 " +
-                              (isSel ? "bg-primary-soft/70" : "hover:bg-surface-2")
-                            }
-                          >
-                            {f.changeType === "added" ? (
-                              <Plus className="h-3.5 w-3.5 shrink-0 text-success" />
-                            ) : (
-                              <Pencil className="h-3.5 w-3.5 shrink-0 text-accent" />
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span
-                                  className={
-                                    "truncate text-[12.5px] font-medium " +
-                                    (isSel ? "text-primary" : "text-foreground")
-                                  }
-                                >
-                                  {f.name}
-                                </span>
-                              </div>
-                              <div className="truncate font-mono text-[10.5px] text-subtle-foreground" title={f.path}>
-                                {f.path}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1.5 font-mono text-[10.5px] shrink-0">
-                              <span className="text-success">+{f.additions}</span>
-                              <span className="text-danger">−{f.deletions}</span>
-                            </div>
-                            {isSel && <ChevronRight className="h-4 w-4 shrink-0 text-primary" />}
-                          </button>
-                        )
-                      })
-                    : realFiles.map((f, idx) => {
+                  {realFiles.map((f, idx) => {
                         const isSel = idx === selectedFileIndex
                         const fileName = f.filePath.split("/").pop() || f.filePath
                         const isAdded = f.changeType === "Add"
@@ -789,39 +723,24 @@ export function TaskImpact() {
                       </IconChip>
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[13px] font-semibold text-foreground">
-                          {"name" in selectedFile
-                            ? selectedFile.name
-                            : selectedFile.filePath.split("/").pop() || selectedFile.filePath}
+                          {selectedFile.filePath.split("/").pop() || selectedFile.filePath}
                         </div>
                         <div className="truncate font-mono text-[10.5px] text-subtle-foreground">
-                          {"project" in selectedFile
-                            ? selectedFile.project
-                            : selectedFile.filePath.split("/")[1] || selectedFile.filePath.split("/")[0]}
+                          {selectedFile.filePath.split("/")[1] || selectedFile.filePath.split("/")[0]}
                         </div>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      <Badge
-                        tone={
-                          "changeType" in selectedFile &&
-                          (selectedFile.changeType === "added" || selectedFile.changeType === "Add")
-                            ? "green"
-                            : "amber"
-                        }
-                      >
-                        {"changeType" in selectedFile
-                          ? selectedFile.changeType === "added" || selectedFile.changeType === "Add"
-                            ? "New file"
-                            : selectedFile.changeType
-                          : "Modified"}
+                      <Badge tone={selectedFile.changeType === "Add" ? "green" : "amber"}>
+                        {selectedFile.changeType === "Add" ? "New file" : selectedFile.changeType}
                       </Badge>
-                      {"evidenceType" in selectedFile && selectedFile.evidenceType && (
+                      {selectedFile.evidenceType && (
                         <Badge tone="neutral" className="font-mono text-[10.5px]">
                           {selectedFile.evidenceType}
                         </Badge>
                       )}
-                      {"isUncertain" in selectedFile && selectedFile.isUncertain && (
+                      {selectedFile.isUncertain && (
                         <Badge tone="amber" className="text-[10.5px]">
                           Uncertain
                         </Badge>
@@ -835,7 +754,7 @@ export function TaskImpact() {
                       </p>
                     </div>
 
-                    {"evidenceDetails" in selectedFile && selectedFile.evidenceDetails && (
+                    {selectedFile.evidenceDetails && (
                       <div className="rounded-[var(--radius-md)] border border-border/60 bg-surface-2 p-2.5">
                         <div className="tech-label text-[10px] mb-1">Repository Evidence</div>
                         <p className="text-[11.5px] leading-relaxed text-foreground font-mono break-words">
@@ -875,28 +794,7 @@ export function TaskImpact() {
           <div>
             <div className="tech-label mb-2.5">System impact & dimensions</div>
             <div className="space-y-2.5 min-w-0">
-              {isMockView
-                ? [
-                    { label: "API surface", icon: Network, items: mockImpactSummary.apiChanges },
-                    { label: "Database", icon: Database, items: mockImpactSummary.database },
-                    { label: "Integrations", icon: ShieldCheck, items: mockImpactSummary.integrations },
-                    { label: "Tests", icon: FlaskConical, items: mockImpactSummary.tests },
-                  ].map((g) => {
-                    const item = g.items[0]
-                    const Icon = g.icon
-                    return (
-                      <div key={g.label} className="rounded-[var(--radius-md)] border border-border bg-surface p-3 min-w-0">
-                        <div className="mb-1.5 flex items-center gap-2 min-w-0">
-                          <Icon className="h-3.5 w-3.5 text-subtle-foreground shrink-0" />
-                          <span className="truncate text-[12px] font-semibold text-foreground">{g.label}</span>
-                          <StatusDot tone={item.tone} className="ml-auto shrink-0" />
-                        </div>
-                        <div className="text-[12px] font-medium text-foreground break-words">{item.label}</div>
-                        <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground break-words">{item.detail}</p>
-                      </div>
-                    )
-                  })
-                : structured?.dimensions && structured.dimensions.length > 0
+              {structured?.dimensions && structured.dimensions.length > 0
                   ? structured.dimensions.map((dim, i) => {
                       const tone = getImpactLevelTone(dim.impactLevel)
                       const Icon = dim.area.toUpperCase() === "API"

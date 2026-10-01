@@ -2,8 +2,7 @@ import type { ReactNode } from "react"
 import { Link } from "react-router-dom"
 import { ArrowUpRight } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { Badge, StatusDot } from "@/components/ui/primitives"
-import { statusMeta, riskMeta, type Task as MockTask, type TaskStatus as MockTaskStatus, type RiskLevel, type Tone } from "@/data/mock"
+import { Badge, StatusDot, type Tone } from "@/components/ui/primitives"
 import { TaskStatus, TaskPriority, type TaskListItem, type Task as ApiTask } from "@/types"
 
 export function PageContainer({ children, className }: { children: ReactNode; className?: string }) {
@@ -77,9 +76,7 @@ function formatRelativeTime(dateString?: string): string {
   return date.toLocaleDateString()
 }
 
-export function TaskRow({ task }: { task: MockTask | TaskListItem | ApiTask | any }) {
-  const isReal = typeof task.status === "number"
-
+export function TaskRow({ task }: { task: TaskListItem | ApiTask }) {
   let statusTone: Tone = "gray"
   let statusLabel = ""
   let isExecuting = false
@@ -90,9 +87,9 @@ export function TaskRow({ task }: { task: MockTask | TaskListItem | ApiTask | an
   let riskTone: Tone = "neutral"
   let riskLabel = ""
 
-  if (isReal) {
+  {
     displayId = task.id.length > 12 ? `TASK-${task.id.slice(0, 8)}` : task.id
-    metaLeft = task.repositoryName || task.repositoryWorkspaceName || "master"
+    metaLeft = task.repositoryName || "master"
     updatedText = formatRelativeTime(task.updatedAt)
 
     switch (task.status) {
@@ -129,17 +126,6 @@ export function TaskRow({ task }: { task: MockTask | TaskListItem | ApiTask | an
       default:
         riskTone = "neutral"; riskLabel = "Normal";
     }
-  } else {
-    const s = statusMeta[task.status as MockTaskStatus] || { label: String(task.status), tone: "neutral" }
-    const r = riskMeta[task.risk as RiskLevel] || { label: String(task.risk), tone: "neutral" }
-    statusTone = s.tone
-    statusLabel = s.label
-    isExecuting = task.status === "executing"
-    displayId = task.id
-    metaLeft = task.branch
-    updatedText = task.updated
-    riskTone = r.tone
-    riskLabel = r.label
   }
 
   return (
@@ -156,12 +142,6 @@ export function TaskRow({ task }: { task: MockTask | TaskListItem | ApiTask | an
         <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-subtle-foreground">
           <span className="truncate">{metaLeft}</span>
           <span>·</span>
-          {task.filesTouched !== undefined && (
-            <>
-              <span>{task.filesTouched} files</span>
-              <span>·</span>
-            </>
-          )}
           <span>{updatedText}</span>
         </div>
       </div>

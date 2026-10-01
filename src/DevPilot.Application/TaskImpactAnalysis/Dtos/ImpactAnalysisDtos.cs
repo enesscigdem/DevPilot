@@ -124,6 +124,29 @@ public sealed class StructuredResultDto
     public IReadOnlyList<string> RiskReasons { get; set; } = Array.Empty<string>();
 
     public Dictionary<string, object>? Metadata { get; set; }
+
+    public AnalysisBaseSnapshotDto? BaseSnapshot { get; set; }
+}
+
+public sealed class AnalysisBaseSnapshotDto
+{
+    public string? BranchName { get; set; }
+
+    public string? BaseCommitSha { get; set; }
+
+    public string? RemoteCommitSha { get; set; }
+
+    public int BehindCount { get; set; }
+
+    public int AheadCount { get; set; }
+
+    public string Freshness { get; set; } = "NotApplicable";
+
+    public bool IsStale { get; set; }
+
+    public string? Message { get; set; }
+
+    public DateTime CapturedAt { get; set; }
 }
 
 public sealed class ImpactAnalysisDto

@@ -73,43 +73,8 @@ export function deriveTaskImpactLifecycle(
   task: Pick<Task, "status" | "createdAt" | "updatedAt"> | null,
   analysis: Pick<ImpactAnalysis, "status" | "createdAt" | "completedAt" | "errorMessage" | "structuredResult"> | null,
   activeExecution: Pick<ExecutionListItem, "id" | "status"> | null = null,
-  isMockView: boolean = false,
-  mockStatus?: string,
   nowMs: number = Date.now(),
 ): TaskImpactLifecycleState {
-  if (isMockView) {
-    if (mockStatus === "analyzing") {
-      return {
-        lifecycle: "analyzing",
-        statusTone: "blue",
-        statusLabel: "Analyzing",
-        canRun: false,
-        canRetry: false,
-        canApprove: false,
-        isAnalyzing: true,
-        isSucceeded: false,
-        isFailed: false,
-        elapsedSeconds: 12,
-        durationFormatted: null,
-        sanitizedErrorMessage: null,
-      }
-    }
-    return {
-      lifecycle: "succeeded",
-      statusTone: mockStatus === "approved" ? "blue" : mockStatus === "rejected" ? "red" : "amber",
-      statusLabel: mockStatus === "approved" ? "Approved" : mockStatus === "rejected" ? "Rejected" : "Awaiting approval",
-      canRun: false,
-      canRetry: false,
-      canApprove: mockStatus !== "approved" && mockStatus !== "rejected",
-      isAnalyzing: false,
-      isSucceeded: true,
-      isFailed: false,
-      elapsedSeconds: 0,
-      durationFormatted: "24s",
-      sanitizedErrorMessage: null,
-    }
-  }
-
   // 1. Check if an analysis is actively in progress
   const isAnalysisInProgress =
     analysis?.status === ImpactAnalysisStatus.InProgress ||
@@ -254,40 +219,7 @@ export function deriveTaskImpactLifecycle(
 export function deriveTaskImpactActionState(
   taskStatus: number | null | undefined,
   activeExecution: Pick<ExecutionListItem, "id" | "status"> | null,
-  isMockView: boolean = false,
-  mockStatus?: string,
 ): TaskImpactActionState {
-  if (isMockView) {
-    if (mockStatus === "approved") {
-      return {
-        kind: "approved",
-        canStart: true,
-        canRetry: false,
-        canApprove: false,
-        activeExecutionId: null,
-        message: null,
-      }
-    }
-    if (mockStatus === "rejected") {
-      return {
-        kind: "rejected",
-        canStart: false,
-        canRetry: false,
-        canApprove: false,
-        activeExecutionId: null,
-        message: null,
-      }
-    }
-    return {
-      kind: "awaiting-approval",
-      canStart: false,
-      canRetry: false,
-      canApprove: true,
-      activeExecutionId: null,
-      message: null,
-    }
-  }
-
   // A) Server reports an actual active execution (Pending or Running)
   if (activeExecution != null) {
     return {

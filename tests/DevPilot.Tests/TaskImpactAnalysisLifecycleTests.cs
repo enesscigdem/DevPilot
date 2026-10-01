@@ -347,9 +347,13 @@ public sealed class TaskImpactAnalysisLifecycleTests
 
         // Exactly two provider calls were made
         sequentialAi.CallCount.Should().Be(2);
-        sequentialAi.RecordedRequests[0].MaxTokens.Should().Be(2048);
-        sequentialAi.RecordedRequests[1].MaxTokens.Should().Be(2048);
+        sequentialAi.RecordedRequests[0].MaxTokens.Should().Be(6144);
+        // Recovery gets a larger (still bounded) budget instead of repeating the undersized initial one.
+        sequentialAi.RecordedRequests[1].MaxTokens.Should().Be(8192);
         sequentialAi.RecordedRequests[1].UserPrompt.Should().Contain("CRITICAL: The previous response was truncated");
+        // Recovery keeps the grounding evidence (project graph + real file inventory), only the output size shrinks.
+        sequentialAi.RecordedRequests[1].UserPrompt.Should().Contain("# Discovered .NET Project Graph");
+        sequentialAi.RecordedRequests[1].UserPrompt.Should().Contain("# Repository Verification Preflight");
 
         task.Status.Should().Be(DevelopmentTaskStatus.AwaitingApproval);
     }
@@ -415,7 +419,7 @@ public sealed class TaskImpactAnalysisLifecycleTests
     }
 
     [Fact]
-    public async Task HandleAsync_NormalOneCallPath_Passes2048TokenBudget()
+    public async Task HandleAsync_NormalOneCallPath_UsesBoundedImpactTokenBudget()
     {
         // Arrange
         var taskId = Guid.NewGuid();
@@ -462,7 +466,178 @@ public sealed class TaskImpactAnalysisLifecycleTests
         // Assert
         result.Success.Should().BeTrue();
         sequentialAi.CallCount.Should().Be(1);
-        sequentialAi.RecordedRequests[0].MaxTokens.Should().Be(2048);
+        sequentialAi.RecordedRequests[0].MaxTokens.Should().Be(6144);
+    }
+
+    [Fact]
+    public async Task HandleAsync_ConfiguredImpactBudgets_AreUsedAndClampedToBoundedCeiling()
+    {
+        var taskRepo = new ConcurrentInMemoryTaskRepository();
+        var task = NewDraftTask("Budget task");
+        taskRepo.Add(task);
+
+        var ai = new SequentialAiProvider(
+            TruncatedResponse(),
+            ValidImpactResponse());
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            new FakeWorkspaceQuery { WorkspaceToReturn = _workspace },
+            new ConcurrentInMemoryAnalysisRepository(),
+            new FakeRepositoryAnalyzer(),
+            ai,
+            new FakeEmbeddingProvider(),
+            new FakeSearchService(),
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance,
+            reliabilityOptions: new DevPilot.Application.Executions.Options.ExecutionReliabilityOptions
+            {
+                ImpactAnalysisMaxOutputTokens = 4096,
+                ImpactAnalysisRecoveryMaxOutputTokens = 1_000_000,
+            });
+
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(task.Id), CancellationToken.None);
+
+        result.Success.Should().BeTrue();
+        ai.RecordedRequests[0].MaxTokens.Should().Be(4096);
+        ai.RecordedRequests[1].MaxTokens.Should().Be(16384, "escalation must stay bounded");
+    }
+
+    [Fact]
+    public async Task HandleAsync_GroundingErrorAfterCompactRecovery_StillGetsOneBoundedRepair()
+    {
+        var taskRepo = new ConcurrentInMemoryTaskRepository();
+        var task = NewDraftTask("Grounding after recovery");
+        taskRepo.Add(task);
+
+        var ungrounded = new AiResponse
+        {
+            IsSuccess = true,
+            Content = "{\"Summary\":\"s\",\"Confidence\":80,\"ImpactedFiles\":[{\"FilePath\":\"src/DoesNotExist/Nope.cs\",\"ChangeType\":\"Modify\",\"Reason\":\"x\"}],\"ProposedPlan\":[{\"Order\":1,\"Title\":\"t\",\"Description\":\"d\"}],\"Risks\":[{\"Level\":\"Low\",\"Description\":\"r\"}]}",
+            Model = "kimi-k3",
+            Provider = "Kimi",
+        };
+
+        var ai = new SequentialAiProvider(TruncatedResponse(), ungrounded, ValidImpactResponse());
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            new FakeWorkspaceQuery { WorkspaceToReturn = _workspace },
+            new ConcurrentInMemoryAnalysisRepository(),
+            new FakeRepositoryAnalyzer(),
+            ai,
+            new FakeEmbeddingProvider(),
+            new FakeSearchService(),
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance);
+
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(task.Id), CancellationToken.None);
+
+        result.Success.Should().BeTrue();
+        ai.CallCount.Should().Be(3, "initial + one compact recovery + one bounded grounding repair, never more");
+        ai.RecordedRequests[2].MaxTokens.Should().Be(8192);
+    }
+
+    [Fact]
+    public async Task HandleAsync_FreshnessEvidence_IsPersistedOnAnalysis_AndNeverBlocksAnalysis()
+    {
+        var taskRepo = new ConcurrentInMemoryTaskRepository();
+        var task = NewDraftTask("Freshness task");
+        taskRepo.Add(task);
+
+        var freshness = new FakeFreshnessService
+        {
+            Result = new DevPilot.Application.RepositoryClone.RepositoryFreshnessResult(
+                DevPilot.Application.RepositoryClone.RepositoryFreshnessStatus.Behind,
+                "main", "aaa111", "bbb222", BehindCount: 3, AheadCount: 0, PreviousCommitSha: null,
+                Message: "Base is 3 commit(s) behind origin but local changes exist; not updated."),
+        };
+
+        var handler = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            new FakeWorkspaceQuery { WorkspaceToReturn = _workspace },
+            new ConcurrentInMemoryAnalysisRepository(),
+            new FakeRepositoryAnalyzer(),
+            new SequentialAiProvider(ValidImpactResponse()),
+            new FakeEmbeddingProvider(),
+            new FakeSearchService(),
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance,
+            freshnessService: freshness);
+
+        var result = await handler.HandleAsync(new AnalyzeTaskImpactCommand(task.Id), CancellationToken.None);
+
+        result.Success.Should().BeTrue();
+        var snapshot = result.Analysis!.StructuredResult!.BaseSnapshot;
+        snapshot.Should().NotBeNull();
+        snapshot!.Freshness.Should().Be("Behind");
+        snapshot.IsStale.Should().BeTrue();
+        snapshot.BehindCount.Should().Be(3);
+        snapshot.BaseCommitSha.Should().Be("aaa111");
+        snapshot.RemoteCommitSha.Should().Be("bbb222");
+
+        // A throwing freshness service must not fail the analysis.
+        var task2 = NewDraftTask("Freshness throws");
+        taskRepo.Add(task2);
+        var throwing = new FakeFreshnessService { ThrowOnRefresh = true };
+        var handler2 = new AnalyzeTaskImpactCommandHandler(
+            taskRepo,
+            new FakeWorkspaceQuery { WorkspaceToReturn = _workspace },
+            new ConcurrentInMemoryAnalysisRepository(),
+            new FakeRepositoryAnalyzer(),
+            new SequentialAiProvider(ValidImpactResponse()),
+            new FakeEmbeddingProvider(),
+            new FakeSearchService(),
+            NullLogger<AnalyzeTaskImpactCommandHandler>.Instance,
+            freshnessService: throwing);
+
+        var result2 = await handler2.HandleAsync(new AnalyzeTaskImpactCommand(task2.Id), CancellationToken.None);
+        result2.Success.Should().BeTrue();
+        result2.Analysis!.StructuredResult!.BaseSnapshot.Should().BeNull();
+    }
+
+    private DevelopmentTask NewDraftTask(string title) => new()
+    {
+        Id = Guid.NewGuid(),
+        RepositoryWorkspaceId = _workspaceId,
+        Title = title,
+        Description = "Requirement description",
+        Status = DevelopmentTaskStatus.Draft,
+        Priority = DevelopmentTaskPriority.Medium,
+        CreatedAt = DateTime.UtcNow,
+        UpdatedAt = DateTime.UtcNow,
+    };
+
+    private static AiResponse TruncatedResponse() => new()
+    {
+        IsSuccess = false,
+        FailureKind = AiFailureKind.TokenLimitExceeded,
+        FinishReason = "length",
+        ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result.",
+    };
+
+    private static AiResponse ValidImpactResponse() => new()
+    {
+        IsSuccess = true,
+        Content = "{\"Summary\":\"Impact summary\",\"Confidence\":88,\"ImpactedFiles\":[{\"FilePath\":\"src/DevPilot.Domain/Entities/DevelopmentTask.cs\",\"ChangeType\":\"Modify\",\"Reason\":\"Add field\"}],\"ProposedPlan\":[{\"Order\":1,\"Title\":\"Update entity\",\"Description\":\"Add field\"}],\"Risks\":[{\"Level\":\"Low\",\"Description\":\"Minor\"}]}",
+        Model = "kimi-k3",
+        Provider = "Kimi",
+        FinishReason = "stop",
+    };
+
+    private sealed class FakeFreshnessService : DevPilot.Application.RepositoryClone.IRepositoryFreshnessService
+    {
+        public DevPilot.Application.RepositoryClone.RepositoryFreshnessResult? Result { get; set; }
+        public bool ThrowOnRefresh { get; set; }
+
+        public Task<DevPilot.Application.RepositoryClone.RepositoryFreshnessResult> RefreshAsync(
+            DevPilot.Application.RepositoryClone.RepositoryFreshnessRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            if (ThrowOnRefresh)
+            {
+                throw new InvalidOperationException("boom");
+            }
+
+            return Task.FromResult(Result!);
+        }
     }
 
     private class SequentialAiProvider : IAiProvider

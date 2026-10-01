@@ -1,15 +1,97 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { Search, CornerDownLeft, ArrowUp, ArrowDown } from "lucide-react"
-import { commandItems } from "@/data/mock"
+import { getExecutions, getTasks } from "@/api"
 import { Kbd } from "@/components/ui/primitives"
+import { useWorkspace } from "@/lib/workspace"
 import { cn } from "@/lib/utils"
+
+interface CommandItem {
+  label: string
+  hint: string
+  href: string
+  group: string
+}
+
+const MAX_TASK_ITEMS = 8
+const MAX_EXECUTION_ITEMS = 6
+
+function byNewest<T>(getDate: (item: T) => string) {
+  return (a: T, b: T) => new Date(getDate(b)).getTime() - new Date(getDate(a)).getTime()
+}
 
 export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [query, setQuery] = useState("")
   const [active, setActive] = useState(0)
+  const [dynamicItems, setDynamicItems] = useState<CommandItem[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
+  const { activeWorkspace, activeWorkspaceId } = useWorkspace()
+
+  const repoHint = activeWorkspace ? `${activeWorkspace.owner}/${activeWorkspace.repository}` : "No repository selected"
+
+  // Navigation entries mirror the real sidebar; task / execution entries come from the active repository.
+  const commandItems = useMemo<CommandItem[]>(
+    () => [
+      { label: "Go to Workspace", hint: repoHint, href: "/", group: "Navigate" },
+      { label: "Open Projects", hint: "Repository structure", href: "/projects", group: "Navigate" },
+      { label: "View Tasks", hint: "Plan and approve changes", href: "/tasks", group: "Navigate" },
+      { label: "Open Project Brain", hint: "Ask the codebase", href: "/brain", group: "Navigate" },
+      { label: "View Executions", hint: "Runs and review", href: "/executions", group: "Navigate" },
+      { label: "Architecture Map", hint: "Impact graph", href: "/architecture", group: "Navigate" },
+      ...dynamicItems,
+    ],
+    [repoHint, dynamicItems],
+  )
+
+  useEffect(() => {
+    if (!open || !activeWorkspaceId) {
+      setDynamicItems([])
+      return
+    }
+
+    let cancelled = false
+    void Promise.allSettled([
+      getTasks({ repositoryWorkspaceId: activeWorkspaceId }),
+      getExecutions(activeWorkspaceId),
+    ]).then(([tasksResult, executionsResult]) => {
+      if (cancelled) return
+      const items: CommandItem[] = []
+      if (tasksResult.status === "fulfilled") {
+        tasksResult.value
+          .slice()
+          .sort(byNewest((t) => t.updatedAt))
+          .slice(0, MAX_TASK_ITEMS)
+          .forEach((t) =>
+            items.push({
+              label: `Open task: ${t.title}`,
+              hint: `TASK-${t.id.slice(0, 8)}`,
+              href: `/tasks/${t.id}`,
+              group: "Tasks",
+            }),
+          )
+      }
+      if (executionsResult.status === "fulfilled") {
+        executionsResult.value
+          .slice()
+          .sort(byNewest((e) => e.createdAt))
+          .slice(0, MAX_EXECUTION_ITEMS)
+          .forEach((e) =>
+            items.push({
+              label: `Open execution: ${e.taskTitle}`,
+              hint: `EXEC-${e.id.slice(0, 8)}`,
+              href: `/executions/${e.id}`,
+              group: "Executions",
+            }),
+          )
+      }
+      setDynamicItems(items)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [open, activeWorkspaceId])
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -17,7 +99,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
     return commandItems.filter(
       (c) => c.label.toLowerCase().includes(q) || c.hint.toLowerCase().includes(q) || c.group.toLowerCase().includes(q),
     )
-  }, [query])
+  }, [query, commandItems])
 
   useEffect(() => {
     if (open) {
@@ -33,7 +115,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
 
   if (!open) return null
 
-  const grouped = results.reduce<Record<string, typeof commandItems>>((acc, item) => {
+  const grouped = results.reduce<Record<string, CommandItem[]>>((acc, item) => {
     ;(acc[item.group] ??= []).push(item)
     return acc
   }, {})
@@ -79,7 +161,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search commands, tasks, files…"
+            placeholder="Search pages, tasks, executions…"
             className="h-12 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-subtle-foreground"
           />
           <Kbd>Esc</Kbd>
@@ -98,7 +180,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
                 const isActive = idx === active
                 return (
                   <button
-                    key={item.label}
+                    key={`${item.group}:${item.href}`}
                     onMouseEnter={() => setActive(idx)}
                     onClick={() => select(item.href)}
                     className={cn(

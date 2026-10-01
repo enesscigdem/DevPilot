@@ -47,7 +47,7 @@ Button.displayName = "Button"
 
 /* ----------------------------------- Badge --------------------------------- */
 
-type Tone = "neutral" | "blue" | "amber" | "green" | "red" | "gray"
+export type Tone = "neutral" | "blue" | "amber" | "green" | "red" | "gray"
 
 const toneStyles: Record<Tone, string> = {
   neutral: "bg-surface-3 text-muted-foreground border-border",

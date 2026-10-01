@@ -203,6 +203,21 @@ export interface StructuredResult {
   unknowns?: string[];
   riskReasons?: string[];
   metadata?: Record<string, unknown>;
+  /** Base commit / freshness evidence captured when the analysis was produced (absent on legacy analyses). */
+  baseSnapshot?: AnalysisBaseSnapshot | null;
+}
+
+export interface AnalysisBaseSnapshot {
+  branchName?: string | null;
+  baseCommitSha?: string | null;
+  remoteCommitSha?: string | null;
+  behindCount: number;
+  aheadCount: number;
+  /** UpToDate | FastForwarded | Behind | Diverged | Ahead | FetchFailed | NotApplicable */
+  freshness: string;
+  isStale: boolean;
+  message?: string | null;
+  capturedAt: string;
 }
 
 export interface ImpactAnalysis {
@@ -372,6 +387,14 @@ export interface ExecutionActivityMetadata {
   discoveredCheckEvidence?: string[] | null;
   repositoryCheckEvidence?: string | null;
   baselineClassification?: string | null;
+  /** True when the baseline comparison was inconclusive and repair continued from raw diagnostics. */
+  baselineUnverified?: boolean | null;
+  /** BaseFreshness activity: base branch / remote commit / how far behind origin the base was. */
+  baseBranchName?: string | null;
+  remoteBaseCommitSha?: string | null;
+  baseBehindCount?: number | null;
+  /** UpToDate | FastForwarded | Behind | Diverged | Ahead | FetchFailed | NotApplicable */
+  baseFreshness?: string | null;
   baseCommitSha?: string | null;
   baselineCacheHit?: boolean | null;
   preExistingFailureCount?: number | null;

@@ -32,7 +32,7 @@ import {
   type ExecutionActivityItem,
   type ExecutionListItem,
 } from "@/types"
-import { stages } from "@/data/mock"
+import { stages } from "@/lib/executionStages"
 
 function getStageState(
   stageIndex: number,

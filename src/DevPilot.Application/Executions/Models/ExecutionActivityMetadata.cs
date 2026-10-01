@@ -65,4 +65,9 @@ public sealed record ExecutionActivityMetadata(
     int? HeuristicInjectedContextCount = null,
     int? PromptSizeEstimate = null,
     string? NoChangeReason = null,
-    int? ResolvedNoChangeCount = null);
+    int? ResolvedNoChangeCount = null,
+    bool? BaselineUnverified = null,
+    string? BaseBranchName = null,
+    string? RemoteBaseCommitSha = null,
+    int? BaseBehindCount = null,
+    string? BaseFreshness = null);

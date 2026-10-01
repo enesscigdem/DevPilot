@@ -190,7 +190,10 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
                     AcceptanceCriteria: task.AcceptanceCriteria,
                     WorkspaceId: workspace.Id,
                     WorkspaceLocalPath: workspace.LocalPath,
-                    ImpactAnalysisSummary: analysis.Summary);
+                    ImpactAnalysisSummary: analysis.Summary,
+                    RepositoryOwner: workspace.Owner,
+                    RepositoryName: workspace.Repository,
+                    BaseBranch: workspace.Branch);
 
                 await _processor.ProcessAsync(context, executionToken).ConfigureAwait(false);
             }
