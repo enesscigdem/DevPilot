@@ -3,6 +3,7 @@ import { NavLink, useLocation } from "react-router-dom"
 import {
   BarChart3,
   Boxes,
+  Cpu,
   FolderGit2,
   ListChecks,
   Sparkles,
@@ -58,6 +59,10 @@ const navGroups: { label: string; items: NavEntry[] }[] = [
   {
     label: "nav.measure",
     items: [{ to: "/insights", label: "nav.insights", icon: BarChart3 }],
+  },
+  {
+    label: "nav.settings",
+    items: [{ to: "/models", label: "nav.aiModels", icon: Cpu }],
   },
 ]
 
@@ -365,6 +370,7 @@ const routeTitles: Record<string, string> = {
   "/executions/compare": "nav.compareExecutions",
   "/architecture": "nav.impactMap",
   "/insights": "nav.insights",
+  "/models": "nav.aiModels",
 }
 
 function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: string }) {

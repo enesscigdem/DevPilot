@@ -11,6 +11,7 @@ import execWs from "./locales/en/execWs"
 import executions from "./locales/en/executions"
 import tasks from "./locales/en/tasks"
 import shared from "./locales/en/shared"
+import models from "./locales/en/models"
 
 const en = {
   common: {
@@ -39,6 +40,8 @@ const en = {
     planRun: "Plan & run",
     understand: "Understand",
     measure: "Measure",
+    settings: "Settings",
+    aiModels: "AI models",
     tasks: "Tasks",
     executions: "Executions",
     repository: "Repository",
@@ -63,6 +66,7 @@ const en = {
     impactHint: "How changes ripple across layers",
     insightsHint: "Success, repair, time and cost",
     compareHint: "Original vs retry",
+    modelsHint: "Add your own models and assign them to steps",
     switchToTurkish: "Switch language to Türkçe",
     switchToEnglish: "Switch language to English",
     languageHint: "Interface language",
@@ -89,6 +93,7 @@ const en = {
   executions,
   shared,
   tasks,
+  models,
 }
 
 export type Resources = typeof en

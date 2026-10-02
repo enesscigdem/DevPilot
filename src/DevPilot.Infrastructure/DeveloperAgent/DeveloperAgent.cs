@@ -262,6 +262,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var primaryRequest = new AiRequest
         {
+            Stage = AiStage.Repair,
             UserPrompt = BuildFocusedDiagnosticRepairUserPrompt(
                 filePath,
                 currentContent ?? string.Empty,
@@ -289,6 +290,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         {
             var microRequest = new AiRequest
             {
+                Stage = AiStage.Repair,
                 UserPrompt = BuildMicroDiagnosticRepairUserPrompt(
                     filePath,
                     currentContent ?? string.Empty,
@@ -867,6 +869,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var fileAiRequest = new AiRequest
         {
+            Stage = AiStage.CodeGeneration,
             Model = request.Model ?? string.Empty,
             SystemPrompt = singleFileSystemPrompt,
             UserPrompt = singleFileUserPrompt,
@@ -953,6 +956,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
                 var compactRequest = new AiRequest
                 {
+                    Stage = AiStage.CodeGeneration,
                     Model = request.Model ?? string.Empty,
                     SystemPrompt = compactSystemPrompt,
                     UserPrompt = compactUserPrompt,
@@ -1177,6 +1181,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             int repairBudget = DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent);
             var repairRequest = new AiRequest
             {
+                Stage = AiStage.Repair,
                 Model = request.Model ?? string.Empty,
                 SystemPrompt = BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement),
                 UserPrompt = repairUserPrompt,
@@ -1397,6 +1402,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var microBudget = DetermineMicroApplicabilityRepairBudget();
         var microRequest = new AiRequest
         {
+            Stage = AiStage.Repair,
             Model = request.Model ?? string.Empty,
             SystemPrompt = BuildMicroApplicabilityRepairSystemPrompt(fileEntry),
             UserPrompt = BuildMicroApplicabilityRepairUserPrompt(

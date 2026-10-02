@@ -29,6 +29,10 @@ import type {
   GitHubConnectionStatus,
   GitHubDiscoveredRepository,
   GitHubBranch,
+  AiModel,
+  SaveAiModelRequest,
+  AiModelTestResult,
+  AiStageAssignment,
 } from './types';
 
 const BASE_URL = '/api';
@@ -343,4 +347,32 @@ export async function disconnectGitHubInstallation(id: string): Promise<void> {
   await http<void>(`/github/installations/${id}`, {
     method: 'DELETE',
   });
+}
+
+export async function getAiModels(): Promise<AiModel[]> {
+  return http<AiModel[]>('/ai-models');
+}
+
+export async function createAiModel(request: SaveAiModelRequest): Promise<AiModel> {
+  return http<AiModel>('/ai-models', { method: 'POST', body: JSON.stringify(request) });
+}
+
+export async function updateAiModel(id: string, request: SaveAiModelRequest): Promise<AiModel> {
+  return http<AiModel>(`/ai-models/${id}`, { method: 'PUT', body: JSON.stringify(request) });
+}
+
+export async function deleteAiModel(id: string): Promise<void> {
+  await http<void>(`/ai-models/${id}`, { method: 'DELETE' });
+}
+
+export async function testAiModel(id: string): Promise<AiModelTestResult> {
+  return http<AiModelTestResult>(`/ai-models/${id}/test`, { method: 'POST' });
+}
+
+export async function getAiStageAssignments(): Promise<AiStageAssignment[]> {
+  return http<AiStageAssignment[]>('/ai-models/stages');
+}
+
+export async function setAiStageAssignments(assignments: AiStageAssignment[]): Promise<AiStageAssignment[]> {
+  return http<AiStageAssignment[]>('/ai-models/stages', { method: 'PUT', body: JSON.stringify(assignments) });
 }

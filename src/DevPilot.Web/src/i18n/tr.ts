@@ -12,6 +12,7 @@ import execWs from "./locales/tr/execWs"
 import executions from "./locales/tr/executions"
 import tasks from "./locales/tr/tasks"
 import shared from "./locales/tr/shared"
+import models from "./locales/tr/models"
 
 const tr: Resources = {
   common: {
@@ -40,6 +41,8 @@ const tr: Resources = {
     planRun: "Planla ve çalıştır",
     understand: "Anla",
     measure: "Ölç",
+    settings: "Ayarlar",
+    aiModels: "Yapay zeka modelleri",
     tasks: "Görevler",
     executions: "Çalıştırmalar",
     repository: "Depo",
@@ -64,6 +67,7 @@ const tr: Resources = {
     impactHint: "Değişikliklerin katmanlara etkisi",
     insightsHint: "Başarı, onarım, süre ve maliyet",
     compareHint: "Orijinal ve yeniden deneme",
+    modelsHint: "Kendi modellerinizi ekleyin ve adımlara atayın",
     switchToTurkish: "Dili Türkçe yap",
     switchToEnglish: "Dili İngilizce yap",
     languageHint: "Arayüz dili",
@@ -90,6 +94,7 @@ const tr: Resources = {
   executions,
   shared,
   tasks,
+  models,
 }
 
 export default tr

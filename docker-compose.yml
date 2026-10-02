@@ -31,9 +31,12 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Development
       ConnectionStrings__DevPilotDb: "Host=postgres;Port=5432;Database=devpilot;Username=devpilot;Password=devpilot"
+      AiModels__KeyRingPath: /app/keys
     depends_on:
       postgres:
         condition: service_healthy
+    volumes:
+      - devpilot-keys:/app/keys
     networks:
       - devpilot-network
 
@@ -51,6 +54,7 @@ services:
 
 volumes:
   devpilot-postgres-data:
+  devpilot-keys:
 
 networks:
   devpilot-network:

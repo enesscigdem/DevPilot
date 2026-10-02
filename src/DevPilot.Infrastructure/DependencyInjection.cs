@@ -59,6 +59,7 @@ using DevPilot.Infrastructure.Tasks;
 using DevPilot.Infrastructure.Executions;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Infrastructure.DeveloperAgent;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -71,6 +72,8 @@ namespace DevPilot.Infrastructure;
 
 public static class DependencyInjection
 {
+    private const string LegacyAiProviderKey = "legacy-ai-provider";
+
     public static IServiceCollection AddInfrastructure(
         this IServiceCollection services,
         IConfiguration configuration)
@@ -187,27 +190,50 @@ public static class DependencyInjection
     {
         var providerName = configuration["AiProvider:Provider"] ?? string.Empty;
 
-        if (providerName == AiProviderNames.Kimi)
+        services.AddHttpClient(OpenAiCompatibleProvider.HttpClientName, client =>
         {
-            services.AddHttpClient("Kimi", client =>
-            {
-                client.Timeout = TimeSpan.FromSeconds(300);
-            });
+            client.Timeout = TimeSpan.FromSeconds(300);
+        });
+
+        // API keys entered in the panel are encrypted at rest. The key ring must survive restarts
+        // (mount a volume in containers) or stored keys can no longer be decrypted.
+        var keyRingPath = configuration["AiModels:KeyRingPath"];
+        if (string.IsNullOrWhiteSpace(keyRingPath))
+        {
+            keyRingPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DevPilot",
+                "keys");
         }
+
+        services.AddDataProtection()
+            .SetApplicationName("DevPilot")
+            .PersistKeysToFileSystem(new DirectoryInfo(keyRingPath));
+        services.AddSingleton<IAiKeyProtector, AiKeyProtector>();
+        services.AddSingleton<IAiProviderFactory, AiProviderFactory>();
+        services.AddScoped<IAiModelService, AiModelService>();
+
+        // The router is the IAiProvider the app uses; models added in the panel take precedence
+        // and the appsettings provider below is the fallback when none are configured.
+        services.AddScoped<IAiProvider>(sp => new RoutingAiProvider(
+            sp.GetRequiredService<DevPilotDbContext>(),
+            sp.GetRequiredService<IAiKeyProtector>(),
+            sp.GetRequiredService<IAiProviderFactory>(),
+            sp.GetRequiredKeyedService<IAiProvider>(LegacyAiProviderKey)));
 
         switch (providerName)
         {
             case AiProviderNames.Kimi:
-                services.AddScoped<IAiProvider, KimiAiProvider>();
+                services.AddKeyedScoped<IAiProvider, KimiAiProvider>(LegacyAiProviderKey);
                 break;
             case AiProviderNames.OpenAI:
-                services.AddScoped<IAiProvider, OpenAiAiProvider>();
+                services.AddKeyedScoped<IAiProvider, OpenAiAiProvider>(LegacyAiProviderKey);
                 break;
             case AiProviderNames.Claude:
-                services.AddScoped<IAiProvider, ClaudeAiProvider>();
+                services.AddKeyedScoped<IAiProvider, ClaudeAiProvider>(LegacyAiProviderKey);
                 break;
             case AiProviderNames.Gemini:
-                services.AddScoped<IAiProvider, GeminiAiProvider>();
+                services.AddKeyedScoped<IAiProvider, GeminiAiProvider>(LegacyAiProviderKey);
                 break;
             default:
                 throw new InvalidOperationException(

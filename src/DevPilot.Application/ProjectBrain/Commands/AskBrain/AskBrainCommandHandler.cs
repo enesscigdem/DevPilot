@@ -237,6 +237,7 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
 
         var aiRequest = new AiRequest
         {
+            Stage = AiStage.Brain,
             SystemPrompt = systemPrompt,
             UserPrompt = userPrompt,
         };

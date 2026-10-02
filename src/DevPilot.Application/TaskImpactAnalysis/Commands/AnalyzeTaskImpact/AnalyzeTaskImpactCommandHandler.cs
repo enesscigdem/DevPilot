@@ -324,6 +324,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
             var aiRequest = new AiRequest
             {
+                Stage = AiStage.Planning,
                 SystemPrompt = SystemPrompt,
                 UserPrompt = BuildUserPrompt(task, workspace, context, evidenceProfile),
                 MaxTokens = defaultImpactMaxTokens,
@@ -359,6 +360,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 var recoveryPrompt = BuildImpactTruncationRecoveryPrompt(task, workspace, context, evidenceProfile);
                 var recoveryRequest = new AiRequest
                 {
+                    Stage = AiStage.Planning,
                     SystemPrompt =
                         "You are DevPilot's compact impact analysis recovery engine. " +
                         "The previous response was truncated because it exceeded output token limits. " +
@@ -429,6 +431,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
                 var repairAiRequest = new AiRequest
                 {
+                    Stage = AiStage.Planning,
                     SystemPrompt =
                         "You are DevPilot's impact analysis repair engine. " +
                         "Correct the deterministic grounding errors in the proposed impact analysis. " +
