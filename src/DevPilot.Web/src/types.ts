@@ -1209,6 +1209,17 @@ export interface SaveAiModelRequest {
   isDefault: boolean;
 }
 
+export interface AiModelOption {
+  id: string;
+  displayName: string | null;
+}
+
+export interface DiscoverAiModelsResult {
+  success: boolean;
+  message: string;
+  models: AiModelOption[];
+}
+
 export interface AiModelTestResult {
   success: boolean;
   message: string;

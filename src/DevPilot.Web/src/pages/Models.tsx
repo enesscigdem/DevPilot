@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next"
 import {
   createAiModel,
   deleteAiModel,
+  discoverAiModels,
   getAiModels,
   getAiStageAssignments,
   setAiStageAssignments,
@@ -14,7 +15,7 @@ import { fmt } from "@/i18n"
 import { cn } from "@/lib/utils"
 import { PageContainer, PageHeading, SectionHead } from "@/components/shared"
 import { Badge, Button, Panel } from "@/components/ui/primitives"
-import { AI_STAGES, type AiAdapterType, type AiModel, type AiStage, type SaveAiModelRequest } from "@/types"
+import { AI_STAGES, type AiAdapterType, type AiModel, type AiModelOption, type AiStage, type SaveAiModelRequest } from "@/types"
 
 /* ------------------------------- Provider presets ------------------------------ */
 
@@ -177,6 +178,9 @@ function ModelForm({
   const [draft, setDraft] = useState<Draft>(editing ? draftFromModel(editing) : emptyDraft)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [modelOptions, setModelOptions] = useState<AiModelOption[]>([])
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [modelsMessage, setModelsMessage] = useState<{ ok: boolean; text: string } | null>(null)
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }))
   const preset = PRESETS.find((p) => p.id === draft.presetId)
@@ -193,6 +197,25 @@ function ModelForm({
       name: p && !d.name ? p.name : d.name,
       useMaxCompletionTokens: p?.useMaxCompletionTokens ?? false,
     }))
+  }
+
+  const loadModels = async () => {
+    setLoadingModels(true)
+    setModelsMessage(null)
+    try {
+      const result = await discoverAiModels({
+        adapterType: draft.adapterType,
+        baseUrl: draft.baseUrl.trim(),
+        apiKey: draft.apiKey.trim() || undefined,
+        existingModelId: editing?.id,
+      })
+      setModelOptions(result.models)
+      setModelsMessage({ ok: result.success, text: result.success ? t("models.form.modelsFound", { count: result.models.length }) : result.message })
+    } catch (err) {
+      setModelsMessage({ ok: false, text: err instanceof Error ? err.message : t("models.form.modelsFailed") })
+    } finally {
+      setLoadingModels(false)
+    }
   }
 
   const canSave = draft.name.trim() && draft.baseUrl.trim() && draft.modelName.trim() && !saving
@@ -271,12 +294,29 @@ function ModelForm({
             />
           </Field>
           <Field label={t("models.form.modelName")}>
-            <input
-              className={cn(fieldClass, "font-mono")}
-              value={draft.modelName}
-              onChange={(e) => set("modelName", e.target.value)}
-              placeholder={preset?.modelHint ?? t("models.form.modelNamePlaceholder")}
-            />
+            <div className="flex gap-2">
+              <input
+                className={cn(fieldClass, "font-mono")}
+                value={draft.modelName}
+                list="ai-model-options"
+                onChange={(e) => set("modelName", e.target.value)}
+                placeholder={preset?.modelHint ?? t("models.form.modelNamePlaceholder")}
+              />
+              <Button type="button" size="md" onClick={() => void loadModels()} disabled={loadingModels || !draft.baseUrl.trim()}>
+                {loadingModels && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {t("models.form.loadModels")}
+              </Button>
+            </div>
+            <datalist id="ai-model-options">
+              {modelOptions.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.displayName ?? m.id}
+                </option>
+              ))}
+            </datalist>
+            {modelsMessage && (
+              <span className={cn("mt-1 block text-[11.5px]", modelsMessage.ok ? "text-success" : "text-danger")}>{modelsMessage.text}</span>
+            )}
           </Field>
           <Field label={t("models.form.baseUrl")}>
             <input

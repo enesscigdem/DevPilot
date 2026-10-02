@@ -32,6 +32,8 @@ import type {
   AiModel,
   SaveAiModelRequest,
   AiModelTestResult,
+  DiscoverAiModelsResult,
+  AiAdapterType,
   AiStageAssignment,
 } from './types';
 
@@ -367,6 +369,15 @@ export async function deleteAiModel(id: string): Promise<void> {
 
 export async function testAiModel(id: string): Promise<AiModelTestResult> {
   return http<AiModelTestResult>(`/ai-models/${id}/test`, { method: 'POST' });
+}
+
+export async function discoverAiModels(request: {
+  adapterType: AiAdapterType;
+  baseUrl: string;
+  apiKey?: string;
+  existingModelId?: string;
+}): Promise<DiscoverAiModelsResult> {
+  return http<DiscoverAiModelsResult>('/ai-models/discover', { method: 'POST', body: JSON.stringify(request) });
 }
 
 export async function getAiStageAssignments(): Promise<AiStageAssignment[]> {

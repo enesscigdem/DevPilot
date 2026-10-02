@@ -215,6 +215,7 @@ public static class DependencyInjection
         services.AddSingleton<IAiKeyProtector, AiKeyProtector>();
         services.AddSingleton<IAiProviderFactory, AiProviderFactory>();
         services.AddScoped<IAiModelService, AiModelService>();
+        services.AddScoped<IAiModelDiscoveryService, AiModelDiscoveryService>();
 
         // The router is the IAiProvider the app uses; models added in the panel take precedence
         // and the appsettings provider below is the fallback when none are configured.
