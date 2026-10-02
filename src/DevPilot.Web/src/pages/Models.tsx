@@ -426,7 +426,8 @@ function ModelCard({
           {model.lastTestSucceeded === false && model.lastTestMessage && (
             <p className="mt-2 max-w-xl text-[12px] text-danger">{model.lastTestMessage}</p>
           )}
-          {note && <p className="mt-2 text-[12px] text-muted-foreground">{note}</p>}
+          {/* A failed test already shows its message above; the live note would repeat it. */}
+          {note && model.lastTestSucceeded !== false && <p className="mt-2 text-[12px] text-muted-foreground">{note}</p>}
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
