@@ -44,6 +44,10 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<ProjectBrainMessage> ProjectBrainMessages => Set<ProjectBrainMessage>();
 
+    public DbSet<AiModelConfig> AiModelConfigs => Set<AiModelConfig>();
+
+    public DbSet<AiStageAssignment> AiStageAssignments => Set<AiStageAssignment>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -364,6 +368,39 @@ public class DevPilotDbContext : DbContext
             entity.HasOne(e => e.Conversation)
                 .WithMany(e => e.Messages)
                 .HasForeignKey(e => e.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<AiModelConfig>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.Name).IsUnique();
+            // At most one default model.
+            entity.HasIndex(e => e.IsDefault).IsUnique().HasFilter("\"IsDefault\" = true");
+            entity.Property(e => e.Name).HasMaxLength(120);
+            entity.Property(e => e.AdapterType).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.BaseUrl).HasMaxLength(500);
+            entity.Property(e => e.ModelName).HasMaxLength(200);
+            entity.Property(e => e.ProtectedApiKey).HasColumnType("text");
+            entity.Property(e => e.ApiKeyHint).HasMaxLength(20);
+            entity.Property(e => e.InputPricePerMillionTokensUsd).HasPrecision(18, 6);
+            entity.Property(e => e.OutputPricePerMillionTokensUsd).HasPrecision(18, 6);
+            entity.Property(e => e.LastTestMessage).HasMaxLength(1000);
+            entity.Property(e => e.LastTestedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+        });
+
+        modelBuilder.Entity<AiStageAssignment>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.Stage).IsUnique();
+            entity.Property(e => e.Stage).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+
+            entity.HasOne(e => e.AiModelConfig)
+                .WithMany()
+                .HasForeignKey(e => e.AiModelConfigId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }
