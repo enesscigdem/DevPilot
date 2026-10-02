@@ -5,16 +5,18 @@ import { cn } from "@/lib/utils"
 interface FormattedTextProps {
   text: string
   className?: string
+  /** "sm" suits dense panels; "md" is for reading answers (larger text and headings). */
+  size?: "sm" | "md"
 }
 
-interface InlineSpan {
-  type: "text" | "code" | "bold" | "italic"
-  content: string
-}
+const SIZES = {
+  sm: { body: "text-[12.5px]", h1: "text-[14.5px]", h2: "text-[13.5px]", h3: "text-[13px]", h4: "text-[12.5px]", code: "text-[11.5px]", cell: "text-[11.5px]" },
+  md: { body: "text-[14px]", h1: "text-[18px]", h2: "text-[16px]", h3: "text-[14.5px]", h4: "text-[14px]", code: "text-[12.5px]", cell: "text-[12.5px]" },
+} as const
 
-function parseInlineFormatting(text: string): React.ReactNode[] {
-  // Regex to match `code`, **bold**, *italic*
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g
+/** Inline: `code`, **bold**, *italic*, [text](https://link). */
+function parseInlineFormatting(text: string, codeSize: string): React.ReactNode[] {
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)\s]+\))/g
   const parts = text.split(pattern)
 
   return parts.map((part, index) => {
@@ -24,7 +26,7 @@ function parseInlineFormatting(text: string): React.ReactNode[] {
       return (
         <code
           key={index}
-          className="rounded border border-border/60 bg-surface-2 px-1 py-0.5 font-mono text-[11.5px] text-foreground"
+          className={cn("rounded border border-border/60 bg-surface-2 px-1 py-0.5 font-mono text-foreground", codeSize)}
         >
           {part.slice(1, -1)}
         </code>
@@ -47,53 +49,76 @@ function parseInlineFormatting(text: string): React.ReactNode[] {
       )
     }
 
+    const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(part)
+    if (link) {
+      // Only web links are made clickable; anything else (javascript:, data:) stays plain text.
+      return /^https?:\/\//i.test(link[2]) ? (
+        <a key={index} href={link[2]} target="_blank" rel="noreferrer noopener" className="text-primary underline-offset-2 hover:underline">
+          {link[1]}
+        </a>
+      ) : (
+        <React.Fragment key={index}>{link[1]}</React.Fragment>
+      )
+    }
+
     return <React.Fragment key={index}>{part}</React.Fragment>
   })
 }
 
-export function FormattedText({ text, className }: FormattedTextProps) {
+const TABLE_ROW = /^\s*\|.*\|\s*$/
+const TABLE_SEPARATOR = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/
+
+function splitRow(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim())
+}
+
+export function FormattedText({ text, className, size = "sm" }: FormattedTextProps) {
   if (!text) {
     return <span className="text-muted-foreground">{i18n.t("shared.noContent")}</span>
   }
 
+  const s = SIZES[size]
+  const inline = (value: string) => parseInlineFormatting(value, s.code)
   const lines = text.split("\n")
   const elements: React.ReactNode[] = []
 
   let inCodeBlock = false
   let codeBlockLanguage = ""
   let codeBlockLines: string[] = []
-  let inBulletList = false
   let bulletListItems: React.ReactNode[] = []
-  let inNumberedList = false
   let numberedListItems: React.ReactNode[] = []
+
+  const indentOf = (raw: string) => Math.min(3, Math.floor((raw.length - raw.trimStart().length) / 2))
 
   const flushBulletList = (keyPrefix: number) => {
     if (bulletListItems.length > 0) {
       elements.push(
-        <ul key={`ul-${keyPrefix}`} className="my-2 ml-4 list-disc space-y-1 text-[12.5px] leading-relaxed text-foreground">
+        <ul key={`ul-${keyPrefix}`} className={cn("my-2 ml-5 list-disc space-y-1 leading-relaxed text-foreground", s.body)}>
           {bulletListItems}
-        </ul>
+        </ul>,
       )
       bulletListItems = []
-      inBulletList = false
     }
   }
 
   const flushNumberedList = (keyPrefix: number) => {
     if (numberedListItems.length > 0) {
       elements.push(
-        <ol key={`ol-${keyPrefix}`} className="my-2 ml-4 list-decimal space-y-1 text-[12.5px] leading-relaxed text-foreground">
+        <ol key={`ol-${keyPrefix}`} className={cn("my-2 ml-5 list-decimal space-y-1 leading-relaxed text-foreground", s.body)}>
           {numberedListItems}
-        </ol>
+        </ol>,
       )
       numberedListItems = []
-      inNumberedList = false
     }
+  }
+
+  const flushLists = (i: number) => {
+    flushBulletList(i)
+    flushNumberedList(i)
   }
 
   const flushCodeBlock = (keyPrefix: number) => {
     if (inCodeBlock) {
-      const codeContent = codeBlockLines.join("\n")
       elements.push(
         <div key={`codeblock-${keyPrefix}`} className="my-2 overflow-hidden rounded-[var(--radius-md)] border border-border bg-surface-3">
           {codeBlockLanguage && (
@@ -101,10 +126,10 @@ export function FormattedText({ text, className }: FormattedTextProps) {
               {codeBlockLanguage}
             </div>
           )}
-          <pre className="overflow-x-auto p-2.5 font-mono text-[11.5px] leading-relaxed text-foreground">
-            <code>{codeContent}</code>
+          <pre className={cn("overflow-x-auto p-2.5 font-mono leading-relaxed text-foreground", s.code)}>
+            <code>{codeBlockLines.join("\n")}</code>
           </pre>
-        </div>
+        </div>,
       )
       codeBlockLines = []
       codeBlockLanguage = ""
@@ -121,8 +146,7 @@ export function FormattedText({ text, className }: FormattedTextProps) {
       if (inCodeBlock) {
         flushCodeBlock(i)
       } else {
-        flushBulletList(i)
-        flushNumberedList(i)
+        flushLists(i)
         inCodeBlock = true
         codeBlockLanguage = trimmed.slice(3).trim()
         codeBlockLines = []
@@ -135,68 +159,94 @@ export function FormattedText({ text, className }: FormattedTextProps) {
       continue
     }
 
+    // Table: a pipe row followed by a separator row (| --- | --- |)
+    if (TABLE_ROW.test(rawLine) && i + 1 < lines.length && TABLE_SEPARATOR.test(lines[i + 1])) {
+      flushLists(i)
+      const header = splitRow(rawLine)
+      const rows: string[][] = []
+      let j = i + 2
+      while (j < lines.length && TABLE_ROW.test(lines[j])) {
+        rows.push(splitRow(lines[j]))
+        j++
+      }
+      elements.push(
+        <div key={`table-${i}`} className="my-2.5 overflow-x-auto rounded-[var(--radius-md)] border border-border">
+          <table className={cn("w-full border-collapse text-left", s.cell)}>
+            <thead className="bg-surface-2">
+              <tr>
+                {header.map((cell, c) => (
+                  <th key={c} className="border-b border-border px-3 py-2 font-semibold text-foreground">
+                    {inline(cell)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, r) => (
+                <tr key={r} className="border-b border-border/60 last:border-b-0">
+                  {row.map((cell, c) => (
+                    <td key={c} className="px-3 py-1.5 align-top text-foreground">
+                      {inline(cell)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      )
+      i = j - 1
+      continue
+    }
+
     // Horizontal Rule
     if (/^(\*\*\*|---|___|===+)$/.test(trimmed)) {
-      flushBulletList(i)
-      flushNumberedList(i)
+      flushLists(i)
       elements.push(<hr key={`hr-${i}`} className="my-3 border-t border-border" />)
       continue
     }
 
-    // Headings
-    if (trimmed.startsWith("# ")) {
-      flushBulletList(i)
-      flushNumberedList(i)
+    // Headings (longest marker first so "#### " is not read as "# ")
+    const heading = /^(#{1,4})\s+(.+)$/.exec(trimmed)
+    if (heading) {
+      flushLists(i)
+      const level = heading[1].length
+      const cls = [
+        "",
+        cn("mt-4 mb-2 font-semibold tracking-tight text-foreground first:mt-0", s.h1),
+        cn("mt-4 mb-1.5 font-semibold tracking-tight text-foreground first:mt-0", s.h2),
+        cn("mt-3 mb-1 font-semibold text-foreground first:mt-0", s.h3),
+        cn("mt-2.5 mb-0.5 font-semibold text-foreground first:mt-0", s.h4),
+      ][level]
+      const Tag = (`h${level}` as "h1" | "h2" | "h3" | "h4")
       elements.push(
-        <h1 key={`h1-${i}`} className="mt-3.5 mb-1.5 text-[14.5px] font-semibold tracking-tight text-foreground first:mt-0">
-          {parseInlineFormatting(trimmed.slice(2))}
-        </h1>
+        <Tag key={`h-${i}`} className={cls}>
+          {inline(heading[2])}
+        </Tag>,
       )
       continue
     }
 
-    if (trimmed.startsWith("## ")) {
-      flushBulletList(i)
-      flushNumberedList(i)
+    // Blockquote
+    const quote = /^>\s?(.*)$/.exec(trimmed)
+    if (quote) {
+      flushLists(i)
       elements.push(
-        <h2 key={`h2-${i}`} className="mt-3 mb-1 text-[13.5px] font-semibold tracking-tight text-foreground first:mt-0">
-          {parseInlineFormatting(trimmed.slice(3))}
-        </h2>
+        <blockquote key={`q-${i}`} className={cn("my-2 border-l-2 border-primary-ring pl-3 italic leading-relaxed text-muted-foreground", s.body)}>
+          {inline(quote[1])}
+        </blockquote>,
       )
       continue
     }
 
-    if (trimmed.startsWith("### ")) {
-      flushBulletList(i)
-      flushNumberedList(i)
-      elements.push(
-        <h3 key={`h3-${i}`} className="mt-2.5 mb-1 text-[13px] font-semibold text-foreground first:mt-0">
-          {parseInlineFormatting(trimmed.slice(4))}
-        </h3>
-      )
-      continue
-    }
-
-    if (trimmed.startsWith("#### ")) {
-      flushBulletList(i)
-      flushNumberedList(i)
-      elements.push(
-        <h4 key={`h4-${i}`} className="mt-2 mb-0.5 text-[12.5px] font-semibold text-foreground first:mt-0">
-          {parseInlineFormatting(trimmed.slice(5))}
-        </h4>
-      )
-      continue
-    }
-
-    // Bullet lists
+    // Bullet lists (leading spaces nest the item)
     const bulletMatch = /^[*-]\s+(.+)$/.exec(trimmed)
     if (bulletMatch) {
       flushNumberedList(i)
-      inBulletList = true
       bulletListItems.push(
-        <li key={`li-${i}`} className="min-w-0 break-words">
-          {parseInlineFormatting(bulletMatch[1])}
-        </li>
+        <li key={`li-${i}`} className="min-w-0 break-words" style={{ marginLeft: indentOf(rawLine) * 16 }}>
+          {inline(bulletMatch[1])}
+        </li>,
       )
       continue
     }
@@ -205,18 +255,16 @@ export function FormattedText({ text, className }: FormattedTextProps) {
     const numberMatch = /^(\d+)\.\s+(.+)$/.exec(trimmed)
     if (numberMatch) {
       flushBulletList(i)
-      inNumberedList = true
       numberedListItems.push(
-        <li key={`li-num-${i}`} className="min-w-0 break-words">
-          {parseInlineFormatting(numberMatch[2])}
-        </li>
+        <li key={`li-num-${i}`} className="min-w-0 break-words" style={{ marginLeft: indentOf(rawLine) * 16 }}>
+          {inline(numberMatch[2])}
+        </li>,
       )
       continue
     }
 
     // Non-list line, flush lists if needed
-    flushBulletList(i)
-    flushNumberedList(i)
+    flushLists(i)
 
     // Empty line / line break
     if (trimmed === "") {
@@ -226,15 +274,14 @@ export function FormattedText({ text, className }: FormattedTextProps) {
 
     // Regular paragraph
     elements.push(
-      <p key={`p-${i}`} className="my-1 text-[12.5px] leading-relaxed text-foreground text-pretty break-words min-w-0">
-        {parseInlineFormatting(rawLine)}
-      </p>
+      <p key={`p-${i}`} className={cn("my-1 min-w-0 break-words leading-relaxed text-foreground text-pretty", s.body)}>
+        {inline(rawLine)}
+      </p>,
     )
   }
 
   flushCodeBlock(lines.length)
-  flushBulletList(lines.length)
-  flushNumberedList(lines.length)
+  flushLists(lines.length)
 
   return <div className={cn("space-y-0.5 min-w-0 overflow-x-hidden", className)}>{elements}</div>
 }

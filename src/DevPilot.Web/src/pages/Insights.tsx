@@ -298,7 +298,7 @@ export function Insights() {
               {insights.recent.map((row) => {
                 const meta = getOutcomeMeta(row.outcome)
                 return (
-                  <tr key={row.executionId} className="border-b border-border/60 last:border-b-0 hover:bg-surface-2">
+                  <tr key={row.executionId} className="border-b border-border/60 last:border-b-0 hover:bg-surface-3">
                     <td className="max-w-[340px] px-3.5 py-2.5">
                       <Link to={`/executions/${row.executionId}`} className="block truncate font-medium text-foreground hover:text-primary" title={srv(row.headline)}>
                         {row.taskTitle}

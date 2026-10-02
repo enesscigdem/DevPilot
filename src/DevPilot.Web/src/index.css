@@ -256,3 +256,24 @@ body {
     background-position: -200% 0;
   }
 }
+
+/*
+  Tailwind v4 resets buttons to the default cursor. Anything the user can click must say so,
+  and a disabled control must say it is not available.
+*/
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="option"],
+  summary,
+  select:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  select:disabled {
+    cursor: not-allowed;
+  }
+}

@@ -693,7 +693,7 @@ export function TaskImpact() {
                             onClick={() => setSelectedFileIndex(idx)}
                             className={
                               "flex w-full items-center gap-2.5 border-b border-border px-3 py-2.5 text-left transition-colors last:border-b-0 min-w-0 " +
-                              (isSel ? "bg-primary-soft/70" : "hover:bg-surface-2")
+                              (isSel ? "bg-primary-soft/70" : "hover:bg-surface-3")
                             }
                           >
                             {isAdded ? (

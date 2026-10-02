@@ -163,7 +163,7 @@ export function ModelPicker({
                     onMouseEnter={() => setActive(i)}
                     className={cn(
                       "flex cursor-pointer items-center gap-2 px-3 py-1.5",
-                      i === active ? "bg-surface-3" : "hover:bg-surface-2",
+                      i === active ? "bg-surface-3" : "hover:bg-surface-3",
                     )}
                   >
                     <div className="min-w-0 flex-1">

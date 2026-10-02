@@ -78,7 +78,7 @@ export function CompareModelsPanel({ taskId }: { taskId: string }) {
               return (
                 <label
                   key={m.id}
-                  className="flex cursor-pointer items-center gap-2 rounded-[var(--radius-md)] border border-border px-2.5 py-2 text-[12.5px] hover:bg-surface-2"
+                  className="flex cursor-pointer items-center gap-2 rounded-[var(--radius-md)] border border-border px-2.5 py-2 text-[12.5px] hover:bg-surface-3"
                 >
                   <input
                     type="checkbox"
@@ -120,7 +120,7 @@ export function CompareModelsPanel({ taskId }: { taskId: string }) {
             <Link
               key={c.id}
               to={`/comparisons/${c.id}`}
-              className="flex items-center justify-between gap-2 rounded-[var(--radius-md)] px-2 py-1.5 text-[12px] hover:bg-surface-2"
+              className="flex items-center justify-between gap-2 rounded-[var(--radius-md)] px-2 py-1.5 text-[12px] hover:bg-surface-3"
             >
               <span className="truncate text-muted-foreground">
                 {fmt.dateTime(c.createdAt)} · {t("modelCompare.panel.modelsCount", { count: c.runs.length })}

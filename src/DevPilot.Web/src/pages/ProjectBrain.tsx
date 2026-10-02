@@ -8,10 +8,8 @@ import {
   Boxes,
   Search,
   Check,
-  Database,
   Hash,
   Braces,
-  Link2,
   Quote,
   ShieldCheck,
   Clock,
@@ -20,9 +18,14 @@ import {
   MessageSquare,
   Plus,
   Trash2,
+  X,
+  ChevronDown,
+  PanelRight,
+  AlertCircle,
 } from "lucide-react"
 import { Button, Badge, StatusDot } from "@/components/ui/primitives"
 import { cn } from "@/lib/utils"
+import { FormattedText } from "@/components/FormattedText"
 import {
   getBrainStatus,
   indexBrain,
@@ -102,7 +105,7 @@ function Message({
             </span>
           )}
         </div>
-        <p className="text-[13.5px] leading-relaxed text-foreground text-pretty whitespace-pre-line">{msg.content}</p>
+        <FormattedText text={msg.content} size="md" />
 
         {msg.citations && msg.citations.length > 0 && (
           <div className="mt-3.5 border-t border-border/80 pt-3">
@@ -157,7 +160,7 @@ function SourcePreview({ citation }: { citation: BrainCitation }) {
         <span className="truncate text-[12px] font-medium text-foreground" title={citation.file}>{citation.file}</span>
         <span className="ml-auto shrink-0 font-mono text-[10px] text-subtle-foreground">{citation.lang ?? "cs"}</span>
       </div>
-      <div className="overflow-x-auto">
+      <div className="max-h-[55vh] overflow-auto">
         <table className="w-full border-collapse font-mono text-[11.5px] leading-relaxed">
           <tbody>
             {lines.map((ln, i) => (
@@ -192,6 +195,9 @@ export function ProjectBrain() {
   const [conversation, setConversation] = useState<BrainMessage[]>([])
   const [contextFiles, setContextFiles] = useState<BrainContextFile[]>([])
   const [selected, setSelected] = useState<BrainCitation | null>(null)
+  // The inspector and the index details stay out of the way until asked for.
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [indexOpen, setIndexOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const repoFullName = activeWorkspace
@@ -199,6 +205,10 @@ export function ProjectBrain() {
     : t("brain.noWorkspace")
 
   const selectedKey = selected ? citationKey(selected) : null
+  const selectCitation = (c: BrainCitation) => {
+    setSelected(c)
+    setInspectorOpen(true)
+  }
 
   const fetchStatus = useCallback(async (workspaceId: string) => {
     const cached = getCachedBrainStatus(workspaceId)
@@ -391,11 +401,16 @@ export function ProjectBrain() {
   const isStale = status?.state === "stale"
 
   return (
-    <div className="mx-auto grid h-full max-w-[1720px] grid-cols-1 lg:h-[calc(100vh-56px)] lg:max-h-[calc(100vh-56px)] lg:grid-cols-[276px_minmax(0,1fr)_440px] xl:grid-cols-[276px_minmax(0,1fr)_520px] lg:overflow-hidden">
+    <div
+      className={cn(
+        "mx-auto grid h-full max-w-[1720px] grid-cols-1 lg:h-[calc(100vh-56px)] lg:max-h-[calc(100vh-56px)] lg:overflow-hidden",
+        inspectorOpen ? "lg:grid-cols-[272px_minmax(0,1fr)_minmax(440px,42%)]" : "lg:grid-cols-[272px_minmax(0,1fr)]",
+      )}
+    >
       {/* LEFT — conversations & knowledge index */}
-      <aside className="flex min-h-0 min-w-0 flex-col overflow-y-auto border-b border-border p-5 lg:border-b-0 lg:border-r space-y-5">
+      <aside className="flex min-h-0 min-w-0 flex-col gap-4 overflow-hidden border-b border-border p-4 lg:border-b-0 lg:border-r">
         {/* Conversations list */}
-        <div>
+        <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center justify-between mb-2">
             <div className="tech-label">{t("brain.chats")}</div>
             <Button
@@ -409,7 +424,7 @@ export function ProjectBrain() {
             </Button>
           </div>
 
-          <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
+          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
             {conversations.length === 0 ? (
               <div className="rounded-[var(--radius-md)] border border-dashed border-border px-3 py-3 text-center text-[11px] text-subtle-foreground">
                 {t("brain.noChats")}
@@ -425,7 +440,7 @@ export function ProjectBrain() {
                       "group flex items-center justify-between gap-2 rounded-[var(--radius-md)] border px-2.5 py-1.5 text-left cursor-pointer transition-colors text-[11.5px]",
                       isActive
                         ? "border-primary-ring bg-primary-soft text-primary font-medium"
-                        : "border-border bg-surface hover:bg-surface-2 text-foreground",
+                        : "border-border bg-surface hover:bg-surface-3 text-foreground",
                     )}
                   >
                     <div className="flex items-center gap-1.5 min-w-0 flex-1">
@@ -446,21 +461,42 @@ export function ProjectBrain() {
           </div>
         </div>
 
-        <div>
-          <div className="flex items-center justify-between mb-2.5">
-            <div className="tech-label">{t("brain.knowledgeIndex")}</div>
+        <div className="shrink-0 rounded-[var(--radius-lg)] border border-border bg-surface shadow-[var(--shadow-sm)]">
+          <div className="flex items-center gap-1 pr-2">
+            <button
+              type="button"
+              onClick={() => setIndexOpen((o) => !o)}
+              aria-expanded={indexOpen}
+              className="flex min-w-0 flex-1 items-center gap-2.5 rounded-[var(--radius-lg)] px-3 py-2.5 text-left transition-colors hover:bg-surface-3"
+            >
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary-soft text-primary">
+                <Boxes className="h-3.5 w-3.5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-foreground">
+                  {t("brain.knowledgeIndex")}
+                  <StatusDot tone={isReady ? "green" : isStale ? "amber" : "gray"} />
+                </div>
+                <div className="truncate font-mono text-[10.5px] text-subtle-foreground">
+                  {status ? `${fmt.number(status.totalFiles)} ${t("brain.files")} · ${t("brain.chunksIndexed", { n: status.totalChunks })}` : t("brain.unindexed")}
+                </div>
+              </div>
+              <ChevronDown className={cn("h-4 w-4 shrink-0 text-subtle-foreground transition-transform", indexOpen && "rotate-180")} />
+            </button>
             {activeWorkspaceId && (
               <button
                 onClick={handleIndex}
                 disabled={isIndexing}
                 title={t("brain.reindex")}
-                className="text-subtle-foreground hover:text-foreground transition-colors p-1 rounded"
+                className="rounded p-1.5 text-subtle-foreground transition-colors hover:bg-surface-3 hover:text-foreground"
               >
                 <RefreshCw className={cn("h-3.5 w-3.5", isIndexing && "animate-spin text-primary")} />
               </button>
             )}
           </div>
-          <div className="rounded-[var(--radius-lg)] border border-border bg-surface p-3.5 shadow-[var(--shadow-sm)]">
+          {indexOpen && (
+          <div className="max-h-[48vh] space-y-4 overflow-y-auto border-t border-border p-3.5">
+          <div>
             <div className="flex items-center gap-2">
               <div className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-md)] bg-primary-soft text-primary">
                 <Boxes className="h-4 w-4" />
@@ -542,9 +578,8 @@ export function ProjectBrain() {
               ))}
             </ol>
           </div>
-        </div>
 
-        <div>
+          <div>
           <div className="tech-label mb-2">{t("brain.indexedSources")}</div>
           <div className="space-y-1.5">
             {sourceGroups.length === 0 ? (
@@ -573,21 +608,38 @@ export function ProjectBrain() {
               })
             )}
           </div>
+          </div>
+          </div>
+          )}
         </div>
       </aside>
 
       {/* CENTER — conversation */}
       <section className="flex min-h-0 min-w-0 flex-1 flex-col lg:border-r lg:border-border">
-        <div className="shrink-0 border-b border-border px-6 py-4">
-          <div className="tech-label mb-1">{t("brain.name")}</div>
-          <h1 className="text-[18px] font-semibold tracking-tight text-foreground">{t("brain.heading")}</h1>
-          <p className="mt-1 max-w-2xl text-[13px] leading-relaxed text-muted-foreground text-pretty">
-            {t("brain.headingDesc")}
-          </p>
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-border px-6 py-4">
+          <div className="min-w-0">
+            <div className="tech-label mb-1">{t("brain.name")}</div>
+            <h1 className="text-[18px] font-semibold tracking-tight text-foreground">{t("brain.heading")}</h1>
+            <p className="mt-1 max-w-2xl text-[13px] leading-relaxed text-muted-foreground text-pretty">
+              {t("brain.headingDesc")}
+            </p>
+          </div>
+          <Button variant={inspectorOpen ? "subtle" : "default"} size="sm" className="shrink-0" onClick={() => setInspectorOpen((o) => !o)}>
+            <PanelRight className="h-3.5 w-3.5" />
+            {t("brain.sourcesAndContext")}
+            {contextFiles.length > 0 && <Badge mono>{contextFiles.length}</Badge>}
+          </Button>
         </div>
 
-        <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 py-5">
-          {conversation.length === 0 ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          <div className="mx-auto w-full max-w-3xl space-y-6">
+          {isLoadingConversation && (
+            <div className="flex items-center justify-center gap-2 py-6 text-[12px] text-subtle-foreground">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              {t("common.loading")}
+            </div>
+          )}
+          {conversation.length === 0 && !isLoadingConversation ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <div className="flex h-12 w-12 items-center justify-center rounded-[var(--radius-lg)] bg-primary-soft text-primary mb-3">
                 <Sparkles className="h-6 w-6" />
@@ -599,7 +651,7 @@ export function ProjectBrain() {
             </div>
           ) : (
             conversation.map((m, i) => (
-              <Message key={i} msg={m} selectedKey={selectedKey} onSelect={setSelected} />
+              <Message key={i} msg={m} selectedKey={selectedKey} onSelect={selectCitation} />
             ))
           )}
 
@@ -644,10 +696,17 @@ export function ProjectBrain() {
               </div>
             </div>
           )}
+          </div>
         </div>
 
         {/* composer */}
         <div className="shrink-0 border-t border-border bg-canvas/60 p-4">
+          {error && (
+            <div className="mx-auto mb-3 flex max-w-3xl items-start gap-2 rounded-[var(--radius-md)] border border-danger/25 bg-danger-soft px-3 py-2 text-[12.5px] text-danger">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="break-words">{error}</span>
+            </div>
+          )}
           <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-[var(--radius-lg)] border border-border-strong bg-surface p-2 shadow-[var(--shadow-sm)] focus-within:border-primary-ring">
             <Search className="mb-2 ml-1.5 h-4 w-4 shrink-0 text-subtle-foreground" />
             <textarea
@@ -682,11 +741,18 @@ export function ProjectBrain() {
         </div>
       </section>
 
-      {/* RIGHT — source inspector */}
-      <aside className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-4 lg:p-5">
-        <div className="tech-label mb-3 flex items-center gap-1.5">
-          <FileCode2 className="h-3 w-3" />
-          {t("brain.inspector")}
+      {/* RIGHT — source inspector (opens on demand) */}
+      {inspectorOpen && (
+      <aside className="fixed bottom-0 right-0 top-14 z-40 flex min-h-0 w-full max-w-[580px] min-w-0 flex-col overflow-y-auto border-l border-border bg-canvas p-4 shadow-[var(--shadow-lg)] lg:static lg:z-auto lg:max-w-none lg:p-5 lg:shadow-none">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="tech-label flex items-center gap-1.5">
+            <FileCode2 className="h-3 w-3" />
+            {t("brain.inspector")}
+          </div>
+          <Button variant="ghost" size="sm" onClick={() => setInspectorOpen(false)}>
+            <X className="h-3.5 w-3.5" />
+            {t("brain.closePanel")}
+          </Button>
         </div>
 
         {selected ? (
@@ -721,16 +787,6 @@ export function ProjectBrain() {
               </span>
             </div>
 
-            <div className="mt-3 flex gap-2">
-              <Button variant="default" size="sm" className="flex-1" onClick={() => {}}>
-                <Link2 className="h-3.5 w-3.5" />
-                {t("brain.openEditor")}
-              </Button>
-              <Button variant="subtle" size="sm" className="flex-1" onClick={() => {}}>
-                <Database className="h-3.5 w-3.5" />
-                {t("brain.findRefs")}
-              </Button>
-            </div>
           </div>
         ) : (
           <div className="rounded-[var(--radius-lg)] border border-dashed border-border-strong bg-surface-2 p-6 text-center">
@@ -762,6 +818,7 @@ export function ProjectBrain() {
           )}
         </div>
       </aside>
+      )}
     </div>
   )
 }

@@ -132,7 +132,7 @@ export function TaskRow({ task }: { task: TaskListItem | ApiTask }) {
   return (
     <Link
       to={`/tasks/${task.id}`}
-      className="group flex items-center gap-3 border-b border-border px-3.5 py-3 transition-colors last:border-b-0 hover:bg-surface-2"
+      className="group flex items-center gap-3 border-b border-border px-3.5 py-3 transition-colors last:border-b-0 hover:bg-surface-3"
     >
       <StatusDot tone={statusTone} pulse={isExecuting} />
       <div className="min-w-0 flex-1">
