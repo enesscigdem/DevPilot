@@ -12,6 +12,9 @@ public sealed class WorkspaceOverviewDto
 
     public WorkspaceActiveExecutionDto? ActiveAgentExecution { get; set; }
 
+    /// <summary>A model comparison that still has runs queued or running in this workspace, if any.</summary>
+    public Guid? OpenModelComparisonId { get; set; }
+
     public List<WorkspaceApprovalItemDto> AwaitingApproval { get; set; } = new();
 
     public List<WorkspaceFailedOrBlockedItemDto> FailedOrBlocked { get; set; } = new();

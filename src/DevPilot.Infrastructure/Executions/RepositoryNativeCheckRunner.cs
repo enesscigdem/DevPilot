@@ -1048,7 +1048,15 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
 
         if (!TryGetDeterministicInstallArguments(check.Executable, workingDirectory, out var installArguments, out var lockfilePath))
         {
-            return null;
+            // Existing repositories keep the strict behavior: no lockfile, no install. Only a project that
+            // DevPilot generated in this execution (and therefore cannot have a lockfile yet) may use a plain npm install.
+            if (!check.AllowLockfileFreeInstall || !string.Equals(check.Executable, "npm", StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            installArguments = new[] { "install", "--no-audit", "--no-fund" };
+            lockfilePath = string.Empty;
         }
 
         if (!_packageManagerResolver.TryResolve(check.Executable, installArguments, out var fileName, out var processArguments, out var resolveError))
@@ -1060,7 +1068,7 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
                 resolveError ?? "Node dependency preparation could not resolve a process-safe package-manager launcher.");
         }
 
-        var lockHashBefore = ComputeFileHash(lockfilePath);
+        var lockHashBefore = lockfilePath.Length > 0 ? ComputeFileHash(lockfilePath) : null;
         var packageJsonPath = Path.Combine(workingDirectory, "package.json");
         var packageHashBefore = File.Exists(packageJsonPath) ? ComputeFileHash(packageJsonPath) : null;
 
@@ -1078,7 +1086,7 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
             DefaultBuildTimeout,
             cancellationToken).ConfigureAwait(false);
 
-        if (lockHashBefore != ComputeFileHash(lockfilePath) ||
+        if ((lockHashBefore != null && lockHashBefore != ComputeFileHash(lockfilePath)) ||
             (packageHashBefore != null && packageHashBefore != ComputeFileHash(packageJsonPath)))
         {
             return InfrastructureFailure(

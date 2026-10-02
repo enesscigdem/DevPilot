@@ -18,6 +18,7 @@ import {
 import { PageContainer, SectionHead } from "@/components/shared"
 import { PipelineStrip } from "@/components/PipelineStrip"
 import { Badge, Button, Meter, Panel, StatusDot } from "@/components/ui/primitives"
+import { cancelExecution } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import { cn } from "@/lib/utils"
 import type {
@@ -212,6 +213,22 @@ export function Workspace() {
   } = useWorkspace()
   const { t } = useTranslation()
   const [, setTimerTick] = useState(0)
+  const [isCanceling, setIsCanceling] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+
+  const handleCancel = async (executionId: string) => {
+    if (isCanceling || !window.confirm(t("overview.cancelConfirm"))) return
+    setIsCanceling(true)
+    setCancelError(null)
+    try {
+      await cancelExecution(executionId, activeWorkspace?.id)
+      await fetchOverview(true)
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : t("overview.cancelError"))
+    } finally {
+      setIsCanceling(false)
+    }
+  }
 
   // 1-second client timer for live active execution elapsed duration
   const isExecutionRunning = Boolean(
@@ -346,6 +363,22 @@ export function Workspace() {
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="flex min-w-0 flex-col gap-8">
+          {overview?.openModelComparisonId && (
+            <Link
+              to={`/comparisons/${overview.openModelComparisonId}`}
+              className="flex items-center justify-between gap-3 rounded-[var(--radius-lg)] border border-primary-ring/60 bg-primary-soft px-4 py-3 hover:border-primary/50"
+            >
+              <div className="min-w-0">
+                <div className="text-[13px] font-semibold text-foreground">{t("modelCompare.banner.title")}</div>
+                <div className="text-[12px] text-muted-foreground">{t("modelCompare.banner.description")}</div>
+              </div>
+              <span className="flex shrink-0 items-center gap-1 text-[12px] font-medium text-primary">
+                {t("modelCompare.banner.open")}
+                <ArrowRight className="h-3.5 w-3.5" />
+              </span>
+            </Link>
+          )}
+
           {/* Active execution */}
           <section>
             <SectionHead
@@ -367,12 +400,13 @@ export function Workspace() {
                   <Button
                     variant="danger"
                     size="sm"
-                    className="shrink-0 gap-1.5 opacity-60 cursor-not-allowed"
-                    disabled
-                    title={t("overview.cancelUnavailable")}
+                    className="shrink-0 gap-1.5"
+                    disabled={isCanceling}
+                    title={cancelError ?? undefined}
+                    onClick={() => void handleCancel(activeAgentExecution.executionId)}
                   >
-                    <CircleStop className="h-3.5 w-3.5" />
-                    {t("overview.cancel")}
+                    {isCanceling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CircleStop className="h-3.5 w-3.5" />}
+                    {isCanceling ? t("overview.canceling") : t("overview.cancel")}
                   </Button>
                 </div>
 

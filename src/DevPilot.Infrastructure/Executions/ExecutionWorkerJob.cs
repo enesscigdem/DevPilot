@@ -1,4 +1,5 @@
 using DevPilot.Application.Executions.Commands.ProcessExecution;
+using DevPilot.Application.Executions.Commands.VerifyExecution;
 using Hangfire;
 using Microsoft.Extensions.Logging;
 
@@ -21,13 +22,16 @@ namespace DevPilot.Infrastructure.Executions;
 public sealed class ExecutionWorkerJob
 {
     private readonly IProcessExecutionCommandHandler _handler;
+    private readonly IVerifyExecutionCommandHandler _verifyHandler;
     private readonly ILogger<ExecutionWorkerJob> _logger;
 
     public ExecutionWorkerJob(
         IProcessExecutionCommandHandler handler,
+        IVerifyExecutionCommandHandler verifyHandler,
         ILogger<ExecutionWorkerJob> logger)
     {
         _handler = handler;
+        _verifyHandler = verifyHandler;
         _logger = logger;
     }
 
@@ -69,6 +73,39 @@ public sealed class ExecutionWorkerJob
 
         _logger.LogInformation(
             "ExecutionWorkerJob: execution {ExecutionId} finished successfully.",
+            executionId);
+    }
+
+    public async Task VerifyAsync(Guid executionId, Guid leaseToken)
+    {
+        _logger.LogInformation(
+            "ExecutionWorkerJob: starting re-verification for execution {ExecutionId}.",
+            executionId);
+
+        var result = await _verifyHandler
+            .ExecuteAsync(executionId, leaseToken)
+            .ConfigureAwait(false);
+
+        if (result.Skipped)
+        {
+            _logger.LogInformation(
+                "ExecutionWorkerJob: re-verification for {ExecutionId} was skipped.",
+                executionId);
+            return;
+        }
+
+        if (result.Status == VerifyExecutionResultStatus.Failed)
+        {
+            _logger.LogError(
+                "ExecutionWorkerJob: re-verification for {ExecutionId} failed: {Error}",
+                executionId,
+                result.ErrorMessage);
+            throw new InvalidOperationException(
+                $"Re-verification {executionId} failed: {result.ErrorMessage}");
+        }
+
+        _logger.LogInformation(
+            "ExecutionWorkerJob: re-verification for {ExecutionId} finished.",
             executionId);
     }
 }

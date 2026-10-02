@@ -116,7 +116,9 @@ public static class DependencyInjection
         services.AddScoped<IGetTaskImpactAnalysisQueryHandler, GetTaskImpactAnalysisQueryHandler>();
         services.AddScoped<IApproveTaskCommandHandler, ApproveTaskCommandHandler>();
         services.AddScoped<IRejectTaskCommandHandler, RejectTaskCommandHandler>();
-        services.AddScoped<IExecutionRepository, EfExecutionRepository>();
+        services.AddScoped<EfExecutionRepository>();
+        services.AddScoped<IExecutionRepository>(sp => sp.GetRequiredService<EfExecutionRepository>());
+        services.AddScoped<IExecutionVerificationRerunStore>(sp => sp.GetRequiredService<EfExecutionRepository>());
         services.AddScoped<IExecutionListReader, EfExecutionListReader>();
         services.AddScoped<IExecutionWorkspaceManager, GitExecutionWorkspaceManager>();
         // Single authoritative reliability configuration shared by the processor, DeveloperAgent and impact analysis.
@@ -162,6 +164,7 @@ public static class DependencyInjection
         services.AddSingleton<IExecutionHeartbeatService, ExecutionHeartbeatService>();
         services.AddHostedService<ExecutionStartupReconciler>();
         services.AddScoped<DevPilot.Application.Executions.Commands.CancelExecution.ICancelExecutionCommandHandler, DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionCommandHandler>();
+        services.AddScoped<DevPilot.Application.Executions.Commands.VerifyExecution.IVerifyExecutionCommandHandler, DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionCommandHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();
         services.AddScoped<IRejectExecutionReviewCommandHandler, RejectExecutionReviewCommandHandler>();
         services.AddScoped<IMergeExecutionCommandHandler, MergeExecutionCommandHandler>();

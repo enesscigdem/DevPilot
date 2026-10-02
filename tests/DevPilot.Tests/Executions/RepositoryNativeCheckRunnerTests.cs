@@ -543,6 +543,50 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task GeneratedProjectWithoutLockfile_InstallsOnceThenRunsBuildAndTest_OnlyWhenExplicitlyAllowed()
+    {
+        // README-only repo that DevPilot turned into a Vite project: package.json exists, lockfile does not.
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc && vite build", "test": "vitest run" } }
+            """);
+        var runner = CreateUnixRunner();
+        var discovered = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks;
+        var build = discovered.Single(check => check.Kind == RepositoryCheckKind.Build);
+        var test = discovered.Single(check => check.Kind == RepositoryCheckKind.Test);
+
+        build.AllowLockfileFreeInstall.Should().BeFalse("discovery itself must never grant a lockfile-free install");
+
+        var buildResult = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(
+            _workspace, "test-branch", build with { AllowLockfileFreeInstall = true }));
+        var testResult = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(
+            _workspace, "test-branch", test with { AllowLockfileFreeInstall = true }));
+
+        buildResult.Success.Should().BeTrue();
+        testResult.Success.Should().BeTrue();
+        _processRunner.Invocations.Should().HaveCount(3);
+        _processRunner.Invocations[0].Arguments.Should().Equal("install", "--no-audit", "--no-fund");
+        _processRunner.Invocations[1].Arguments.Should().Equal("run", "build");
+        _processRunner.Invocations[2].Arguments.Should().Equal("run", "test");
+    }
+
+    [Fact]
+    public async Task AllowLockfileFreeInstall_WithExistingLockfile_StillUsesDeterministicCi()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        var runner = CreateUnixRunner();
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks.Single();
+
+        await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(
+            _workspace, "test-branch", check with { AllowLockfileFreeInstall = true }));
+
+        _processRunner.Invocations[0].Arguments.Should().Equal("ci");
+        _processRunner.Invocations.Should().NotContain(invocation => invocation.Arguments.Contains("--no-audit"));
+    }
+
+    [Fact]
     public async Task WindowsNpmBuild_UsesStructuredNodeCliLauncher()
     {
         var nodejs = Path.Combine(_workspace, "fake-nodejs");
@@ -709,7 +753,7 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
                 return true;
             }
 
-            if (arguments[0] == "install" && arguments.Contains("--frozen-lockfile"))
+            if (arguments[0] == "install" && (arguments.Contains("--frozen-lockfile") || arguments.Contains("--no-audit")))
             {
                 return true;
             }

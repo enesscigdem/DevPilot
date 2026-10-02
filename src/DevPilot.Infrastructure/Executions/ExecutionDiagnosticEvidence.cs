@@ -57,7 +57,7 @@ public static class ExecutionDiagnosticEvidence
     public const int MaxSanitizedActivityDiagnosticLines = 5;
     public const int MaxSanitizedActivityDiagnosticChars = 240;
 
-    private const string SourceExtensionPattern = @"(?:cs|fs|vb|ts|tsx|js|jsx|py|java|kt|go|rs)";
+    private const string SourceExtensionPattern = @"(?:cs|fs|vb|ts|tsx|mts|cts|js|jsx|mjs|cjs|json|py|java|kt|go|rs)";
 
     private static readonly Regex ParenthesizedDiagnosticRegex = new(
         $@"(?<path>(?:[A-Za-z]:)?[^\r\n]*?\.{SourceExtensionPattern})\((?<line>\d+),(?<column>\d+)\):\s*error\s*(?<code>[A-Za-z]+\d+)?\s*:\s*(?<message>.*?)(?:\s+\[[^\]]+\])?$",

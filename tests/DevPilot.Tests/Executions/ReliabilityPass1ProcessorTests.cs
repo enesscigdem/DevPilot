@@ -1,5 +1,6 @@
 using System.Text.Json;
 using DevPilot.Application.DeveloperAgent.Models;
+using DevPilot.Application.Executions.Dtos;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Options;
@@ -453,18 +454,181 @@ public sealed class ReliabilityPass1ProcessorTests
         runner.TestRequests.Should().NotBeEmpty();
     }
 
+    // ── README-only repository that becomes a runnable project ─────────────────
+
+    [Fact]
+    public async Task ReadmeOnlyBase_ChecksDiscoveredAfterGeneration_AreRunAndReportedVerified()
+    {
+        var runner = new BootstrapCheckRunner(
+            beforeGeneration: UnconfiguredProfile(),
+            afterGeneration: ConfiguredNodeProfile());
+        var recorder = new FakeRecorder();
+
+        await CreateProcessor(new FakeAgent("package.json", "src/App.tsx", "src/App.test.tsx"), runner, recorder)
+            .ProcessAsync(NewContext());
+
+        runner.DiscoverCalls.Should().Be(2, "checks are rediscovered once the generated files are in the worktree");
+        runner.Executed.Select(request => request.Check.Id).Should().Equal(
+            "node:package.json:build", "node:package.json:test");
+        runner.Executed.Should().OnlyContain(
+            request => request.Check.AllowLockfileFreeInstall,
+            "a freshly generated project has no lockfile yet");
+        recorder.Activities.Should().NotContain(a =>
+            a.Metadata != null && a.Metadata.EventKind == "ReadyForReview" && a.Metadata.VerificationOutcome == "VerificationUnavailable");
+        DetermineOutcome(recorder).Should().Be(ExecutionVerificationOutcome.Verified);
+    }
+
+    [Fact]
+    public async Task ReadmeOnlyBase_NothingRunnableAfterGeneration_StaysUnverified()
+    {
+        var runner = new BootstrapCheckRunner(UnconfiguredProfile(), UnconfiguredProfile());
+        var recorder = new FakeRecorder();
+
+        await CreateProcessor(new FakeAgent("README.md"), runner, recorder).ProcessAsync(NewContext());
+
+        runner.DiscoverCalls.Should().Be(2);
+        runner.Executed.Should().BeEmpty();
+        recorder.Activities.Should().Contain(a =>
+            a.Metadata != null && a.Metadata.EventKind == "ReadyForReview" && a.Metadata.VerificationOutcome == "VerificationUnavailable");
+        DetermineOutcome(recorder).Should().Be(ExecutionVerificationOutcome.VerificationUnavailable);
+    }
+
+    [Fact]
+    public async Task ReadmeOnlyBase_RediscoveredBuildFails_UsesExistingBoundedRepair()
+    {
+        const string oneFile = "src/A.cs(10,5): error CS0103: The name 'alpha' does not exist in the current context";
+        var runner = new BootstrapCheckRunner(
+            UnconfiguredProfile(),
+            ConfiguredNodeProfile(),
+            buildResults: new[] { Fail(oneFile), Pass() });
+        var agent = new FakeAgent("src/A.cs");
+        var recorder = new FakeRecorder();
+
+        await CreateProcessor(agent, runner, recorder).ProcessAsync(NewContext());
+
+        agent.RepairRequests.Should().HaveCount(1);
+        runner.Executed.Count(request => request.Check.Kind == RepositoryCheckKind.Build).Should().Be(2);
+        DetermineOutcome(recorder).Should().NotBe(ExecutionVerificationOutcome.VerificationUnavailable);
+    }
+
+    [Fact]
+    public async Task ExistingRepository_WithChecksAtPreflight_IsNotRediscoveredAndKeepsStrictInstall()
+    {
+        var runner = new BootstrapCheckRunner(ConfiguredNodeProfile(), ConfiguredNodeProfile());
+        var recorder = new FakeRecorder();
+
+        await CreateProcessor(new FakeAgent("src/App.tsx"), runner, recorder).ProcessAsync(NewContext());
+
+        runner.DiscoverCalls.Should().Be(1);
+        runner.Executed.Should().NotBeEmpty();
+        runner.Executed.Should().OnlyContain(request => !request.Check.AllowLockfileFreeInstall);
+    }
+
+    [Fact]
+    public async Task VerifyOnly_ReusesWorktree_RunsChecks_WithoutGeneratingCode()
+    {
+        var agent = new FakeAgent("should-not-be-written.cs");
+        var workspace = new FakeWorkspaceManager();
+        var runner = new BootstrapCheckRunner(ConfiguredNodeProfile(), ConfiguredNodeProfile());
+        var recorder = new FakeRecorder();
+        var worktree = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "devpilot-verify-" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            await CreateProcessor(
+                    agent,
+                    runner,
+                    recorder,
+                    workspace: workspace,
+                    gitDiffReader: new FakeDiffReader("package.json", "src/App.tsx", "src/App.test.tsx"))
+                .ProcessAsync(NewContext() with
+                {
+                    VerifyOnlyWorkspace = new ExecutionVerifyOnlyWorkspace(worktree.FullName, "devpilot/task", "base123"),
+                });
+        }
+        finally
+        {
+            worktree.Delete(recursive: true);
+        }
+
+        agent.GenerateCalls.Should().Be(0);
+        workspace.PrepareCalls.Should().Be(0);
+        runner.DiscoverCalls.Should().Be(1);
+        runner.Executed.Select(request => request.Check.Id).Should().Equal(
+            "node:package.json:build", "node:package.json:test");
+        runner.Executed.Should().OnlyContain(request => request.Check.AllowLockfileFreeInstall);
+        recorder.Activities.Should().Contain(a => a.Message.Contains("code was not regenerated", StringComparison.OrdinalIgnoreCase));
+        recorder.Activities.Should().NotContain(a => a.Message.Contains("Developer Agent started", StringComparison.OrdinalIgnoreCase));
+        DetermineOutcome(recorder).Should().Be(ExecutionVerificationOutcome.Verified);
+    }
+
+    [Fact]
+    public async Task VerifyOnly_BuildFailure_UsesExistingBoundedRepair_WithoutRegenerating()
+    {
+        const string oneFile = "src/A.cs(10,5): error CS0103: The name 'alpha' does not exist in the current context";
+        var agent = new FakeAgent("should-not-be-written.cs");
+        var runner = new BootstrapCheckRunner(
+            ConfiguredNodeProfile(),
+            ConfiguredNodeProfile(),
+            buildResults: new[] { Fail(oneFile), Pass() });
+        var recorder = new FakeRecorder();
+        var worktree = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "devpilot-verify-" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            await CreateProcessor(agent, runner, recorder, gitDiffReader: new FakeDiffReader("src/A.cs"))
+                .ProcessAsync(NewContext() with
+                {
+                    VerifyOnlyWorkspace = new ExecutionVerifyOnlyWorkspace(worktree.FullName, "devpilot/task", "base123"),
+                });
+        }
+        finally
+        {
+            worktree.Delete(recursive: true);
+        }
+
+        agent.GenerateCalls.Should().Be(0);
+        agent.RepairRequests.Should().HaveCount(1);
+        runner.Executed.Count(request => request.Check.Kind == RepositoryCheckKind.Build).Should().Be(2);
+        DetermineOutcome(recorder).Should().NotBe(ExecutionVerificationOutcome.VerificationUnavailable);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    private static RepositoryProfile UnconfiguredProfile() => new(
+        RepositoryVerificationState.Unconfigured,
+        Array.Empty<string>(),
+        Array.Empty<RepositoryCheck>(),
+        "No supported manifest was found.",
+        HasUnresolvedVerification: true);
+
+    private static RepositoryProfile ConfiguredNodeProfile() => new(
+        RepositoryVerificationState.Configured,
+        new[] { "node" },
+        new[]
+        {
+            new RepositoryCheck(
+                "node:package.json:build", "npm build", RepositoryCheckKind.Build, "node", "npm",
+                new[] { "run", "build" }, ".", true, TimeSpan.FromMinutes(5),
+                RepositoryCheckSource.PackageJsonScript, "package.json", Order: 110),
+            new RepositoryCheck(
+                "node:package.json:test", "npm test", RepositoryCheckKind.Test, "node", "npm",
+                new[] { "run", "test" }, ".", true, TimeSpan.FromMinutes(10),
+                RepositoryCheckSource.PackageJsonScript, "package.json", Order: 410),
+        });
 
     private static GitWorkspaceExecutionProcessor CreateProcessor(
         FakeAgent agent,
-        ScriptedCheckRunner runner,
+        IRepositoryCheckRunner runner,
         FakeRecorder recorder,
         FakeBaseline? baseline = null,
         ExecutionReliabilityOptions? options = null,
         IExecutionChangeFingerprintCalculator? fingerprintCalculator = null,
-        IRepositoryFreshnessService? freshness = null) =>
+        IRepositoryFreshnessService? freshness = null,
+        FakeWorkspaceManager? workspace = null,
+        IExecutionGitDiffReader? gitDiffReader = null) =>
         new(
-            new FakeWorkspaceManager(),
+            workspace ?? new FakeWorkspaceManager(),
             new InMemoryExecutionRepository(),
             new FakeImpactRepo(),
             agent,
@@ -474,7 +638,8 @@ public sealed class ReliabilityPass1ProcessorTests
             changeFingerprintCalculator: fingerprintCalculator,
             baselineVerificationService: baseline,
             reliabilityOptions: (options ?? new ExecutionReliabilityOptions()).Normalize(),
-            freshnessService: freshness);
+            freshnessService: freshness,
+            gitDiffReader: gitDiffReader);
 
     private static ExecutionProcessingContext NewContext() =>
         new(Guid.NewGuid(), Guid.NewGuid(), "Task", "Desc", null, Guid.NewGuid(), "/src", "Summary");
@@ -543,9 +708,14 @@ public sealed class ReliabilityPass1ProcessorTests
 
     private sealed class FakeWorkspaceManager : IExecutionWorkspaceManager
     {
+        public int PrepareCalls { get; private set; }
+
         public Task<ExecutionWorkspaceResult> PrepareWorkspaceAsync(
-            Guid executionId, Guid taskId, string sourceRepositoryLocalPath, string? sourceBranch = null, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new ExecutionWorkspaceResult("/workspace/path", "devpilot/branch", true, BaseCommitSha: "base123"));
+            Guid executionId, Guid taskId, string sourceRepositoryLocalPath, string? sourceBranch = null, CancellationToken cancellationToken = default)
+        {
+            PrepareCalls++;
+            return Task.FromResult(new ExecutionWorkspaceResult("/workspace/path", "devpilot/branch", true, BaseCommitSha: "base123"));
+        }
 
         public Task<WorkspaceVerificationResult> VerifyWorkspaceStateAsync(
             string workspacePath, string expectedBranchName, bool requireClean = true, CancellationToken cancellationToken = default) =>
@@ -607,14 +777,33 @@ public sealed class ReliabilityPass1ProcessorTests
 
         public List<FocusedRepairRequest> RepairRequests { get; } = new();
 
-        public Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(DeveloperAgentRequest request, CancellationToken cancellationToken = default) =>
-            Task.FromResult(DeveloperAgentResult.Ok(_generatedFiles.ToList(), model: "test-model"));
+        public int GenerateCalls { get; private set; }
+
+        public Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(DeveloperAgentRequest request, CancellationToken cancellationToken = default)
+        {
+            GenerateCalls++;
+            return Task.FromResult(DeveloperAgentResult.Ok(_generatedFiles.ToList(), model: "test-model"));
+        }
 
         public Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(FocusedRepairRequest request, CancellationToken cancellationToken = default)
         {
             RepairRequests.Add(request);
             return Task.FromResult(DeveloperAgentResult.Ok(request.RepairFiles.ToList(), model: "test-model"));
         }
+    }
+
+    private sealed class FakeDiffReader : IExecutionGitDiffReader
+    {
+        private readonly IReadOnlyList<ExecutionReviewFileDto> _files;
+
+        public FakeDiffReader(params string[] paths) =>
+            _files = paths.Select(path => new ExecutionReviewFileDto(path, "Modified")).ToList();
+
+        public Task<ExecutionGitDiffResult> ReadWorkspaceDiffAsync(string workspacePath, string branchName, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ExecutionGitDiffResult(true, ChangedFiles: _files));
+
+        public Task<ExecutionGitDiffResult> ReadCommittedDiffAsync(string workspacePath, string baseCommitSha, string commitSha, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ExecutionGitDiffResult(true, ChangedFiles: _files));
     }
 
     private sealed class FakeRecorder : IExecutionActivityRecorder
@@ -669,6 +858,41 @@ public sealed class ReliabilityPass1ProcessorTests
 
         public Task<ExecutionFingerprintResult> ComputeStagedTreeFingerprintAsync(string workspacePath, string treeSha, string baseHeadSha, CancellationToken cancellationToken = default) =>
             Task.FromResult(new ExecutionFingerprintResult(true, Fingerprint: treeSha, BaseHeadSha: baseHeadSha));
+    }
+
+    /// <summary>First discovery sees the README-only base; later discoveries see the generated project.</summary>
+    private sealed class BootstrapCheckRunner : IRepositoryCheckRunner
+    {
+        private readonly RepositoryProfile _before;
+        private readonly RepositoryProfile _after;
+        private readonly Queue<RepositoryCheckResult> _buildResults;
+
+        public BootstrapCheckRunner(
+            RepositoryProfile beforeGeneration,
+            RepositoryProfile afterGeneration,
+            IEnumerable<RepositoryCheckResult>? buildResults = null)
+        {
+            _before = beforeGeneration;
+            _after = afterGeneration;
+            _buildResults = new Queue<RepositoryCheckResult>(buildResults ?? Array.Empty<RepositoryCheckResult>());
+        }
+
+        public int DiscoverCalls { get; private set; }
+        public List<RepositoryCheckExecutionRequest> Executed { get; } = new();
+
+        public Task<RepositoryProfile> DiscoverAsync(RepositoryPreflightRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(++DiscoverCalls == 1 ? _before : _after);
+
+        public Task<RepositoryCheckResult> ExecuteAsync(RepositoryCheckExecutionRequest request, CancellationToken cancellationToken = default)
+        {
+            Executed.Add(request);
+            if (request.Check.Kind == RepositoryCheckKind.Build && _buildResults.Count > 0)
+            {
+                return Task.FromResult(_buildResults.Dequeue());
+            }
+
+            return Task.FromResult(Pass());
+        }
     }
 
     private sealed class ScriptedCheckRunner : IRepositoryCheckRunner

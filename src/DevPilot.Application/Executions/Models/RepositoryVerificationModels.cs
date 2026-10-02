@@ -50,7 +50,10 @@ public sealed record RepositoryCheck(
     bool SupportsSkipBuild = false,
     bool SupportsTargetedTest = false,
     int Order = 0,
-    string? DiscoveryEvidence = null);
+    string? DiscoveryEvidence = null,
+    // Set only for checks rediscovered after DevPilot itself generated the project (e.g. README-only repo).
+    // The project has no lockfile yet, so dependencies may be installed without one. Never set by discovery.
+    bool AllowLockfileFreeInstall = false);
 
 public sealed record RepositoryProfile(
     RepositoryVerificationState State,

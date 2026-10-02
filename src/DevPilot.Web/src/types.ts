@@ -1039,6 +1039,7 @@ export interface WorkspaceOverview {
   needsAttention: WorkspaceAttentionItem[];
   activeExecution?: WorkspaceActiveExecution | null;
   activeAgentExecution?: WorkspaceActiveExecution | null;
+  openModelComparisonId?: string | null;
   awaitingApproval: WorkspaceApprovalItem[];
   failedOrBlocked: WorkspaceFailedOrBlockedItem[];
   recentActivity: WorkspaceActivityItem[];

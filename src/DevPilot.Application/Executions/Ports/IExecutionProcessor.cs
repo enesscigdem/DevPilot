@@ -36,4 +36,18 @@ public sealed record ExecutionProcessingContext(
     string ImpactAnalysisSummary,
     string? RepositoryOwner = null,
     string? RepositoryName = null,
-    string? BaseBranch = null);
+    string? BaseBranch = null,
+    /// <summary>
+    /// When set, the already generated worktree is verified again instead of generating code: no new
+    /// workspace is prepared and the Developer Agent is not asked for edits. Bounded repair still runs.
+    /// </summary>
+    ExecutionVerifyOnlyWorkspace? VerifyOnlyWorkspace = null)
+{
+    public bool IsVerifyOnly => VerifyOnlyWorkspace is not null;
+}
+
+/// <summary>The existing worktree of a finished execution, re-verified without regenerating code.</summary>
+public sealed record ExecutionVerifyOnlyWorkspace(
+    string WorkspacePath,
+    string BranchName,
+    string? BaseCommitSha = null);

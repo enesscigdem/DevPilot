@@ -100,6 +100,10 @@ public class ModelComparisonServiceTests
         public List<Guid> Enqueued { get; } = new();
 
         public void EnqueueProcessExecution(Guid executionId) => Enqueued.Add(executionId);
+
+        public void EnqueueVerifyExecution(Guid executionId, Guid leaseToken)
+        {
+        }
     }
 
     [Fact]

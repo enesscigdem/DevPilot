@@ -174,6 +174,12 @@ export async function getExecution(id: string, workspaceId?: string | null, init
   return http<ExecutionDetail>(appendWorkspaceQuery(`/executions/${id}`, workspaceId), init);
 }
 
+export async function verifyExecution(id: string, workspaceId?: string | null): Promise<{ message: string }> {
+  return http<{ message: string }>(appendWorkspaceQuery(`/executions/${id}/verify`, workspaceId), {
+    method: 'POST',
+  });
+}
+
 export async function cancelExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<{ message: string }> {
   return http<{ message: string }>(appendWorkspaceQuery(`/executions/${id}/cancel`, workspaceId), {
     ...init,

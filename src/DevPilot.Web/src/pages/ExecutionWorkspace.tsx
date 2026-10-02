@@ -27,7 +27,7 @@ import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
 import { ExecutionTabs } from "@/components/ExecutionTabs"
 import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { cn } from "@/lib/utils"
-import { getExecution, getExecutionActivity, retryExecution, cancelExecution, getExecutions } from "@/api"
+import { getExecution, getExecutionActivity, retryExecution, cancelExecution, verifyExecution, getExecutions, getModelComparisonsForTask } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import {
   TaskExecutionStatus,
@@ -197,12 +197,15 @@ export function ExecutionWorkspace() {
   const [execution, setExecution] = useState<ExecutionDetail | null>(null)
   const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
   const [activeExecutionForTask, setActiveExecutionForTask] = useState<ExecutionListItem | null>(null)
+  const [comparisonId, setComparisonId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [isRetrying, setIsRetrying] = useState(false)
   const [retryError, setRetryError] = useState<string | null>(null)
   const [isCanceling, setIsCanceling] = useState(false)
   const [cancelError, setCancelError] = useState<string | null>(null)
+  const [isVerifying, setIsVerifying] = useState(false)
+  const [verifyError, setVerifyError] = useState<string | null>(null)
   const [showGenDetails, setShowGenDetails] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
 
@@ -230,6 +233,23 @@ export function ExecutionWorkspace() {
       setRetryError(err instanceof Error ? err.message : t("execWs.errRetry"))
     } finally {
       setIsRetrying(false)
+    }
+  }
+
+  const handleVerifyExisting = async () => {
+    if (!execution || isVerifying) return
+    if (!window.confirm(t("execWs.verifyConfirm"))) return
+    setIsVerifying(true)
+    setVerifyError(null)
+
+    try {
+      await verifyExecution(execution.id, activeWorkspaceId)
+      refreshOverview(true)
+      await fetchData(false)
+    } catch (err) {
+      setVerifyError(err instanceof Error ? err.message : t("execWs.errVerify"))
+    } finally {
+      setIsVerifying(false)
     }
   }
 
@@ -282,6 +302,12 @@ export function ExecutionWorkspace() {
               e.id !== execData.id,
           )
           setActiveExecutionForTask(activeForTask ?? null)
+          void getModelComparisonsForTask(execData.developmentTaskId, { signal })
+            .then((list) => {
+              if (signal?.aborted) return
+              setComparisonId(list.find((c) => c.runs.some((r) => r.executionId === execData.id))?.id ?? null)
+            })
+            .catch(() => undefined)
           setError(null)
         }
       }
@@ -374,6 +400,20 @@ export function ExecutionWorkspace() {
   const isFailed = execution.status === TaskExecutionStatus.Failed
   const isCancelled = execution.status === TaskExecutionStatus.Cancelled
   const canRetryExecution = Boolean(execution.canRetry) || isFailed || isCancelled
+  const verificationMissing =
+    !execution.verificationOutcome ||
+    execution.verificationOutcome === "VerificationUnavailable" ||
+    execution.verificationOutcome === "VerificationInfrastructureError"
+  const deliveryUntouched =
+    (execution.commitStatus ?? "None") === "None" &&
+    (execution.pushStatus ?? "None") === "None" &&
+    (execution.pullRequestStatus ?? "None") === "None" &&
+    (execution.mergeStatus ?? "None") === "None"
+  const canVerifyExisting =
+    execution.status === TaskExecutionStatus.Completed &&
+    verificationMissing &&
+    deliveryUntouched &&
+    !activeExecutionForTask
 
   // Authoritative build/test outcome derived from final validation activity and execution status
   const buildActivities = activities.filter((a) => a.stage === "Build" && (a.status === "Completed" || a.status === "Failed"))
@@ -425,10 +465,10 @@ export function ExecutionWorkspace() {
               <GitBranch className="h-3 w-3" />
               {execution.repositoryOwner}/{execution.repositoryName}
             </div>
-            {(retryError || cancelError) && (
+            {(retryError || cancelError || verifyError) && (
               <div className="mt-1 flex items-center gap-1.5 text-[11.5px] font-medium text-danger">
                 <AlertCircle className="h-3 w-3 shrink-0" />
-                <span>{retryError || cancelError}</span>
+                <span>{retryError || cancelError || verifyError}</span>
               </div>
             )}
           </div>
@@ -458,6 +498,26 @@ export function ExecutionWorkspace() {
                   <>
                     <X className="h-3.5 w-3.5" />
                     {t("execWs.cancelExecution")}
+                  </>
+                )}
+              </Button>
+            )}
+            {canVerifyExisting && (
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={isVerifying}
+                onClick={handleVerifyExisting}
+              >
+                {isVerifying ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    {t("execWs.verifying")}
+                  </>
+                ) : (
+                  <>
+                    <FlaskConical className="h-3.5 w-3.5" />
+                    {t("execWs.verifyExisting")}
                   </>
                 )}
               </Button>
@@ -495,7 +555,7 @@ export function ExecutionWorkspace() {
               )
             )}
             <Button
-              variant={canRetryExecution ? "default" : "primary"}
+              variant={canRetryExecution || canVerifyExisting ? "default" : "primary"}
               size="sm"
               disabled={isPending || isRunning || isCancelled}
               onClick={() => navigate(`/review/${execution.id}`)}
@@ -1137,6 +1197,14 @@ export function ExecutionWorkspace() {
                 <span className="tech-label">{t("execWs.model")}</span>
                 <span className="font-mono text-[11px] text-muted-foreground">{execution.model || t("execWs.notRecorded")}</span>
               </div>
+              {comparisonId && (
+                <div className="mt-2 flex items-center justify-between border-t border-border/40 pt-2 text-[11.5px]">
+                  <span className="text-subtle-foreground">{t("modelCompare.fromComparison")}</span>
+                  <Link to={`/comparisons/${comparisonId}`} className="font-medium text-primary hover:underline">
+                    {t("modelCompare.openComparison")}
+                  </Link>
+                </div>
+              )}
             </Panel>
           </div>
 

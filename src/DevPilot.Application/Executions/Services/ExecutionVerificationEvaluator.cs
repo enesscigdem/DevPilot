@@ -47,8 +47,27 @@ public static class ExecutionVerificationEvaluator
             return ExecutionVerificationOutcome.Failed;
         }
 
+        // A preflight that found no checks is superseded when checks were rediscovered after the generated
+        // changes were applied (README-only repo that became a runnable project). The same later discovery
+        // also retires an earlier "unverified" terminal marker, so re-running checks on an existing worktree
+        // can replace that verdict.
+        var lastDiscoveringPreflightIndex = parsedActivities
+            .Where(p => p.Metadata?.EventKind == "RepositoryPreflight" && p.Metadata.DiscoveredCheckCount is > 0)
+            .Select(p => p.Index)
+            .DefaultIfEmpty(-1)
+            .Max();
+        bool IsSupersededEmptyPreflight(ExecutionActivityMetadata? m, int index) =>
+            m?.EventKind == "RepositoryPreflight" &&
+            (m.DiscoveredCheckCount ?? 0) == 0 &&
+            index < lastDiscoveringPreflightIndex;
+        bool IsStaleUnverifiedMarker(ExecutionActivityMetadata? m, int index) =>
+            IsSupersededEmptyPreflight(m, index) ||
+            (index < lastDiscoveringPreflightIndex &&
+             (string.Equals(m?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationUnavailable), StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(m?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationInfrastructureError), StringComparison.OrdinalIgnoreCase)));
+
         // 1. VerificationInfrastructureError: Infrastructure failure during check discovery or execution
-        var hasInfraError = parsedActivities.Any(p =>
+        var hasInfraError = parsedActivities.Where(p => !IsStaleUnverifiedMarker(p.Metadata, p.Index)).Any(p =>
             string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationInfrastructureError), StringComparison.OrdinalIgnoreCase) ||
             (p.Metadata?.VerificationFailureCategory != null && p.Metadata.VerificationFailureCategory.Contains("Infrastructure", StringComparison.OrdinalIgnoreCase)) ||
             (p.Activity.MetadataJson != null &&
@@ -144,7 +163,7 @@ public static class ExecutionVerificationEvaluator
         }
 
         // 5. VerificationUnavailable: No checks discovered or unconfigured
-        var hasUnavailable = parsedActivities.Any(p =>
+        var hasUnavailable = parsedActivities.Where(p => !IsStaleUnverifiedMarker(p.Metadata, p.Index)).Any(p =>
             string.Equals(p.Metadata?.VerificationOutcome, nameof(ExecutionVerificationOutcome.VerificationUnavailable), StringComparison.OrdinalIgnoreCase) ||
             string.Equals(p.Metadata?.VerificationFailureCategory, "Unconfigured", StringComparison.OrdinalIgnoreCase));
 
@@ -157,7 +176,8 @@ public static class ExecutionVerificationEvaluator
         }
 
         // 6. Check if preflight reported unresolved verification (e.g. partial discovery / unresolved scripts)
-        var hasUnresolvedVerification = parsedActivities.Any(p => p.Metadata?.VerificationUnresolved == true);
+        var hasUnresolvedVerification = parsedActivities.Any(p =>
+            p.Metadata?.VerificationUnresolved == true && !IsStaleUnverifiedMarker(p.Metadata, p.Index));
 
         // 7. Clean build passed and no tests discovered
         if (buildCount > 0 && testCount == 0)

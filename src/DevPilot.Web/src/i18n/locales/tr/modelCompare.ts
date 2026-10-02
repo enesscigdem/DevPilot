@@ -32,6 +32,13 @@ const modelCompare: Resources["modelCompare"] = {
   openReview: "İncele",
   runLabel: "{{n}}. çalıştırma",
   failedWith: "Çalıştırma başarısız: {{message}}",
+  banner: {
+    title: "Model karşılaştırması devam ediyor",
+    description: "Çalıştırmalar sırayla ilerler. Her modeli izlemek için karşılaştırmayı açın.",
+    open: "Karşılaştırmayı aç",
+  },
+  fromComparison: "Bu çalıştırma bir model karşılaştırmasının parçası.",
+  openComparison: "Karşılaştırmayı aç",
   panel: {
     title: "Modelleri karşılaştır",
     description: "Bu planı 2 ya da 3 modelle sırayla çalıştırın ve sonuçları yan yana karşılaştırın.",
