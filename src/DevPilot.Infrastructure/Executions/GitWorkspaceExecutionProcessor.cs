@@ -31,6 +31,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IRepositoryRepairContextProvider? _repairContextProvider;
     private readonly IBaselineVerificationService? _baselineVerificationService;
     private readonly IRepositoryFreshnessService? _freshnessService;
+    private readonly IExecutionGitDiffReader? _gitDiffReader;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
     private readonly int _maxCompileRepairRounds;
     private readonly int _maxTestRepairRounds;
@@ -49,9 +50,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IRepositoryRepairContextProvider? repairContextProvider = null,
         IBaselineVerificationService? baselineVerificationService = null,
         ExecutionReliabilityOptions? reliabilityOptions = null,
-        IRepositoryFreshnessService? freshnessService = null)
+        IRepositoryFreshnessService? freshnessService = null,
+        IExecutionGitDiffReader? gitDiffReader = null)
     {
         _freshnessService = freshnessService;
+        _gitDiffReader = gitDiffReader;
         _workspaceManager = workspaceManager;
         _executionRepository = executionRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
@@ -84,30 +87,42 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             context.ExecutionId,
             ExecutionStage.Workspace,
             ExecutionActivityStatus.Started,
-            "Workspace preparation started.",
+            context.IsVerifyOnly ? "Re-verification started on the existing worktree." : "Workspace preparation started.",
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        // Fetch origin and fast-forward the managed clone when provably safe, so the execution branches from a
-        // fresh base. Never fails or blocks the execution; the outcome is recorded as evidence below.
-        var freshness = await TryRefreshBaseAsync(context, cancellationToken).ConfigureAwait(false);
+        RepositoryFreshnessResult? freshness = null;
+        ExecutionWorkspaceResult prepResult;
 
-        var prepResult = await _workspaceManager.PrepareWorkspaceAsync(
-            context.ExecutionId,
-            context.TaskId,
-            context.WorkspaceLocalPath,
-            sourceBranch: null,
-            cancellationToken).ConfigureAwait(false);
-
-        if (!prepResult.Success)
+        if (context.VerifyOnlyWorkspace is { } existing)
         {
-            var error = $"Execution workspace preparation failed: {prepResult.ErrorMessage}";
-            await SafeRecordActivityAsync(
+            // Re-verification must never touch the base clone or recreate the worktree: the generated
+            // changes live in it and would be lost.
+            prepResult = ResolveExistingWorkspace(existing);
+        }
+        else
+        {
+            // Fetch origin and fast-forward the managed clone when provably safe, so the execution branches from a
+            // fresh base. Never fails or blocks the execution; the outcome is recorded as evidence below.
+            freshness = await TryRefreshBaseAsync(context, cancellationToken).ConfigureAwait(false);
+
+            prepResult = await _workspaceManager.PrepareWorkspaceAsync(
                 context.ExecutionId,
-                ExecutionStage.Workspace,
-                ExecutionActivityStatus.Failed,
-                error,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException(error);
+                context.TaskId,
+                context.WorkspaceLocalPath,
+                sourceBranch: null,
+                cancellationToken).ConfigureAwait(false);
+
+            if (!prepResult.Success)
+            {
+                var error = $"Execution workspace preparation failed: {prepResult.ErrorMessage}";
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Workspace,
+                    ExecutionActivityStatus.Failed,
+                    error,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException(error);
+            }
         }
 
         var fileSets = new ExecutionFileSets();
@@ -125,7 +140,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 context.ExecutionId,
                 ExecutionStage.Workspace,
                 ExecutionActivityStatus.Completed,
-                "Workspace prepared.",
+                context.IsVerifyOnly ? "Existing worktree reused." : "Workspace prepared.",
                 new ExecutionActivityMetadata(BranchName: prepResult.BranchName),
                 cancellationToken).ConfigureAwait(false);
 
@@ -147,10 +162,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     cancellationToken).ConfigureAwait(false);
             }
 
+            // A re-verified worktree already holds the generated changes, so a clean tree is not expected.
             var preAiVerification = await _workspaceManager.VerifyWorkspaceStateAsync(
                 prepResult.WorkspacePath,
                 prepResult.BranchName,
-                requireClean: true,
+                requireClean: !context.IsVerifyOnly,
                 cancellationToken).ConfigureAwait(false);
 
             if (!preAiVerification.IsValid)
@@ -175,6 +191,17 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 .OrderBy(check => check.Order)
                 .ThenBy(check => check.Id, StringComparer.Ordinal)
                 .ToList();
+
+            if (context.IsVerifyOnly)
+            {
+                // The worktree already holds a project this execution generated, so it may not have a lockfile yet.
+                // Repositories that do have one still install through the deterministic lockfile command.
+                requiredChecks = requiredChecks
+                    .Select(check => check.Source == RepositoryCheckSource.PackageJsonScript
+                        ? check with { AllowLockfileFreeInstall = true }
+                        : check)
+                    .ToList();
+            }
 
             if (requiredChecks.Count == 0)
             {
@@ -236,146 +263,76 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 throw new InvalidOperationException(error);
             }
 
-            var summary = !string.IsNullOrWhiteSpace(analysis.StructuredResult?.Summary)
-                ? analysis.StructuredResult.Summary
-                : context.ImpactAnalysisSummary;
-            var impactedFiles = analysis.StructuredResult?.ImpactedFiles?
-                .Select(file => file.FilePath)
-                .Where(path => !string.IsNullOrWhiteSpace(path))
-                .ToList() ?? new List<string>();
-            var impactedFileDetails = analysis.StructuredResult?.ImpactedFiles?
-                .Where(file => !string.IsNullOrWhiteSpace(file.FilePath))
-                .Select(file => new ImpactedFileDetail(
-                    file.FilePath,
-                    file.ChangeType.ToString(),
-                    file.Reason,
-                    file.EvidenceType,
-                    file.IsUncertain))
-                .ToList() ?? new List<ImpactedFileDetail>();
-
-            var changeDimensions = analysis.StructuredResult?.Dimensions?
-                .Select(d => $"{d.Area}: {d.Summary}")
-                .Take(5)
-                .ToList();
-
-            var expectedChecks = analysis.StructuredResult?.ChangeBrief?.ExpectedChecks?
-                .Select(c => c.DisplayName)
-                .Take(5)
-                .ToList();
-
-            var criticalUnknowns = analysis.StructuredResult?.Unknowns?
-                .Take(3)
-                .ToList();
-
-            var agentRequest = new DeveloperAgentRequest(
-                context.TaskId,
-                context.ExecutionId,
-                context.TaskTitle,
-                context.TaskDescription,
-                context.AcceptanceCriteria,
-                summary,
-                BuildProposedPlanText(analysis),
-                impactedFiles,
-                prepResult.WorkspacePath,
-                prepResult.BranchName,
-                impactedFileDetails,
-                analysis.Model,
-                ChangeDimensions: changeDimensions,
-                ExpectedChecks: expectedChecks,
-                Unknowns: criticalUnknowns);
-
-            await SafeRecordActivityAsync(
-                context.ExecutionId,
-                ExecutionStage.DeveloperAgent,
-                ExecutionActivityStatus.Started,
-                "Developer Agent started.",
-                new ExecutionActivityMetadata(Model: analysis.Model, EventKind: "GeneratingChange"),
-                cancellationToken).ConfigureAwait(false);
-
-            var agentResult = await _developerAgent.GenerateAndApplyEditsAsync(agentRequest, cancellationToken).ConfigureAwait(false);
-            var actualModel = agentResult.Model ?? analysis.Model;
-            if (!string.IsNullOrWhiteSpace(actualModel))
+            string? actualModel;
+            if (context.IsVerifyOnly)
             {
-                await _executionRepository.SetModelAsync(context.ExecutionId, actualModel, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (!agentResult.Success)
-            {
-                var error = $"Developer Agent failed: {agentResult.ErrorMessage ?? "Developer Agent failed to generate or apply edits."}";
-                await SafeRecordActivityAsync(
-                    context.ExecutionId,
-                    ExecutionStage.DeveloperAgent,
-                    ExecutionActivityStatus.Failed,
-                    error,
-                    new ExecutionActivityMetadata(Model: actualModel, EventKind: "GeneratingChange"),
-                    cancellationToken).ConfigureAwait(false);
-                throw new InvalidOperationException(error);
-            }
-
-            if (agentResult.ModifiedFiles == null || agentResult.ModifiedFiles.Count == 0)
-            {
-                if (agentResult.HasResolvedNoChange)
+                actualModel = await LoadVerifyOnlyChangesAsync(context, prepResult, fileSets, cancellationToken).ConfigureAwait(false);
+                if (fileSets.ActuallyModifiedFiles.Count == 0)
                 {
-                    await SafeRecordActivityAsync(
-                        context.ExecutionId,
-                        ExecutionStage.DeveloperAgent,
-                        ExecutionActivityStatus.Completed,
-                        "Developer Agent completed.",
-                        new ExecutionActivityMetadata(
-                            ModifiedFileCount: 0,
-                            Model: actualModel,
-                            EventKind: "GeneratingChange",
-                            ResolvedNoChangeCount: agentResult.ResolvedNoChangeFiles!.Count),
-                        cancellationToken).ConfigureAwait(false);
-
                     await SafeRecordActivityAsync(
                         context.ExecutionId,
                         ExecutionStage.Execution,
                         ExecutionActivityStatus.Completed,
-                        "No code changes were required by the generated plan.",
+                        "Re-verification stopped: the worktree has no changes left to verify.",
                         new ExecutionActivityMetadata(
-                            Model: actualModel,
                             EventKind: "ReadyForReview",
-                            VerificationOutcome: "NeedsReview",
-                            ResolvedNoChangeCount: agentResult.ResolvedNoChangeFiles.Count),
+                            VerificationOutcome: "VerificationUnavailable"),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }
+            }
+            else
+            {
+                var generation = await RunDeveloperAgentAsync(context, prepResult, analysis, fileSets, cancellationToken).ConfigureAwait(false);
+                actualModel = generation.Model;
+                if (!generation.ShouldContinue)
+                {
+                    return;
+                }
+            }
 
-                const string error = "Developer Agent failed: Developer Agent returned success but produced zero modified files.";
-                await SafeRecordActivityAsync(
-                    context.ExecutionId,
-                    ExecutionStage.DeveloperAgent,
-                    ExecutionActivityStatus.Failed,
-                    error,
-                    new ExecutionActivityMetadata(Model: actualModel, EventKind: "GeneratingChange"),
+            // The base had nothing to verify (e.g. a README-only repo), but the generated files may now define
+            // build/test scripts. Rediscover against the worktree that actually holds the changes. If that still
+            // finds nothing, the unverified outcome below is kept unchanged.
+            if (requiredChecks.Count == 0)
+            {
+                var rediscovered = await _repositoryCheckRunner.DiscoverAsync(
+                    new RepositoryPreflightRequest(prepResult.WorkspacePath, prepResult.BranchName),
                     cancellationToken).ConfigureAwait(false);
-                throw new InvalidOperationException(error);
-            }
 
-            foreach (var file in agentResult.ModifiedFiles)
-            {
-                fileSets.AddActuallyModified(file);
-            }
+                var rediscoveredChecks = rediscovered.Checks
+                    .Where(check => check.Required)
+                    .OrderBy(check => check.Order)
+                    .ThenBy(check => check.Id, StringComparer.Ordinal)
+                    .Select(check => check.Source == RepositoryCheckSource.PackageJsonScript
+                        ? check with { AllowLockfileFreeInstall = true }
+                        : check)
+                    .ToList();
 
-            foreach (var file in agentResult.ResolvedNoChangeFiles ?? Array.Empty<string>())
-            {
-                fileSets.AddResolvedNoChange(file);
-            }
+                if (rediscoveredChecks.Count > 0)
+                {
+                    profile = rediscovered;
+                    requiredChecks = rediscoveredChecks;
 
-            await SafeRecordActivityAsync(
-                context.ExecutionId,
-                ExecutionStage.DeveloperAgent,
-                ExecutionActivityStatus.Completed,
-                "Developer Agent completed.",
-                new ExecutionActivityMetadata(
-                    ModifiedFileCount: fileSets.ActuallyModifiedFiles.Count,
-                    Model: actualModel,
-                    EventKind: "GeneratingChange",
-                    ResolvedNoChangeCount: fileSets.ResolvedNoChangeFiles.Count > 0
-                        ? fileSets.ResolvedNoChangeFiles.Count
-                        : null),
-                cancellationToken).ConfigureAwait(false);
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Build,
+                        ExecutionActivityStatus.Completed,
+                        "Repository verification checks discovered after applying generated changes.",
+                        new ExecutionActivityMetadata(
+                            EventKind: "RepositoryPreflight",
+                            DiscoveredCheckCount: requiredChecks.Count,
+                            DiscoveredChecks: requiredChecks.Select(check => check.Id).ToList(),
+                            DiscoveredCheckEvidence: requiredChecks
+                                .Where(check => !string.IsNullOrWhiteSpace(check.DiscoveryEvidence))
+                                .Select(check => $"{check.Id}: {check.DiscoveryEvidence}")
+                                .ToList(),
+                            DetectedEcosystems: profile.Ecosystems,
+                            DeterministicCheck: true,
+                            VerificationUnresolved: profile.HasUnresolvedVerification),
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
 
             var prerequisiteChecks = requiredChecks.Where(check => check.Kind != RepositoryCheckKind.Test).ToList();
             var testChecks = requiredChecks.Where(check => check.Kind == RepositoryCheckKind.Test).ToList();
@@ -1984,5 +1941,247 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             return superseded;
         }
+    }
+
+    /// <summary>
+    /// Generates and applies the planned edits. Returns ShouldContinue=false when the execution already
+    /// reached a terminal activity (for example a plan that resolved to no change at all).
+    /// </summary>
+    private async Task<(bool ShouldContinue, string? Model)> RunDeveloperAgentAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        TaskImpactAnalysis analysis,
+        ExecutionFileSets fileSets,
+        CancellationToken cancellationToken)
+    {
+        var summary = !string.IsNullOrWhiteSpace(analysis.StructuredResult?.Summary)
+            ? analysis.StructuredResult.Summary
+            : context.ImpactAnalysisSummary;
+        var impactedFiles = analysis.StructuredResult?.ImpactedFiles?
+            .Select(file => file.FilePath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .ToList() ?? new List<string>();
+        var impactedFileDetails = analysis.StructuredResult?.ImpactedFiles?
+            .Where(file => !string.IsNullOrWhiteSpace(file.FilePath))
+            .Select(file => new ImpactedFileDetail(
+                file.FilePath,
+                file.ChangeType.ToString(),
+                file.Reason,
+                file.EvidenceType,
+                file.IsUncertain))
+            .ToList() ?? new List<ImpactedFileDetail>();
+
+        var changeDimensions = analysis.StructuredResult?.Dimensions?
+            .Select(d => $"{d.Area}: {d.Summary}")
+            .Take(5)
+            .ToList();
+
+        var expectedChecks = analysis.StructuredResult?.ChangeBrief?.ExpectedChecks?
+            .Select(c => c.DisplayName)
+            .Take(5)
+            .ToList();
+
+        var criticalUnknowns = analysis.StructuredResult?.Unknowns?
+            .Take(3)
+            .ToList();
+
+        var agentRequest = new DeveloperAgentRequest(
+            context.TaskId,
+            context.ExecutionId,
+            context.TaskTitle,
+            context.TaskDescription,
+            context.AcceptanceCriteria,
+            summary,
+            BuildProposedPlanText(analysis),
+            impactedFiles,
+            prepResult.WorkspacePath,
+            prepResult.BranchName,
+            impactedFileDetails,
+            analysis.Model,
+            ChangeDimensions: changeDimensions,
+            ExpectedChecks: expectedChecks,
+            Unknowns: criticalUnknowns);
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Started,
+            "Developer Agent started.",
+            new ExecutionActivityMetadata(Model: analysis.Model, EventKind: "GeneratingChange"),
+            cancellationToken).ConfigureAwait(false);
+
+        var agentResult = await _developerAgent.GenerateAndApplyEditsAsync(agentRequest, cancellationToken).ConfigureAwait(false);
+        var actualModel = agentResult.Model ?? analysis.Model;
+        if (!string.IsNullOrWhiteSpace(actualModel))
+        {
+            await _executionRepository.SetModelAsync(context.ExecutionId, actualModel, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!agentResult.Success)
+        {
+            var error = $"Developer Agent failed: {agentResult.ErrorMessage ?? "Developer Agent failed to generate or apply edits."}";
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Failed,
+                error,
+                new ExecutionActivityMetadata(Model: actualModel, EventKind: "GeneratingChange"),
+                cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(error);
+        }
+
+        if (agentResult.ModifiedFiles == null || agentResult.ModifiedFiles.Count == 0)
+        {
+            if (agentResult.HasResolvedNoChange)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.DeveloperAgent,
+                    ExecutionActivityStatus.Completed,
+                    "Developer Agent completed.",
+                    new ExecutionActivityMetadata(
+                        ModifiedFileCount: 0,
+                        Model: actualModel,
+                        EventKind: "GeneratingChange",
+                        ResolvedNoChangeCount: agentResult.ResolvedNoChangeFiles!.Count),
+                    cancellationToken).ConfigureAwait(false);
+
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Execution,
+                    ExecutionActivityStatus.Completed,
+                    "No code changes were required by the generated plan.",
+                    new ExecutionActivityMetadata(
+                        Model: actualModel,
+                        EventKind: "ReadyForReview",
+                        VerificationOutcome: "NeedsReview",
+                        ResolvedNoChangeCount: agentResult.ResolvedNoChangeFiles.Count),
+                    cancellationToken).ConfigureAwait(false);
+                return (false, actualModel);
+            }
+
+            const string error = "Developer Agent failed: Developer Agent returned success but produced zero modified files.";
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.DeveloperAgent,
+                ExecutionActivityStatus.Failed,
+                error,
+                new ExecutionActivityMetadata(Model: actualModel, EventKind: "GeneratingChange"),
+                cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(error);
+        }
+
+        foreach (var file in agentResult.ModifiedFiles)
+        {
+            fileSets.AddActuallyModified(file);
+        }
+
+        foreach (var file in agentResult.ResolvedNoChangeFiles ?? Array.Empty<string>())
+        {
+            fileSets.AddResolvedNoChange(file);
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Completed,
+            "Developer Agent completed.",
+            new ExecutionActivityMetadata(
+                ModifiedFileCount: fileSets.ActuallyModifiedFiles.Count,
+                Model: actualModel,
+                EventKind: "GeneratingChange",
+                ResolvedNoChangeCount: fileSets.ResolvedNoChangeFiles.Count > 0
+                    ? fileSets.ResolvedNoChangeFiles.Count
+                    : null),
+            cancellationToken).ConfigureAwait(false);
+
+        return (true, actualModel);
+    }
+
+    /// <summary>
+    /// Accepts the execution's stored worktree. Preparing a new one is forbidden here: the manager refuses to
+    /// reuse an existing path, and creating another worktree would drop the generated changes.
+    /// </summary>
+    private static ExecutionWorkspaceResult ResolveExistingWorkspace(ExecutionVerifyOnlyWorkspace existing)
+    {
+        if (string.IsNullOrWhiteSpace(existing.WorkspacePath) || !Directory.Exists(existing.WorkspacePath))
+        {
+            return new ExecutionWorkspaceResult(
+                existing.WorkspacePath ?? string.Empty,
+                existing.BranchName ?? string.Empty,
+                false,
+                "The execution worktree no longer exists, so the generated changes cannot be verified.");
+        }
+
+        if (string.IsNullOrWhiteSpace(existing.BranchName))
+        {
+            return new ExecutionWorkspaceResult(
+                existing.WorkspacePath,
+                string.Empty,
+                false,
+                "The execution has no branch name, so the worktree cannot be verified.");
+        }
+
+        return new ExecutionWorkspaceResult(
+            existing.WorkspacePath,
+            existing.BranchName,
+            true,
+            BaseCommitSha: existing.BaseCommitSha);
+    }
+
+    /// <summary>
+    /// Loads the files already changed in the worktree. Returns the model recorded on the execution.
+    /// </summary>
+    private async Task<string?> LoadVerifyOnlyChangesAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        ExecutionFileSets fileSets,
+        CancellationToken cancellationToken)
+    {
+        if (_gitDiffReader == null)
+        {
+            throw new InvalidOperationException("Re-verification requires a git diff reader.");
+        }
+
+        var diff = await _gitDiffReader
+            .ReadWorkspaceDiffAsync(prepResult.WorkspacePath, prepResult.BranchName, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!diff.Success)
+        {
+            throw new InvalidOperationException(
+                $"Re-verification could not read the worktree changes: {diff.ErrorMessage}");
+        }
+
+        if (diff.ChangedFiles != null)
+        {
+            foreach (var file in diff.ChangedFiles)
+            {
+                if (!string.IsNullOrWhiteSpace(file.Path))
+                {
+                    fileSets.AddActuallyModified(file.Path.Replace('\\', '/'));
+                }
+            }
+        }
+
+        var execution = await _executionRepository
+            .GetByIdAsync(context.ExecutionId, cancellationToken)
+            .ConfigureAwait(false);
+        var actualModel = !string.IsNullOrWhiteSpace(execution?.Model)
+            ? execution.Model
+            : execution?.PinnedAiModelName;
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Completed,
+            "Existing worktree changes reused; code was not regenerated.",
+            new ExecutionActivityMetadata(
+                ModifiedFileCount: fileSets.ActuallyModifiedFiles.Count,
+                Model: actualModel,
+                EventKind: "ReverifyExistingChanges"),
+            cancellationToken).ConfigureAwait(false);
+
+        return actualModel;
     }
 }

@@ -8,6 +8,7 @@ import {
   Boxes,
   Search,
   Check,
+  Copy,
   Hash,
   Braces,
   Quote,
@@ -75,6 +76,7 @@ function Message({
   onSelect: (c: BrainCitation) => void
 }) {
   const { t } = useTranslation()
+  const [copied, setCopied] = useState(false)
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
@@ -104,6 +106,20 @@ function Message({
               {msg.elapsed}
             </span>
           )}
+          <button
+            type="button"
+            title={t("brain.copyHint")}
+            onClick={() => {
+              void navigator.clipboard.writeText(msg.content).then(() => {
+                setCopied(true)
+                setTimeout(() => setCopied(false), 1500)
+              })
+            }}
+            className="ml-auto flex items-center gap-1 rounded-[var(--radius-md)] px-1.5 py-0.5 text-[11px] font-medium text-subtle-foreground hover:bg-surface-3 hover:text-foreground"
+          >
+            {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
+            {copied ? t("brain.copied") : t("brain.copy")}
+          </button>
         </div>
         <FormattedText text={msg.content} size="md" />
 

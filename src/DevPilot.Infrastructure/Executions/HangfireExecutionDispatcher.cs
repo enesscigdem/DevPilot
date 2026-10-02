@@ -21,4 +21,9 @@ public sealed class HangfireExecutionDispatcher : IExecutionDispatcher
     {
         _jobClient.Enqueue<ExecutionWorkerJob>(job => job.ExecuteAsync(executionId));
     }
+
+    public void EnqueueVerifyExecution(Guid executionId, Guid leaseToken)
+    {
+        _jobClient.Enqueue<ExecutionWorkerJob>(job => job.VerifyAsync(executionId, leaseToken));
+    }
 }

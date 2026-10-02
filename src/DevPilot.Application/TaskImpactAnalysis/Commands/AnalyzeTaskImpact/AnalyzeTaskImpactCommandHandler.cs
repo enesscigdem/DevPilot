@@ -999,6 +999,20 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         }
     }
 
+    private static bool IsEfGeneratedArtifact(string path)
+    {
+        var norm = path.Replace('\\', '/');
+        var name = norm[(norm.LastIndexOf('/') + 1)..];
+        if (name.Contains("ModelSnapshot", StringComparison.OrdinalIgnoreCase) &&
+            name.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return name.EndsWith(".Designer.cs", StringComparison.OrdinalIgnoreCase) &&
+               norm.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static List<string> FindCandidatePaths(
         string targetPath,
         string workspaceLocalPath,
@@ -1441,6 +1455,24 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 }
 
                 var changeType = ParseChangeType(f.ChangeType);
+
+                // EF Core generates the model snapshot and every migration *.Designer.cs (`dotnet ef migrations add`).
+                // Hand-writing them produces files that do not compile (e.g. CS0115 on BuildTargetModel), and the
+                // repair loop cannot fix a file that should not exist. Only the migration class itself may be planned.
+                if (IsEfGeneratedArtifact(normalizedPath))
+                {
+                    var generatedErr = $"Impacted file '{rawPath}' is an EF Core generated artifact (model snapshot or migration .Designer.cs). Do not plan it; propose only the new migration file '<timestamp>_<Name>.cs' (changeType 'Add') with Up/Down and the entity/DbContext changes.";
+                    return ParseResult.GroundingFailure(
+                        generatedErr,
+                        new ImpactGroundingErrorDetails
+                        {
+                            InvalidFilePath = rawPath,
+                            InvalidChangeType = changeType.ToString(),
+                            ExactError = generatedErr,
+                            ValidImpactedFiles = impactedFiles.ToList(),
+                            CandidateRepositoryPaths = FindCandidatePaths(normalizedPath, workspaceLocalPath, effectiveRoots, evidence.InventoryFiles)
+                        });
+                }
 
                 if (normalizedPath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
                 {

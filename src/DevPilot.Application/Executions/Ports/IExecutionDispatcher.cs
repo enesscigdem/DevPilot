@@ -13,4 +13,9 @@ public interface IExecutionDispatcher
     /// Returns immediately; the job runs asynchronously on a worker.
     /// </summary>
     void EnqueueProcessExecution(Guid executionId);
+
+    /// <summary>
+    /// Enqueues a job that verifies the execution's existing worktree. The lease was already claimed.
+    /// </summary>
+    void EnqueueVerifyExecution(Guid executionId, Guid leaseToken);
 }

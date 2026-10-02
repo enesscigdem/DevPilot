@@ -346,6 +346,10 @@ public sealed class StartExecutionCommandTests
             }
             DispatchedExecutionIds.Add(executionId);
         }
+
+        public void EnqueueVerifyExecution(Guid executionId, Guid leaseToken)
+        {
+        }
     }
 
     #endregion

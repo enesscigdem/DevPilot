@@ -30,6 +30,13 @@ const modelCompare = {
   openReview: "Review",
   runLabel: "Run {{n}}",
   failedWith: "Run failed: {{message}}",
+  banner: {
+    title: "Model comparison in progress",
+    description: "Runs go one after another. Open the comparison to follow each model.",
+    open: "Open comparison",
+  },
+  fromComparison: "This run is part of a model comparison.",
+  openComparison: "Open comparison",
   panel: {
     title: "Compare models",
     description: "Run this plan with 2 or 3 models, one after another, and compare the results side by side.",

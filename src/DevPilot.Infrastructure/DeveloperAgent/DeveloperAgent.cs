@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -582,7 +582,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     ApplicabilityRepairCount: callCounter.ApplicabilityRepairCount,
                     TotalGenerationTimeMs: generationStopwatch.ElapsedMilliseconds,
                     StageDurationMs: generationStopwatch.ElapsedMilliseconds)).ConfigureAwait(false);
-            return DeveloperAgentResult.Fail(ex.Message, model: capturedModels.FirstOrDefault() ?? request.Model);
+            return DeveloperAgentResult.Fail(ex.Message, model: PrimaryModel(capturedModels) ?? request.Model);
         }
 
         generationStopwatch.Stop();
@@ -610,7 +610,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         if (orderedEdits.Count != totalFiles)
         {
-            return DeveloperAgentResult.Fail($"Failed to generate edits for all planned files ({orderedEdits.Count}/{totalFiles} generated).", model: capturedModels.FirstOrDefault() ?? request.Model);
+            return DeveloperAgentResult.Fail($"Failed to generate edits for all planned files ({orderedEdits.Count}/{totalFiles} generated).", model: PrimaryModel(capturedModels) ?? request.Model);
         }
 
         var completePlan = new StructuredEditPlan(orderedEdits);
@@ -620,7 +620,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
         catch (Exception ex)
         {
-            return DeveloperAgentResult.Fail($"Complete edit plan validation failed: {ex.Message}", model: capturedModels.FirstOrDefault() ?? request.Model);
+            return DeveloperAgentResult.Fail($"Complete edit plan validation failed: {ex.Message}", model: PrimaryModel(capturedModels) ?? request.Model);
         }
 
         await SafeRecordActivityAsync(request.ExecutionId, "Applying generated edits.", cancellationToken).ConfigureAwait(false);
@@ -631,7 +631,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
             completePlan,
             cancellationToken).ConfigureAwait(false);
 
-        return applyResult with { Model = capturedModels.FirstOrDefault() ?? request.Model };
+        return applyResult with { Model = PrimaryModel(capturedModels) ?? request.Model };
     }
 
     private async Task ExecuteDagGenerationAsync(
@@ -1107,6 +1107,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
         }
 
+        // Cheap compile-time gate: a syntax error is caught right here (milliseconds) and goes through the
+        // existing bounded single-file repair, before dependents consume this file as a locked contract.
+        if (validationError == null && !salvagedCompletedEdit && !string.IsNullOrWhiteSpace(candidateCode))
+        {
+            validationError = FindCSharpSyntaxError(fileEntry.FilePath, candidateCode, fileEntry.Action == FileEditAction.Modify ? targetContent : null);
+        }
+
         if (validationError != null)
         {
             if (recoveryUsed)
@@ -1181,7 +1188,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
             int repairBudget = DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent);
             var repairRequest = new AiRequest
             {
-                Stage = AiStage.Repair,
+                // Re-writing a generated edit that did not apply is still code generation, so it uses the
+                // code-generation model. The Repair stage is reserved for build/test failure fixes.
+                Stage = AiStage.CodeGeneration,
                 Model = request.Model ?? string.Empty,
                 SystemPrompt = BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement),
                 UserPrompt = repairUserPrompt,
@@ -1362,6 +1371,53 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return editSpec;
     }
 
+    /// <summary>
+    /// The model that handled most calls. A ConcurrentBag enumerates in arbitrary order, so taking its first
+    /// item made the recorded model depend on thread timing instead of on what actually did the work.
+    /// </summary>
+    private static string? PrimaryModel(IEnumerable<string> models) =>
+        models
+            .GroupBy(m => m, StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(g => g.Count())
+            .ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.Key)
+            .FirstOrDefault();
+
+    /// <summary>
+    /// Parses generated C# and returns a short description of the first syntax errors, or null when it is fine.
+    /// A Modify target that was already broken before the edit is skipped so pre-existing problems never block a run.
+    /// </summary>
+    internal static string? FindCSharpSyntaxError(string filePath, string code, string? originalContent)
+    {
+        if (!filePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        static List<Microsoft.CodeAnalysis.Diagnostic> Errors(string text) =>
+            CSharpSyntaxTree.ParseText(text).GetDiagnostics()
+                .Where(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error)
+                .ToList();
+
+        var errors = Errors(code);
+        if (errors.Count == 0)
+        {
+            return null;
+        }
+
+        if (originalContent != null && Errors(originalContent).Count > 0)
+        {
+            return null;
+        }
+
+        var details = errors.Take(3).Select(d =>
+        {
+            var line = d.Location.GetLineSpan().StartLinePosition.Line + 1;
+            return $"line {line}: {d.Id} {d.GetMessage()}";
+        });
+        return $"Generated C# has {errors.Count} syntax error(s): {string.Join("; ", details)}";
+    }
+
     private static async Task<(string Content, string Hash)> ReadCurrentTargetContentAsync(
         string workspacePath,
         string filePath,
@@ -1402,7 +1458,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var microBudget = DetermineMicroApplicabilityRepairBudget();
         var microRequest = new AiRequest
         {
-            Stage = AiStage.Repair,
+            Stage = AiStage.CodeGeneration,
             Model = request.Model ?? string.Empty,
             SystemPrompt = BuildMicroApplicabilityRepairSystemPrompt(fileEntry),
             UserPrompt = BuildMicroApplicabilityRepairUserPrompt(

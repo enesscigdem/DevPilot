@@ -6,7 +6,7 @@ using Npgsql;
 
 namespace DevPilot.Infrastructure.Executions;
 
-public sealed class EfExecutionRepository : IExecutionRepository
+public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVerificationRerunStore
 {
     private readonly DevPilotDbContext _dbContext;
 
@@ -162,6 +162,87 @@ public sealed class EfExecutionRepository : IExecutionRepository
                 setters => setters
                     .SetProperty(e => e.HeartbeatAt, now)
                     .SetProperty(e => e.LeaseExpiresAt, leaseExpires),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    public async Task<bool> ClaimCompletedForVerificationAsync(
+        Guid executionId,
+        Guid leaseToken,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        try
+        {
+            var affected = await _dbContext.TaskExecutions
+                .Where(e => e.Id == executionId
+                            && e.Status == TaskExecutionStatus.Completed
+                            && e.CommitStatus == ExecutionCommitStatus.None
+                            && e.PushStatus == ExecutionPushStatus.None
+                            && e.PullRequestStatus == ExecutionPullRequestStatus.None
+                            && e.MergeStatus == ExecutionMergeStatus.None
+                            && e.WorkspacePath != null
+                            && e.BranchName != null)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(e => e.Status, TaskExecutionStatus.Running)
+                        .SetProperty(e => e.CompletedAt, (DateTime?)null)
+                        .SetProperty(e => e.ErrorMessage, (string?)null)
+                        .SetProperty(e => e.LeaseToken, leaseToken)
+                        .SetProperty(e => e.HeartbeatAt, now)
+                        .SetProperty(e => e.LeaseExpiresAt, now.AddSeconds(45)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            return affected > 0;
+        }
+        catch (DbUpdateException ex)
+            when (ex.GetBaseException() is PostgresException pg &&
+                  pg.SqlState == "23505" &&
+                  (pg.ConstraintName == "IX_TaskExecutions_ActivePerTask" ||
+                   (pg.MessageText != null && pg.MessageText.Contains("IX_TaskExecutions_ActivePerTask", StringComparison.OrdinalIgnoreCase))))
+        {
+            return false;
+        }
+    }
+
+    public async Task<bool> RestoreCompletedAfterVerificationDispatchFailureAsync(
+        Guid executionId,
+        Guid leaseToken,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId && e.Status == TaskExecutionStatus.Running && e.LeaseToken == leaseToken)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.Status, TaskExecutionStatus.Completed)
+                    .SetProperty(e => e.CompletedAt, now)
+                    .SetProperty(e => e.LeaseToken, (Guid?)null)
+                    .SetProperty(e => e.HeartbeatAt, (DateTime?)null)
+                    .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected > 0;
+    }
+
+    public async Task<bool> TryInvalidateReviewApprovalAsync(
+        Guid executionId,
+        CancellationToken cancellationToken = default)
+    {
+        var affected = await _dbContext.TaskExecutions
+            .Where(e => e.Id == executionId &&
+                        e.ReviewStatus == ExecutionReviewStatus.Approved &&
+                        (e.Status == TaskExecutionStatus.Completed || e.Status == TaskExecutionStatus.Running))
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(e => e.ReviewStatus, ExecutionReviewStatus.Pending)
+                    .SetProperty(e => e.ReviewDecidedAt, (DateTime?)null)
+                    .SetProperty(e => e.ApprovedChangeFingerprint, (string?)null)
+                    .SetProperty(e => e.ReviewRejectionReason, (string?)null),
                 cancellationToken)
             .ConfigureAwait(false);
 

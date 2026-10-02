@@ -24,6 +24,22 @@ public sealed class ExecutionDiagnosticEvidenceTests
     }
 
     [Fact]
+    public void CompilerError_InTsconfigJson_CorrelatesToTouchedConfigFile()
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(
+            "tsconfig.json(21,18): error TS6310: Referenced project 'tsconfig.node.json' may not disable emit.",
+            null,
+            "npm build failed");
+
+        var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+            evidence,
+            new[] { "tsconfig.json", "tsconfig.node.json", "vite.config.ts" });
+
+        selection.FilePath.Should().Be("tsconfig.json");
+        evidence.Locations.Should().ContainSingle(location => location.Line == 21 && location.Column == 18);
+    }
+
+    [Fact]
     public void CompilerErrors_ExplicitlyImplicatingTwoTouchedFiles_SelectBothAndNoMore()
     {
         var evidence = ExecutionDiagnosticEvidence.ParseCompilerFailure(

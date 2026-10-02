@@ -280,8 +280,22 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
         // 9. Shipped Recently (Merged only)
         var shippedRecently = BuildShippedRecently(executions, taskMap);
 
+        // 10. Open model comparison: later runs start on their own once the previous one ends, so the
+        // client must keep refreshing even while no execution is running at this very moment.
+        var openModelComparisonId = await _db.ModelComparisons
+            .AsNoTracking()
+            .Where(c => taskIds.Contains(c.DevelopmentTaskId) && c.CancelledAt == null)
+            .Where(c => c.Runs.Any(r => !_db.TaskExecutions.Any(e => e.ModelComparisonRunId == r.Id)
+                                        || _db.TaskExecutions.Any(e => e.ModelComparisonRunId == r.Id
+                                                                       && (e.Status == TaskExecutionStatus.Pending || e.Status == TaskExecutionStatus.Running))))
+            .OrderByDescending(c => c.CreatedAt)
+            .Select(c => (Guid?)c.Id)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
         return new WorkspaceOverviewDto
         {
+            OpenModelComparisonId = openModelComparisonId,
             Header = header,
             NeedsAttention = needsAttention,
             ActiveExecution = activeWorkflowDto,

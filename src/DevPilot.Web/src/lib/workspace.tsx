@@ -278,7 +278,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const hasActiveExecution = Boolean(
     (overview?.activeAgentExecution && !overview.activeAgentExecution.completedAt) ||
-    (overview?.activeExecution && !overview.activeExecution.completedAt),
+    (overview?.activeExecution && !overview.activeExecution.completedAt) ||
+    // A model comparison starts its next run on its own after the previous one ends.
+    overview?.openModelComparisonId,
   )
 
   // Only poll when an execution is genuinely active/running. No idle background polling.

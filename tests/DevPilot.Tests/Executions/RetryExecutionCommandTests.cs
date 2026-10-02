@@ -545,6 +545,10 @@ public sealed class RetryExecutionCommandTests
             }
             DispatchedExecutionIds.Add(executionId);
         }
+
+        public void EnqueueVerifyExecution(Guid executionId, Guid leaseToken)
+        {
+        }
     }
 
     #endregion

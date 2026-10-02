@@ -284,4 +284,25 @@ public class ExecutionsController : ControllerBase
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }
+
+    [HttpPost("{id:guid}/verify", Name = nameof(VerifyExecution))]
+    public async Task<IActionResult> VerifyExecution(
+        [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
+        [FromServices] DevPilot.Application.Executions.Commands.VerifyExecution.IVerifyExecutionCommandHandler verifyHandler,
+        CancellationToken cancellationToken)
+    {
+        var result = await verifyHandler
+            .RequestAsync(new DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionCommand(id, repositoryWorkspaceId), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be verified." }),
+            DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionResultStatus.Failed => StatusCode(500, new { error = result.ErrorMessage ?? "Verification could not be started." }),
+            DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionResultStatus.Accepted => Accepted(new { message = "Verification started." }),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
 }

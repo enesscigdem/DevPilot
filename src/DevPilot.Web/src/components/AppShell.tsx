@@ -256,7 +256,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
 function ActiveExecutionMini() {
   const { t } = useTranslation()
-  const { activeAgentExecution } = useWorkspace()
+  const { activeAgentExecution, overview } = useWorkspace()
+  const comparisonId = overview?.openModelComparisonId ?? null
   const [, setTick] = useState(0)
 
   const isRunning = Boolean(activeAgentExecution && !activeAgentExecution.completedAt)
@@ -269,14 +270,26 @@ function ActiveExecutionMini() {
     return () => clearInterval(interval)
   }, [isRunning])
 
+  const comparisonLink = comparisonId ? (
+    <NavLink
+      to={`/comparisons/${comparisonId}`}
+      className="mt-1 block rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-1.5 text-[11.5px] font-medium text-primary hover:border-primary/50"
+    >
+      {t("modelCompare.banner.title")}
+    </NavLink>
+  ) : null
+
   if (!activeAgentExecution) {
     return (
-      <div className="block rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-2 text-subtle-foreground">
-        <div className="flex items-center gap-1.5">
-          <StatusDot tone="neutral" />
-          <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">{t("shared.shell.agentIdle")}</span>
+      <div>
+        <div className="block rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-2 text-subtle-foreground">
+          <div className="flex items-center gap-1.5">
+            <StatusDot tone="neutral" />
+            <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">{t("shared.shell.agentIdle")}</span>
+          </div>
+          <div className="mt-1 truncate text-[12px] text-muted-foreground">{t("shared.shell.noActiveExecution")}</div>
         </div>
-        <div className="mt-1 truncate text-[12px] text-muted-foreground">{t("shared.shell.noActiveExecution")}</div>
+        {comparisonLink}
       </div>
     )
   }
@@ -290,6 +303,7 @@ function ActiveExecutionMini() {
     : t("shared.shell.running")
 
   return (
+    <div>
     <NavLink
       to={`/executions/${activeAgentExecution.executionId}`}
       className="block rounded-[var(--radius-md)] border border-primary-ring/60 bg-primary-soft px-2.5 py-2 transition-colors hover:border-primary/50"
@@ -305,6 +319,8 @@ function ActiveExecutionMini() {
         {t("shared.shell.elapsed", { time: elapsedText })}
       </div>
     </NavLink>
+    {comparisonLink}
+    </div>
   )
 }
 

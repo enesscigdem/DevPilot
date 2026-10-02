@@ -95,7 +95,7 @@ public sealed class EfExecutionListReader : IExecutionListReader
                 MergeStatus = e.MergeStatus.ToString(),
                 ErrorMessage = e.ErrorMessage,
                 ProgressPercentage = progress,
-                Model = e.Model,
+                Model = !string.IsNullOrWhiteSpace(e.Model) ? e.Model : e.PinnedAiModelName,
                 Stages = stages
             });
         }

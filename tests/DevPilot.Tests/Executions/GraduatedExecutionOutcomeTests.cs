@@ -35,6 +35,41 @@ public class GraduatedExecutionOutcomeTests
     }
 
     [Fact]
+    public void DetermineOutcome_LaterDiscovery_ReplacesEarlierUnverifiedMarker()
+    {
+        var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
+        var activities = new List<ExecutionActivity>
+        {
+            new()
+            {
+                Stage = ExecutionStage.Workspace,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Repository verification is unconfigured.",
+                MetadataJson = """{"eventKind":"RepositoryPreflight","discoveredCheckCount":0,"verificationOutcome":"VerificationUnavailable","verificationFailureCategory":"Unconfigured"}""",
+            },
+            new()
+            {
+                Stage = ExecutionStage.Execution,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Execution completed without verification.",
+                MetadataJson = """{"eventKind":"ReadyForReview","verificationOutcome":"VerificationUnavailable"}""",
+            },
+            new()
+            {
+                Stage = ExecutionStage.Workspace,
+                Status = ExecutionActivityStatus.Completed,
+                Message = "Repository verification checks discovered.",
+                MetadataJson = """{"eventKind":"RepositoryPreflight","discoveredCheckCount":2}""",
+            },
+            new() { Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, MetadataJson = """{"repositoryCheckId":"node:package.json:build","buildPassed":true}""" },
+            new() { Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, MetadataJson = """{"repositoryCheckId":"node:package.json:test","testPassed":true}""" },
+        };
+
+        ExecutionVerificationEvaluator.DetermineOutcome(execution, activities)
+            .Should().Be(ExecutionVerificationOutcome.Verified);
+    }
+
+    [Fact]
     public void DetermineOutcome_BuildOnlyPassed_ReturnsPartiallyVerified()
     {
         var execution = new TaskExecution { Status = TaskExecutionStatus.Completed };
