@@ -21,11 +21,13 @@ public class AiModelRoutingTests
             .ConfigureWarnings(w => w.Ignore(InMemoryEventId.TransactionIgnoredWarning))
             .Options);
 
-    private static (RoutingAiProvider Router, FakeFactory Factory, RecordingProvider Legacy) NewRouter(DevPilotDbContext db)
+    private static (RoutingAiProvider Router, FakeFactory Factory, RecordingProvider Legacy) NewRouter(
+        DevPilotDbContext db,
+        IAiExecutionContext? executionContext = null)
     {
         var factory = new FakeFactory();
         var legacy = new RecordingProvider("legacy");
-        var router = new RoutingAiProvider(db, new FakeProtector(), factory, legacy);
+        var router = new RoutingAiProvider(db, new FakeProtector(), factory, legacy, executionContext);
         return (router, factory, legacy);
     }
 
@@ -162,6 +164,54 @@ public class AiModelRoutingTests
             .Select(_ => router.SendAsync(new AiRequest { UserPrompt = "x" })));
 
         responses.Should().OnlyContain(r => r.IsSuccess && r.Provider == "main");
+    }
+
+    [Fact]
+    public async Task PinnedModel_WinsOverStageAssignmentAndDefault()
+    {
+        await using var db = NewDb();
+        var fallback = Model("fallback", isDefault: true);
+        var assigned = Model("assigned");
+        var pinned = Model("pinned");
+        db.AiModelConfigs.AddRange(fallback, assigned, pinned);
+        db.AiStageAssignments.Add(new AiStageAssignment { Id = Guid.NewGuid(), Stage = AiStage.CodeGeneration, AiModelConfigId = assigned.Id });
+        await db.SaveChangesAsync();
+        var (router, _, _) = NewRouter(db, new AiExecutionContext { PinnedModelId = pinned.Id });
+
+        var response = await router.SendAsync(new AiRequest { UserPrompt = "x", Stage = AiStage.CodeGeneration });
+
+        response.Provider.Should().Be("pinned");
+    }
+
+    [Fact]
+    public async Task PinnedModelThatNoLongerExists_FailsInsteadOfUsingAnotherModel()
+    {
+        await using var db = NewDb();
+        db.AiModelConfigs.Add(Model("main", isDefault: true));
+        await db.SaveChangesAsync();
+        var (router, factory, legacy) = NewRouter(db, new AiExecutionContext { PinnedModelId = Guid.NewGuid() });
+
+        var response = await router.SendAsync(new AiRequest { UserPrompt = "x" });
+
+        response.IsSuccess.Should().BeFalse();
+        response.ErrorMessage.Should().Contain("pinned");
+        factory.Created.Should().BeEmpty();
+        legacy.Calls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task PinnedModelThatIsDisabled_FailsToo()
+    {
+        await using var db = NewDb();
+        var off = Model("off", enabled: false);
+        db.AiModelConfigs.AddRange(Model("main", isDefault: true), off);
+        await db.SaveChangesAsync();
+        var (router, factory, _) = NewRouter(db, new AiExecutionContext { PinnedModelId = off.Id });
+
+        var response = await router.SendAsync(new AiRequest { UserPrompt = "x" });
+
+        response.IsSuccess.Should().BeFalse();
+        factory.Created.Should().BeEmpty();
     }
 
     // ---- OpenAiCompatibleProvider wire format ----

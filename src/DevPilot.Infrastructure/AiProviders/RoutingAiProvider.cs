@@ -20,6 +20,7 @@ internal sealed class RoutingAiProvider : IAiProvider
     private readonly IAiKeyProtector _keyProtector;
     private readonly IAiProviderFactory _factory;
     private readonly IAiProvider _legacyProvider;
+    private readonly IAiExecutionContext? _executionContext;
     private readonly SemaphoreSlim _loadLock = new(1, 1);
     private Snapshot? _snapshot;
 
@@ -27,8 +28,10 @@ internal sealed class RoutingAiProvider : IAiProvider
         DevPilotDbContext db,
         IAiKeyProtector keyProtector,
         IAiProviderFactory factory,
-        IAiProvider legacyProvider)
+        IAiProvider legacyProvider,
+        IAiExecutionContext? executionContext = null)
     {
+        _executionContext = executionContext;
         _db = db;
         _keyProtector = keyProtector;
         _factory = factory;
@@ -40,7 +43,21 @@ internal sealed class RoutingAiProvider : IAiProvider
     public async Task<AiResponse> SendAsync(AiRequest request, CancellationToken cancellationToken = default)
     {
         var snapshot = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        var config = snapshot.Resolve(request.Stage);
+        var pinnedId = _executionContext?.PinnedModelId;
+        var config = pinnedId is { } pinned ? snapshot.GetEnabled(pinned) : snapshot.Resolve(request.Stage);
+
+        if (pinnedId is not null && config is null)
+        {
+            // Never fall back to another model: a comparison run must be attributable to exactly one.
+            return new AiResponse
+            {
+                Provider = "Router",
+                Model = request.Model,
+                IsSuccess = false,
+                FailureKind = AiFailureKind.Permanent,
+                ErrorMessage = "The model pinned to this execution was deleted or disabled.",
+            };
+        }
 
         if (config is null)
         {
@@ -158,6 +175,8 @@ internal sealed class RoutingAiProvider : IAiProvider
             // No default flagged but models exist: use the only one rather than silently ignoring the user's setup.
             return _default ?? (_models.Count == 1 ? _models.Values.First() : null);
         }
+
+        public AiModelConfig? GetEnabled(Guid modelId) => _models.GetValueOrDefault(modelId);
 
         public string? GetApiKey(Guid modelId) => _keys.GetValueOrDefault(modelId);
     }

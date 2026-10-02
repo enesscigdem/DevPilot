@@ -1,6 +1,7 @@
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.GitProviders;
+using DevPilot.Application.ModelComparisons;
 using DevPilot.Application.ProjectBrain.Commands.AskBrain;
 using DevPilot.Application.ProjectBrain.Commands.IndexWorkspace;
 using DevPilot.Application.ProjectBrain.Ports;
@@ -55,6 +56,7 @@ using DevPilot.Infrastructure.ProjectBrain.Repositories;
 using DevPilot.Infrastructure.ProjectBrain.SemanticSearch;
 using DevPilot.Infrastructure.RepositoryClone;
 using DevPilot.Infrastructure.ImpactAnalysis;
+using DevPilot.Infrastructure.ModelComparisons;
 using DevPilot.Infrastructure.Tasks;
 using DevPilot.Infrastructure.Executions;
 using DevPilot.Application.DeveloperAgent.Ports;
@@ -219,11 +221,16 @@ public static class DependencyInjection
 
         // The router is the IAiProvider the app uses; models added in the panel take precedence
         // and the appsettings provider below is the fallback when none are configured.
+        services.AddScoped<IAiExecutionContext, AiExecutionContext>();
         services.AddScoped<IAiProvider>(sp => new RoutingAiProvider(
             sp.GetRequiredService<DevPilotDbContext>(),
             sp.GetRequiredService<IAiKeyProtector>(),
             sp.GetRequiredService<IAiProviderFactory>(),
-            sp.GetRequiredKeyedService<IAiProvider>(LegacyAiProviderKey)));
+            sp.GetRequiredKeyedService<IAiProvider>(LegacyAiProviderKey),
+            sp.GetRequiredService<IAiExecutionContext>()));
+
+        services.AddScoped<IModelComparisonService, ModelComparisonService>();
+        services.AddHostedService<ModelComparisonCoordinator>();
 
         // Models added in the panel are the primary path. The appsettings Kimi provider stays as a
         // fallback for existing installs; any other value falls back to a provider that fails loudly.

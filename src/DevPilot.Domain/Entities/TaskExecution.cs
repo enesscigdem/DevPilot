@@ -26,6 +26,18 @@ public class TaskExecution
 
     public string? Model { get; set; }
 
+    /// <summary>
+    /// When set, every AI call of this execution uses this registered model instead of the per-stage
+    /// assignments. Used by model comparisons so each run is attributable to exactly one model.
+    /// </summary>
+    public Guid? PinnedAiModelId { get; set; }
+
+    /// <summary>Name of the pinned model when the run was created (survives deleting the model).</summary>
+    public string? PinnedAiModelName { get; set; }
+
+    /// <summary>The comparison run this execution belongs to, if any.</summary>
+    public Guid? ModelComparisonRunId { get; set; }
+
     public Guid? LeaseToken { get; set; }
 
     public DateTime? HeartbeatAt { get; set; }
