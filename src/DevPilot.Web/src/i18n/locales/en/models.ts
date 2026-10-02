@@ -2,7 +2,7 @@ const models = {
   eyebrow: "Settings",
   title: "AI models",
   description:
-    "Bring your own models. Add any OpenAI-compatible endpoint (OpenAI, DeepSeek, Kimi, Qwen, OpenRouter, or a local Ollama / LM Studio) and choose which one handles each step of the pipeline.",
+    "Bring your own models. Add Claude, Gemini or any OpenAI-compatible endpoint (OpenAI, DeepSeek, Kimi, Qwen, OpenRouter, or a local Ollama / LM Studio) and choose which one handles each step of the pipeline.",
   addModel: "Add model",
   editModel: "Edit model",
   loading: "Loading models…",
@@ -70,7 +70,7 @@ const models = {
     saving: "Saving…",
     cancel: "Cancel",
     keyEncrypted: "Keys are encrypted on the server and never shown again.",
-    comingSoon: "Direct Claude and Gemini adapters are coming soon. For now, use them through OpenRouter.",
+    priceHint: "Prices are optional. When set, they are used to estimate the cost of each run.",
     custom: "Custom",
   },
 }

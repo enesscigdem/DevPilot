@@ -14,28 +14,32 @@ import { fmt } from "@/i18n"
 import { cn } from "@/lib/utils"
 import { PageContainer, PageHeading, SectionHead } from "@/components/shared"
 import { Badge, Button, Panel } from "@/components/ui/primitives"
-import { AI_STAGES, type AiModel, type AiStage, type SaveAiModelRequest } from "@/types"
+import { AI_STAGES, type AiAdapterType, type AiModel, type AiStage, type SaveAiModelRequest } from "@/types"
 
 /* ------------------------------- Provider presets ------------------------------ */
 
 interface Preset {
   id: string
   name: string
+  adapter: AiAdapterType
   baseUrl: string
   modelHint: string
   useMaxCompletionTokens?: boolean
 }
 
-// Endpoints that speak the OpenAI chat-completions protocol. Picking one only pre-fills the form.
+// Claude and Gemini use their own APIs; every other endpoint speaks the OpenAI chat-completions protocol.
+// Picking a preset only pre-fills the form.
 const PRESETS: Preset[] = [
-  { id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", modelHint: "gpt-…", useMaxCompletionTokens: true },
-  { id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", modelHint: "deepseek-chat" },
-  { id: "kimi", name: "Kimi (Moonshot)", baseUrl: "https://api.moonshot.ai/v1", modelHint: "kimi-…" },
-  { id: "qwen", name: "Qwen (Alibaba)", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", modelHint: "qwen-plus" },
-  { id: "mistral", name: "Mistral", baseUrl: "https://api.mistral.ai/v1", modelHint: "mistral-large-latest" },
-  { id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", modelHint: "vendor/model-name" },
-  { id: "ollama", name: "Ollama (local)", baseUrl: "http://localhost:11434/v1", modelHint: "llama3.1" },
-  { id: "lmstudio", name: "LM Studio (local)", baseUrl: "http://localhost:1234/v1", modelHint: "model-id" },
+  { id: "anthropic", adapter: "Claude", name: "Claude (Anthropic)", baseUrl: "https://api.anthropic.com", modelHint: "claude-…" },
+  { id: "gemini", adapter: "Gemini", name: "Gemini (Google)", baseUrl: "https://generativelanguage.googleapis.com", modelHint: "gemini-…" },
+  { id: "openai", adapter: "OpenAiCompatible", name: "OpenAI", baseUrl: "https://api.openai.com/v1", modelHint: "gpt-…", useMaxCompletionTokens: true },
+  { id: "deepseek", adapter: "OpenAiCompatible", name: "DeepSeek", baseUrl: "https://api.deepseek.com", modelHint: "deepseek-chat" },
+  { id: "kimi", adapter: "OpenAiCompatible", name: "Kimi (Moonshot)", baseUrl: "https://api.moonshot.ai/v1", modelHint: "kimi-…" },
+  { id: "qwen", adapter: "OpenAiCompatible", name: "Qwen (Alibaba)", baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", modelHint: "qwen-plus" },
+  { id: "mistral", adapter: "OpenAiCompatible", name: "Mistral", baseUrl: "https://api.mistral.ai/v1", modelHint: "mistral-large-latest" },
+  { id: "openrouter", adapter: "OpenAiCompatible", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", modelHint: "vendor/model-name" },
+  { id: "ollama", adapter: "OpenAiCompatible", name: "Ollama (local)", baseUrl: "http://localhost:11434/v1", modelHint: "llama3.1" },
+  { id: "lmstudio", adapter: "OpenAiCompatible", name: "LM Studio (local)", baseUrl: "http://localhost:1234/v1", modelHint: "model-id" },
 ]
 
 function isLocalUrl(url: string): boolean {
@@ -59,6 +63,7 @@ function hostOf(url: string): string {
 
 interface Draft {
   presetId: string
+  adapterType: AiAdapterType
   name: string
   baseUrl: string
   modelName: string
@@ -74,6 +79,7 @@ interface Draft {
 
 const emptyDraft: Draft = {
   presetId: "",
+  adapterType: "OpenAiCompatible",
   name: "",
   baseUrl: "",
   modelName: "",
@@ -89,7 +95,8 @@ const emptyDraft: Draft = {
 
 function draftFromModel(m: AiModel): Draft {
   return {
-    presetId: PRESETS.find((p) => p.baseUrl === m.baseUrl)?.id ?? "",
+    presetId: PRESETS.find((p) => p.baseUrl === m.baseUrl && p.adapter === m.adapterType)?.id ?? "",
+    adapterType: m.adapterType,
     name: m.name,
     baseUrl: m.baseUrl,
     modelName: m.modelName,
@@ -114,7 +121,7 @@ function parseNumber(value: string): number | null {
 function toRequest(d: Draft): SaveAiModelRequest {
   return {
     name: d.name.trim(),
-    adapterType: "OpenAiCompatible",
+    adapterType: d.adapterType,
     baseUrl: d.baseUrl.trim(),
     modelName: d.modelName.trim(),
     apiKey: d.apiKey.trim() || undefined,
@@ -174,12 +181,14 @@ function ModelForm({
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }))
   const preset = PRESETS.find((p) => p.id === draft.presetId)
   const local = isLocalUrl(draft.baseUrl)
+  const openAiStyle = draft.adapterType === "OpenAiCompatible"
 
   const applyPreset = (id: string) => {
     const p = PRESETS.find((x) => x.id === id)
     setDraft((d) => ({
       ...d,
       presetId: id,
+      adapterType: p ? p.adapter : "OpenAiCompatible",
       baseUrl: p ? p.baseUrl : d.baseUrl,
       name: p && !d.name ? p.name : d.name,
       useMaxCompletionTokens: p?.useMaxCompletionTokens ?? false,
@@ -249,7 +258,6 @@ function ModelForm({
               {t("models.form.custom")}
             </button>
           </div>
-          <p className="mt-1.5 text-[11.5px] text-subtle-foreground">{t("models.form.comingSoon")}</p>
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
@@ -276,7 +284,7 @@ function ModelForm({
               value={draft.baseUrl}
               onChange={(e) => {
                 set("baseUrl", e.target.value)
-                set("presetId", PRESETS.find((p) => p.baseUrl === e.target.value)?.id ?? "")
+                set("presetId", PRESETS.find((p) => p.baseUrl === e.target.value && p.adapter === draft.adapterType)?.id ?? "")
               }}
               placeholder="https://api.example.com/v1"
               inputMode="url"
@@ -316,7 +324,8 @@ function ModelForm({
             <Field label={t("models.form.outputPrice")}>
               <input className={fieldClass} inputMode="decimal" value={draft.outputPrice} onChange={(e) => set("outputPrice", e.target.value)} />
             </Field>
-            <div className="space-y-2 sm:col-span-3">
+            <p className="text-[11.5px] text-subtle-foreground sm:col-span-3">{t("models.form.priceHint")}</p>
+            <div className={cn("space-y-2 sm:col-span-3", !openAiStyle && "hidden")}>
               <Check2
                 checked={draft.supportsReasoningEffort}
                 onChange={(v) => set("supportsReasoningEffort", v)}

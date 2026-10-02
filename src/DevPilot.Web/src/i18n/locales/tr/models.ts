@@ -4,7 +4,7 @@ const models: Resources["models"] = {
   eyebrow: "Ayarlar",
   title: "Yapay zeka modelleri",
   description:
-    "Kendi modellerinizi getirin. OpenAI uyumlu herhangi bir servisi (OpenAI, DeepSeek, Kimi, Qwen, OpenRouter ya da yerel Ollama / LM Studio) ekleyin ve her adımı hangi modelin yapacağını seçin.",
+    "Kendi modellerinizi getirin. Claude, Gemini ya da OpenAI uyumlu herhangi bir servisi (OpenAI, DeepSeek, Kimi, Qwen, OpenRouter ya da yerel Ollama / LM Studio) ekleyin ve her adımı hangi modelin yapacağını seçin.",
   addModel: "Model ekle",
   editModel: "Modeli düzenle",
   loading: "Modeller yükleniyor…",
@@ -72,7 +72,7 @@ const models: Resources["models"] = {
     saving: "Kaydediliyor…",
     cancel: "Vazgeç",
     keyEncrypted: "Anahtarlar sunucuda şifrelenir ve bir daha gösterilmez.",
-    comingSoon: "Doğrudan Claude ve Gemini adaptörleri yakında geliyor. Şimdilik OpenRouter üzerinden kullanabilirsiniz.",
+    priceHint: "Fiyatlar isteğe bağlıdır. Girildiğinde her çalıştırmanın maliyetini tahmin etmek için kullanılır.",
     custom: "Özel",
   },
 }
