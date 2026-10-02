@@ -8,6 +8,7 @@ using DevPilot.Application.Executions.Commands.SyncPullRequest;
 using DevPilot.Application.Executions.Queries.GetExecutionActivity;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
 using DevPilot.Application.Executions.Queries.GetExecutionReview;
+using DevPilot.Application.Executions.Queries.GetExecutionRevisionDiff;
 using DevPilot.Application.Executions.Queries.GetExecutions;
 using Microsoft.AspNetCore.Mvc;
 
@@ -189,6 +190,27 @@ public class ExecutionsController : ControllerBase
             RequestExecutionChangesResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Changes cannot be requested for this execution." }),
             RequestExecutionChangesResultStatus.Failed => StatusCode(500, new { error = result.ErrorMessage ?? "Changes could not be started." }),
             RequestExecutionChangesResultStatus.Accepted => Accepted(new { message = "Changes requested.", revisionNumber = result.RevisionNumber }),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
+    /// <summary>The diff of just the latest requested fix.</summary>
+    [HttpGet("{id:guid}/revision/diff", Name = nameof(GetExecutionRevisionDiff))]
+    public async Task<IActionResult> GetExecutionRevisionDiff(
+        [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
+        [FromServices] IGetExecutionRevisionDiffQueryHandler diffHandler,
+        CancellationToken cancellationToken)
+    {
+        var result = await diffHandler
+            .HandleAsync(new GetExecutionRevisionDiffQuery(id, repositoryWorkspaceId), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            GetExecutionRevisionDiffStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            GetExecutionRevisionDiffStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "No fix diff available." }),
+            GetExecutionRevisionDiffStatus.Success => Ok(result.Diff),
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }

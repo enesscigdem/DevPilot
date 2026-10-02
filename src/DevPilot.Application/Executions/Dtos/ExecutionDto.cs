@@ -95,6 +95,9 @@ public sealed class ExecutionDto
 
     public IReadOnlyList<ExecutionStageStepDto> Stages { get; set; } = Array.Empty<ExecutionStageStepDto>();
 
+    /// <summary>The latest requested fix, derived only from what happened since it was requested (null when none).</summary>
+    public ExecutionRevisionDto? Revision { get; set; }
+
     /// <summary>Explanation of the verification outcome (null while the execution is still running).</summary>
     public ExecutionVerdictDto? Verdict { get; set; }
 

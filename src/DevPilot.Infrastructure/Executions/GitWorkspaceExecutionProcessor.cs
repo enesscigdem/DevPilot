@@ -2172,7 +2172,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             ExecutionStage.DeveloperAgent,
             ExecutionActivityStatus.Started,
             $"Applying reviewer feedback (revision {changeRequest.RevisionNumber}).",
-            new ExecutionActivityMetadata(Model: model, EventKind: "ApplyingReviewFeedback"),
+            new ExecutionActivityMetadata(
+                Model: model,
+                EventKind: "ApplyingReviewFeedback",
+                ConsideredFiles: fileSets.ActuallyModifiedFiles.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToList()),
             cancellationToken).ConfigureAwait(false);
 
         var result = await _reviewFeedbackAgent.ApplyReviewFeedbackAsync(
@@ -2201,7 +2204,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ExecutionStage.Review,
                 ExecutionActivityStatus.Failed,
                 $"Requested fix could not be applied: {error}",
-                new ExecutionActivityMetadata(Model: actualModel, EventKind: "ReviewFeedbackFailed"),
+                new ExecutionActivityMetadata(Model: actualModel, EventKind: "ReviewFeedbackFailed", UnresolvedNote: error.Length > 600 ? error[..600] : error),
                 cancellationToken).ConfigureAwait(false);
             throw new InvalidOperationException(error);
         }
@@ -2216,6 +2219,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 new ExecutionActivityMetadata(
                     Model: actualModel,
                     EventKind: "ReviewFeedbackNoChange",
+                    ChangeSummary: result.Summary,
+                    UnresolvedNote: result.Unresolved,
                     ResolvedNoChangeCount: result.ResolvedNoChangeFiles?.Count),
                 cancellationToken).ConfigureAwait(false);
             return (false, actualModel);
@@ -2234,7 +2239,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             new ExecutionActivityMetadata(
                 ModifiedFileCount: result.ModifiedFiles.Count,
                 Model: actualModel,
-                EventKind: "ReviewFeedbackApplied"),
+                EventKind: "ReviewFeedbackApplied",
+                ChangedFiles: result.ModifiedFiles.ToList(),
+                ChangeSummary: result.Summary,
+                UnresolvedNote: result.Unresolved),
             cancellationToken).ConfigureAwait(false);
 
         return (true, actualModel);

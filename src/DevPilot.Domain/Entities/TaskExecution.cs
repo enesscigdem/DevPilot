@@ -74,6 +74,17 @@ public class TaskExecution
 
     public DateTime? LastChangeRequestAt { get; set; }
 
+    /// <summary>How many fixes were requested on this execution (every attempt, including failed ones).</summary>
+    public int ChangeRequestCount { get; set; }
+
+    /// <summary>When the first generation run finished; kept because a requested fix reopens the execution.</summary>
+    public DateTime? InitialRunCompletedAt { get; set; }
+
+    /// <summary>Git snapshot (pinned commit) of the worktree before / after the latest requested fix.</summary>
+    public string? RevisionBaseSnapshotSha { get; set; }
+
+    public string? RevisionResultSnapshotSha { get; set; }
+
     /// <summary>Short outcome of the latest requested fix (null while it is still running).</summary>
     public string? LastChangeRequestResult { get; set; }
 

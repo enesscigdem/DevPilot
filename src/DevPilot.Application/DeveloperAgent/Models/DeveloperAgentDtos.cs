@@ -64,7 +64,9 @@ public sealed record DeveloperAgentResult(
     IReadOnlyList<string>? ModifiedFiles = null,
     string? RawAiResponse = null,
     string? Model = null,
-    IReadOnlyList<string>? ResolvedNoChangeFiles = null)
+    IReadOnlyList<string>? ResolvedNoChangeFiles = null,
+    string? Summary = null,
+    string? Unresolved = null)
 {
     public static DeveloperAgentResult Fail(string message, string? model = null) =>
         new(Success: false, ErrorMessage: message, Model: model);
@@ -73,14 +75,18 @@ public sealed record DeveloperAgentResult(
         IReadOnlyList<string> modifiedFiles,
         string? rawAiResponse = null,
         string? model = null,
-        IReadOnlyList<string>? resolvedNoChangeFiles = null) =>
+        IReadOnlyList<string>? resolvedNoChangeFiles = null,
+        string? summary = null,
+        string? unresolved = null) =>
         new(
             Success: true,
             ErrorMessage: null,
             ModifiedFiles: modifiedFiles,
             RawAiResponse: rawAiResponse,
             Model: model,
-            ResolvedNoChangeFiles: resolvedNoChangeFiles);
+            ResolvedNoChangeFiles: resolvedNoChangeFiles,
+            Summary: summary,
+            Unresolved: unresolved);
 
     public bool HasResolvedNoChange =>
         ResolvedNoChangeFiles is { Count: > 0 };

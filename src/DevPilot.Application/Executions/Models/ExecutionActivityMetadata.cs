@@ -71,4 +71,8 @@ public sealed record ExecutionActivityMetadata(
     string? RemoteBaseCommitSha = null,
     int? BaseBehindCount = null,
     string? BaseFreshness = null,
-    bool? TestWeakeningSuspected = null);
+    bool? TestWeakeningSuspected = null,
+    IReadOnlyList<string>? ConsideredFiles = null,
+    IReadOnlyList<string>? ChangedFiles = null,
+    string? ChangeSummary = null,
+    string? UnresolvedNote = null);

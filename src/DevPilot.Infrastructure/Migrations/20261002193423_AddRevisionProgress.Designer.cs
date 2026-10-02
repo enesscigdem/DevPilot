@@ -3,6 +3,7 @@ using System;
 using DevPilot.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Pgvector;
@@ -12,9 +13,11 @@ using Pgvector;
 namespace DevPilot.Infrastructure.Migrations
 {
     [DbContext(typeof(DevPilotDbContext))]
-    partial class DevPilotDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261002193423_AddRevisionProgress")]
+    partial class AddRevisionProgress
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -60,13 +63,6 @@ namespace DevPilot.Infrastructure.Migrations
                     b.Property<string>("LastTestMessage")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
-
-                    b.Property<string>("LastTestOutcome")
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<int?>("LastTestStatusCode")
-                        .HasColumnType("integer");
 
                     b.Property<bool?>("LastTestSucceeded")
                         .HasColumnType("boolean");

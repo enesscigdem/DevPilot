@@ -1,5 +1,6 @@
 import overview from "./locales/en/overview"
 import review from "./locales/en/review"
+import revision from "./locales/en/revision"
 import impact from "./locales/en/impact"
 import brain from "./locales/en/brain"
 import arch from "./locales/en/arch"
@@ -84,6 +85,7 @@ const en = {
   },
   overview,
   review,
+  revision,
   impact,
   brain,
   arch,

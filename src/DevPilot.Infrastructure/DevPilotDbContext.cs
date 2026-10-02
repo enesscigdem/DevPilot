@@ -238,6 +238,10 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.LastChangeRequest).HasMaxLength(2000);
             entity.Property(e => e.LastChangeRequestAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.LastChangeRequestResult).HasMaxLength(500);
+            entity.Property(e => e.ChangeRequestCount).HasDefaultValue(0);
+            entity.Property(e => e.InitialRunCompletedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.RevisionBaseSnapshotSha).HasMaxLength(100);
+            entity.Property(e => e.RevisionResultSnapshotSha).HasMaxLength(100);
             entity.Property(e => e.CommitStatus)
                 .HasConversion<string>()
                 .HasMaxLength(50)
@@ -397,6 +401,7 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.InputPricePerMillionTokensUsd).HasPrecision(18, 6);
             entity.Property(e => e.OutputPricePerMillionTokensUsd).HasPrecision(18, 6);
             entity.Property(e => e.LastTestMessage).HasMaxLength(1000);
+            entity.Property(e => e.LastTestOutcome).HasMaxLength(20);
             entity.Property(e => e.LastTestedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");

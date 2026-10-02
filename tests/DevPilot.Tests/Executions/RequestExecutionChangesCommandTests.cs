@@ -158,7 +158,7 @@ public sealed class RequestExecutionChangesCommandTests
     public async Task Request_CountsRevisionsAfterEarlierOnes()
     {
         var fx = new Fixture();
-        fx.Execution.RevisionCount = 2;
+        fx.Execution.ChangeRequestCount = 2;
 
         var result = await fx.Handler.RequestAsync(new RequestExecutionChangesCommand(fx.Execution.Id, "again"));
 
@@ -279,6 +279,19 @@ public sealed class RequestExecutionChangesCommandTests
     }
 
     [Fact]
+    public async Task Execute_TakesASnapshotBeforeAndAfterTheFix_SoTheFixDiffCanBeShown()
+    {
+        var fx = await Fixture.RequestedAsync();
+        fx.Processor.OnProcess = () => fx.Fingerprints.Current = "after";
+
+        await fx.Handler.ExecuteAsync(fx.Execution.Id, fx.Execution.LeaseToken!.Value);
+
+        fx.Snapshots.Labels.Should().Equal("r1-base", "r1-result");
+        fx.Execution.RevisionBaseSnapshotSha.Should().Be("snapshot-r1-base");
+        fx.Execution.RevisionResultSnapshotSha.Should().Be("snapshot-r1-result");
+    }
+
+    [Fact]
     public async Task Execute_BeforeAnyDelivery_AlsoSendsAnApprovedReviewBackToPending()
     {
         var fx = new Fixture();
@@ -307,6 +320,7 @@ public sealed class RequestExecutionChangesCommandTests
         public FakeDispatcher Dispatcher { get; } = new();
         public FakeRecorder Recorder { get; } = new();
         public FakeFingerprints Fingerprints { get; } = new();
+        public FakeSnapshots Snapshots { get; } = new();
         public TaskExecution Execution { get; }
         public RequestExecutionChangesCommandHandler Handler { get; }
 
@@ -359,7 +373,8 @@ public sealed class RequestExecutionChangesCommandTests
                 new FakeHeartbeat(),
                 new FakeCancellationRegistry(),
                 NullLogger<RequestExecutionChangesCommandHandler>.Instance,
-                fingerprintCalculator: Fingerprints);
+                fingerprintCalculator: Fingerprints,
+                snapshotService: Snapshots);
         }
 
         public static async Task<Fixture> RequestedAsync(string feedback = "Please fix the timeout.")
@@ -392,6 +407,7 @@ public sealed class RequestExecutionChangesCommandTests
             e.LastChangeRequest = feedback;
             e.LastChangeRequestAt = requestedAt;
             e.LastChangeRequestResult = null;
+            e.ChangeRequestCount++;
             return Task.FromResult(true);
         }
 
@@ -420,6 +436,14 @@ public sealed class RequestExecutionChangesCommandTests
             e.CiStatus = ExecutionCiStatus.Unknown;
             e.PullRequestIntegrityStatus = ExecutionPullRequestIntegrityStatus.Unknown;
             return Task.FromResult(true);
+        }
+
+        public Task SetRevisionSnapshotAsync(Guid executionId, string? baseSnapshotSha, string? resultSnapshotSha, CancellationToken cancellationToken = default)
+        {
+            var e = _repository.Executions[executionId];
+            e.RevisionBaseSnapshotSha = baseSnapshotSha ?? e.RevisionBaseSnapshotSha;
+            e.RevisionResultSnapshotSha = resultSnapshotSha ?? e.RevisionResultSnapshotSha;
+            return Task.CompletedTask;
         }
 
         public Task SetRevisionResultAsync(Guid executionId, string result, CancellationToken cancellationToken = default)
@@ -484,6 +508,17 @@ public sealed class RequestExecutionChangesCommandTests
 
         public Task<ExecutionFingerprintResult> ComputeStagedTreeFingerprintAsync(string workspacePath, string treeSha, string baseHeadSha, CancellationToken cancellationToken = default) =>
             Task.FromResult(new ExecutionFingerprintResult(true, Current, baseHeadSha, false, 1));
+    }
+
+    private sealed class FakeSnapshots : IExecutionWorktreeSnapshotService
+    {
+        public List<string> Labels { get; } = new();
+
+        public Task<string?> CaptureAsync(string workspacePath, Guid executionId, string label, CancellationToken cancellationToken = default)
+        {
+            Labels.Add(label);
+            return Task.FromResult<string?>($"snapshot-{label}");
+        }
     }
 
     private sealed class FakeHeartbeat : IExecutionHeartbeatService

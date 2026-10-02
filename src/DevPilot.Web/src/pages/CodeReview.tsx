@@ -34,176 +34,9 @@ import {
   type ExecutionActivityItem,
 } from "@/types"
 import { cn } from "@/lib/utils"
-
-interface ParsedLine {
-  id: number
-  type: "header" | "hunk" | "add" | "del" | "context" | "info"
-  content: string
-  oldNo?: number
-  newNo?: number
-  filePath?: string
-}
-
-function parseGitDiff(diffText: string): ParsedLine[] {
-  if (!diffText) return []
-  const rawLines = diffText.split("\n")
-  const parsed: ParsedLine[] = []
-
-  let currentOldLine: number | undefined = undefined
-  let currentNewLine: number | undefined = undefined
-  let currentFile: string | undefined = undefined
-
-  for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i]
-
-    if (line.startsWith("diff --git ")) {
-      const match = line.match(/b\/(.+)$/)
-      if (match) {
-        currentFile = match[1]
-      }
-    }
-
-    if (
-      line.startsWith("diff --git") ||
-      line.startsWith("index ") ||
-      line.startsWith("--- ") ||
-      line.startsWith("+++ ") ||
-      line.startsWith("old mode") ||
-      line.startsWith("new mode") ||
-      line.startsWith("new file") ||
-      line.startsWith("deleted file") ||
-      line.startsWith("similarity index") ||
-      line.startsWith("rename from") ||
-      line.startsWith("rename to")
-    ) {
-      parsed.push({
-        id: i,
-        type: "header",
-        content: line,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    if (line.startsWith("@@ ")) {
-      const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
-      if (hunkMatch) {
-        currentOldLine = parseInt(hunkMatch[1], 10)
-        currentNewLine = parseInt(hunkMatch[2], 10)
-      } else {
-        currentOldLine = undefined
-        currentNewLine = undefined
-      }
-      parsed.push({
-        id: i,
-        type: "hunk",
-        content: line,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    if (
-      line.startsWith("[Redacted sensitive file content:") ||
-      line.startsWith("[Binary file diff not shown:")
-    ) {
-      parsed.push({
-        id: i,
-        type: "info",
-        content: line,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    if (line.startsWith("+")) {
-      parsed.push({
-        id: i,
-        type: "add",
-        content: line,
-        oldNo: undefined,
-        newNo: currentNewLine !== undefined ? currentNewLine++ : undefined,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    if (line.startsWith("-")) {
-      parsed.push({
-        id: i,
-        type: "del",
-        content: line,
-        oldNo: currentOldLine !== undefined ? currentOldLine++ : undefined,
-        newNo: undefined,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    parsed.push({
-      id: i,
-      type: "context",
-      content: line,
-      oldNo: currentOldLine !== undefined ? currentOldLine++ : undefined,
-      newNo: currentNewLine !== undefined ? currentNewLine++ : undefined,
-      filePath: currentFile,
-    })
-  }
-
-  return parsed
-}
-
-function DiffRow({ line }: { line: ParsedLine }) {
-  if (line.type === "hunk") {
-    return (
-      <div className="border-y border-primary/20 bg-primary-soft/40 px-3 py-1 font-mono text-[11px] text-primary">
-        {line.content}
-      </div>
-    )
-  }
-
-  if (line.type === "header") {
-    return (
-      <div
-        id={line.content.startsWith("diff --git") && line.filePath ? `file-diff-${line.filePath}` : undefined}
-        className="border-b border-border/40 bg-surface-2 px-3 py-1 font-mono text-[11px] text-subtle-foreground"
-      >
-        {line.content}
-      </div>
-    )
-  }
-
-  if (line.type === "info") {
-    return (
-      <div className="flex items-center gap-2 border-y border-accent/20 bg-amber-soft/60 px-4 py-2 font-mono text-[12px] font-medium text-accent">
-        <Info className="h-3.5 w-3.5 shrink-0" />
-        <span>{line.content}</span>
-      </div>
-    )
-  }
-
-  const tone = line.type === "add" ? "bg-success-soft/60" : line.type === "del" ? "bg-danger-soft/60" : ""
-  const sign = line.type === "add" ? "+" : line.type === "del" ? "−" : " "
-  const signColor = line.type === "add" ? "text-success" : line.type === "del" ? "text-danger" : "text-subtle-foreground"
-
-  const displayCode =
-    line.content.length > 0 && (line.content[0] === "+" || line.content[0] === "-" || line.content[0] === " ")
-      ? line.content.slice(1)
-      : line.content
-
-  return (
-    <div className={"flex font-mono text-[12px] leading-[1.6] " + tone}>
-      <span className="w-10 shrink-0 select-none border-r border-border/60 px-2 text-right text-subtle-foreground">
-        {line.oldNo ?? ""}
-      </span>
-      <span className="w-10 shrink-0 select-none border-r border-border/60 px-2 text-right text-subtle-foreground">
-        {line.newNo ?? ""}
-      </span>
-      <span className={"w-5 shrink-0 select-none text-center " + signColor}>{sign}</span>
-      <code className="whitespace-pre pr-4 text-foreground">{displayCode || " "}</code>
-    </div>
-  )
-}
+import { DiffRow, parseGitDiff } from "@/components/DiffView"
+import { RevisionPanel } from "@/components/RevisionPanel"
+import { RequestChangesModal } from "@/components/RequestChangesModal"
 
 export function CodeReview() {
   const { t } = useTranslation()
@@ -224,7 +57,6 @@ export function CodeReview() {
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReasonInput, setRejectionReasonInput] = useState("")
   const [showChangesModal, setShowChangesModal] = useState(false)
-  const [changesInput, setChangesInput] = useState("")
   const [isRequestingChanges, setIsRequestingChanges] = useState(false)
   const [changesError, setChangesError] = useState<string | null>(null)
 
@@ -498,9 +330,8 @@ export function CodeReview() {
 
   // The fix runs in the background on the same branch; the execution page shows its progress, and the
   // review page comes back to life once it is done.
-  const handleRequestChanges = async () => {
-    const feedback = changesInput.trim()
-    if (!id || !review || isRequestingChanges || feedback.length === 0) return
+  const handleRequestChanges = async (feedback: string) => {
+    if (!id || !review || isRequestingChanges) return
     setIsRequestingChanges(true)
     setChangesError(null)
 
@@ -508,10 +339,9 @@ export function CodeReview() {
       const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
       await requestExecutionChanges(id, feedback, wsId)
       setShowChangesModal(false)
-      setChangesInput("")
       navigate(`/executions/${id}`)
     } catch (err) {
-      setChangesError(err instanceof Error ? err.message : t("review.errRequestChanges"))
+      setChangesError(err instanceof Error ? err.message : t("revision.modal.error"))
     } finally {
       setIsRequestingChanges(false)
     }
@@ -956,38 +786,18 @@ export function CodeReview() {
 
           <div className="mt-5 space-y-3">
             <div className="tech-label">{t("review.decision")}</div>
-            {review.lastChangeRequest && (
-              <Panel className="space-y-2 border-primary/30 bg-primary-soft/30 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-[13px] font-semibold text-primary">
-                    <MessageSquareWarning className="h-4 w-4 shrink-0" />
-                    <span>{t("review.revisionTitle")}</span>
-                  </div>
-                  {(review.revisionCount ?? 0) > 0 && (
-                    <Badge tone="blue">{t("review.revisionNumber", { n: review.revisionCount })}</Badge>
-                  )}
-                </div>
-                <div className="rounded-[var(--radius-md)] border border-border bg-surface p-2.5 text-[12px] text-foreground">
-                  <span className="mb-0.5 block text-[10.5px] font-semibold uppercase tracking-wider text-subtle-foreground">
-                    {t("review.revisionFeedback")}
-                  </span>
-                  <span className="whitespace-pre-wrap break-words">{review.lastChangeRequest}</span>
-                </div>
-                {review.lastChangeRequestResult && (
-                  <div className="text-[12px] text-muted-foreground">
-                    <span className="font-semibold text-foreground">{t("review.revisionResult")}: </span>
-                    {review.lastChangeRequestResult}
-                  </div>
-                )}
-                {review.pullRequestStatus === "Open" && review.pullRequestNumber != null && review.pushStatus !== "Pushed" && (
-                  <div className="flex items-start gap-2 text-[11.5px] text-muted-foreground">
-                    <GitPullRequest className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span>
-                      {t(isPendingDecision ? "review.revisionPrNotePending" : "review.revisionPrNote", { n: review.pullRequestNumber })}
-                    </span>
-                  </div>
-                )}
-              </Panel>
+            {review.revision && (
+              <RevisionPanel
+                compact
+                revision={review.revision}
+                executionId={review.executionId}
+                workspaceId={review.repositoryWorkspaceId ?? activeWorkspaceId}
+                canRequestChanges={Boolean(review.canRequestChanges)}
+                onRequestChanges={() => {
+                  setChangesError(null)
+                  setShowChangesModal(true)
+                }}
+              />
             )}
             {isPendingDecision && (() => {
               const isBlocked = review.verificationOutcome === "NeedsReview" || review.verificationOutcome === "Failed" || review.verificationOutcome === "Blocked"
@@ -1374,63 +1184,13 @@ export function CodeReview() {
 
       {/* Request Changes Modal */}
       {showChangesModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="w-full max-w-[520px] space-y-4 rounded-[var(--radius-lg)] border border-border bg-canvas p-6 shadow-xl">
-            <h3 className="flex items-center gap-2 text-[15px] font-semibold text-foreground">
-              <MessageSquareWarning className="h-4 w-4 text-primary" />
-              {t("review.changesModalTitle")}
-            </h3>
-            <p className="text-[12.5px] text-muted-foreground">{t("review.changesModalDesc")}</p>
-            {review.pullRequestStatus === "Open" && review.pullRequestNumber != null && (
-              <div className="flex items-start gap-2 rounded-[var(--radius-md)] border border-border bg-surface-2 p-2.5 text-[12px] text-muted-foreground">
-                <GitPullRequest className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>{t("review.changesModalPrOpen", { n: review.pullRequestNumber })}</span>
-              </div>
-            )}
-            <textarea
-              autoFocus
-              className="h-32 w-full rounded-[var(--radius-md)] border border-border bg-surface p-3 font-sans text-[13px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-              placeholder={t("review.changesPlaceholder")}
-              maxLength={2000}
-              value={changesInput}
-              onChange={(e) => setChangesInput(e.target.value)}
-            />
-            <div className="text-right font-mono text-[11px] text-subtle-foreground">
-              {t("review.changesCounter", { n: changesInput.length, max: 2000 })}
-            </div>
-            {changesError && (
-              <div className="rounded-[var(--radius-md)] bg-danger-soft/60 p-2 text-[12px] text-danger">{changesError}</div>
-            )}
-            <div className="flex items-center justify-end gap-3 pt-2">
-              <Button
-                variant="default"
-                size="sm"
-                disabled={isRequestingChanges}
-                onClick={() => {
-                  setShowChangesModal(false)
-                  setChangesError(null)
-                }}
-              >
-                {t("review.cancel")}
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                disabled={isRequestingChanges || changesInput.trim().length === 0}
-                onClick={handleRequestChanges}
-              >
-                {isRequestingChanges ? (
-                  <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    {t("review.sendingChanges")}
-                  </>
-                ) : (
-                  t("review.sendChanges")
-                )}
-              </Button>
-            </div>
-          </div>
-        </div>
+        <RequestChangesModal
+          pullRequestNumber={review.pullRequestStatus === "Open" ? review.pullRequestNumber : null}
+          isSubmitting={isRequestingChanges}
+          error={changesError}
+          onClose={() => setShowChangesModal(false)}
+          onSubmit={handleRequestChanges}
+        />
       )}
 
       {/* Reject Modal */}

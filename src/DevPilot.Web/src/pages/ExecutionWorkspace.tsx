@@ -28,7 +28,10 @@ import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
 import { ExecutionTabs } from "@/components/ExecutionTabs"
 import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { cn } from "@/lib/utils"
-import { getExecution, getExecutionActivity, retryExecution, cancelExecution, verifyExecution, getExecutions, getModelComparisonsForTask } from "@/api"
+import { getExecution, getExecutionActivity, retryExecution, cancelExecution, verifyExecution, getExecutions, getModelComparisonsForTask, requestExecutionChanges } from "@/api"
+import { RevisionPanel } from "@/components/RevisionPanel"
+import { formatDuration } from "@/lib/duration"
+import { RequestChangesModal } from "@/components/RequestChangesModal"
 import { useWorkspace } from "@/lib/workspace"
 import {
   TaskExecutionStatus,
@@ -195,8 +198,8 @@ export function ExecutionWorkspace() {
     activeReqWorkspaceIdRef.current = activeWorkspaceId
   }, [activeWorkspaceId])
 
-  const [execution, setExecution] = useState<ExecutionDetail | null>(null)
-  const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
+  const [rawExecution, setExecution] = useState<ExecutionDetail | null>(null)
+  const [rawActivities, setActivities] = useState<ExecutionActivityItem[]>([])
   const [activeExecutionForTask, setActiveExecutionForTask] = useState<ExecutionListItem | null>(null)
   const [comparisonId, setComparisonId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -209,8 +212,34 @@ export function ExecutionWorkspace() {
   const [verifyError, setVerifyError] = useState<string | null>(null)
   const [showGenDetails, setShowGenDetails] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [showOriginal, setShowOriginal] = useState(false)
+  const [showChangesModal, setShowChangesModal] = useState(false)
+  const [isRequestingChanges, setIsRequestingChanges] = useState(false)
+  const [changesError, setChangesError] = useState<string | null>(null)
 
-  const isRunningExecution = execution?.status === TaskExecutionStatus.Running
+  // A requested fix reopens the execution. The first run is shown only on request, as it was before the fix,
+  // so its finished state, duration and green checks never describe the fix that is running now.
+  const revision = rawExecution?.revision ?? null
+  const showingOriginal = Boolean(revision && showOriginal)
+  const initialCutoffMs = revision?.initialRun.completedAt ? new Date(revision.initialRun.completedAt).getTime() : null
+  const execution: ExecutionDetail | null =
+    rawExecution && revision && showingOriginal
+      ? {
+          ...rawExecution,
+          status: TaskExecutionStatus.Completed,
+          completedAt: revision.initialRun.completedAt ?? rawExecution.completedAt,
+          verificationOutcome: revision.initialRun.outcome ?? rawExecution.verificationOutcome,
+          stages: [],
+          canRetry: false,
+          progressPercentage: 100,
+        }
+      : rawExecution
+  const activities =
+    showingOriginal && initialCutoffMs != null
+      ? rawActivities.filter((a) => new Date(a.createdAt).getTime() <= initialCutoffMs)
+      : rawActivities
+
+  const isRunningExecution = rawExecution?.status === TaskExecutionStatus.Running
 
   useEffect(() => {
     if (!isRunningExecution) return
@@ -251,6 +280,24 @@ export function ExecutionWorkspace() {
       setVerifyError(err instanceof Error ? err.message : t("execWs.errVerify"))
     } finally {
       setIsVerifying(false)
+    }
+  }
+
+  const handleRequestChanges = async (feedback: string) => {
+    if (!rawExecution || isRequestingChanges) return
+    setIsRequestingChanges(true)
+    setChangesError(null)
+
+    try {
+      await requestExecutionChanges(rawExecution.id, feedback, activeWorkspaceId)
+      setShowChangesModal(false)
+      setShowOriginal(false)
+      refreshOverview(true)
+      await fetchData(false)
+    } catch (err) {
+      setChangesError(err instanceof Error ? err.message : t("revision.modal.error"))
+    } finally {
+      setIsRequestingChanges(false)
     }
   }
 
@@ -343,10 +390,10 @@ export function ExecutionWorkspace() {
 
   // Polling loop while execution is Pending (0) or Running (1)
   useEffect(() => {
-    if (isWorkspaceLoading || !execution) return
+    if (isWorkspaceLoading || !rawExecution) return
     const isRunningOrPending =
-      execution.status === TaskExecutionStatus.Pending ||
-      execution.status === TaskExecutionStatus.Running
+      rawExecution.status === TaskExecutionStatus.Pending ||
+      rawExecution.status === TaskExecutionStatus.Running
 
     if (!isRunningOrPending) return
 
@@ -355,7 +402,7 @@ export function ExecutionWorkspace() {
     }, 2000)
 
     return () => clearInterval(interval)
-  }, [isWorkspaceLoading, execution, fetchData])
+  }, [isWorkspaceLoading, rawExecution, fetchData])
 
   if (isWorkspaceLoading || isLoading) {
     return (
@@ -410,7 +457,11 @@ export function ExecutionWorkspace() {
     (execution.pushStatus ?? "None") === "None" &&
     (execution.pullRequestStatus ?? "None") === "None" &&
     (execution.mergeStatus ?? "None") === "None"
+  const revisionEvents = revision
+    ? rawActivities.filter((a) => new Date(a.createdAt).getTime() >= new Date(revision.requestedAt).getTime())
+    : []
   const canVerifyExisting =
+    !showingOriginal &&
     execution.status === TaskExecutionStatus.Completed &&
     verificationMissing &&
     deliveryUntouched &&
@@ -460,7 +511,13 @@ export function ExecutionWorkspace() {
             <div className="flex items-center gap-2">
               <span className="font-mono text-[11px] text-subtle-foreground">{execution.id}</span>
               <h1 className="truncate text-[14.5px] font-semibold text-foreground">{execution.taskTitle}</h1>
-              <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+              {revision?.state === "Running" && !showingOriginal ? (
+                <Badge tone="blue">
+                  {t("revision.state.Running")} · {t("revision.number", { n: revision.number })}
+                </Badge>
+              ) : (
+                <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+              )}
             </div>
             <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-subtle-foreground">
               <GitBranch className="h-3 w-3" />
@@ -555,6 +612,19 @@ export function ExecutionWorkspace() {
                 </Button>
               )
             )}
+            {rawExecution?.canRequestChanges && !isRunning && !showingOriginal && (
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => {
+                  setChangesError(null)
+                  setShowChangesModal(true)
+                }}
+              >
+                <MessageSquareWarning className="h-3.5 w-3.5" />
+                {t("review.requestChanges")}
+              </Button>
+            )}
             <Button
               variant={canRetryExecution || canVerifyExisting ? "default" : "primary"}
               size="sm"
@@ -575,32 +645,77 @@ export function ExecutionWorkspace() {
         reviewAvailable={!isPending && !isRunning && execution.status === TaskExecutionStatus.Completed}
       />
 
-      {execution.lastChangeRequest && (
-        <div className="mx-auto max-w-[1500px] px-6 pt-4">
-          <div className="space-y-1.5 rounded-[var(--radius-md)] border border-primary/30 bg-primary-soft/30 p-3 text-[12.5px]">
-            <div className="flex items-center gap-2 font-semibold text-primary">
-              <MessageSquareWarning className="h-4 w-4 shrink-0" />
-              <span>{t("execWs.revisionTitle")}</span>
-              {(execution.revisionCount ?? 0) > 0 && (
-                <Badge tone="blue">{t("execWs.revisionNumber", { n: execution.revisionCount })}</Badge>
-              )}
-              {isRunning && !execution.lastChangeRequestResult && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            </div>
-            <p className="whitespace-pre-wrap break-words text-foreground">{execution.lastChangeRequest}</p>
-            {isRunning && !execution.lastChangeRequestResult ? (
-              <p className="text-muted-foreground">{t("execWs.revisionRunning")}</p>
-            ) : (
-              execution.lastChangeRequestResult && (
-                <p className="text-muted-foreground">
-                  <span className="font-semibold text-foreground">{t("execWs.revisionResult")}: </span>
-                  {execution.lastChangeRequestResult}
-                </p>
-              )
-            )}
-          </div>
-        </div>
-      )}
+      {revision && !showingOriginal ? (
+        <div className="mx-auto max-w-[1040px] space-y-4 px-6 py-6">
+          <RevisionPanel
+            revision={revision}
+            executionId={rawExecution!.id}
+            workspaceId={activeWorkspaceId}
+            canRequestChanges={Boolean(rawExecution?.canRequestChanges)}
+            onRequestChanges={() => {
+              setChangesError(null)
+              setShowChangesModal(true)
+            }}
+            onOpenReview={() => navigate(`/review/${rawExecution!.id}`)}
+          />
 
+          <Panel className="space-y-2 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="tech-label">{t("revision.previous.title")}</div>
+                <p className="mt-0.5 text-[11.5px] text-muted-foreground">{t("revision.previous.note")}</p>
+              </div>
+              <Button variant="default" size="sm" onClick={() => setShowOriginal(true)}>
+                {t("revision.previous.show")}
+              </Button>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11.5px] text-muted-foreground">
+              {revision.initialRun.durationMs != null && (
+                <span>{t("revision.previous.finished", { time: formatDuration(revision.initialRun.durationMs) })}</span>
+              )}
+              {revision.initialRun.outcome && (
+                <span>
+                  {t("revision.previous.outcome", {
+                    outcome: t(`revision.outcomeLabel.${revision.initialRun.outcome}`, { defaultValue: revision.initialRun.outcome }),
+                  })}
+                </span>
+              )}
+            </div>
+          </Panel>
+
+          <details className="group rounded-[var(--radius-md)] border border-border bg-surface">
+            <summary className="flex cursor-pointer items-center justify-between px-4 py-3 text-[12.5px] font-medium text-foreground">
+              <span className="flex items-center gap-2">
+                <Terminal className="h-3.5 w-3.5 text-subtle-foreground" />
+                {t("execWs.activity")}
+              </span>
+              <span className="font-mono text-[11px] text-subtle-foreground">
+                {t("execWs.events", { count: revisionEvents.length })}
+              </span>
+            </summary>
+            <ul className="max-h-[320px] space-y-1 overflow-y-auto border-t border-border px-4 py-3">
+              {revisionEvents.map((a) => (
+                <li key={a.id} className="flex gap-3 text-[12px]">
+                  <span className="shrink-0 font-mono text-[11px] text-subtle-foreground">{formatTimeOnly(a.createdAt)}</span>
+                  <span className="text-foreground">{srv(a.message)}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        </div>
+      ) : (
+        <>
+          {showingOriginal && (
+            <div className="mx-auto flex max-w-[1500px] items-center justify-between gap-3 px-6 pt-4">
+              <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-border bg-surface-2 px-3 py-2 text-[12.5px] text-muted-foreground">
+                <Clock className="h-3.5 w-3.5 shrink-0" />
+                {t("revision.previous.banner")}
+              </div>
+              <Button variant="primary" size="sm" onClick={() => setShowOriginal(false)}>
+                {t("revision.previous.hide")}
+              </Button>
+            </div>
+          )}
       <div className="mx-auto grid max-w-[1500px] grid-cols-1 gap-0 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
         {/* LEFT — stage rail */}
         <aside className="border-b border-border p-5 lg:border-b-0 lg:border-r">
@@ -1276,6 +1391,18 @@ export function ExecutionWorkspace() {
           </Button>
         </aside>
       </div>
+        </>
+      )}
+
+      {showChangesModal && (
+        <RequestChangesModal
+          pullRequestNumber={rawExecution?.pullRequestStatus === "Open" ? rawExecution.pullRequestNumber : null}
+          isSubmitting={isRequestingChanges}
+          error={changesError}
+          onClose={() => setShowChangesModal(false)}
+          onSubmit={handleRequestChanges}
+        />
+      )}
     </div>
   )
 }

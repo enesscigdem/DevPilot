@@ -87,6 +87,7 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
     private readonly IExecutionVerificationSnapshotRecorder? _snapshotRecorder;
     private readonly IExecutionChangeFingerprintCalculator? _fingerprintCalculator;
     private readonly IAiExecutionContext? _aiContext;
+    private readonly IExecutionWorktreeSnapshotService? _snapshotService;
 
     public RequestExecutionChangesCommandHandler(
         IExecutionRepository executionRepository,
@@ -99,7 +100,8 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
         ILogger<RequestExecutionChangesCommandHandler> logger,
         IExecutionVerificationSnapshotRecorder? snapshotRecorder = null,
         IExecutionChangeFingerprintCalculator? fingerprintCalculator = null,
-        IAiExecutionContext? aiContext = null)
+        IAiExecutionContext? aiContext = null,
+        IExecutionWorktreeSnapshotService? snapshotService = null)
     {
         _executionRepository = executionRepository;
         _revisionStore = revisionStore;
@@ -112,6 +114,7 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
         _snapshotRecorder = snapshotRecorder;
         _fingerprintCalculator = fingerprintCalculator;
         _aiContext = aiContext;
+        _snapshotService = snapshotService;
     }
 
     /// <summary>Control characters other than line breaks and tabs are dropped; null when nothing is left.</summary>
@@ -204,6 +207,7 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
             return RequestExecutionChangesResult.Conflict("Another execution for this task is already active.");
         }
 
+        var revisionNumber = execution.ChangeRequestCount + 1; // read before the claim counts this request
         var leaseToken = Guid.NewGuid();
         var requestedAt = DateTime.UtcNow;
         var claimed = await _revisionStore
@@ -215,7 +219,6 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
             return RequestExecutionChangesResult.Conflict("Changes could not be requested for this execution right now.");
         }
 
-        var revisionNumber = execution.RevisionCount + 1;
         await SafeRecordActivityAsync(
             execution.Id,
             ExecutionStage.Review,
@@ -260,10 +263,11 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
         }
 
         var feedback = execution.LastChangeRequest ?? string.Empty;
-        var revisionNumber = execution.RevisionCount + 1;
+        var revisionNumber = execution.ChangeRequestCount; // already counted by the claim
         var workspacePath = execution.WorkspacePath;
         var wasApproved = execution.ReviewStatus == ExecutionReviewStatus.Approved;
         var fingerprintBefore = await TryComputeFingerprintAsync(workspacePath).ConfigureAwait(false);
+        await CaptureSnapshotAsync(executionId, workspacePath, $"r{revisionNumber}-base", isBase: true).ConfigureAwait(false);
         string? failure = null;
 
         if (_aiContext is not null)
@@ -344,6 +348,7 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
             // Only a worktree that really changed leaves the earlier approval and delivery behind. A fix that failed
             // or changed nothing keeps the previous state, which still describes the unchanged code.
             var fingerprintAfter = await TryComputeFingerprintAsync(workspacePath).ConfigureAwait(false);
+            await CaptureSnapshotAsync(executionId, workspacePath, $"r{revisionNumber}-result", isBase: false).ConfigureAwait(false);
             var codeChanged = fingerprintBefore != null && fingerprintAfter != null &&
                               !string.Equals(fingerprintBefore, fingerprintAfter, StringComparison.Ordinal);
 
@@ -392,6 +397,32 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
         finally
         {
             _cancellationRegistry.Unregister(executionId);
+        }
+    }
+
+    /// <summary>The revision's diff is the difference between the snapshot before and after; failing to take one only hides that diff.</summary>
+    private async Task CaptureSnapshotAsync(Guid executionId, string? workspacePath, string label, bool isBase)
+    {
+        if (_snapshotService == null || string.IsNullOrWhiteSpace(workspacePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var sha = await _snapshotService
+                .CaptureAsync(workspacePath, executionId, label, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (sha != null)
+            {
+                await _revisionStore
+                    .SetRevisionSnapshotAsync(executionId, isBase ? sha : null, isBase ? null : sha, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "RequestExecutionChanges: snapshot '{Label}' failed for {ExecutionId}.", label, executionId);
         }
     }
 

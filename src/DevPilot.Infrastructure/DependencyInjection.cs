@@ -120,6 +120,7 @@ public static class DependencyInjection
         services.AddScoped<IExecutionRepository>(sp => sp.GetRequiredService<EfExecutionRepository>());
         services.AddScoped<IExecutionVerificationRerunStore>(sp => sp.GetRequiredService<EfExecutionRepository>());
         services.AddScoped<IExecutionRevisionStore>(sp => sp.GetRequiredService<EfExecutionRepository>());
+        services.AddScoped<IExecutionWorktreeSnapshotService, GitWorktreeSnapshotService>();
         services.AddScoped<IExecutionListReader, EfExecutionListReader>();
         services.AddScoped<IExecutionWorkspaceManager, GitExecutionWorkspaceManager>();
         // Single authoritative reliability configuration shared by the processor, DeveloperAgent and impact analysis.
@@ -169,6 +170,7 @@ public static class DependencyInjection
         services.AddScoped<DevPilot.Application.Executions.Commands.CancelExecution.ICancelExecutionCommandHandler, DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionCommandHandler>();
         services.AddScoped<DevPilot.Application.Executions.Commands.VerifyExecution.IVerifyExecutionCommandHandler, DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionCommandHandler>();
         services.AddScoped<DevPilot.Application.Executions.Commands.RequestExecutionChanges.IRequestExecutionChangesCommandHandler, DevPilot.Application.Executions.Commands.RequestExecutionChanges.RequestExecutionChangesCommandHandler>();
+        services.AddScoped<DevPilot.Application.Executions.Queries.GetExecutionRevisionDiff.IGetExecutionRevisionDiffQueryHandler, DevPilot.Application.Executions.Queries.GetExecutionRevisionDiff.GetExecutionRevisionDiffQueryHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();
         services.AddScoped<IRejectExecutionReviewCommandHandler, RejectExecutionReviewCommandHandler>();
         services.AddScoped<IMergeExecutionCommandHandler, MergeExecutionCommandHandler>();

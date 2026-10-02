@@ -88,4 +88,5 @@ public sealed record ExecutionReviewDto(
     int RevisionCount = 0,
     string? LastChangeRequest = null,
     DateTime? LastChangeRequestAt = null,
-    string? LastChangeRequestResult = null);
+    string? LastChangeRequestResult = null,
+    ExecutionRevisionDto? Revision = null);

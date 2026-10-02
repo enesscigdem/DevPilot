@@ -282,7 +282,11 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                         .SetProperty(e => e.LeaseExpiresAt, requestedAt.AddSeconds(45))
                         .SetProperty(e => e.LastChangeRequest, feedback)
                         .SetProperty(e => e.LastChangeRequestAt, requestedAt)
-                        .SetProperty(e => e.LastChangeRequestResult, (string?)null),
+                        .SetProperty(e => e.LastChangeRequestResult, (string?)null)
+                        .SetProperty(e => e.ChangeRequestCount, e => e.ChangeRequestCount + 1)
+                        .SetProperty(e => e.InitialRunCompletedAt, e => e.InitialRunCompletedAt ?? e.CompletedAt)
+                        .SetProperty(e => e.RevisionBaseSnapshotSha, (string?)null)
+                        .SetProperty(e => e.RevisionResultSnapshotSha, (string?)null),
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -347,6 +351,29 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
             .ConfigureAwait(false);
 
         return affected > 0;
+    }
+
+    public async Task SetRevisionSnapshotAsync(
+        Guid executionId,
+        string? baseSnapshotSha,
+        string? resultSnapshotSha,
+        CancellationToken cancellationToken = default)
+    {
+        if (baseSnapshotSha != null)
+        {
+            await _dbContext.TaskExecutions
+                .Where(e => e.Id == executionId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(e => e.RevisionBaseSnapshotSha, baseSnapshotSha), cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (resultSnapshotSha != null)
+        {
+            await _dbContext.TaskExecutions
+                .Where(e => e.Id == executionId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(e => e.RevisionResultSnapshotSha, resultSnapshotSha), cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     public async Task SetRevisionResultAsync(

@@ -36,6 +36,13 @@ public interface IExecutionRevisionStore
         Guid executionId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Stores the worktree snapshots taken before and after the latest requested fix (null leaves one unchanged).</summary>
+    Task SetRevisionSnapshotAsync(
+        Guid executionId,
+        string? baseSnapshotSha,
+        string? resultSnapshotSha,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Stores a short outcome of the latest requested fix, shown next to the feedback in the review.</summary>
     Task SetRevisionResultAsync(
         Guid executionId,

@@ -38,6 +38,12 @@ public sealed class AiModelDto
     public bool? LastTestSucceeded { get; set; }
 
     public string? LastTestMessage { get; set; }
+
+    /// <summary>Why the last test ended: Ok, Timeout, HttpError, NetworkError or Failed.</summary>
+    public string? LastTestOutcome { get; set; }
+
+    /// <summary>HTTP status the provider answered with when the last test failed with one.</summary>
+    public int? LastTestStatusCode { get; set; }
 }
 
 public sealed class SaveAiModelRequest
@@ -81,6 +87,14 @@ public sealed class AiModelTestResultDto
     public int? InputTokens { get; set; }
 
     public int? OutputTokens { get; set; }
+
+    /// <summary>Ok, Timeout (our time limit, the provider never answered), HttpError (the provider answered with an error status), NetworkError or Failed.</summary>
+    public string Outcome { get; set; } = "Failed";
+
+    public int? StatusCode { get; set; }
+
+    /// <summary>The limit a Timeout outcome refers to.</summary>
+    public int TimeLimitSeconds { get; set; }
 }
 
 public sealed class AiStageAssignmentDto

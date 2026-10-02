@@ -1,6 +1,7 @@
 import type { Resources } from "./en"
 import overview from "./locales/tr/overview"
 import review from "./locales/tr/review"
+import revision from "./locales/tr/revision"
 import impact from "./locales/tr/impact"
 import brain from "./locales/tr/brain"
 import arch from "./locales/tr/arch"
@@ -85,6 +86,7 @@ const tr: Resources = {
   },
   overview,
   review,
+  revision,
   impact,
   brain,
   arch,

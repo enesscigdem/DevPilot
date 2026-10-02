@@ -33,15 +33,18 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
     private readonly IImpactAnalysisRepository _impactAnalysisRepository;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
     private readonly AiPricingOptions? _pricing;
+    private readonly IExecutionGitDiffReader? _gitDiffReader;
 
     public GetExecutionByIdQueryHandler(
         IExecutionRepository executionRepository,
         IExecutionActivityRepository activityRepository,
         IImpactAnalysisRepository impactAnalysisRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions,
-        AiPricingOptions? pricing = null)
+        AiPricingOptions? pricing = null,
+        IExecutionGitDiffReader? gitDiffReader = null)
     {
         _pricing = pricing;
+        _gitDiffReader = gitDiffReader;
         _executionRepository = executionRepository;
         _activityRepository = activityRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
@@ -88,10 +91,27 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
                             outcome == DevPilot.Domain.Enums.ExecutionVerificationOutcome.NeedsReview));
 
         var analysis = await _impactAnalysisRepository.GetLatestByTaskIdAsync(execution.DevelopmentTaskId, cancellationToken).ConfigureAwait(false);
-        var stages = ExecutionStageEvaluator.EvaluateStages(execution, execution.DevelopmentTask, analysis, activities);
+        // While a requested fix runs, progress comes from that fix only; the first run is history.
+        var revisionActive = ExecutionRevisionScope.IsActive(execution);
+        var stages = ExecutionStageEvaluator.EvaluateStages(
+            execution,
+            execution.DevelopmentTask,
+            analysis,
+            revisionActive ? ExecutionRevisionScope.Since(execution, activities) : activities);
+        if (revisionActive)
+        {
+            stages = ExecutionRevisionScope.ForActiveRevision(stages);
+        }
+
         var progressPercentage = ExecutionStageEvaluator.CalculateProgressPercentage(stages);
 
         var dto = MapToDto(execution, allowNoChecks, activities, outcome, canRetry, stages, progressPercentage);
+        dto.Revision = await BuildRevisionAsync(execution, activities, outcome, cancellationToken).ConfigureAwait(false);
+        if (revisionActive)
+        {
+            dto.StartedAt = execution.LastChangeRequestAt;
+            dto.VerificationOutcome = dto.Revision?.VerificationOutcome ?? string.Empty;
+        }
         var snapshot = ExecutionVerdictBuilder.Resolve(execution, activities, outcome, _pricing);
         dto.Usage = snapshot.Usage;
         if (execution.Status is not (DevPilot.Domain.Enums.TaskExecutionStatus.Pending or DevPilot.Domain.Enums.TaskExecutionStatus.Running))
@@ -104,6 +124,32 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             Found = true,
             Execution = dto,
         };
+    }
+
+    private async Task<ExecutionRevisionDto?> BuildRevisionAsync(
+        TaskExecution execution,
+        IReadOnlyList<ExecutionActivity> activities,
+        DevPilot.Domain.Enums.ExecutionVerificationOutcome outcome,
+        CancellationToken cancellationToken)
+    {
+        if (!ExecutionRevisionScope.HasRevision(execution))
+        {
+            return null;
+        }
+
+        ExecutionGitDiffResult? diff = null;
+        if (_gitDiffReader != null &&
+            !ExecutionRevisionScope.IsActive(execution) &&
+            !string.IsNullOrWhiteSpace(execution.WorkspacePath) &&
+            !string.IsNullOrWhiteSpace(execution.RevisionBaseSnapshotSha) &&
+            !string.IsNullOrWhiteSpace(execution.RevisionResultSnapshotSha))
+        {
+            diff = await _gitDiffReader
+                .ReadCommittedDiffAsync(execution.WorkspacePath, execution.RevisionBaseSnapshotSha, execution.RevisionResultSnapshotSha, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return ExecutionRevisionBuilder.Build(execution, activities, outcome, diff);
     }
 
     private static ExecutionDto MapToDto(
