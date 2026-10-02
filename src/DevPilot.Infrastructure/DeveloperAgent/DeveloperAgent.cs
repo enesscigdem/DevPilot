@@ -167,7 +167,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 return initialBudget;
             }
 
-            return Math.Min(Math.Max(initialBudget * 2, 4096), Math.Min(8192, _maxCompactRetryOutputTokens));
+            return Math.Min(Math.Max(initialBudget * 2, 4096), Math.Min(16384, _maxCompactRetryOutputTokens));
         }
 
         if (isRepair)
@@ -998,7 +998,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
                     else
                     {
-                        throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
+                        throw new InvalidOperationException(
+                            $"AI provider error during compact retry for '{fileEntry.FilePath}' " +
+                            $"(kind: {compactResponse.FailureKind}, status: {compactResponse.StatusCode}): {compactResponse.ErrorMessage}");
                     }
                 }
                 catch (InvalidOperationException)
@@ -1012,7 +1014,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "DeveloperAgent: compact retry call failed for file '{FilePath}'.", fileEntry.FilePath);
-                    throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
+                    throw new InvalidOperationException(
+                        $"Compact retry call failed for '{fileEntry.FilePath}': {ex.GetType().Name}: {ex.Message}", ex);
                 }
             }
         }
