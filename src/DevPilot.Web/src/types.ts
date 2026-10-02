@@ -1163,3 +1163,63 @@ export interface WorkspaceInsights {
   recent: InsightExecutionRow[];
   retriedTasks: InsightRetriedTask[];
 }
+
+// ---- AI models (bring your own model) ----
+
+export type AiAdapterType = 'OpenAiCompatible' | 'Claude' | 'Gemini';
+
+export type AiStage = 'Planning' | 'CodeGeneration' | 'Repair' | 'Brain';
+
+export const AI_STAGES: AiStage[] = ['Planning', 'CodeGeneration', 'Repair', 'Brain'];
+
+export interface AiModel {
+  id: string;
+  name: string;
+  adapterType: AiAdapterType;
+  baseUrl: string;
+  modelName: string;
+  hasApiKey: boolean;
+  /** Masked key such as "...a3f9"; the full key is never returned. */
+  apiKeyHint: string | null;
+  maxOutputTokens: number | null;
+  supportsReasoningEffort: boolean;
+  useMaxCompletionTokens: boolean;
+  inputPricePerMillionTokensUsd: number | null;
+  outputPricePerMillionTokensUsd: number | null;
+  isEnabled: boolean;
+  isDefault: boolean;
+  lastTestedAt: string | null;
+  lastTestSucceeded: boolean | null;
+  lastTestMessage: string | null;
+}
+
+export interface SaveAiModelRequest {
+  name: string;
+  adapterType: AiAdapterType;
+  baseUrl: string;
+  modelName: string;
+  /** On update, omit or leave empty to keep the stored key. */
+  apiKey?: string;
+  maxOutputTokens: number | null;
+  supportsReasoningEffort: boolean;
+  useMaxCompletionTokens: boolean;
+  inputPricePerMillionTokensUsd: number | null;
+  outputPricePerMillionTokensUsd: number | null;
+  isEnabled: boolean;
+  isDefault: boolean;
+}
+
+export interface AiModelTestResult {
+  success: boolean;
+  message: string;
+  durationMs: number;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+}
+
+export interface AiStageAssignment {
+  stage: AiStage;
+  /** Null means the stage uses the default model. */
+  aiModelConfigId: string | null;
+}

@@ -45,6 +45,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
       { label: t("nav.impactMap"), hint: t("command.impactHint"), href: "/architecture", group: t("command.groupNavigate") },
       { label: t("nav.insights"), hint: t("command.insightsHint"), href: "/insights", group: t("command.groupNavigate") },
       { label: t("nav.compareExecutions"), hint: t("command.compareHint"), href: "/executions/compare", group: t("command.groupNavigate") },
+      { label: t("nav.aiModels"), hint: t("command.modelsHint"), href: "/models", group: t("command.groupSettings") },
       {
         label: i18n.language === "tr" ? t("command.switchToEnglish") : t("command.switchToTurkish"),
         hint: t("command.languageHint"),
