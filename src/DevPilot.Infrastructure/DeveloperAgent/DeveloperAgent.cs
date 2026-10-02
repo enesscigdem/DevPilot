@@ -224,6 +224,7 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         return DeveloperAgentResult.Ok(appliedFiles, model: request.Model);
     }
 
+    private static readonly TimeSpan FocusedRepairLocalPreparationTimeout = TimeSpan.FromSeconds(60);
     private const int ReviewFeedbackMaxContextFiles = 15;
     private const int ReviewFeedbackMaxAttempts = 2;
 
@@ -561,18 +562,26 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
         var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
         const bool useFullFileReplacement = false;
-        var peerContext = CollectFocusedRepairPeerContext(
-            request.WorkspacePath,
-            filePath,
-            request,
-            currentContent ?? string.Empty);
-        var behavioralEvidence = CollectFocusedRepairBehavioralEvidence(
-            filePath,
-            currentContent ?? string.Empty,
-            request);
-        var behavioralSignatures = BehavioralDependencyEvidence.CollectLockedSignatures(
-            behavioralEvidence,
-            workspacePath: request.WorkspacePath);
+        Dictionary<string, string> peerContext;
+        IReadOnlyList<VerificationContractExcerpt> behavioralEvidence;
+        IReadOnlyDictionary<string, string> behavioralSignatures;
+        try
+        {
+            // Local file scanning runs before the model call; bound it so a slow disk or a huge tree cannot stall the repair.
+            (peerContext, behavioralEvidence, behavioralSignatures) = await Task.Run(() =>
+            {
+                var peers = CollectFocusedRepairPeerContext(request.WorkspacePath, filePath, request, currentContent ?? string.Empty);
+                var evidence = CollectFocusedRepairBehavioralEvidence(filePath, currentContent ?? string.Empty, request);
+                var signatures = BehavioralDependencyEvidence.CollectLockedSignatures(evidence, workspacePath: request.WorkspacePath);
+                return (peers, evidence, signatures);
+            }, cancellationToken).WaitAsync(FocusedRepairLocalPreparationTimeout, cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            return DeveloperAgentResult.Fail(
+                $"Collecting repair context for '{filePath}' took longer than {(int)FocusedRepairLocalPreparationTimeout.TotalSeconds}s, so no model request was sent.",
+                request.Model);
+        }
 
         var primaryRequest = new AiRequest
         {
@@ -1959,6 +1968,10 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
             LogicalProviderCallCount: 1,
             ProviderCallKind: callKind,
             ProviderAttemptCount: response.AttemptCount,
+            Model: string.IsNullOrWhiteSpace(response.Model) ? null : response.Model,
+            ModelConfigName: response.ModelConfigName,
+            ModelSource: response.RoutingSource,
+            ModelFallbackReason: response.FallbackReason,
             RequestedOutputTokens: request.MaxTokens,
             InputTokens: response.InputTokens,
             OutputTokens: response.OutputTokens,

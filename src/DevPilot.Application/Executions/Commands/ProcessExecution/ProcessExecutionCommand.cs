@@ -97,7 +97,7 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
         // A model comparison pins one model to this run; the AI router reads it on every call.
         if (_aiContext is not null)
         {
-            _aiContext.PinnedModelId = execution.PinnedAiModelId;
+            AiExecutionBinding.Bind(_aiContext, executionId, execution.PinnedAiModelId, _activityRecorder);
         }
 
         // ── 2. Atomic claim: Pending → Running with unique lease token ────────────

@@ -75,4 +75,9 @@ public sealed record ExecutionActivityMetadata(
     IReadOnlyList<string>? ConsideredFiles = null,
     IReadOnlyList<string>? ChangedFiles = null,
     string? ChangeSummary = null,
-    string? UnresolvedNote = null);
+    string? UnresolvedNote = null,
+    string? ModelConfigName = null,
+    string? ModelSource = null,
+    string? ModelFallbackReason = null,
+    string? AttemptOutcome = null,
+    bool? WillRetry = null);

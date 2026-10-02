@@ -57,7 +57,8 @@ public sealed record ExecutionProcessingContext(
 public sealed record ExecutionChangeRequest(
     string Feedback,
     int RevisionNumber,
-    string? CommittedBaseCommitSha = null);
+    string? CommittedBaseCommitSha = null,
+    bool FeedbackAlreadyApplied = false);
 
 /// <summary>The existing worktree of a finished execution, re-verified without regenerating code.</summary>
 public sealed record ExecutionVerifyOnlyWorkspace(

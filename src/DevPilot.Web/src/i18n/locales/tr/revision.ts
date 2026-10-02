@@ -93,14 +93,15 @@ const revision: Resources["revision"] = {
     requestAgain: "Başka bir değişiklik iste",
     requestChanges: "Düzeltme iste",
   },
+  run: {
+    label: "Bu çalıştırmanın turları",
+    initial: "İlk üretim",
+    live: "Canlı",
+    initialDone: "Tamamlandı",
+  },
   previous: {
-    title: "İlk çalıştırma (bu düzeltmeden önce)",
-    note: "Geçmiş bilgidir; yukarıdaki düzeltmeyi anlatmaz.",
-    finished: "{{time}} içinde bitti",
+    note: "İlk üretim, herhangi bir düzeltmeden önceki hâliyle. İstenen düzeltmelerin kendi sekmeleri yukarıda.",
     outcome: "Sonuç: {{outcome}}",
-    show: "İlk çalıştırmayı göster",
-    hide: "Bu düzeltmeye dön",
-    banner: "Düzeltme istenmeden önceki hâliyle ilk çalıştırmaya bakıyorsunuz.",
   },
   modal: {
     title: "Düzeltme iste",

@@ -11,6 +11,9 @@ namespace DevPilot.Infrastructure.Executions;
 public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFingerprintCalculator
 {
     private static readonly TimeSpan DefaultGitTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>Upper bound for one whole fingerprint computation, however many files changed.</summary>
+    private static readonly TimeSpan TotalFingerprintTimeout = TimeSpan.FromSeconds(90);
     private readonly ILogger<GitExecutionChangeFingerprintCalculator> _logger;
 
     public GitExecutionChangeFingerprintCalculator(ILogger<GitExecutionChangeFingerprintCalculator> logger)
@@ -29,6 +32,24 @@ public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFi
 
         var fullWorkspacePath = Path.GetFullPath(workspacePath);
 
+        using var budgetCts = new CancellationTokenSource(TotalFingerprintTimeout);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, budgetCts.Token);
+        try
+        {
+            return await ComputeFingerprintCoreAsync(fullWorkspacePath, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (budgetCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            return new ExecutionFingerprintResult(
+                false,
+                ErrorMessage: $"Computing the change fingerprint exceeded {(int)TotalFingerprintTimeout.TotalSeconds}s.");
+        }
+    }
+
+    private async Task<ExecutionFingerprintResult> ComputeFingerprintCoreAsync(
+        string fullWorkspacePath,
+        CancellationToken cancellationToken)
+    {
         // 1. Obtain current HEAD SHA
         var headCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, "rev-parse", "HEAD").ConfigureAwait(false);
         if (!headCmd.IsSuccess || string.IsNullOrWhiteSpace(headCmd.StdOut))
@@ -38,15 +59,18 @@ public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFi
         var baseHeadSha = headCmd.StdOut.Trim();
 
         // 2. Discover changes relative to HEAD via git status
-        var statusCmd = await RunGitCommandAsync(
-            fullWorkspacePath,
-            cancellationToken,
+        var statusArgs = new List<string>
+        {
             "-c", "diff.renames=true",
             "-c", "status.renames=true",
             "status",
             "--porcelain=v1",
             "-z",
-            "--untracked-files=all").ConfigureAwait(false);
+            "--untracked-files=all",
+            "--",
+        };
+        statusArgs.AddRange(WorkspaceChangeScope.WorktreePathspecs());
+        var statusCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, statusArgs.ToArray()).ConfigureAwait(false);
 
         if (!statusCmd.IsSuccess)
         {
@@ -67,6 +91,7 @@ public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFi
 
         var canonicalEntries = new List<CanonicalEntry>();
         var hasSensitiveFiles = false;
+        var blobHashes = await HashWorktreeFilesAsync(fullWorkspacePath, statusEntries, cancellationToken).ConfigureAwait(false);
 
         foreach (var entry in statusEntries)
         {
@@ -111,7 +136,9 @@ public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFi
                             fileMode = "100755";
                         }
 
-                        contentHash = await ComputeGitBlobShaAsync(fullWorkspacePath, entry.Path, absoluteFilePath, cancellationToken).ConfigureAwait(false);
+                        contentHash = blobHashes.TryGetValue(entry.Path, out var batched)
+                            ? batched
+                            : await ComputeGitBlobShaAsync(fullWorkspacePath, entry.Path, absoluteFilePath, cancellationToken).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)
@@ -256,6 +283,68 @@ public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFi
         {
             return path;
         }
+    }
+
+    /// <summary>
+    /// Hashes every changed regular file with one <c>git hash-object --stdin-paths</c> process instead of one process per file.
+    /// Paths it cannot hash this way (newlines in the name, count mismatch) are left to the per-file fallback.
+    /// </summary>
+    private static async Task<Dictionary<string, string>> HashWorktreeFilesAsync(
+        string workspacePath,
+        IReadOnlyList<ParsedStatusEntry> entries,
+        CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        var paths = new List<string>();
+        foreach (var entry in entries)
+        {
+            if (entry.ChangeType == "D" || entry.Path.Contains('\n') || ExecutionSensitivePathClassifier.IsSensitivePath(entry.Path))
+            {
+                continue;
+            }
+
+            try
+            {
+                var info = new FileInfo(Path.Combine(workspacePath, entry.Path));
+                if (info.Exists && !info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    paths.Add(entry.Path);
+                }
+            }
+            catch (Exception)
+            {
+                // The per-file path reports unreadable files.
+            }
+        }
+
+        if (paths.Count == 0)
+        {
+            return result;
+        }
+
+        var cmd = await RunGitCommandAsync(
+            workspacePath,
+            string.Join('\n', paths) + "\n",
+            cancellationToken,
+            "hash-object",
+            "--stdin-paths").ConfigureAwait(false);
+        if (!cmd.IsSuccess)
+        {
+            return result;
+        }
+
+        var hashes = cmd.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (hashes.Length != paths.Count)
+        {
+            return result;
+        }
+
+        for (var i = 0; i < paths.Count; i++)
+        {
+            result[paths[i]] = hashes[i];
+        }
+
+        return result;
     }
 
     private static async Task<string> ComputeGitBlobShaAsync(
@@ -442,8 +531,15 @@ public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFi
         return result;
     }
 
+    private static Task<GitCommandResult> RunGitCommandAsync(
+        string workingDirectory,
+        CancellationToken cancellationToken,
+        params string[] arguments) =>
+        RunGitCommandAsync(workingDirectory, null, cancellationToken, arguments);
+
     private static async Task<GitCommandResult> RunGitCommandAsync(
         string workingDirectory,
+        string? standardInput,
         CancellationToken cancellationToken,
         params string[] arguments)
     {
@@ -455,6 +551,7 @@ public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFi
             FileName = "git",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = standardInput != null,
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = workingDirectory
@@ -481,10 +578,16 @@ public sealed class GitExecutionChangeFingerprintCalculator : IExecutionChangeFi
 
         using var msOut = new MemoryStream();
         var msOutTask = process.StandardOutput.BaseStream.CopyToAsync(msOut, linkedCts.Token);
-        var errTask = process.StandardError.ReadToEndAsync();
+        var errTask = process.StandardError.ReadToEndAsync(linkedCts.Token);
 
         try
         {
+            if (standardInput != null)
+            {
+                await process.StandardInput.WriteAsync(standardInput.AsMemory(), linkedCts.Token).ConfigureAwait(false);
+                process.StandardInput.Close();
+            }
+
             await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
             await Task.WhenAll(msOutTask, errTask).ConfigureAwait(false);
         }

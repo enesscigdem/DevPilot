@@ -239,8 +239,9 @@ export async function requestExecutionChanges(
   });
 }
 
-export async function getExecutionRevisionDiff(id: string, workspaceId?: string | null, init?: RequestInit): Promise<ExecutionRevisionDiff> {
-  return http<ExecutionRevisionDiff>(appendWorkspaceQuery(`/executions/${id}/revision/diff`, workspaceId), init);
+export async function getExecutionRevisionDiff(id: string, workspaceId?: string | null, init?: RequestInit, number?: number): Promise<ExecutionRevisionDiff> {
+  const base = appendWorkspaceQuery(`/executions/${id}/revision/diff`, workspaceId);
+  return http<ExecutionRevisionDiff>(number != null ? `${base}${base.includes("?") ? "&" : "?"}number=${number}` : base, init);
 }
 
 export async function commitExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<CommitExecutionResult> {

@@ -3,7 +3,7 @@ import type { Tone } from "@/components/ui/primitives"
 
 const outcomeTones: Record<string, Tone> = {
   Verified: "green",
-  NoNewRegressions: "green",
+  NoNewRegressions: "amber",
   PartiallyVerified: "amber",
   VerificationUnavailable: "gray",
   VerificationInfrastructureError: "red",

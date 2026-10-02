@@ -343,12 +343,16 @@ export interface ExecutionDetail {
   verdict?: ExecutionVerdict | null;
   usage?: ExecutionUsage | null;
   canRetry?: boolean;
+  canCancel?: boolean;
+  cancelBlockedReason?: string | null;
   canRequestChanges?: boolean;
   revisionCount?: number;
   lastChangeRequest?: string | null;
   lastChangeRequestAt?: string | null;
   lastChangeRequestResult?: string | null;
   revision?: ExecutionRevision | null;
+  /** Every requested fix, oldest first (the last one is `revision`). */
+  revisions?: ExecutionRevision[];
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -404,6 +408,11 @@ export interface ExecutionActivityMetadata {
   baseBehindCount?: number | null;
   /** UpToDate | FastForwarded | Behind | Diverged | Ahead | FetchFailed | NotApplicable */
   baseFreshness?: string | null;
+  modelConfigName?: string | null;
+  modelSource?: string | null;
+  modelFallbackReason?: string | null;
+  attemptOutcome?: string | null;
+  willRetry?: boolean | null;
   baseCommitSha?: string | null;
   baselineCacheHit?: boolean | null;
   preExistingFailureCount?: number | null;
@@ -533,6 +542,8 @@ export interface ExecutionReview {
   lastChangeRequestAt?: string | null;
   lastChangeRequestResult?: string | null;
   revision?: ExecutionRevision | null;
+  /** Every requested fix, oldest first (the last one is `revision`). */
+  revisions?: ExecutionRevision[];
   repositoryWorkspaceId?: string;
   repositoryOwner?: string;
   repositoryName?: string;
@@ -1293,7 +1304,8 @@ export type RevisionNextAction =
   | "Commit"
   | "Push"
   | "PullRequestUpdated"
-  | "OpenPullRequest";
+  | "OpenPullRequest"
+  | "None";
 
 export interface ExecutionRevisionFile {
   path: string;
@@ -1325,6 +1337,9 @@ export interface ExecutionRevision {
   hasDiff: boolean;
   nextAction: RevisionNextAction;
   initialRun: { completedAt?: string | null; durationMs?: number | null; outcome?: string | null };
+  /** False for an older fix: it only covers the time between its own request and the next one. */
+  isLatest?: boolean;
+  windowEnd?: string | null;
 }
 
 export interface ExecutionRevisionDiff {

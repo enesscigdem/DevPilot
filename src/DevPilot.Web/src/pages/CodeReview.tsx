@@ -743,11 +743,13 @@ export function CodeReview() {
                 <FlaskConical
                   className={cn(
                     "h-3.5 w-3.5",
-                    review.test.status === "Passed" || review.test.status === "NoNewRegressions"
+                    review.test.status === "Passed"
                       ? "text-success"
-                      : review.test.status === "Failed"
-                        ? "text-danger"
-                        : "text-subtle-foreground",
+                      : review.test.status === "NoNewRegressions"
+                        ? "text-amber-500"
+                        : review.test.status === "Failed"
+                          ? "text-danger"
+                          : "text-subtle-foreground",
                   )}
                 />
                 <span className="tech-label">{t("review.tests")}</span>
@@ -758,7 +760,7 @@ export function CodeReview() {
                   review.test.status === "Passed"
                     ? "text-success"
                     : review.test.status === "NoNewRegressions"
-                      ? "text-emerald-500"
+                      ? "text-amber-500"
                       : review.test.status === "Failed"
                         ? "text-danger"
                         : "text-muted-foreground",

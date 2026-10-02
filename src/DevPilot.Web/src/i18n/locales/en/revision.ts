@@ -91,14 +91,15 @@ const revision = {
     requestAgain: "Request another change",
     requestChanges: "Request changes",
   },
+  run: {
+    label: "Runs of this execution",
+    initial: "First run",
+    live: "Live",
+    initialDone: "Completed",
+  },
   previous: {
-    title: "First run (before this fix)",
-    note: "History. It does not describe the fix above.",
-    finished: "Finished in {{time}}",
+    note: "The first run as it was before any fix. Requested fixes have their own tabs above.",
     outcome: "Result: {{outcome}}",
-    show: "Show the first run",
-    hide: "Back to this fix",
-    banner: "You are looking at the first run, as it was before the fix was requested.",
   },
   modal: {
     title: "Request changes",

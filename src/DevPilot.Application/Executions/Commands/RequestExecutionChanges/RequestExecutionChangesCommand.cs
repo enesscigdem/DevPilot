@@ -58,6 +58,15 @@ public interface IRequestExecutionChangesCommandHandler
         RequestExecutionChangesCommand command,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Resumes a revision whose worker stopped ("Interrupted"): the feedback is already in the worktree, so only build, test
+    /// and repair run again on it. Nothing is regenerated.
+    /// </summary>
+    Task<RequestExecutionChangesResult> ResumeAsync(
+        Guid executionId,
+        Guid? repositoryWorkspaceId = null,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Background part: applies the feedback on the existing worktree, then runs build and test again.</summary>
     Task<RequestExecutionChangesResult> ExecuteAsync(
         Guid executionId,
@@ -242,6 +251,75 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
         return RequestExecutionChangesResult.Accepted(revisionNumber);
     }
 
+    public async Task<RequestExecutionChangesResult> ResumeAsync(
+        Guid executionId,
+        Guid? repositoryWorkspaceId = null,
+        CancellationToken cancellationToken = default)
+    {
+        var execution = await _executionRepository
+            .GetByIdAsync(executionId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (execution is null ||
+            (repositoryWorkspaceId.HasValue && execution.DevelopmentTask?.RepositoryWorkspaceId != repositoryWorkspaceId.Value))
+        {
+            return RequestExecutionChangesResult.NotFound();
+        }
+
+        var rejection = DescribeWhyChangesCannotBeRequested(execution);
+        if (rejection != null)
+        {
+            return RequestExecutionChangesResult.Conflict(rejection);
+        }
+
+        if (execution.LastChangeRequestResult is null ||
+            !execution.LastChangeRequestResult.StartsWith("Interrupted", StringComparison.Ordinal))
+        {
+            return RequestExecutionChangesResult.Conflict("Only a revision that was interrupted can be resumed.");
+        }
+
+        if (await _executionRepository
+                .HasActiveExecutionForTaskAsync(execution.DevelopmentTaskId, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            return RequestExecutionChangesResult.Conflict("Another execution for this task is already active.");
+        }
+
+        var revisionNumber = execution.ChangeRequestCount;
+        var leaseToken = Guid.NewGuid();
+        var claimed = await _revisionStore
+            .ResumeInterruptedRevisionAsync(execution.Id, leaseToken, DateTime.UtcNow, cancellationToken)
+            .ConfigureAwait(false);
+        if (!claimed)
+        {
+            return RequestExecutionChangesResult.Conflict("The interrupted revision could not be resumed right now.");
+        }
+
+        await SafeRecordActivityAsync(
+            execution.Id,
+            ExecutionStage.Review,
+            ExecutionActivityStatus.Started,
+            $"Resuming revision {revisionNumber}: verification restarts on the existing worktree; the feedback is not applied again.",
+            new ExecutionActivityMetadata(EventKind: "RevisionResumed")).ConfigureAwait(false);
+
+        RevisionResumeMarkers.Mark(execution.Id);
+        try
+        {
+            _dispatcher.EnqueueReviseExecution(execution.Id, leaseToken);
+        }
+        catch (Exception ex)
+        {
+            RevisionResumeMarkers.Clear(execution.Id);
+            _logger.LogError(ex, "RequestExecutionChanges: failed to enqueue the resumed revision for {ExecutionId}.", execution.Id);
+            await _revisionStore
+                .RestoreCompletedAfterRevisionDispatchFailureAsync(execution.Id, leaseToken, CancellationToken.None)
+                .ConfigureAwait(false);
+            return RequestExecutionChangesResult.Failed("Failed to enqueue the resumed revision.");
+        }
+
+        return RequestExecutionChangesResult.Accepted(revisionNumber);
+    }
+
     public async Task<RequestExecutionChangesResult> ExecuteAsync(
         Guid executionId,
         Guid leaseToken,
@@ -265,6 +343,9 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
         var feedback = execution.LastChangeRequest ?? string.Empty;
         var revisionNumber = execution.ChangeRequestCount; // already counted by the claim
         var workspacePath = execution.WorkspacePath;
+        // A resumed revision already holds the feedback in its worktree; only verification and repair run again.
+        var resumed = RevisionResumeMarkers.Consume(executionId);
+        var approvedFingerprint = execution.ApprovedChangeFingerprint;
         var wasApproved = execution.ReviewStatus == ExecutionReviewStatus.Approved;
         var fingerprintBefore = await TryComputeFingerprintAsync(workspacePath).ConfigureAwait(false);
         await CaptureSnapshotAsync(executionId, workspacePath, $"r{revisionNumber}-base", isBase: true).ConfigureAwait(false);
@@ -272,7 +353,7 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
 
         if (_aiContext is not null)
         {
-            _aiContext.PinnedModelId = execution.PinnedAiModelId;
+            AiExecutionBinding.Bind(_aiContext, executionId, execution.PinnedAiModelId, _activityRecorder);
         }
 
         var task = execution.DevelopmentTask;
@@ -291,7 +372,7 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
         {
             if (await IsCancelledAsync(executionId, executionToken).ConfigureAwait(false))
             {
-                return await FinishCancellationAsync(executionId, leaseToken, revisionNumber).ConfigureAwait(false);
+                return await FinishCancellationAsync(executionId, leaseToken, revisionNumber, workspacePath, fingerprintBefore).ConfigureAwait(false);
             }
 
             try
@@ -316,19 +397,20 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
                     ChangeRequest: new ExecutionChangeRequest(
                         feedback,
                         revisionNumber,
-                        CommittedBaseCommitSha: execution.InitialBaseCommitSha ?? execution.BaseCommitSha));
+                        CommittedBaseCommitSha: execution.InitialBaseCommitSha ?? execution.BaseCommitSha,
+                        FeedbackAlreadyApplied: resumed));
 
                 await _processor.ProcessAsync(context, executionToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (executionToken.IsCancellationRequested || cancellationToken.IsCancellationRequested)
             {
-                return await FinishCancellationAsync(executionId, leaseToken, revisionNumber).ConfigureAwait(false);
+                return await FinishCancellationAsync(executionId, leaseToken, revisionNumber, workspacePath, fingerprintBefore).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 if (await _executionRepository.IsCancellationRequestedAsync(executionId, CancellationToken.None).ConfigureAwait(false))
                 {
-                    return await FinishCancellationAsync(executionId, leaseToken, revisionNumber).ConfigureAwait(false);
+                    return await FinishCancellationAsync(executionId, leaseToken, revisionNumber, workspacePath, fingerprintBefore).ConfigureAwait(false);
                 }
 
                 _logger.LogError(ex, "RequestExecutionChanges: applying the fix failed for execution {ExecutionId}.", executionId);
@@ -342,15 +424,18 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
 
             if (await IsCancelledAsync(executionId, executionToken).ConfigureAwait(false))
             {
-                return await FinishCancellationAsync(executionId, leaseToken, revisionNumber).ConfigureAwait(false);
+                return await FinishCancellationAsync(executionId, leaseToken, revisionNumber, workspacePath, fingerprintBefore).ConfigureAwait(false);
             }
 
             // Only a worktree that really changed leaves the earlier approval and delivery behind. A fix that failed
             // or changed nothing keeps the previous state, which still describes the unchanged code.
             var fingerprintAfter = await TryComputeFingerprintAsync(workspacePath).ConfigureAwait(false);
             await CaptureSnapshotAsync(executionId, workspacePath, $"r{revisionNumber}-result", isBase: false).ConfigureAwait(false);
-            var codeChanged = fingerprintBefore != null && fingerprintAfter != null &&
-                              !string.Equals(fingerprintBefore, fingerprintAfter, StringComparison.Ordinal);
+            // A resumed run starts from the worktree the interrupted run left, so "changed" is measured against what was approved.
+            var codeChanged = resumed
+                ? fingerprintAfter != null && !string.Equals(approvedFingerprint, fingerprintAfter, StringComparison.Ordinal)
+                : fingerprintBefore != null && fingerprintAfter != null &&
+                  !string.Equals(fingerprintBefore, fingerprintAfter, StringComparison.Ordinal);
 
             if (codeChanged)
             {
@@ -443,11 +528,43 @@ public sealed class RequestExecutionChangesCommandHandler : IRequestExecutionCha
     private async Task<RequestExecutionChangesResult> FinishCancellationAsync(
         Guid executionId,
         Guid leaseToken,
-        int revisionNumber)
+        int revisionNumber,
+        string? workspacePath,
+        string? fingerprintBefore)
     {
-        await _executionRepository
-            .AcknowledgeCancellationWithLeaseAsync(executionId, leaseToken, CancellationToken.None)
+        // Whatever the fix already wrote into the worktree is unreviewed code: the old approval must not vouch for it.
+        var fingerprintNow = await TryComputeFingerprintAsync(workspacePath).ConfigureAwait(false);
+        var worktreeChanged = fingerprintBefore != null && fingerprintNow != null &&
+                              !string.Equals(fingerprintBefore, fingerprintNow, StringComparison.Ordinal);
+        if (worktreeChanged)
+        {
+            await _revisionStore.MarkRevisionPendingDeliveryAsync(executionId, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        await _revisionStore
+            .SetRevisionResultAsync(executionId, "Cancelled: the requested fix was cancelled.", CancellationToken.None)
             .ConfigureAwait(false);
+
+        var execution = await _executionRepository.GetByIdAsync(executionId, CancellationToken.None).ConfigureAwait(false);
+        var hadDelivery = execution is not null &&
+                          (execution.CommitStatus != ExecutionCommitStatus.None ||
+                           execution.PushStatus != ExecutionPushStatus.None ||
+                           execution.PullRequestStatus != ExecutionPullRequestStatus.None ||
+                           !string.IsNullOrWhiteSpace(execution.PullRequestUrl));
+        if (hadDelivery)
+        {
+            // The earlier commit, push and pull request stay valid, so the execution goes back to Completed and
+            // the next fix can be requested, instead of ending as a cancelled execution with an open pull request.
+            await _revisionStore
+                .RestoreCompletedAfterRevisionDispatchFailureAsync(executionId, leaseToken, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            await _executionRepository
+                .AcknowledgeCancellationWithLeaseAsync(executionId, leaseToken, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
 
         await SafeRecordActivityAsync(
             executionId,

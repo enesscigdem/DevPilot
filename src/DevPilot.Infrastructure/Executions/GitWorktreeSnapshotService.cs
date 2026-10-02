@@ -34,7 +34,7 @@ public sealed class GitWorktreeSnapshotService : IExecutionWorktreeSnapshotServi
         {
             // An isolated index keeps the real index and the branch untouched.
             if (!(await RunAsync(workspace, indexEnv, cancellationToken, "read-tree", "HEAD").ConfigureAwait(false)).Ok ||
-                !(await RunAsync(workspace, indexEnv, cancellationToken, "add", "-A", "--", ".").ConfigureAwait(false)).Ok)
+                !(await RunAsync(workspace, indexEnv, cancellationToken, new[] { "add", "-A", "--" }.Concat(WorkspaceChangeScope.WorktreePathspecs()).ToArray()).ConfigureAwait(false)).Ok)
             {
                 return null;
             }

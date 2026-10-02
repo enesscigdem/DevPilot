@@ -35,9 +35,12 @@ public sealed record ExecutionRevisionDto(
     int Deletions,
     bool HasDiff,
     string NextAction,
-    ExecutionRevisionInitialRunDto InitialRun);
+    ExecutionRevisionInitialRunDto InitialRun,
+    /// <summary>False for an older fix; it only describes what happened between its request and the next one.</summary>
+    bool IsLatest = true,
+    DateTime? WindowEnd = null);
 
-/// <summary>The unified diff of just the latest fix.</summary>
+/// <summary>The unified diff of one fix.</summary>
 public sealed record ExecutionRevisionDiffDto(
     IReadOnlyList<ExecutionReviewFileDto> Files,
     string Diff,

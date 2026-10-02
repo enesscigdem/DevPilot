@@ -344,9 +344,63 @@ public class KimiAiProviderTests
         var response = await provider.SendAsync(new AiRequest { UserPrompt = "Empty stream test" });
 
         response.IsSuccess.Should().BeFalse();
-        response.ErrorMessage.Should().Be("Kimi returned empty content after 4 attempts.");
+        response.ErrorMessage.Should().StartWith("Kimi returned empty content after 4 attempts");
+        response.ErrorMessage.Should().Contain("0 events").And.Contain("finish=none", "the message says what the stream really contained");
         response.AttemptCount.Should().Be(4);
         handler.CallCount.Should().Be(4); // Retries on empty content
+    }
+
+    [Fact]
+    public async Task SendAsync_StreamWithContentPartsArray_IsReadNotTreatedAsEmpty()
+    {
+        var stream =
+            "data: {\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"Hel\"}]}}]}\n\n" +
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"lo\"}]},\"finish_reason\":\"stop\"}]}\n\n" +
+            "data: [DONE]\n";
+        var handler = new MockHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(stream, Encoding.UTF8, "text/event-stream")
+        });
+        var provider = new KimiAiProvider(new MockHttpClientFactory(handler), _configuration, NullLogger<KimiAiProvider>.Instance);
+
+        var response = await provider.SendAsync(new AiRequest { UserPrompt = "parts" });
+
+        response.IsSuccess.Should().BeTrue();
+        response.Content.Should().Be("Hello");
+    }
+
+    [Fact]
+    public async Task SendAsync_FinalChunkCarryingTheWholeMessage_IsRead()
+    {
+        var stream =
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+            "data: {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"whole answer\"},\"finish_reason\":\"stop\"}]}\n\n" +
+            "data: [DONE]\n";
+        var handler = new MockHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(stream, Encoding.UTF8, "text/event-stream")
+        });
+        var provider = new KimiAiProvider(new MockHttpClientFactory(handler), _configuration, NullLogger<KimiAiProvider>.Instance);
+
+        var response = await provider.SendAsync(new AiRequest { UserPrompt = "message" });
+
+        response.IsSuccess.Should().BeTrue();
+        response.Content.Should().Be("whole answer");
+    }
+
+    [Fact]
+    public async Task SendAsync_Http200WithAPlainJsonError_ReportsTheProvidersErrorInsteadOfJustEmpty()
+    {
+        var handler = new MockHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"error\":{\"type\":\"overloaded_error\",\"message\":\"Upstream is busy\"}}\n", Encoding.UTF8, "text/event-stream")
+        });
+        var provider = new KimiAiProvider(new MockHttpClientFactory(handler), _configuration, NullLogger<KimiAiProvider>.Instance);
+
+        var response = await provider.SendAsync(new AiRequest { UserPrompt = "error body" });
+
+        response.IsSuccess.Should().BeFalse();
+        response.ErrorMessage.Should().Contain("provider error:").And.Contain("Upstream is busy");
     }
 
     [Fact]

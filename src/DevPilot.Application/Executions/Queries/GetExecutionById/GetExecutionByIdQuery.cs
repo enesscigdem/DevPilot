@@ -34,6 +34,7 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
     private readonly AiPricingOptions? _pricing;
     private readonly IExecutionGitDiffReader? _gitDiffReader;
+    private readonly IExecutionRevisionStore? _revisionStore;
 
     public GetExecutionByIdQueryHandler(
         IExecutionRepository executionRepository,
@@ -41,10 +42,12 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
         IImpactAnalysisRepository impactAnalysisRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions,
         AiPricingOptions? pricing = null,
-        IExecutionGitDiffReader? gitDiffReader = null)
+        IExecutionGitDiffReader? gitDiffReader = null,
+        IExecutionRevisionStore? revisionStore = null)
     {
         _pricing = pricing;
         _gitDiffReader = gitDiffReader;
+        _revisionStore = revisionStore;
         _executionRepository = executionRepository;
         _activityRepository = activityRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
@@ -84,9 +87,14 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
         var hasActive = await _executionRepository
             .HasActiveExecutionForTaskAsync(execution.DevelopmentTaskId, cancellationToken)
             .ConfigureAwait(false);
+        // Same rule as the Retry command: failed runs, the latest cancelled run, or a run that needs review.
+        var isRetryableCancelled = execution.Status == DevPilot.Domain.Enums.TaskExecutionStatus.Cancelled &&
+                                   Commands.RetryExecution.RetryExecutionCommandHandler.IsRetryableCancelled(
+                                       execution,
+                                       await _executionRepository.GetAllAsync(cancellationToken).ConfigureAwait(false));
         var canRetry = !hasActive &&
-                       (execution.Status is DevPilot.Domain.Enums.TaskExecutionStatus.Failed
-                           or DevPilot.Domain.Enums.TaskExecutionStatus.Cancelled
+                       (execution.Status == DevPilot.Domain.Enums.TaskExecutionStatus.Failed
+                        || isRetryableCancelled
                         || (execution.Status == DevPilot.Domain.Enums.TaskExecutionStatus.Completed &&
                             outcome == DevPilot.Domain.Enums.ExecutionVerificationOutcome.NeedsReview));
 
@@ -106,7 +114,10 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
         var progressPercentage = ExecutionStageEvaluator.CalculateProgressPercentage(stages);
 
         var dto = MapToDto(execution, allowNoChecks, activities, outcome, canRetry, stages, progressPercentage);
-        dto.Revision = await BuildRevisionAsync(execution, activities, outcome, cancellationToken).ConfigureAwait(false);
+        dto.Revisions = await ExecutionRevisionProjector
+            .BuildAsync(execution, _revisionStore, activities, outcome, _gitDiffReader, cancellationToken)
+            .ConfigureAwait(false);
+        dto.Revision = dto.Revisions.LastOrDefault();
         if (revisionActive)
         {
             dto.StartedAt = execution.LastChangeRequestAt;
@@ -124,32 +135,6 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             Found = true,
             Execution = dto,
         };
-    }
-
-    private async Task<ExecutionRevisionDto?> BuildRevisionAsync(
-        TaskExecution execution,
-        IReadOnlyList<ExecutionActivity> activities,
-        DevPilot.Domain.Enums.ExecutionVerificationOutcome outcome,
-        CancellationToken cancellationToken)
-    {
-        if (!ExecutionRevisionScope.HasRevision(execution))
-        {
-            return null;
-        }
-
-        ExecutionGitDiffResult? diff = null;
-        if (_gitDiffReader != null &&
-            !ExecutionRevisionScope.IsActive(execution) &&
-            !string.IsNullOrWhiteSpace(execution.WorkspacePath) &&
-            !string.IsNullOrWhiteSpace(execution.RevisionBaseSnapshotSha) &&
-            !string.IsNullOrWhiteSpace(execution.RevisionResultSnapshotSha))
-        {
-            diff = await _gitDiffReader
-                .ReadCommittedDiffAsync(execution.WorkspacePath, execution.RevisionBaseSnapshotSha, execution.RevisionResultSnapshotSha, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        return ExecutionRevisionBuilder.Build(execution, activities, outcome, diff);
     }
 
     private static ExecutionDto MapToDto(
@@ -212,6 +197,8 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             CanRequestMerge = ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks).CanMerge,
             VerificationOutcome = outcome.ToString(),
             CanRetry = canRetry,
+            CanCancel = DevPilot.Application.Executions.Services.ExecutionCancellationPolicy.DescribeWhyCannotCancel(execution) is null,
+            CancelBlockedReason = DevPilot.Application.Executions.Services.ExecutionCancellationPolicy.DescribeWhyCannotCancel(execution),
             CanRequestChanges = DevPilot.Application.Executions.Commands.RequestExecutionChanges.RequestExecutionChangesCommandHandler
                 .DescribeWhyChangesCannotBeRequested(execution) is null,
             RevisionCount = execution.RevisionCount,

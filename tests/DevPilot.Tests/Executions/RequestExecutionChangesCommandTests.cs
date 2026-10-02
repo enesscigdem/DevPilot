@@ -309,6 +309,68 @@ public sealed class RequestExecutionChangesCommandTests
         fx.Execution.RevisionCount.Should().Be(1);
     }
 
+    // ---- resume / cancel ----------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Resume_OnARevisionThatWasNotInterrupted_IsAConflict()
+    {
+        var fx = new Fixture();
+
+        var result = await fx.Handler.ResumeAsync(fx.Execution.Id);
+
+        result.Status.Should().Be(RequestExecutionChangesResultStatus.Conflict);
+        fx.Dispatcher.Enqueued.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Resume_InterruptedRevision_ReusesTheRevisionAndDoesNotApplyTheFeedbackAgain()
+    {
+        var fx = new Fixture();
+        fx.Execution.LastChangeRequest = "Use a constant.";
+        fx.Execution.ChangeRequestCount = 1;
+        fx.Execution.LastChangeRequestResult = "Interrupted: the worker stopped before this fix finished.";
+        fx.Fingerprints.Current = "worktree-with-feedback";
+
+        var resumed = await fx.Handler.ResumeAsync(fx.Execution.Id, fx.WorkspaceId);
+
+        resumed.Status.Should().Be(RequestExecutionChangesResultStatus.Accepted);
+        resumed.RevisionNumber.Should().Be(1);
+        fx.Execution.ChangeRequestCount.Should().Be(1, "a resume is not a new request");
+        fx.Execution.Status.Should().Be(TaskExecutionStatus.Running);
+        fx.Dispatcher.Enqueued.Should().ContainSingle();
+
+        var executed = await fx.Handler.ExecuteAsync(fx.Execution.Id, fx.Execution.LeaseToken!.Value);
+
+        executed.Status.Should().Be(RequestExecutionChangesResultStatus.Accepted);
+        var context = fx.Processor.Contexts.Should().ContainSingle().Subject;
+        context.ChangeRequest!.FeedbackAlreadyApplied.Should().BeTrue();
+        context.ChangeRequest.Feedback.Should().Be("Use a constant.");
+        // The worktree differs from what was approved, so the approval no longer stands.
+        fx.Execution.ReviewStatus.Should().Be(ExecutionReviewStatus.Pending);
+        fx.Execution.LastChangeRequestResult.Should().StartWith("Applied");
+    }
+
+    [Fact]
+    public async Task Execute_CancelledDuringARevisionOfADeliveredExecution_KeepsTheDeliveryAndReturnsToCompleted()
+    {
+        var fx = await Fixture.RequestedAsync();
+        fx.Processor.OnProcess = () =>
+        {
+            fx.Fingerprints.Current = "half-applied";
+            fx.Execution.CancellationRequestedAt = DateTime.UtcNow;
+        };
+
+        await fx.Handler.ExecuteAsync(fx.Execution.Id, fx.Execution.LeaseToken!.Value);
+
+        var e = fx.Execution;
+        e.Status.Should().Be(TaskExecutionStatus.Completed, "the earlier delivery stays usable");
+        e.LastChangeRequestResult.Should().StartWith("Cancelled");
+        e.PullRequestStatus.Should().Be(ExecutionPullRequestStatus.Open);
+        e.PullRequestNumber.Should().Be(42);
+        e.ReviewStatus.Should().Be(ExecutionReviewStatus.Pending, "code the cancelled fix already wrote was never reviewed");
+        e.ApprovedChangeFingerprint.Should().BeNull();
+    }
+
     // ---- fixtures -----------------------------------------------------------------------------------------------
 
     private sealed class Fixture
@@ -424,6 +486,24 @@ public sealed class RequestExecutionChangesCommandTests
             return Task.FromResult(true);
         }
 
+        public Task<bool> ResumeInterruptedRevisionAsync(Guid executionId, Guid leaseToken, DateTime resumedAt, CancellationToken cancellationToken = default)
+        {
+            if (!_repository.Executions.TryGetValue(executionId, out var e) ||
+                e.Status != TaskExecutionStatus.Completed ||
+                e.LastChangeRequestResult is null ||
+                !e.LastChangeRequestResult.StartsWith("Interrupted", StringComparison.Ordinal))
+            {
+                return Task.FromResult(false);
+            }
+
+            e.Status = TaskExecutionStatus.Running;
+            e.CompletedAt = null;
+            e.LeaseToken = leaseToken;
+            e.LastChangeRequestAt = resumedAt;
+            e.LastChangeRequestResult = null;
+            return Task.FromResult(true);
+        }
+
         public Task<bool> MarkRevisionPendingDeliveryAsync(Guid executionId, CancellationToken cancellationToken = default)
         {
             var e = _repository.Executions[executionId];
@@ -445,6 +525,9 @@ public sealed class RequestExecutionChangesCommandTests
             e.RevisionResultSnapshotSha = resultSnapshotSha ?? e.RevisionResultSnapshotSha;
             return Task.CompletedTask;
         }
+
+        public Task<IReadOnlyList<ExecutionRevision>> ListRevisionsAsync(Guid executionId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ExecutionRevision>>(Array.Empty<ExecutionRevision>());
 
         public Task SetRevisionResultAsync(Guid executionId, string result, CancellationToken cancellationToken = default)
         {

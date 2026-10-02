@@ -80,6 +80,7 @@ const execWs: Resources["execWs"] = {
   repoChecks: "Depo kontrolleri",
   prerequisites: "Ön koşullar",
   noSuite: "Test seti yok",
+  failingOnBase: "Temelde de başarısız",
   openTask: "Görev ayrıntısını aç",
   meta: {
     budget: "bütçe",

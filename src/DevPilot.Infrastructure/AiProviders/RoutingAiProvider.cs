@@ -22,6 +22,7 @@ internal sealed class RoutingAiProvider : IAiProvider
     private readonly IAiProvider _legacyProvider;
     private readonly IAiExecutionContext? _executionContext;
     private readonly SemaphoreSlim _loadLock = new(1, 1);
+    private readonly HashSet<string> _announced = new();
     private Snapshot? _snapshot;
 
     public RoutingAiProvider(
@@ -44,7 +45,12 @@ internal sealed class RoutingAiProvider : IAiProvider
     {
         var snapshot = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
         var pinnedId = _executionContext?.PinnedModelId;
-        var config = pinnedId is { } pinned ? snapshot.GetEnabled(pinned) : snapshot.Resolve(request.Stage);
+        // Timeouts and retries of this call are reported to the execution that is running it.
+        request.OnAttempt ??= _executionContext?.AttemptObserver;
+
+        var (config, source, fallbackReason) = pinnedId is { } pinned
+            ? (snapshot.GetEnabled(pinned), "Pinned", (string?)null)
+            : snapshot.Resolve(request.Stage);
 
         if (pinnedId is not null && config is null)
         {
@@ -61,7 +67,12 @@ internal sealed class RoutingAiProvider : IAiProvider
 
         if (config is null)
         {
-            return await _legacyProvider.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            var legacy = await _legacyProvider.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            legacy.RoutingSource = "Legacy";
+            legacy.FallbackReason = fallbackReason is null
+                ? $"No model is configured in Settings > Models; the appsettings provider ({_legacyProvider.ProviderName}) answered."
+                : $"{fallbackReason} The appsettings provider ({_legacyProvider.ProviderName}) answered.";
+            return legacy;
         }
 
         var apiKey = snapshot.GetApiKey(config.Id);
@@ -76,6 +87,8 @@ internal sealed class RoutingAiProvider : IAiProvider
             return Failure(config, $"No usable API key is stored for model {config.Name}. Open Settings > Models and enter the key again.");
         }
 
+        await AnnounceAsync(request, config, source, fallbackReason).ConfigureAwait(false);
+
         var routed = new AiRequest
         {
             // The assigned model always wins over whatever name the caller put in the request.
@@ -85,9 +98,81 @@ internal sealed class RoutingAiProvider : IAiProvider
             UserPrompt = request.UserPrompt,
             MaxTokens = CapTokens(request.MaxTokens, config.MaxOutputTokens),
             ReasoningEffort = request.ReasoningEffort,
+            OnAttempt = request.OnAttempt,
         };
 
-        return await provider.SendAsync(routed, cancellationToken).ConfigureAwait(false);
+        var response = await provider.SendAsync(routed, cancellationToken).ConfigureAwait(false);
+        response.ModelConfigId = config.Id;
+        response.ModelConfigName = config.Name;
+        response.RoutingSource = source;
+        response.FallbackReason = fallbackReason;
+        return response;
+    }
+
+    /// <summary>
+    /// Makes the choice visible once per stage and model: which model the execution really uses and, when it is not the
+    /// one assigned to the stage, why. The first model is also stored on the execution.
+    /// </summary>
+    private async Task AnnounceAsync(AiRequest request, AiModelConfig config, string source, string? fallbackReason)
+    {
+        var stage = request.Stage?.ToString() ?? "unspecified stage";
+        bool first;
+        lock (_announced)
+        {
+            first = _announced.Add($"{stage}|{config.Id}");
+        }
+
+        if (!first)
+        {
+            return;
+        }
+
+        var label = $"{config.Name} ({config.ModelName})";
+        var how = source switch
+        {
+            "Pinned" => "pinned model",
+            "StageAssignment" => "stage assignment",
+            "Default" => "default model",
+            "OnlyModel" => "the only configured model",
+            _ => source,
+        };
+
+        if (request.OnAttempt is { } observer)
+        {
+            try
+            {
+                await observer(new AiAttemptEvent(1, 1, "ModelSelected", 0, false, Detail: $"{stage} via {how}", Model: label)).ConfigureAwait(false);
+                if (fallbackReason is not null)
+                {
+                    await observer(new AiAttemptEvent(1, 1, "ModelFallback", 0, false, Detail: fallbackReason, Model: label)).ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+                // Telemetry only.
+            }
+        }
+
+        if (_executionContext?.ExecutionId is { } executionId)
+        {
+            // The scoped DbContext is shared by parallel calls, so the write takes the same lock as the model load.
+            await _loadLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await _db.TaskExecutions
+                    .Where(e => e.Id == executionId && (e.Model == null || e.Model == string.Empty))
+                    .ExecuteUpdateAsync(s => s.SetProperty(e => e.Model, config.ModelName))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Recording the model must not fail the AI call.
+            }
+            finally
+            {
+                _loadLock.Release();
+            }
+        }
     }
 
     private static int? CapTokens(int? requested, int? modelLimit) =>
@@ -163,17 +248,38 @@ internal sealed class RoutingAiProvider : IAiProvider
             _default = models.FirstOrDefault(m => m.IsDefault);
         }
 
-        public AiModelConfig? Resolve(AiStage? stage)
+        /// <summary>
+        /// The model for a stage, how it was chosen and, when it is not the model assigned to the stage, why.
+        /// </summary>
+        public (AiModelConfig? Config, string Source, string? FallbackReason) Resolve(AiStage? stage)
         {
-            if (stage is { } s
-                && _assignments.TryGetValue(s, out var modelId)
-                && _models.TryGetValue(modelId, out var assigned))
+            string? reason = null;
+            if (stage is { } s)
             {
-                return assigned;
+                if (_assignments.TryGetValue(s, out var modelId))
+                {
+                    if (_models.TryGetValue(modelId, out var assigned))
+                    {
+                        return (assigned, "StageAssignment", null);
+                    }
+
+                    reason = $"The model assigned to {s} is disabled or deleted, so another model was used.";
+                }
+                else
+                {
+                    reason = $"No model is assigned to {s}, so the default model was used.";
+                }
+            }
+
+            if (_default is not null)
+            {
+                return (_default, "Default", reason);
             }
 
             // No default flagged but models exist: use the only one rather than silently ignoring the user's setup.
-            return _default ?? (_models.Count == 1 ? _models.Values.First() : null);
+            return _models.Count == 1
+                ? (_models.Values.First(), "OnlyModel", reason)
+                : (null, "Legacy", reason);
         }
 
         public AiModelConfig? GetEnabled(Guid modelId) => _models.GetValueOrDefault(modelId);

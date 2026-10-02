@@ -28,11 +28,26 @@ public interface IExecutionRevisionStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Takes a lease on a revision whose worker stopped before it finished (result starts with "Interrupted") so it
+    /// can be verified again on the same worktree. Does not count a new request or add a revision row.
+    /// </summary>
+    Task<bool> ResumeInterruptedRevisionAsync(
+        Guid executionId,
+        Guid leaseToken,
+        DateTime resumedAt,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Called once the worktree holds new, unreviewed changes. Counts the revision, removes the review approval,
     /// clears the commit and push markers of the earlier delivery (the pull request number and the last pushed SHA
     /// stay, so the same pull request is updated) and forgets the CI result of the previous head.
     /// </summary>
     Task<bool> MarkRevisionPendingDeliveryAsync(
+        Guid executionId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Every requested fix of the execution, oldest first.</summary>
+    Task<IReadOnlyList<DevPilot.Domain.Entities.ExecutionRevision>> ListRevisionsAsync(
         Guid executionId,
         CancellationToken cancellationToken = default);
 

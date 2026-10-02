@@ -14,34 +14,117 @@ public static class ExecutionRevisionBuilder
 
     private sealed record Event(ExecutionActivity Activity, ExecutionActivityMetadata? Meta);
 
+    /// <summary>One requested fix as the builder sees it: from a history row, or from the execution's own latest-fix fields.</summary>
+    public sealed record RevisionRecord(
+        int Number,
+        string Feedback,
+        DateTime RequestedAt,
+        DateTime? CompletedAt,
+        string? Result,
+        string? BaseSnapshotSha,
+        string? ResultSnapshotSha);
+
+    public static RevisionRecord FromEntity(ExecutionRevision row) =>
+        new(row.Number, row.Feedback, row.RequestedAt, row.CompletedAt, row.Result, row.BaseSnapshotSha, row.ResultSnapshotSha);
+
+    /// <summary>Executions fixed before history rows existed still have their latest fix on the execution itself.</summary>
+    public static RevisionRecord FromExecution(TaskExecution execution) =>
+        new(
+            execution.ChangeRequestCount,
+            execution.LastChangeRequest ?? string.Empty,
+            execution.LastChangeRequestAt!.Value,
+            null,
+            execution.LastChangeRequestResult,
+            execution.RevisionBaseSnapshotSha,
+            execution.RevisionResultSnapshotSha);
+
+    /// <summary>The latest fix only (kept for callers that need just that one).</summary>
     public static ExecutionRevisionDto? Build(
         TaskExecution execution,
         IReadOnlyList<ExecutionActivity> allActivities,
         ExecutionVerificationOutcome overallOutcome,
-        ExecutionGitDiffResult? snapshotDiff)
+        ExecutionGitDiffResult? snapshotDiff) =>
+        !ExecutionRevisionScope.HasRevision(execution)
+            ? null
+            : BuildOne(execution, FromExecution(execution), true, null, allActivities, overallOutcome, snapshotDiff);
+
+    /// <summary>
+    /// Every requested fix, oldest first. Each one only sees the activity between its own request and the next
+    /// request, so an older fix never shows a newer fix's files, checks or events (and the other way round).
+    /// </summary>
+    public static IReadOnlyList<ExecutionRevisionDto> BuildAll(
+        TaskExecution execution,
+        IReadOnlyList<ExecutionRevision> rows,
+        IReadOnlyList<ExecutionActivity> allActivities,
+        ExecutionVerificationOutcome overallOutcome,
+        Func<RevisionRecord, ExecutionGitDiffResult?> diffFor)
     {
         if (!ExecutionRevisionScope.HasRevision(execution))
         {
-            return null;
+            return Array.Empty<ExecutionRevisionDto>();
         }
 
-        var requestedAt = execution.LastChangeRequestAt!.Value;
-        var scoped = ExecutionRevisionScope.Since(execution, allActivities);
+        var records = rows.OrderBy(r => r.Number).Select(FromEntity).ToList();
+        // The latest fix of an execution that predates history rows is described by the execution itself.
+        if (records.Count == 0 || records[^1].Number < execution.ChangeRequestCount)
+        {
+            var latest = FromExecution(execution);
+            records.RemoveAll(r => r.Number == latest.Number);
+            records.Add(latest);
+        }
+        else
+        {
+            // The execution mirrors the live latest fix, which is more current than its row while it runs.
+            var last = records[^1];
+            records[^1] = last with
+            {
+                Result = execution.LastChangeRequestResult ?? last.Result,
+                BaseSnapshotSha = execution.RevisionBaseSnapshotSha ?? last.BaseSnapshotSha,
+                ResultSnapshotSha = execution.RevisionResultSnapshotSha ?? last.ResultSnapshotSha,
+            };
+        }
+
+        var dtos = new List<ExecutionRevisionDto>(records.Count);
+        for (var i = 0; i < records.Count; i++)
+        {
+            var isLatest = i == records.Count - 1;
+            DateTime? windowEnd = isLatest ? null : records[i + 1].RequestedAt;
+            dtos.Add(BuildOne(execution, records[i], isLatest, windowEnd, allActivities, overallOutcome, diffFor(records[i])));
+        }
+
+        return dtos;
+    }
+
+    private static ExecutionRevisionDto BuildOne(
+        TaskExecution execution,
+        RevisionRecord record,
+        bool isLatest,
+        DateTime? windowEnd,
+        IReadOnlyList<ExecutionActivity> allActivities,
+        ExecutionVerificationOutcome overallOutcome,
+        ExecutionGitDiffResult? snapshotDiff)
+    {
+        var requestedAt = record.RequestedAt;
+        var scoped = allActivities
+            .Where(a => a.CreatedAt >= requestedAt && (windowEnd == null || a.CreatedAt < windowEnd))
+            .ToList();
         var events = scoped.Select(a => new Event(a, ParseMetadata(a.MetadataJson))).ToList();
 
-        var active = ExecutionRevisionScope.IsActive(execution);
-        var result = execution.LastChangeRequestResult;
+        var active = isLatest && ExecutionRevisionScope.IsActive(execution);
+        var result = record.Result;
         var state = active
             ? "Running"
-            : execution.Status == TaskExecutionStatus.Cancelled
+            : result is not null && result.StartsWith("Cancelled", StringComparison.OrdinalIgnoreCase)
                 ? "Cancelled"
-                : result is null
-                    ? "Failed"
-                    : result.StartsWith("Applied", StringComparison.OrdinalIgnoreCase)
-                        ? "Applied"
-                        : result.StartsWith("No change", StringComparison.OrdinalIgnoreCase)
-                            ? "NoChange"
-                            : "Failed";
+                : isLatest && execution.Status == TaskExecutionStatus.Cancelled
+                    ? "Cancelled"
+                    : result is null
+                        ? "Failed"
+                        : result.StartsWith("Applied", StringComparison.OrdinalIgnoreCase)
+                            ? "Applied"
+                            : result.StartsWith("No change", StringComparison.OrdinalIgnoreCase)
+                                ? "NoChange"
+                                : "Failed";
 
         var applyStarted = events.Any(e => e.Meta?.EventKind == "ApplyingReviewFeedback");
         var applied = events.Any(e => e.Meta?.EventKind == "ReviewFeedbackApplied");
@@ -67,7 +150,7 @@ public static class ExecutionRevisionBuilder
         var filesAreFinal = !active && snapshotDiff is { Success: true };
         var changed = files.Where(f => f.State is not ("Considered" or "Unchanged")).ToList();
 
-        DateTime? completedAt = active ? null : execution.CompletedAt;
+        DateTime? completedAt = active ? null : record.CompletedAt ?? (isLatest ? execution.CompletedAt : null);
         long? durationMs = completedAt.HasValue
             ? (long)Math.Max(0, (completedAt.Value - requestedAt).TotalMilliseconds)
             : null;
@@ -88,10 +171,10 @@ public static class ExecutionRevisionBuilder
             initialOutcome);
 
         return new ExecutionRevisionDto(
-            Number: execution.ChangeRequestCount,
+            Number: record.Number,
             State: state,
             Phase: phase,
-            Feedback: execution.LastChangeRequest ?? string.Empty,
+            Feedback: record.Feedback,
             RequestedAt: requestedAt,
             CompletedAt: completedAt,
             DurationMs: durationMs,
@@ -108,10 +191,12 @@ public static class ExecutionRevisionBuilder
             Additions: changed.Sum(f => f.Additions ?? 0),
             Deletions: changed.Sum(f => f.Deletions ?? 0),
             HasDiff: filesAreFinal && changed.Count > 0 &&
-                     !string.IsNullOrWhiteSpace(execution.RevisionBaseSnapshotSha) &&
-                     !string.IsNullOrWhiteSpace(execution.RevisionResultSnapshotSha),
-            NextAction: NextAction(execution, state, overallOutcome),
-            InitialRun: initialRun);
+                     !string.IsNullOrWhiteSpace(record.BaseSnapshotSha) &&
+                     !string.IsNullOrWhiteSpace(record.ResultSnapshotSha),
+            NextAction: isLatest ? NextAction(execution, state, overallOutcome) : "None",
+            InitialRun: initialRun,
+            IsLatest: isLatest,
+            WindowEnd: windowEnd);
     }
 
     public static string NextAction(TaskExecution execution, string state, ExecutionVerificationOutcome overallOutcome)

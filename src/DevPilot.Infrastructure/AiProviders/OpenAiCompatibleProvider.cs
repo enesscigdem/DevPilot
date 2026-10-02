@@ -36,6 +36,8 @@ internal class OpenAiCompatibleProvider : IAiProvider
     private readonly int _baseDelayMs;
     private readonly int _maxAttempts;
     private readonly int _maxRetryAfterMs;
+    private readonly TimeSpan _totalTimeout;
+    private readonly TimeSpan _streamIdleTimeout;
 
     public OpenAiCompatibleProvider(
         IHttpClientFactory httpClientFactory,
@@ -58,6 +60,8 @@ internal class OpenAiCompatibleProvider : IAiProvider
         _baseDelayMs = settings.BaseDelayMs > 0 ? settings.BaseDelayMs : 1000;
         _maxAttempts = settings.MaxAttempts > 0 ? settings.MaxAttempts : 4;
         _maxRetryAfterMs = settings.MaxRetryAfterMs > 0 ? settings.MaxRetryAfterMs : 30000;
+        _totalTimeout = settings.TotalTimeout;
+        _streamIdleTimeout = settings.StreamIdleTimeout;
 
         // Local runtimes (Ollama, LM Studio) usually need no key, so the key is only required
         // when the settings say so.
@@ -141,6 +145,24 @@ internal class OpenAiCompatibleProvider : IAiProvider
             }
             var attemptStopwatch = Stopwatch.StartNew();
 
+            // One deadline for the whole attempt (headers and the entire stream) and one for silence while streaming.
+            // A caller cancellation is told apart from both, so it is never retried.
+            using var totalCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            if (_totalTimeout > TimeSpan.Zero)
+            {
+                totalCts.CancelAfter(_totalTimeout);
+            }
+
+            using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(totalCts.Token);
+            var attemptToken = idleCts.Token;
+            Action armIdleTimer = () =>
+            {
+                if (_streamIdleTimeout > TimeSpan.Zero)
+                {
+                    idleCts.CancelAfter(_streamIdleTimeout);
+                }
+            };
+
             try
             {
                 using var client = _httpClientFactory.CreateClient(HttpClientName);
@@ -153,7 +175,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
                 requestMessage.Content = new StringContent(payloadJson, Encoding.UTF8, MediaTypeHeaderValue.Parse("application/json"));
 
                 var response = await client
-                    .SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                    .SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, attemptToken)
                     .ConfigureAwait(false);
 
                 attemptStopwatch.Stop();
@@ -174,7 +196,8 @@ internal class OpenAiCompatibleProvider : IAiProvider
                             requestId,
                             inputTokenEstimate,
                             maxTokens,
-                            cancellationToken).ConfigureAwait(false);
+                            attemptToken,
+                            armIdleTimer).ConfigureAwait(false);
 
                         if (streamResponse.IsSuccess)
                         {
@@ -192,6 +215,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
                         if (attempt < maxAttempts)
                         {
                             var delayMs = GetDelayMilliseconds(response, attempt, baseDelayMs, _maxRetryAfterMs);
+                            await NotifyAsync(request, new AiAttemptEvent(attempt, maxAttempts, "StreamFailed", attemptStopwatch.ElapsedMilliseconds, true, delayMs, Detail: SanitizeDiagnosticText(streamResponse.ErrorMessage ?? string.Empty, 120), Model: model)).ConfigureAwait(false);
                             _logger.LogWarning(
                                 "OpenAI-compatible API streaming response failed ({ErrorMessage}) on attempt {Attempt}/{MaxAttempts} (ElapsedMs: {ElapsedMs}, RequestId: {RequestId}, Model: {Model}). Retrying in {DelayMs}ms.",
                                 streamResponse.ErrorMessage, attempt, maxAttempts, attemptStopwatch.ElapsedMilliseconds, requestId ?? "none", model, delayMs);
@@ -205,7 +229,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
                     else
                     {
                         var responseContent = await response.Content
-                            .ReadAsStringAsync(cancellationToken)
+                            .ReadAsStringAsync(attemptToken)
                             .ConfigureAwait(false);
 
                         var completion = JsonSerializer.Deserialize<ChatCompletionResponse>(
@@ -297,7 +321,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
                 // Handle Non-Success HTTP status
                 var statusCode = (int)response.StatusCode;
                 var errorBody = await response.Content
-                    .ReadAsStringAsync(cancellationToken)
+                    .ReadAsStringAsync(attemptToken)
                     .ConfigureAwait(false);
 
                 var (errorCode, errorType, _) = ParseErrorBody(errorBody);
@@ -336,6 +360,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
                 if (isTransient && attempt < maxAttempts)
                 {
                     var delayMs = GetDelayMilliseconds(response, attempt, baseDelayMs, _maxRetryAfterMs);
+                    await NotifyAsync(request, new AiAttemptEvent(attempt, maxAttempts, "HttpStatus", attemptStopwatch.ElapsedMilliseconds, true, delayMs, statusCode, Model: model)).ConfigureAwait(false);
                     _logger.LogWarning(
                         "OpenAI-compatible API returned transient status code {StatusCode} on attempt {Attempt}/{MaxAttempts} (ElapsedMs: {ElapsedMs}, RequestId: {RequestId}, Model: {Model}, RetryAfter: {RetryAfter}, ErrorCode: {ErrorCode}, ErrorType: {ErrorType}, ErrorExcerpt: {ErrorExcerpt}, PayloadLength: {PayloadLength}, InputTokenEstimate: {InputTokens}, MaxOutputTokens: {MaxOutputTokens}, Streaming: {IsStreaming}). Retrying in {DelayMs}ms.",
                         statusCode, attempt, maxAttempts, attemptStopwatch.ElapsedMilliseconds, requestId ?? "none", model,
@@ -379,6 +404,8 @@ internal class OpenAiCompatibleProvider : IAiProvider
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                // The caller (for example the execution's cancel) stopped the call: report it and never retry.
+                await NotifyAsync(request, new AiAttemptEvent(attempt, maxAttempts, "Cancelled", attemptStopwatch.ElapsedMilliseconds, false, Model: model)).ConfigureAwait(false);
                 stopwatch.Stop();
                 return new AiResponse
                 {
@@ -391,13 +418,16 @@ internal class OpenAiCompatibleProvider : IAiProvider
                     ErrorMessage = $"{_displayName} request was cancelled.",
                 };
             }
-            catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
             {
                 attemptStopwatch.Stop();
                 lastException = exception;
+                var timeoutKind = totalCts.IsCancellationRequested ? "TotalTimeout" : idleCts.IsCancellationRequested ? "IdleTimeout" : "Timeout";
+                var timeoutDelayMs = attempt < maxAttempts ? GetDelayMilliseconds(null, attempt, baseDelayMs, _maxRetryAfterMs) : (int?)null;
+                await NotifyAsync(request, new AiAttemptEvent(attempt, maxAttempts, timeoutKind, attemptStopwatch.ElapsedMilliseconds, attempt < maxAttempts, timeoutDelayMs, Model: model)).ConfigureAwait(false);
                 if (attempt < maxAttempts)
                 {
-                    var delayMs = GetDelayMilliseconds(null, attempt, baseDelayMs, _maxRetryAfterMs);
+                    var delayMs = timeoutDelayMs ?? 0;
                     _logger.LogWarning(
                         exception,
                         "OpenAI-compatible API request timed out on attempt {Attempt}/{MaxAttempts} (ElapsedMs: {ElapsedMs}, Model: {Model}, PayloadLength: {PayloadLength}, InputTokenEstimate: {InputTokens}, MaxOutputTokens: {MaxOutputTokens}, Streaming: {IsStreaming}). Retrying in {DelayMs}ms.",
@@ -420,7 +450,12 @@ internal class OpenAiCompatibleProvider : IAiProvider
                     IsSuccess = false,
                     AttemptCount = attempt,
                     FailureKind = AiFailureKind.TimeoutOrConnection,
-                    ErrorMessage = $"{_displayName} request timed out after {(int)stopwatch.Elapsed.TotalSeconds}s ({attempt} attempts).",
+                    ErrorMessage = timeoutKind switch
+                    {
+                        "TotalTimeout" => $"{_displayName} call exceeded the {(int)_totalTimeout.TotalSeconds}s total time limit ({attempt} attempts, {(int)stopwatch.Elapsed.TotalSeconds}s).",
+                        "IdleTimeout" => $"{_displayName} stream sent no data for {(int)_streamIdleTimeout.TotalSeconds}s ({attempt} attempts, {(int)stopwatch.Elapsed.TotalSeconds}s).",
+                        _ => $"{_displayName} request timed out after {(int)stopwatch.Elapsed.TotalSeconds}s ({attempt} attempts).",
+                    },
                 };
             }
             catch (HttpRequestException exception)
@@ -430,6 +465,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
                 if (attempt < maxAttempts)
                 {
                     var delayMs = GetDelayMilliseconds(null, attempt, baseDelayMs, _maxRetryAfterMs);
+                    await NotifyAsync(request, new AiAttemptEvent(attempt, maxAttempts, "NetworkError", attemptStopwatch.ElapsedMilliseconds, true, delayMs, Detail: SanitizeDiagnosticText(exception.Message, 120), Model: model)).ConfigureAwait(false);
                     _logger.LogWarning(
                         exception,
                         "OpenAI-compatible API HTTP request exception on attempt {Attempt}/{MaxAttempts} (ElapsedMs: {ElapsedMs}, Model: {Model}, PayloadLength: {PayloadLength}, InputTokenEstimate: {InputTokens}, MaxOutputTokens: {MaxOutputTokens}, Streaming: {IsStreaming}). Retrying in {DelayMs}ms.",
@@ -512,6 +548,24 @@ internal class OpenAiCompatibleProvider : IAiProvider
         };
     }
 
+    /// <summary>Reports an attempt event to whoever asked (the execution feed). Observers can never break the call.</summary>
+    private static async Task NotifyAsync(AiRequest request, AiAttemptEvent attemptEvent)
+    {
+        if (request.OnAttempt is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await request.OnAttempt(attemptEvent).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Telemetry only.
+        }
+    }
+
     private async Task<AiResponse> ReadStreamResponseAsync(
         HttpResponseMessage response,
         string fallbackModel,
@@ -522,9 +576,11 @@ internal class OpenAiCompatibleProvider : IAiProvider
         string? requestId,
         int inputTokenEstimate,
         int? maxOutputTokens,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? armIdleTimer = null)
     {
         using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        armIdleTimer?.Invoke();
         using var reader = new StreamReader(stream, Encoding.UTF8);
 
         var contentSb = new StringBuilder();
@@ -536,11 +592,22 @@ internal class OpenAiCompatibleProvider : IAiProvider
         int? completionTokens = null;
         int? reasoningTokens = null;
         bool receivedDone = false;
+        var dataEvents = 0;
+        string? streamError = null;
+        var deltaKeys = new HashSet<string>(StringComparer.Ordinal);
 
         try
         {
-            while (await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            while (true)
             {
+                // Silence is measured from the moment we start waiting for the next line (keep-alive comments count as data).
+                armIdleTimer?.Invoke();
+                var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+                if (line is null)
+                {
+                    break;
+                }
+
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var trimmed = line.Trim();
@@ -558,6 +625,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
                         break;
                     }
 
+                    dataEvents++;
                     try
                     {
                         using var doc = JsonDocument.Parse(dataContent);
@@ -573,17 +641,24 @@ internal class OpenAiCompatibleProvider : IAiProvider
                             {
                                 if (choice.TryGetProperty("delta", out var deltaEl) && deltaEl.ValueKind == JsonValueKind.Object)
                                 {
-                                    if (deltaEl.TryGetProperty("content", out var contentEl) && contentEl.ValueKind == JsonValueKind.String)
+                                    foreach (var deltaProperty in deltaEl.EnumerateObject())
                                     {
-                                        var chunk = contentEl.GetString();
-                                        if (!string.IsNullOrEmpty(chunk))
+                                        if (deltaKeys.Count < 12)
                                         {
-                                            if (contentSb.Length + chunk.Length > maxAccumulatedBytes)
-                                            {
-                                                throw new InvalidOperationException("Streamed AI response exceeded maximum allowed buffer size.");
-                                            }
-                                            contentSb.Append(chunk);
+                                            deltaKeys.Add(deltaProperty.Name);
                                         }
+                                    }
+
+                                    // Gateways in front of other vendors do not always send a plain string: parts arrays,
+                                    // "text", or a whole "message" in the last chunk all carry the answer.
+                                    var chunk = ExtractStreamText(deltaEl, "content") ?? ExtractStreamText(deltaEl, "text");
+                                    if (!string.IsNullOrEmpty(chunk))
+                                    {
+                                        if (contentSb.Length + chunk.Length > maxAccumulatedBytes)
+                                        {
+                                            throw new InvalidOperationException("Streamed AI response exceeded maximum allowed buffer size.");
+                                        }
+                                        contentSb.Append(chunk);
                                     }
 
                                     if ((deltaEl.TryGetProperty("reasoning_content", out var reasoningEl) ||
@@ -599,10 +674,33 @@ internal class OpenAiCompatibleProvider : IAiProvider
                                     }
                                 }
 
+                                // A final chunk that carries the finished message instead of deltas.
+                                if (contentSb.Length == 0 &&
+                                    choice.TryGetProperty("message", out var messageEl) && messageEl.ValueKind == JsonValueKind.Object)
+                                {
+                                    var whole = ExtractStreamText(messageEl, "content");
+                                    if (!string.IsNullOrEmpty(whole))
+                                    {
+                                        contentSb.Append(whole);
+                                    }
+                                }
+
                                 if (choice.TryGetProperty("finish_reason", out var finishReasonEl) && finishReasonEl.ValueKind == JsonValueKind.String)
                                 {
                                     finishReason = finishReasonEl.GetString();
                                 }
+                            }
+                        }
+
+                        // Anthropic-style events relayed as-is.
+                        if (root.TryGetProperty("type", out var eventTypeEl) && eventTypeEl.ValueKind == JsonValueKind.String &&
+                            string.Equals(eventTypeEl.GetString(), "content_block_delta", StringComparison.Ordinal) &&
+                            root.TryGetProperty("delta", out var blockDelta) && blockDelta.ValueKind == JsonValueKind.Object)
+                        {
+                            var text = ExtractStreamText(blockDelta, "text");
+                            if (!string.IsNullOrEmpty(text) && contentSb.Length + text.Length <= maxAccumulatedBytes)
+                            {
+                                contentSb.Append(text);
                             }
                         }
 
@@ -632,6 +730,15 @@ internal class OpenAiCompatibleProvider : IAiProvider
                     catch (JsonException)
                     {
                         // Non-JSON chunk line, ignore safely
+                    }
+                }
+                else if (trimmed.StartsWith('{') && streamError is null)
+                {
+                    // An HTTP 200 whose body is a plain JSON error instead of SSE events.
+                    var (errorCode, errorType, errorMessage) = ParseErrorBody(trimmed);
+                    if (errorCode is not null || errorType is not null || errorMessage is not null)
+                    {
+                        streamError = SanitizeDiagnosticText($"{errorType} {errorCode} {errorMessage}", 160);
                     }
                 }
             }
@@ -704,16 +811,20 @@ internal class OpenAiCompatibleProvider : IAiProvider
                 AttemptCount = attempt,
                 RequestId = requestId,
                 FailureKind = AiFailureKind.TransientServiceUnavailable,
-                ErrorMessage = $"{_displayName} SSE stream ended before [DONE] after {attempt} attempt{(attempt == 1 ? "" : "s")}{(requestId != null ? $" (RequestId: {requestId})" : "")}.",
+                ErrorMessage = $"{_displayName} SSE stream ended before [DONE] after {attempt} attempt{(attempt == 1 ? "" : "s")}{(requestId != null ? $" (RequestId: {requestId})" : "")}{(streamError is not null ? $" [{dataEvents} events, provider error: {streamError}]" : "")}.",
                 FinishReason = finishReason,
             };
         }
 
         if (string.IsNullOrWhiteSpace(finalContent))
         {
+            // Say what the stream really contained, so an empty answer from the provider can be told from one we failed to read.
+            var streamFacts = $"{dataEvents} events, {reasoningSb.Length} reasoning chars, finish={finishReason ?? "none"}, completion_tokens={completionTokens?.ToString() ?? "n/a"}" +
+                              (deltaKeys.Count > 0 ? $", delta fields: {string.Join('/', deltaKeys)}" : string.Empty) +
+                              (streamError is not null ? $", provider error: {streamError}" : string.Empty);
             _logger.LogWarning(
-                "OpenAI-compatible API streaming returned empty content on attempt {Attempt}/{MaxAttempts} (HeadersElapsedMs: {HeadersElapsedMs}, TotalElapsedMs: {TotalElapsedMs}, RequestId: {RequestId}, Model: {Model}).",
-                attempt, maxAttempts, headersElapsedMs, totalStopwatch.ElapsedMilliseconds, requestId ?? "none", model ?? fallbackModel);
+                "OpenAI-compatible API streaming returned empty content on attempt {Attempt}/{MaxAttempts} (HeadersElapsedMs: {HeadersElapsedMs}, TotalElapsedMs: {TotalElapsedMs}, RequestId: {RequestId}, Model: {Model}, Stream: {StreamFacts}).",
+                attempt, maxAttempts, headersElapsedMs, totalStopwatch.ElapsedMilliseconds, requestId ?? "none", model ?? fallbackModel, streamFacts);
 
             return new AiResponse
             {
@@ -725,7 +836,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
                 AttemptCount = attempt,
                 RequestId = requestId,
                 FailureKind = AiFailureKind.TransientServiceUnavailable,
-                ErrorMessage = $"{_displayName} returned empty content after {attempt} attempt{(attempt == 1 ? "" : "s")}{(requestId != null ? $" (RequestId: {requestId})" : "")}.",
+                ErrorMessage = $"{_displayName} returned empty content after {attempt} attempt{(attempt == 1 ? "" : "s")}{(requestId != null ? $" (RequestId: {requestId})" : "")} [{streamFacts}].",
                 FinishReason = finishReason,
             };
         }
@@ -751,6 +862,45 @@ internal class OpenAiCompatibleProvider : IAiProvider
             FailureKind = AiFailureKind.None,
             FinishReason = finishReason ?? "stop",
         };
+    }
+
+    /// <summary>Reads text from a property that is a string, an array of text parts, or a single part object.</summary>
+    private static string? ExtractStreamText(JsonElement owner, string propertyName)
+    {
+        if (!owner.TryGetProperty(propertyName, out var element))
+        {
+            return null;
+        }
+
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.String:
+                return element.GetString();
+            case JsonValueKind.Object:
+                return element.TryGetProperty("text", out var partText) && partText.ValueKind == JsonValueKind.String
+                    ? partText.GetString()
+                    : null;
+            case JsonValueKind.Array:
+                var builder = new StringBuilder();
+                foreach (var part in element.EnumerateArray())
+                {
+                    if (part.ValueKind == JsonValueKind.String)
+                    {
+                        builder.Append(part.GetString());
+                    }
+                    else if (part.ValueKind == JsonValueKind.Object &&
+                             part.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String &&
+                             (!part.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String ||
+                              !string.Equals(type.GetString(), "thinking", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        builder.Append(text.GetString());
+                    }
+                }
+
+                return builder.Length > 0 ? builder.ToString() : null;
+            default:
+                return null;
+        }
     }
 
     internal static int GetDelayMilliseconds(HttpResponseMessage? response, int attempt, int baseDelayMs, int maxRetryAfterMs = 30000)

@@ -206,7 +206,8 @@ public static class DependencyInjection
 
         services.AddHttpClient(OpenAiCompatibleProvider.HttpClientName, client =>
         {
-            client.Timeout = TimeSpan.FromSeconds(300);
+            // The provider enforces its own, reported deadlines (total and stream idle); this is only a safety net above them.
+            client.Timeout = TimeSpan.FromSeconds(330);
         });
 
         // API keys entered in the panel are encrypted at rest. The key ring must survive restarts

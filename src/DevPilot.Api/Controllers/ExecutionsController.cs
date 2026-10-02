@@ -194,16 +194,42 @@ public class ExecutionsController : ControllerBase
         };
     }
 
+    /// <summary>
+    /// Resumes a revision that was interrupted (for example by a restart): verification and repair run again on the
+    /// existing worktree, the feedback is not applied again and no code is regenerated.
+    /// </summary>
+    [HttpPost("{id:guid}/review/resume-revision", Name = nameof(ResumeExecutionRevision))]
+    public async Task<IActionResult> ResumeExecutionRevision(
+        [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
+        [FromServices] IRequestExecutionChangesCommandHandler changesHandler,
+        CancellationToken cancellationToken)
+    {
+        var result = await changesHandler
+            .ResumeAsync(id, repositoryWorkspaceId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            RequestExecutionChangesResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            RequestExecutionChangesResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "The revision cannot be resumed." }),
+            RequestExecutionChangesResultStatus.Failed => StatusCode(500, new { error = result.ErrorMessage ?? "The revision could not be resumed." }),
+            RequestExecutionChangesResultStatus.Accepted => Accepted(new { message = "Revision resumed.", revisionNumber = result.RevisionNumber }),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
     /// <summary>The diff of just the latest requested fix.</summary>
     [HttpGet("{id:guid}/revision/diff", Name = nameof(GetExecutionRevisionDiff))]
     public async Task<IActionResult> GetExecutionRevisionDiff(
         [FromRoute] Guid id,
         [FromQuery] Guid? repositoryWorkspaceId,
         [FromServices] IGetExecutionRevisionDiffQueryHandler diffHandler,
+        [FromQuery] int? number,
         CancellationToken cancellationToken)
     {
         var result = await diffHandler
-            .HandleAsync(new GetExecutionRevisionDiffQuery(id, repositoryWorkspaceId), cancellationToken)
+            .HandleAsync(new GetExecutionRevisionDiffQuery(id, repositoryWorkspaceId, number), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch

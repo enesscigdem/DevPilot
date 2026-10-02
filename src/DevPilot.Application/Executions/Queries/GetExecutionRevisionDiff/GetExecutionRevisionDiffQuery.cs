@@ -4,7 +4,7 @@ using DevPilot.Application.Executions.Services;
 
 namespace DevPilot.Application.Executions.Queries.GetExecutionRevisionDiff;
 
-public sealed record GetExecutionRevisionDiffQuery(Guid ExecutionId, Guid? RepositoryWorkspaceId = null);
+public sealed record GetExecutionRevisionDiffQuery(Guid ExecutionId, Guid? RepositoryWorkspaceId = null, int? Number = null);
 
 public enum GetExecutionRevisionDiffStatus
 {
@@ -43,13 +43,16 @@ public sealed class GetExecutionRevisionDiffQueryHandler : IGetExecutionRevision
 {
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionGitDiffReader _gitDiffReader;
+    private readonly IExecutionRevisionStore? _revisionStore;
 
     public GetExecutionRevisionDiffQueryHandler(
         IExecutionRepository executionRepository,
-        IExecutionGitDiffReader gitDiffReader)
+        IExecutionGitDiffReader gitDiffReader,
+        IExecutionRevisionStore? revisionStore = null)
     {
         _executionRepository = executionRepository;
         _gitDiffReader = gitDiffReader;
+        _revisionStore = revisionStore;
     }
 
     public async Task<GetExecutionRevisionDiffResult> HandleAsync(
@@ -67,14 +70,31 @@ public sealed class GetExecutionRevisionDiffQueryHandler : IGetExecutionRevision
             return GetExecutionRevisionDiffResult.NotFound("Execution not found.");
         }
 
-        if (!ExecutionRevisionScope.HasRevision(execution) || ExecutionRevisionScope.IsActive(execution))
+        if (!ExecutionRevisionScope.HasRevision(execution))
         {
-            return GetExecutionRevisionDiffResult.Conflict("There is no finished requested fix to show.");
+            return GetExecutionRevisionDiffResult.Conflict("There is no requested fix to show.");
+        }
+
+        var number = query.Number ?? execution.ChangeRequestCount;
+        if (number == execution.ChangeRequestCount && ExecutionRevisionScope.IsActive(execution))
+        {
+            return GetExecutionRevisionDiffResult.Conflict("This fix is still running; its diff is not final yet.");
+        }
+
+        // The latest fix is mirrored on the execution itself; older ones are read from their history rows.
+        string? baseSha = number == execution.ChangeRequestCount ? execution.RevisionBaseSnapshotSha : null;
+        string? resultSha = number == execution.ChangeRequestCount ? execution.RevisionResultSnapshotSha : null;
+        if ((string.IsNullOrWhiteSpace(baseSha) || string.IsNullOrWhiteSpace(resultSha)) && _revisionStore != null)
+        {
+            var row = (await _revisionStore.ListRevisionsAsync(execution.Id, cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(r => r.Number == number);
+            baseSha = row?.BaseSnapshotSha;
+            resultSha = row?.ResultSnapshotSha;
         }
 
         if (string.IsNullOrWhiteSpace(execution.WorkspacePath) ||
-            string.IsNullOrWhiteSpace(execution.RevisionBaseSnapshotSha) ||
-            string.IsNullOrWhiteSpace(execution.RevisionResultSnapshotSha))
+            string.IsNullOrWhiteSpace(baseSha) ||
+            string.IsNullOrWhiteSpace(resultSha))
         {
             return GetExecutionRevisionDiffResult.Conflict("The worktree snapshots of this fix were not recorded.");
         }
@@ -82,8 +102,8 @@ public sealed class GetExecutionRevisionDiffQueryHandler : IGetExecutionRevision
         var diff = await _gitDiffReader
             .ReadCommittedDiffAsync(
                 execution.WorkspacePath,
-                execution.RevisionBaseSnapshotSha,
-                execution.RevisionResultSnapshotSha,
+                baseSha,
+                resultSha,
                 cancellationToken)
             .ConfigureAwait(false);
 

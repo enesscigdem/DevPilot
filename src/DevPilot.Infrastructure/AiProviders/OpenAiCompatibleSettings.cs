@@ -36,4 +36,10 @@ internal sealed record OpenAiCompatibleSettings
     public int MaxAttempts { get; init; } = 4;
 
     public int MaxRetryAfterMs { get; init; } = 30000;
+
+    /// <summary>Deadline for one attempt, from sending the request to the last byte of the stream. Zero disables it.</summary>
+    public TimeSpan TotalTimeout { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How long a stream may send nothing (keep-alive comments count) before the attempt is abandoned. Zero disables it.</summary>
+    public TimeSpan StreamIdleTimeout { get; init; } = TimeSpan.FromSeconds(90);
 }

@@ -77,6 +77,11 @@ public sealed class ExecutionDto
 
     public bool CanRetry { get; set; }
 
+    /// <summary>The same rule the cancel endpoint applies; null reason when cancelling is allowed.</summary>
+    public bool CanCancel { get; set; }
+
+    public string? CancelBlockedReason { get; set; }
+
     /// <summary>True when the reviewer may ask for a fix that is applied on this execution's own branch (and pull request).</summary>
     public bool CanRequestChanges { get; set; }
 
@@ -97,6 +102,9 @@ public sealed class ExecutionDto
 
     /// <summary>The latest requested fix, derived only from what happened since it was requested (null when none).</summary>
     public ExecutionRevisionDto? Revision { get; set; }
+
+    /// <summary>Every requested fix, oldest first; the last one is also in <see cref="Revision"/>.</summary>
+    public IReadOnlyList<ExecutionRevisionDto> Revisions { get; set; } = Array.Empty<ExecutionRevisionDto>();
 
     /// <summary>Explanation of the verification outcome (null while the execution is still running).</summary>
     public ExecutionVerdictDto? Verdict { get; set; }

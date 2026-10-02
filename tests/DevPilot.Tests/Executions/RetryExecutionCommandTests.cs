@@ -292,6 +292,97 @@ public sealed class RetryExecutionCommandTests
         _dispatcher.DispatchedExecutionIds.Should().BeEmpty();
     }
 
+    private TaskExecution CancelledExecution(DateTime createdAt)
+    {
+        _executionRepository.Executions.Clear();
+        _task.Status = DevelopmentTaskStatus.Approved; // what cancelling leaves behind
+        var cancelled = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = _task.Id,
+            DevelopmentTask = _task,
+            Status = TaskExecutionStatus.Cancelled,
+            CreatedAt = createdAt,
+            CancelledAt = createdAt.AddMinutes(1),
+            WorkspacePath = "/worktrees/exec-cancelled",
+            BranchName = "devpilot/task-cancelled",
+        };
+        _executionRepository.Executions[cancelled.Id] = cancelled;
+        return cancelled;
+    }
+
+    [Fact]
+    public async Task HandleAsync_WhenTheLatestExecutionWasCancelled_StartsANewExecutionWithTheApprovedPlan()
+    {
+        var cancelled = CancelledExecution(DateTime.UtcNow.AddMinutes(-5));
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, _workspaceId));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.Execution!.Id.Should().NotBe(cancelled.Id);
+        result.Execution.Status.Should().Be(TaskExecutionStatus.Pending);
+        _dispatcher.DispatchedExecutionIds.Should().ContainSingle().Which.Should().Be(result.Execution.Id);
+        _analysisRepository.Analyses.Should().HaveCount(1, "the approved plan is reused, not re-analysed");
+    }
+
+    [Fact]
+    public async Task HandleAsync_KeepsTheCancelledExecutionAndItsWorktreeUntouched()
+    {
+        var cancelled = CancelledExecution(DateTime.UtcNow.AddMinutes(-5));
+
+        await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, _workspaceId));
+
+        var kept = _executionRepository.Executions[cancelled.Id];
+        kept.Status.Should().Be(TaskExecutionStatus.Cancelled);
+        kept.WorkspacePath.Should().Be("/worktrees/exec-cancelled");
+        kept.BranchName.Should().Be("devpilot/task-cancelled");
+    }
+
+    [Fact]
+    public async Task HandleAsync_WhileAnotherExecutionIsActive_NeverStartsASecondOneForACancelledRun()
+    {
+        CancelledExecution(DateTime.UtcNow.AddMinutes(-5));
+        _executionRepository.ActiveExecutionExists = true;
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, _workspaceId));
+
+        result.Success.Should().BeFalse();
+        result.Conflict.Should().BeTrue();
+        _dispatcher.DispatchedExecutionIds.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task HandleAsync_AnOlderCancelledExecution_CannotReopenATaskWhoseNewerRunFinished()
+    {
+        var cancelled = CancelledExecution(DateTime.UtcNow.AddMinutes(-30));
+        var newer = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = _task.Id,
+            DevelopmentTask = _task,
+            Status = TaskExecutionStatus.Completed,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            CompletedAt = DateTime.UtcNow.AddMinutes(-5),
+        };
+        _executionRepository.Executions[newer.Id] = newer;
+        _task.Status = DevelopmentTaskStatus.Completed;
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, _workspaceId));
+
+        result.Success.Should().BeFalse();
+        result.Conflict.Should().BeTrue();
+        RetryExecutionCommandHandler.IsRetryableCancelled(cancelled, _executionRepository.Executions.Values).Should().BeFalse();
+        RetryExecutionCommandHandler.IsRetryableCancelled(newer, _executionRepository.Executions.Values).Should().BeFalse("only cancelled runs qualify");
+    }
+
+    [Fact]
+    public void IsRetryableCancelled_IsTheRuleTheExecutionPageUses()
+    {
+        var cancelled = CancelledExecution(DateTime.UtcNow.AddMinutes(-5));
+
+        RetryExecutionCommandHandler.IsRetryableCancelled(cancelled, _executionRepository.Executions.Values).Should().BeTrue();
+    }
+
     [Fact]
     public async Task HandleAsync_WhenNoFailedExecutionExists_ReturnsConflict()
     {
@@ -304,7 +395,7 @@ public sealed class RetryExecutionCommandTests
         // Assert
         result.Success.Should().BeFalse();
         result.Conflict.Should().BeTrue();
-        result.ErrorMessage.Should().Contain("No failed execution exists");
+        result.ErrorMessage.Should().Contain("No failed or cancelled execution exists");
     }
 
     [Fact]

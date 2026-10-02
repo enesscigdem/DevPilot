@@ -268,7 +268,31 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
 
             string? actualModel;
-            if (context.IsRevision)
+            if (context.IsRevision && context.ChangeRequest!.FeedbackAlreadyApplied)
+            {
+                // Resumed revision: the feedback is already in the worktree, so no model call applies it again; the
+                // build, test and repair that were interrupted run on what is there.
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.DeveloperAgent,
+                    ExecutionActivityStatus.Started,
+                    $"Resuming revision {context.ChangeRequest.RevisionNumber} on the existing worktree; reviewer feedback is not applied again.",
+                    new ExecutionActivityMetadata(EventKind: "RevisionResumed"),
+                    cancellationToken).ConfigureAwait(false);
+                actualModel = await LoadVerifyOnlyChangesAsync(context, prepResult, fileSets, cancellationToken).ConfigureAwait(false);
+                if (fileSets.ActuallyModifiedFiles.Count == 0)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Execution,
+                        ExecutionActivityStatus.Completed,
+                        "Resumed revision stopped: the worktree has no changes left to verify.",
+                        new ExecutionActivityMetadata(EventKind: "ReadyForReview", VerificationOutcome: "VerificationUnavailable"),
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+            }
+            else if (context.IsRevision)
             {
                 var revision = await ApplyReviewFeedbackAsync(context, prepResult, fileSets, cancellationToken).ConfigureAwait(false);
                 actualModel = revision.Model;
@@ -630,7 +654,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         check,
                         "VerifyingRepository",
                         result,
-                        buildPassed: true,
+                        buildPassed: false,
                         baselineClassification: "PreExisting",
                         verificationOutcome: "NoNewRegressions",
                         preExistingFailureCount: baseComparison.PreExistingCount,
@@ -802,7 +826,15 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     cancellationToken).ConfigureAwait(false);
             }
 
-            var languageContext = _repairContextProvider?.GetCompileRepairContext(check, prepResult.WorkspacePath, repairFiles);
+            var languageContext = _repairContextProvider is null
+                ? null
+                : await RunRepairPreparationStepAsync<string>(
+                    context.ExecutionId,
+                    check,
+                    repairRound,
+                    "collecting language context",
+                    ct => Task.Run(() => _repairContextProvider.GetCompileRepairContext(check, prepResult.WorkspacePath, repairFiles), ct),
+                    cancellationToken).ConfigureAwait(false);
             var repairRequest = new FocusedRepairRequest(
                 TaskId: context.TaskId,
                 ExecutionId: context.ExecutionId,
@@ -816,11 +848,24 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 LanguageContext: languageContext,
                 Model: actualModel);
 
-            var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+            var beforeFingerprint = await RunRepairPreparationStepAsync<string>(
+                context.ExecutionId,
+                check,
+                repairRound,
+                "fingerprinting the worktree",
+                ct => GetChangeFingerprintAsync(prepResult.WorkspacePath, ct),
+                cancellationToken).ConfigureAwait(false);
             var repairStopwatch = Stopwatch.StartNew();
             DeveloperAgentResult repairResult;
             try
             {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Build,
+                    ExecutionActivityStatus.Started,
+                    $"Repair preparation: asking the model to repair {Path.GetFileName(repairFiles[0])}.",
+                    CheckMetadata(check, "RepairPreparation", repairKind: "Compile", repairRound: repairRound, progressResult: "model-request"),
+                    cancellationToken).ConfigureAwait(false);
                 repairResult = await _developerAgent.ExecuteFocusedRepairAsync(repairRequest, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1064,7 +1109,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         check,
                         isFinalTest ? "ReadyForReview" : "VerifyingRepository",
                         result,
-                        testPassed: true,
+                        testPassed: false,
                         baselineClassification: "PreExisting",
                         verificationOutcome: "NoNewRegressions",
                         preExistingFailureCount: baseComparison.PreExistingCount,
@@ -1851,6 +1896,58 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             TestName: testName,
             BaselineUnverified: baselineUnverified);
 
+    /// <summary>Longest a local step before a repair may take; the model call has its own limits.</summary>
+    private static readonly TimeSpan RepairPreparationStepTimeout = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// Runs one local step that precedes a repair model call (context collection, change fingerprint) with a time limit,
+    /// cancellation, and activity records that name the step, so a slow step is visible instead of looking like a hang.
+    /// A step that exceeds its limit is abandoned and yields <c>default</c>; the repair continues without its result.
+    /// </summary>
+    private async Task<T?> RunRepairPreparationStepAsync<T>(
+        Guid executionId,
+        RepositoryCheck check,
+        int repairRound,
+        string step,
+        Func<CancellationToken, Task<T?>> work,
+        CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        await SafeRecordActivityAsync(
+            executionId,
+            ExecutionStage.Build,
+            ExecutionActivityStatus.Started,
+            $"Repair preparation: {step}.",
+            CheckMetadata(check, "RepairPreparation", repairKind: "Compile", repairRound: repairRound, progressResult: step),
+            cancellationToken).ConfigureAwait(false);
+
+        using var stepCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        stepCts.CancelAfter(RepairPreparationStepTimeout);
+        try
+        {
+            var value = await work(stepCts.Token).WaitAsync(stepCts.Token).ConfigureAwait(false);
+            await SafeRecordActivityAsync(
+                executionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Completed,
+                $"Repair preparation: {step} finished in {stopwatch.Elapsed.TotalSeconds:0.#}s.",
+                CheckMetadata(check, "RepairPreparation", repairKind: "Compile", repairRound: repairRound, progressResult: step, stageDurationMs: stopwatch.ElapsedMilliseconds),
+                cancellationToken).ConfigureAwait(false);
+            return value;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            await SafeRecordActivityAsync(
+                executionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                $"Repair preparation: {step} did not finish within {(int)RepairPreparationStepTimeout.TotalSeconds}s; continuing without it.",
+                CheckMetadata(check, "RepairPreparation", repairKind: "Compile", repairRound: repairRound, progressResult: $"{step}:Timeout", stageDurationMs: stopwatch.ElapsedMilliseconds),
+                cancellationToken).ConfigureAwait(false);
+            return default;
+        }
+    }
+
     private async Task<string?> GetChangeFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
     {
         if (_changeFingerprintCalculator == null)
@@ -2020,7 +2117,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             ExecutionStage.DeveloperAgent,
             ExecutionActivityStatus.Started,
             "Developer Agent started.",
-            new ExecutionActivityMetadata(Model: analysis.Model, EventKind: "GeneratingChange"),
+            // Not analysis.Model: that is the planning model. The model that really answers is recorded per provider call.
+            new ExecutionActivityMetadata(EventKind: "GeneratingChange"),
             cancellationToken).ConfigureAwait(false);
 
         var agentResult = await _developerAgent.GenerateAndApplyEditsAsync(agentRequest, cancellationToken).ConfigureAwait(false);

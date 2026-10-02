@@ -110,14 +110,16 @@ export function RevisionPanel({
         </div>
       </div>
 
-      {revision.hasDiff && <DiffToggle executionId={executionId} workspaceId={workspaceId} compact={compact} />}
+      {revision.hasDiff && <DiffToggle key={revision.number} executionId={executionId} workspaceId={workspaceId} compact={compact} number={revision.number} />}
 
-      <NextCard
-        revision={revision}
-        canRequestChanges={canRequestChanges}
-        onRequestChanges={onRequestChanges}
-        onOpenReview={onOpenReview}
-      />
+      {revision.nextAction !== "None" && (
+        <NextCard
+          revision={revision}
+          canRequestChanges={canRequestChanges}
+          onRequestChanges={onRequestChanges}
+          onOpenReview={onOpenReview}
+        />
+      )}
     </div>
   )
 }
@@ -392,7 +394,7 @@ function ChecksCard({ revision }: { revision: ExecutionRevision }) {
 
 /* ----------------------------------- Diff ----------------------------------- */
 
-function DiffToggle({ executionId, workspaceId, compact }: { executionId: string; workspaceId?: string | null; compact: boolean }) {
+function DiffToggle({ executionId, workspaceId, compact, number }: { executionId: string; workspaceId?: string | null; compact: boolean; number: number }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [diff, setDiff] = useState<ExecutionRevisionDiff | null>(null)
@@ -406,7 +408,7 @@ function DiffToggle({ executionId, workspaceId, compact }: { executionId: string
       setLoading(true)
       setFailed(false)
       try {
-        setDiff(await getExecutionRevisionDiff(executionId, workspaceId))
+        setDiff(await getExecutionRevisionDiff(executionId, workspaceId, undefined, number))
       } catch {
         setFailed(true)
       } finally {

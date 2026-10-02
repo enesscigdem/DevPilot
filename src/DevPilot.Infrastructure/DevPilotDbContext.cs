@@ -37,6 +37,7 @@ public class DevPilotDbContext : DbContext
     public DbSet<TaskExecution> TaskExecutions => Set<TaskExecution>();
 
     public DbSet<ExecutionActivity> ExecutionActivities => Set<ExecutionActivity>();
+    public DbSet<ExecutionRevision> ExecutionRevisions => Set<ExecutionRevision>();
 
     public DbSet<ExecutionCiCheck> ExecutionCiChecks => Set<ExecutionCiCheck>();
 
@@ -302,6 +303,19 @@ public class DevPilotDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(e => e.DevelopmentTaskId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ExecutionRevision>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.ExecutionId, e.Number }).IsUnique();
+            entity.Property(e => e.Feedback).HasMaxLength(2000);
+            entity.Property(e => e.Result).HasMaxLength(500);
+            entity.Property(e => e.BaseSnapshotSha).HasMaxLength(100);
+            entity.Property(e => e.ResultSnapshotSha).HasMaxLength(100);
+            entity.Property(e => e.RequestedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CompletedAt).HasColumnType("timestamp with time zone");
+            entity.HasOne<TaskExecution>().WithMany().HasForeignKey(e => e.ExecutionId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<ExecutionActivity>(entity =>

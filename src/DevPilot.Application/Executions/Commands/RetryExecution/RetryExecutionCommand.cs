@@ -126,6 +126,10 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
             .ConfigureAwait(false);
         var hasNeedsReviewCompletion = await HasCompletedNeedsReviewExecutionAsync(command.TaskId, cancellationToken)
             .ConfigureAwait(false);
+        // A cancelled run leaves the task approved with nothing delivered; only the latest run counts, so an older
+        // cancelled run cannot reopen a task whose newer run already finished.
+        var hasCancelledLatest = await LatestExecutionIsCancelledAsync(command.TaskId, cancellationToken)
+            .ConfigureAwait(false);
 
         if (task.Status == DevelopmentTaskStatus.Completed && !hasNeedsReviewCompletion)
         {
@@ -141,10 +145,10 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
                 $"Cannot retry execution for a task in '{task.Status}' status.");
         }
 
-        if (!hasFailed && !hasNeedsReviewCompletion)
+        if (!hasFailed && !hasNeedsReviewCompletion && !hasCancelledLatest)
         {
             return RetryExecutionResult.ConflictResult(
-                "No failed execution exists for this task to retry.");
+                "No failed or cancelled execution exists for this task to retry.");
         }
 
         // 5. Require approved impact analysis / plan evidence
@@ -211,6 +215,25 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
             execution.Id);
 
         return RetryExecutionResult.Ok(MapToDto(execution, task));
+    }
+
+    /// <summary>The same rule the execution page uses to offer Retry on a cancelled run.</summary>
+    public static bool IsRetryableCancelled(TaskExecution execution, IEnumerable<TaskExecution> taskExecutions) =>
+        execution.Status == TaskExecutionStatus.Cancelled &&
+        taskExecutions
+            .Where(e => e.DevelopmentTaskId == execution.DevelopmentTaskId)
+            .OrderByDescending(e => e.CreatedAt)
+            .ThenByDescending(e => e.Id)
+            .FirstOrDefault()?.Id == execution.Id;
+
+    private async Task<bool> LatestExecutionIsCancelledAsync(Guid taskId, CancellationToken cancellationToken)
+    {
+        var latest = (await _executionRepository.GetAllAsync(cancellationToken).ConfigureAwait(false))
+            .Where(e => e.DevelopmentTaskId == taskId)
+            .OrderByDescending(e => e.CreatedAt)
+            .ThenByDescending(e => e.Id)
+            .FirstOrDefault();
+        return latest?.Status == TaskExecutionStatus.Cancelled;
     }
 
     private async Task<bool> HasCompletedNeedsReviewExecutionAsync(

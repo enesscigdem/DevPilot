@@ -290,6 +290,25 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     cancellationToken)
                 .ConfigureAwait(false);
 
+            if (affected > 0)
+            {
+                // The fix gets its own history row, so it can still be opened after later fixes.
+                var number = await _dbContext.TaskExecutions
+                    .Where(e => e.Id == executionId)
+                    .Select(e => e.ChangeRequestCount)
+                    .FirstAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                _dbContext.ExecutionRevisions.Add(new ExecutionRevision
+                {
+                    Id = Guid.NewGuid(),
+                    ExecutionId = executionId,
+                    Number = number,
+                    Feedback = feedback,
+                    RequestedAt = requestedAt,
+                });
+                await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return affected > 0;
         }
         catch (DbUpdateException ex)
@@ -316,11 +335,73 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.CompletedAt, now)
                     .SetProperty(e => e.LeaseToken, (Guid?)null)
                     .SetProperty(e => e.HeartbeatAt, (DateTime?)null)
-                    .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null),
+                    .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null)
+                    // A stop request that ended this run must not cancel the next one.
+                    .SetProperty(e => e.CancellationRequestedAt, (DateTime?)null)
+                    .SetProperty(e => e.CancellationReason, (string?)null),
                 cancellationToken)
             .ConfigureAwait(false);
 
         return affected > 0;
+    }
+
+    public async Task<bool> ResumeInterruptedRevisionAsync(
+        Guid executionId,
+        Guid leaseToken,
+        DateTime resumedAt,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var affected = await _dbContext.TaskExecutions
+                .Where(e => e.Id == executionId
+                            && e.Status == TaskExecutionStatus.Completed
+                            && e.LastChangeRequestResult != null
+                            && e.LastChangeRequestResult.StartsWith("Interrupted")
+                            && e.MergeStatus == ExecutionMergeStatus.None
+                            && e.PullRequestRemoteState != ExecutionPullRequestRemoteState.Merged
+                            && e.PullRequestRemoteState != ExecutionPullRequestRemoteState.Closed
+                            && e.CommitStatus != ExecutionCommitStatus.InProgress
+                            && e.PushStatus != ExecutionPushStatus.InProgress
+                            && e.PullRequestStatus != ExecutionPullRequestStatus.InProgress
+                            && e.WorkspacePath != null
+                            && e.BranchName != null)
+                .ExecuteUpdateAsync(
+                    setters => setters
+                        .SetProperty(e => e.Status, TaskExecutionStatus.Running)
+                        .SetProperty(e => e.CompletedAt, (DateTime?)null)
+                        .SetProperty(e => e.ErrorMessage, (string?)null)
+                        .SetProperty(e => e.LeaseToken, leaseToken)
+                        .SetProperty(e => e.HeartbeatAt, resumedAt)
+                        .SetProperty(e => e.LeaseExpiresAt, resumedAt.AddSeconds(45))
+                        .SetProperty(e => e.LastChangeRequestAt, resumedAt)
+                        .SetProperty(e => e.LastChangeRequestResult, (string?)null)
+                        .SetProperty(e => e.CancellationRequestedAt, (DateTime?)null)
+                        .SetProperty(e => e.CancellationReason, (string?)null),
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (affected > 0)
+            {
+                await CurrentRevisionRow(executionId)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(r => r.Result, (string?)null)
+                            .SetProperty(r => r.CompletedAt, (DateTime?)null),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            return affected > 0;
+        }
+        catch (DbUpdateException ex)
+            when (ex.GetBaseException() is PostgresException pg &&
+                  pg.SqlState == "23505" &&
+                  (pg.ConstraintName == "IX_TaskExecutions_ActivePerTask" ||
+                   (pg.MessageText != null && pg.MessageText.Contains("IX_TaskExecutions_ActivePerTask", StringComparison.OrdinalIgnoreCase))))
+        {
+            return false;
+        }
     }
 
     public async Task<bool> MarkRevisionPendingDeliveryAsync(
@@ -353,6 +434,25 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
         return affected > 0;
     }
 
+    public async Task<IReadOnlyList<ExecutionRevision>> ListRevisionsAsync(
+        Guid executionId,
+        CancellationToken cancellationToken = default) =>
+        await _dbContext.ExecutionRevisions
+            .AsNoTracking()
+            .Where(r => r.ExecutionId == executionId)
+            .OrderBy(r => r.Number)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <summary>The history row of the fix that is current for the execution (its number is the change request count).</summary>
+    private IQueryable<ExecutionRevision> CurrentRevisionRow(Guid executionId) =>
+        _dbContext.ExecutionRevisions.Where(r =>
+            r.ExecutionId == executionId &&
+            r.Number == _dbContext.TaskExecutions
+                .Where(e => e.Id == executionId)
+                .Select(e => e.ChangeRequestCount)
+                .FirstOrDefault());
+
     public async Task SetRevisionSnapshotAsync(
         Guid executionId,
         string? baseSnapshotSha,
@@ -365,6 +465,9 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                 .Where(e => e.Id == executionId)
                 .ExecuteUpdateAsync(setters => setters.SetProperty(e => e.RevisionBaseSnapshotSha, baseSnapshotSha), cancellationToken)
                 .ConfigureAwait(false);
+            await CurrentRevisionRow(executionId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.BaseSnapshotSha, baseSnapshotSha), cancellationToken)
+                .ConfigureAwait(false);
         }
 
         if (resultSnapshotSha != null)
@@ -372,6 +475,9 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
             await _dbContext.TaskExecutions
                 .Where(e => e.Id == executionId)
                 .ExecuteUpdateAsync(setters => setters.SetProperty(e => e.RevisionResultSnapshotSha, resultSnapshotSha), cancellationToken)
+                .ConfigureAwait(false);
+            await CurrentRevisionRow(executionId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(r => r.ResultSnapshotSha, resultSnapshotSha), cancellationToken)
                 .ConfigureAwait(false);
         }
     }
@@ -386,6 +492,14 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
             .Where(e => e.Id == executionId)
             .ExecuteUpdateAsync(
                 setters => setters.SetProperty(e => e.LastChangeRequestResult, trimmed),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        await CurrentRevisionRow(executionId)
+            .ExecuteUpdateAsync(
+                setters => setters
+                    .SetProperty(r => r.Result, trimmed)
+                    .SetProperty(r => r.CompletedAt, DateTime.UtcNow),
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -642,6 +756,37 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
         int reconciledCount = 0;
         foreach (var exec in staleExecutions)
         {
+            // A requested fix that stopped with its worker must not turn a delivered execution into a failed one: the
+            // earlier commit, push and pull request are untouched and the worktree is still there. Hand it back as
+            // Completed with an "Interrupted" revision so the fix can be verified again without regenerating code.
+            var hadDelivery = exec.CommitStatus != ExecutionCommitStatus.None ||
+                              exec.PushStatus != ExecutionPushStatus.None ||
+                              exec.PullRequestStatus != ExecutionPullRequestStatus.None;
+            if (hadDelivery && exec.LastChangeRequestAt != null && !string.IsNullOrWhiteSpace(exec.WorkspacePath))
+            {
+                var restored = await _dbContext.TaskExecutions
+                    .Where(e => e.Id == exec.Id && e.Status == TaskExecutionStatus.Running)
+                    .ExecuteUpdateAsync(
+                        setters => setters
+                            .SetProperty(e => e.Status, TaskExecutionStatus.Completed)
+                            .SetProperty(e => e.CompletedAt, now)
+                            .SetProperty(e => e.LeaseToken, (Guid?)null)
+                            .SetProperty(e => e.HeartbeatAt, (DateTime?)null)
+                            .SetProperty(e => e.LeaseExpiresAt, (DateTime?)null)
+                            .SetProperty(e => e.CancellationRequestedAt, (DateTime?)null)
+                            .SetProperty(e => e.CancellationReason, (string?)null)
+                            .SetProperty(e => e.LastChangeRequestResult,
+                                "Interrupted: the worker stopped before this fix finished. The delivered code is unchanged; resume the verification on the same worktree."),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (restored > 0)
+                {
+                    reconciledCount++;
+                }
+
+                continue;
+            }
+
             var affected = await _dbContext.TaskExecutions
                 .Where(e => e.Id == exec.Id && e.Status == TaskExecutionStatus.Running)
                 .ExecuteUpdateAsync(
