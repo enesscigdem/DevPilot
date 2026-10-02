@@ -777,7 +777,7 @@ export function CodeReview() {
                       "flex w-full items-center gap-2 rounded-[var(--radius-md)] px-2.5 py-2 text-left transition-colors " +
                       (isActive
                         ? "bg-primary-soft text-primary"
-                        : "text-muted-foreground hover:bg-surface-2 hover:text-foreground")
+                        : "text-muted-foreground hover:bg-surface-3 hover:text-foreground")
                     }
                   >
                     <FileCode2 className="h-3.5 w-3.5 shrink-0" />

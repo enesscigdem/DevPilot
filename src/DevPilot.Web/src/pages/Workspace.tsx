@@ -312,7 +312,7 @@ export function Workspace() {
             <Link
               key={item.id}
               to={href}
-              className="group relative overflow-hidden rounded-[var(--radius-lg)] border border-border bg-surface p-4 transition-all hover:border-border-strong hover:bg-surface-2"
+              className="group relative overflow-hidden rounded-[var(--radius-lg)] border border-border bg-surface p-4 transition-all hover:border-border-strong hover:bg-surface-3"
             >
               <div
                 className={cn(
@@ -491,7 +491,7 @@ export function Workspace() {
                 <Link
                   key={item.id}
                   to={item.executionId ? `/executions/${item.executionId}` : `/tasks/${item.taskId}`}
-                  className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-2"
+                  className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-3"
                 >
                   <StatusDot tone="red" pulse className="shrink-0" />
                   <div className="min-w-0 flex-1">

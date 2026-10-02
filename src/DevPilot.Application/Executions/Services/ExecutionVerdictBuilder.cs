@@ -183,13 +183,27 @@ public static class ExecutionVerdictBuilder
         var calls = parsed.Where(p => p.Metadata?.EventKind == "ProviderCall").ToList();
         long input = 0, output = 0, providerMs = 0;
         var withoutTokens = 0;
+        decimal costSum = 0;
+        var anyCallUnpriced = false;
         foreach (var call in calls)
         {
             var meta = call.Metadata!;
             if (meta.InputTokens.HasValue || meta.OutputTokens.HasValue)
             {
-                input += meta.InputTokens ?? 0;
-                output += meta.OutputTokens ?? 0;
+                var callInput = meta.InputTokens ?? 0;
+                var callOutput = meta.OutputTokens ?? 0;
+                input += callInput;
+                output += callOutput;
+
+                // Each call is priced by the model that served it, so mixing models stays accurate.
+                if (pricing is not null && pricing.TryGetPrice(meta.Model, out var inputPrice, out var outputPrice))
+                {
+                    costSum += (callInput * inputPrice + callOutput * outputPrice) / 1_000_000m;
+                }
+                else
+                {
+                    anyCallUnpriced = true;
+                }
             }
             else
             {
@@ -199,13 +213,11 @@ public static class ExecutionVerdictBuilder
             providerMs += meta.StageDurationMs ?? 0;
         }
 
-        decimal? cost = null;
-        if (pricing is { IsConfigured: true })
-        {
-            cost = Math.Round(
-                (input * pricing.InputPerMillionTokensUsd!.Value + output * pricing.OutputPerMillionTokensUsd!.Value) / 1_000_000m,
-                4);
-        }
+        // One call without a known price would make the total an under-estimate, so report no cost
+        // rather than a misleading partial one.
+        decimal? cost = pricing is { IsConfigured: true } && !anyCallUnpriced
+            ? Math.Round(costSum, 4)
+            : null;
 
         var summary = parsed.LastOrDefault(p => p.Metadata?.EventKind == "GenerationSummary").Metadata;
         var timings = new List<ExecutionStageTimingDto>();

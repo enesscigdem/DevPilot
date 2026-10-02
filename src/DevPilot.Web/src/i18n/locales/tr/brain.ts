@@ -17,6 +17,8 @@ const brain: Resources["brain"] = {
   newChat: "Yeni sohbet",
   noChats: "Bu çalışma alanında geçmiş sohbet yok.",
   deleteChat: "Sohbeti sil",
+  sourcesAndContext: "Kaynaklar ve bağlam",
+  closePanel: "Kapat",
   knowledgeIndex: "Bilgi indeksi",
   reindex: "Çalışma alanını yeniden indeksle",
   chunksIndexed: "{{n}} parça indekslendi",

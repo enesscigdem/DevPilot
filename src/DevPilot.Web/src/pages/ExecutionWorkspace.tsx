@@ -1002,7 +1002,7 @@ export function ExecutionWorkspace() {
                         <button
                           type="button"
                           onClick={() => setShowGenDetails(!showGenDetails)}
-                          className="flex w-full items-center justify-between px-4 py-2.5 text-left text-[12.5px] font-medium text-muted-foreground hover:bg-surface-2 transition-colors"
+                          className="flex w-full items-center justify-between px-4 py-2.5 text-left text-[12.5px] font-medium text-muted-foreground hover:bg-surface-3 transition-colors"
                         >
                           <div className="flex items-center gap-2">
                             <Terminal className="h-3.5 w-3.5 text-subtle-foreground" />

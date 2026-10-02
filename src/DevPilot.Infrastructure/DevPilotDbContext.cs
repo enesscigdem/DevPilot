@@ -48,6 +48,10 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<AiStageAssignment> AiStageAssignments => Set<AiStageAssignment>();
 
+    public DbSet<ModelComparison> ModelComparisons => Set<ModelComparison>();
+
+    public DbSet<ModelComparisonRun> ModelComparisonRuns => Set<ModelComparisonRun>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -210,6 +214,8 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.WorkspacePath).HasMaxLength(500);
             entity.Property(e => e.BranchName).HasMaxLength(200);
             entity.Property(e => e.Model).HasMaxLength(100);
+            entity.Property(e => e.PinnedAiModelName).HasMaxLength(120);
+            entity.HasIndex(e => e.ModelComparisonRunId).HasDatabaseName("IX_TaskExecutions_ModelComparisonRunId");
             entity.Property(e => e.LeaseToken).HasColumnType("uuid");
             entity.Property(e => e.HeartbeatAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.LeaseExpiresAt).HasColumnType("timestamp with time zone");
@@ -389,6 +395,31 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.LastTestedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+        });
+
+        modelBuilder.Entity<ModelComparison>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.DevelopmentTaskId);
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CancelledAt).HasColumnType("timestamp with time zone");
+
+            entity.HasOne(e => e.DevelopmentTask)
+                .WithMany()
+                .HasForeignKey(e => e.DevelopmentTaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ModelComparisonRun>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.ModelComparisonId, e.Position }).IsUnique();
+            entity.Property(e => e.ModelName).HasMaxLength(120);
+
+            entity.HasOne(e => e.ModelComparison)
+                .WithMany(e => e.Runs)
+                .HasForeignKey(e => e.ModelComparisonId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<AiStageAssignment>(entity =>

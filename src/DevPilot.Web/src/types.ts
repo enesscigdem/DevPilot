@@ -1209,6 +1209,17 @@ export interface SaveAiModelRequest {
   isDefault: boolean;
 }
 
+export interface AiModelOption {
+  id: string;
+  displayName: string | null;
+}
+
+export interface DiscoverAiModelsResult {
+  success: boolean;
+  message: string;
+  models: AiModelOption[];
+}
+
 export interface AiModelTestResult {
   success: boolean;
   message: string;
@@ -1222,4 +1233,30 @@ export interface AiStageAssignment {
   stage: AiStage;
   /** Null means the stage uses the default model. */
   aiModelConfigId: string | null;
+}
+
+// ---- Model comparison ----
+
+export type ModelComparisonStatus = 'Running' | 'Completed' | 'Cancelled';
+
+export type ModelComparisonRunState = 'Queued' | 'Running' | 'Finished' | 'Skipped';
+
+export interface ModelComparisonRun {
+  id: string;
+  position: number;
+  modelId: string;
+  modelName: string;
+  state: ModelComparisonRunState;
+  executionId: string | null;
+  executionStatus: string | number | null;
+}
+
+export interface ModelComparison {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  repositoryWorkspaceId: string;
+  createdAt: string;
+  status: ModelComparisonStatus;
+  runs: ModelComparisonRun[];
 }

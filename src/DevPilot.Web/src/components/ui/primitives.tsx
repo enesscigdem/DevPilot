@@ -15,9 +15,9 @@ const buttonVariants: Record<ButtonVariant, string> = {
   primary:
     "bg-primary text-primary-foreground hover:bg-primary-hover shadow-[var(--shadow-sm)] border border-transparent",
   default:
-    "bg-surface text-foreground border border-border-strong hover:bg-surface-2 shadow-[var(--shadow-sm)]",
-  subtle: "bg-surface-3 text-foreground border border-transparent hover:bg-border",
-  ghost: "bg-transparent text-muted-foreground hover:bg-surface-3 hover:text-foreground border border-transparent",
+    "bg-surface text-foreground border border-border-strong hover:bg-surface-3 hover:border-subtle-foreground active:bg-border shadow-[var(--shadow-sm)]",
+  subtle: "bg-surface-3 text-foreground border border-transparent hover:bg-border active:bg-border-strong",
+  ghost: "bg-transparent text-muted-foreground hover:bg-border hover:text-foreground active:bg-border-strong border border-transparent",
   danger: "bg-transparent text-danger border border-border-strong hover:bg-danger-soft hover:border-danger/40",
   accent: "bg-accent text-accent-foreground hover:brightness-105 border border-transparent",
 }

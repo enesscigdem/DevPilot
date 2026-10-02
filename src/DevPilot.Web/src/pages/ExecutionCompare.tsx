@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { Link, useSearchParams } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import i18n, { fmt, srv } from "@/i18n"
+import { fmt, srv } from "@/i18n"
 import { AlertCircle, ArrowLeft, GitCompareArrows, Loader2 } from "lucide-react"
 import { getExecution, getExecutionReview, getExecutions } from "@/api"
 import { PageContainer, PageHeading } from "@/components/shared"
@@ -9,6 +9,7 @@ import { Badge, Panel } from "@/components/ui/primitives"
 import { useWorkspace } from "@/lib/workspace"
 import { cn } from "@/lib/utils"
 import { formatCost, formatMs, formatSeconds, formatTokenCount, getOutcomeMeta } from "@/lib/outcomes"
+import { durationSeconds, flagList, stageMs } from "@/lib/executionCompareMetrics"
 import type { ExecutionDetail, ExecutionListItem, ExecutionReview } from "@/types"
 
 interface Side {
@@ -17,15 +18,6 @@ interface Side {
 }
 
 type Better = "lower" | "none"
-
-function durationSeconds(e: ExecutionDetail): number | null {
-  if (!e.startedAt || !e.completedAt) return null
-  return Math.max(0, Math.round((new Date(e.completedAt).getTime() - new Date(e.startedAt).getTime()) / 1000))
-}
-
-function stageMs(e: ExecutionDetail, stage: string): number | null {
-  return e.usage?.stageTimings.find((t) => t.stage === stage)?.durationMs ?? null
-}
 
 function Row({
   label,
@@ -60,18 +52,6 @@ function TextRow({ label, a, b }: { label: string; a: ReactNode; b: ReactNode })
       <td className="px-4 py-2.5 align-top text-[12px] text-foreground">{b}</td>
     </tr>
   )
-}
-
-function flagList(e: ExecutionDetail): string {
-  const v = e.verdict
-  if (!v) return "—"
-  const flags = [
-    v.baselineUnverified && i18n.t("compare.flags.baselineUnverified"),
-    v.flakeConfirmed && i18n.t("compare.flags.flake"),
-    v.testWeakeningSuspected && i18n.t("compare.flags.weakening"),
-    v.staleBase && i18n.t("compare.flags.staleBase"),
-  ].filter(Boolean) as string[]
-  return flags.length ? flags.join(", ") : i18n.t("compare.flags.none")
 }
 
 function OutcomeCell({ side }: { side: Side }) {

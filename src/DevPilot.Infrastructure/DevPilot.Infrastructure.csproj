@@ -14,6 +14,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Anthropic" Version="12.53.0" />
     <PackageReference Include="Hangfire.Core" Version="1.8.24" />
     <PackageReference Include="Microsoft.AspNetCore.DataProtection" Version="10.0.12" />
     <!-- Direct pin to a safe Newtonsoft.Json version, overriding the vulnerable

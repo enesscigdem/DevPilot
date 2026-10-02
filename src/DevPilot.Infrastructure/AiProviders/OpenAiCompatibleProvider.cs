@@ -145,7 +145,11 @@ internal class OpenAiCompatibleProvider : IAiProvider
             {
                 using var client = _httpClientFactory.CreateClient(HttpClientName);
                 using var requestMessage = new HttpRequestMessage(HttpMethod.Post, BuildCompletionUri());
-                requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+                // Local runtimes (Ollama, LM Studio) run without a key; do not send an empty bearer token.
+                if (!string.IsNullOrWhiteSpace(_apiKey))
+                {
+                    requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+                }
                 requestMessage.Content = new StringContent(payloadJson, Encoding.UTF8, MediaTypeHeaderValue.Parse("application/json"));
 
                 var response = await client

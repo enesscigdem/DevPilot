@@ -1,3 +1,4 @@
+using DevPilot.Application.AiProviders;
 using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
@@ -46,6 +47,7 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
     private readonly IExecutionCancellationRegistry _cancellationRegistry;
     private readonly ILogger<ProcessExecutionCommandHandler> _logger;
     private readonly IExecutionVerificationSnapshotRecorder? _snapshotRecorder;
+    private readonly IAiExecutionContext? _aiContext;
 
     public ProcessExecutionCommandHandler(
         IExecutionRepository executionRepository,
@@ -55,9 +57,11 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
         IExecutionHeartbeatService heartbeatService,
         IExecutionCancellationRegistry cancellationRegistry,
         ILogger<ProcessExecutionCommandHandler> logger,
-        IExecutionVerificationSnapshotRecorder? snapshotRecorder = null)
+        IExecutionVerificationSnapshotRecorder? snapshotRecorder = null,
+        IAiExecutionContext? aiContext = null)
     {
         _snapshotRecorder = snapshotRecorder;
+        _aiContext = aiContext;
         _executionRepository = executionRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
         _processor = processor;
@@ -89,6 +93,12 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
 
         var task = execution.DevelopmentTask;
         var workspace = task.RepositoryWorkspace;
+
+        // A model comparison pins one model to this run; the AI router reads it on every call.
+        if (_aiContext is not null)
+        {
+            _aiContext.PinnedModelId = execution.PinnedAiModelId;
+        }
 
         // ── 2. Atomic claim: Pending → Running with unique lease token ────────────
         var claimed = await _executionRepository

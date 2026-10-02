@@ -10,10 +10,12 @@ namespace DevPilot.Api.Controllers;
 public class AiModelsController : ControllerBase
 {
     private readonly IAiModelService _service;
+    private readonly IAiModelDiscoveryService _discovery;
 
-    public AiModelsController(IAiModelService service)
+    public AiModelsController(IAiModelService service, IAiModelDiscoveryService discovery)
     {
         _service = service;
+        _discovery = discovery;
     }
 
     [HttpGet]
@@ -43,6 +45,11 @@ public class AiModelsController : ControllerBase
     [HttpPost("{id:guid}/test")]
     public Task<IActionResult> Test(Guid id, CancellationToken cancellationToken) =>
         Run(async () => Ok(await _service.TestAsync(id, cancellationToken)));
+
+    /// <summary>Lists the models a key can use, so the form can offer valid names instead of free typing.</summary>
+    [HttpPost("discover")]
+    public Task<IActionResult> Discover([FromBody] DiscoverAiModelsRequest request, CancellationToken cancellationToken) =>
+        Run(async () => Ok(await _discovery.DiscoverAsync(request, cancellationToken)));
 
     [HttpGet("stages")]
     public async Task<IActionResult> GetStages(CancellationToken cancellationToken) =>

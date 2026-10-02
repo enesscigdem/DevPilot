@@ -211,7 +211,7 @@ export function Tasks() {
                 "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors " +
                 (isActive
                   ? "border-primary-ring/60 bg-primary-soft text-primary"
-                  : "border-border bg-surface text-muted-foreground hover:bg-surface-2 hover:text-foreground")
+                  : "border-border bg-surface text-muted-foreground hover:bg-surface-3 hover:text-foreground")
               }
             >
               {f.key !== "all" && (

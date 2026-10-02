@@ -401,7 +401,7 @@ export function Architecture() {
                           <button
                             key={id}
                             onClick={() => setSelectedId(id)}
-                            className="mb-1 flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-border bg-surface px-2.5 py-1.5 text-left hover:bg-surface-2"
+                            className="mb-1 flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-border bg-surface px-2.5 py-1.5 text-left hover:bg-surface-3"
                           >
                             <StatusDot tone={target.tone} />
                             <span className="text-[12px] font-medium text-foreground">{target.label}</span>
@@ -421,7 +421,7 @@ export function Architecture() {
                           <button
                             key={id}
                             onClick={() => setSelectedId(id)}
-                            className="mb-1 flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-border bg-surface px-2.5 py-1.5 text-left hover:bg-surface-2"
+                            className="mb-1 flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-border bg-surface px-2.5 py-1.5 text-left hover:bg-surface-3"
                           >
                             <StatusDot tone={target.tone} />
                             <span className="text-[12px] font-medium text-foreground">{target.label}</span>

@@ -1,4 +1,5 @@
 using DevPilot.Application.AiProviders;
+using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure;
 using DevPilot.Infrastructure.AiProviders;
@@ -20,6 +21,32 @@ public class AiModelServiceTests
     private static AiModelService NewService(DevPilotDbContext db, AiModelRoutingTests.FakeFactory? factory = null) =>
         new(db, new AiModelRoutingTests.FakeProtector(), factory ?? new AiModelRoutingTests.FakeFactory());
 
+    /// <summary>A provider that waits until it is cancelled, like a real one stuck on a slow endpoint.</summary>
+    private sealed class HangingFactory : IAiProviderFactory
+    {
+        public bool RequiresApiKey(AiModelConfig config) => false;
+
+        public IAiProvider? Create(AiModelConfig config, string? apiKey, bool forConnectionTest = false) => new HangingProvider();
+    }
+
+    private sealed class HangingProvider : IAiProvider
+    {
+        public string ProviderName => "hang";
+
+        public async Task<AiResponse> SendAsync(AiRequest request, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            return new AiResponse { IsSuccess = false, FailureKind = AiFailureKind.Cancelled, ErrorMessage = "cancelled" };
+        }
+    }
+
     private static SaveAiModelRequest Request(string name = "DeepSeek", string url = "https://api.deepseek.com", string? key = "sk-abcdef123456") =>
         new() { Name = name, BaseUrl = url, ModelName = "deepseek-chat", ApiKey = key };
 
@@ -35,6 +62,19 @@ public class AiModelServiceTests
 
         var stored = await db.AiModelConfigs.SingleAsync();
         stored.ProtectedApiKey.Should().NotBe("sk-abcdef123456");
+    }
+
+    [Theory]
+    [InlineData("https://yapayzekalab.org/v1/chat/completions", "https://yapayzekalab.org/v1")]
+    [InlineData("https://yapayzekalab.org/chat/completions/", "https://yapayzekalab.org")]
+    [InlineData("  https://api.deepseek.com/  ", "https://api.deepseek.com")]
+    public async Task Create_CleansUpPastedEndpointPaths(string typed, string stored)
+    {
+        await using var db = NewDb();
+
+        var created = await NewService(db).CreateAsync(Request(url: typed), CancellationToken.None);
+
+        created.BaseUrl.Should().Be(stored);
     }
 
     [Fact]
@@ -67,15 +107,15 @@ public class AiModelServiceTests
     }
 
     [Fact]
-    public async Task Create_RejectsAdaptersThatAreNotImplementedYet()
+    public async Task Create_RejectsUnknownAdapterTypes()
     {
         await using var db = NewDb();
         var request = Request();
-        request.AdapterType = AiAdapterType.Claude;
+        request.AdapterType = (AiAdapterType)99;
 
         var act = () => NewService(db).CreateAsync(request, CancellationToken.None);
 
-        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*not available yet*");
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Unknown adapter*");
     }
 
     [Fact]
@@ -184,6 +224,35 @@ public class AiModelServiceTests
 
         await unknown.Should().ThrowAsync<ArgumentException>();
         await off.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task Test_ThatNeverAnswers_EndsWithAClearMessage_AndIsRecorded()
+    {
+        await using var db = NewDb();
+        var service = new AiModelService(db, new AiModelRoutingTests.FakeProtector(), new HangingFactory(), TimeSpan.FromMilliseconds(150));
+        var model = await NewService(db).CreateAsync(Request(), CancellationToken.None);
+
+        var result = await service.TestAsync(model.Id, CancellationToken.None);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Contain("No answer within");
+        var stored = await db.AiModelConfigs.SingleAsync();
+        stored.LastTestSucceeded.Should().BeFalse();
+        stored.LastTestMessage.Should().Contain("No answer");
+    }
+
+    [Fact]
+    public async Task Test_CancelledByTheCaller_PropagatesTheCancellation_InsteadOfReportingATimeout()
+    {
+        await using var db = NewDb();
+        var service = new AiModelService(db, new AiModelRoutingTests.FakeProtector(), new HangingFactory(), TimeSpan.FromSeconds(30));
+        var model = await NewService(db).CreateAsync(Request(), CancellationToken.None);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        var act = () => service.TestAsync(model.Id, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
     }
 
     [Fact]

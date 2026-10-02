@@ -12,6 +12,7 @@ import executions from "./locales/en/executions"
 import tasks from "./locales/en/tasks"
 import shared from "./locales/en/shared"
 import models from "./locales/en/models"
+import modelCompare from "./locales/en/modelCompare"
 
 const en = {
   common: {
@@ -42,6 +43,7 @@ const en = {
     measure: "Measure",
     settings: "Settings",
     aiModels: "AI models",
+    modelComparison: "Model comparison",
     tasks: "Tasks",
     executions: "Executions",
     repository: "Repository",
@@ -94,6 +96,7 @@ const en = {
   shared,
   tasks,
   models,
+  modelCompare,
 }
 
 export type Resources = typeof en

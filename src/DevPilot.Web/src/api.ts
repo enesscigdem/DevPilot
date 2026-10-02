@@ -32,7 +32,10 @@ import type {
   AiModel,
   SaveAiModelRequest,
   AiModelTestResult,
+  DiscoverAiModelsResult,
+  AiAdapterType,
   AiStageAssignment,
+  ModelComparison,
 } from './types';
 
 const BASE_URL = '/api';
@@ -369,10 +372,35 @@ export async function testAiModel(id: string): Promise<AiModelTestResult> {
   return http<AiModelTestResult>(`/ai-models/${id}/test`, { method: 'POST' });
 }
 
+export async function discoverAiModels(request: {
+  adapterType: AiAdapterType;
+  baseUrl: string;
+  apiKey?: string;
+  existingModelId?: string;
+}): Promise<DiscoverAiModelsResult> {
+  return http<DiscoverAiModelsResult>('/ai-models/discover', { method: 'POST', body: JSON.stringify(request) });
+}
+
 export async function getAiStageAssignments(): Promise<AiStageAssignment[]> {
   return http<AiStageAssignment[]>('/ai-models/stages');
 }
 
 export async function setAiStageAssignments(assignments: AiStageAssignment[]): Promise<AiStageAssignment[]> {
   return http<AiStageAssignment[]>('/ai-models/stages', { method: 'PUT', body: JSON.stringify(assignments) });
+}
+
+export async function startModelComparison(taskId: string, modelIds: string[]): Promise<ModelComparison> {
+  return http<ModelComparison>('/model-comparisons', { method: 'POST', body: JSON.stringify({ taskId, modelIds }) });
+}
+
+export async function getModelComparison(id: string, init?: RequestInit): Promise<ModelComparison> {
+  return http<ModelComparison>(`/model-comparisons/${id}`, init);
+}
+
+export async function getModelComparisonsForTask(taskId: string, init?: RequestInit): Promise<ModelComparison[]> {
+  return http<ModelComparison[]>(`/model-comparisons?taskId=${taskId}`, init);
+}
+
+export async function cancelModelComparison(id: string): Promise<ModelComparison> {
+  return http<ModelComparison>(`/model-comparisons/${id}/cancel`, { method: 'POST' });
 }

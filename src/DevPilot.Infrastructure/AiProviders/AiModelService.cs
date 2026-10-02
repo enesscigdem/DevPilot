@@ -9,15 +9,25 @@ internal sealed class AiModelService : IAiModelService
 {
     private const string TestPrompt = "Reply with the single word: ok";
 
+    // A connection test that has not answered by now is a result in itself: waiting for the 5 minute
+    // client timeout would leave the user staring at a spinner.
+    private static readonly TimeSpan DefaultTestTimeout = TimeSpan.FromSeconds(45);
+
     private readonly DevPilotDbContext _db;
     private readonly IAiKeyProtector _keyProtector;
     private readonly IAiProviderFactory _factory;
+    private readonly TimeSpan _testTimeout;
 
-    public AiModelService(DevPilotDbContext db, IAiKeyProtector keyProtector, IAiProviderFactory factory)
+    public AiModelService(
+        DevPilotDbContext db,
+        IAiKeyProtector keyProtector,
+        IAiProviderFactory factory,
+        TimeSpan? testTimeout = null)
     {
         _db = db;
         _keyProtector = keyProtector;
         _factory = factory;
+        _testTimeout = testTimeout ?? DefaultTestTimeout;
     }
 
     public async Task<IReadOnlyList<AiModelDto>> ListAsync(CancellationToken cancellationToken)
@@ -210,9 +220,24 @@ internal sealed class AiModelService : IAiModelService
             return Fail($"The {model.AdapterType} adapter is not available yet.");
         }
 
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_testTimeout);
+
         var response = await provider.SendAsync(
             new AiRequest { Model = model.ModelName, UserPrompt = TestPrompt, MaxTokens = 256 },
-            cancellationToken).ConfigureAwait(false);
+            timeout.Token).ConfigureAwait(false);
+
+        if (response.FailureKind == AiFailureKind.Cancelled && !cancellationToken.IsCancellationRequested)
+        {
+            return new AiModelTestResultDto
+            {
+                Success = false,
+                Message = $"No answer within {(int)_testTimeout.TotalSeconds} seconds. The endpoint was reached but the model did not respond. " +
+                          "Try again, or test a faster model to check the key and address.",
+                DurationMs = (long)_testTimeout.TotalMilliseconds,
+                Model = model.ModelName,
+            };
+        }
 
         // A reasoning model may spend the whole tiny budget thinking; the endpoint, key and model
         // name are still proven good, which is all a connection test must establish.
@@ -272,9 +297,9 @@ internal sealed class AiModelService : IAiModelService
             throw new ArgumentException("Name is required and must be at most 120 characters.");
         }
 
-        if (request.AdapterType != AiAdapterType.OpenAiCompatible)
+        if (!Enum.IsDefined(request.AdapterType))
         {
-            throw new ArgumentException($"The {request.AdapterType} adapter is not available yet. Use an OpenAI-compatible model for now.");
+            throw new ArgumentException("Unknown adapter type.");
         }
 
         if (!Uri.TryCreate(request.BaseUrl?.Trim(), UriKind.Absolute, out var uri)
@@ -310,7 +335,7 @@ internal sealed class AiModelService : IAiModelService
     {
         model.Name = name;
         model.AdapterType = request.AdapterType;
-        model.BaseUrl = request.BaseUrl.Trim().TrimEnd('/');
+        model.BaseUrl = AiBaseUrl.Normalize(request.BaseUrl);
         model.ModelName = request.ModelName.Trim();
         model.MaxOutputTokens = request.MaxOutputTokens;
         model.SupportsReasoningEffort = request.SupportsReasoningEffort;

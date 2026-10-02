@@ -176,7 +176,7 @@ export function Executions() {
                 "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors " +
                 (isActive
                   ? "border-primary-ring/60 bg-primary-soft text-primary"
-                  : "border-border bg-surface text-muted-foreground hover:bg-surface-2 hover:text-foreground")
+                  : "border-border bg-surface text-muted-foreground hover:bg-surface-3 hover:text-foreground")
               }
             >
               {f.key !== "all" && (
@@ -251,7 +251,7 @@ export function Executions() {
 
             return (
               <Link key={run.id} to={`/executions/${run.id}`}>
-                <Panel className="group p-4 transition-colors hover:border-border-strong hover:bg-surface-2">
+                <Panel className="group p-4 transition-colors hover:border-border-strong hover:bg-surface-3">
                   <div className="flex items-center gap-3">
                     <StatusDot tone={meta.tone} pulse={isLive} />
                     <div className="min-w-0 flex-1">

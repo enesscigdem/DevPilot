@@ -379,6 +379,8 @@ function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: stri
     routeTitles[path] ??
     (path.startsWith("/tasks/")
       ? "nav.taskImpact"
+      : path.startsWith("/comparisons/")
+        ? "nav.modelComparison"
       : path.startsWith("/executions/")
         ? "nav.execution"
         : path.startsWith("/review/")

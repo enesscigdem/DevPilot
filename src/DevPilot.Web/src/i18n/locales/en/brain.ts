@@ -16,6 +16,8 @@ const brain = {
   noChats: "No past chats in this workspace.",
   deleteChat: "Delete chat",
   knowledgeIndex: "Knowledge index",
+  sourcesAndContext: "Sources & context",
+  closePanel: "Close",
   reindex: "Reindex workspace",
   chunksIndexed: "{{n}} chunks indexed",
   files: "Files",

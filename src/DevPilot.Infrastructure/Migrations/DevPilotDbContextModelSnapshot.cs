@@ -326,6 +326,56 @@ namespace DevPilot.Infrastructure.Migrations
                     b.ToTable("GitHubInstallationConnections");
                 });
 
+            modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparison", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("CancelledAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("DevelopmentTaskId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DevelopmentTaskId");
+
+                    b.ToTable("ModelComparisons");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparisonRun", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AiModelConfigId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ModelComparisonId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ModelName")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
+                    b.Property<int>("Position")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ModelComparisonId", "Position")
+                        .IsUnique();
+
+                    b.ToTable("ModelComparisonRuns");
+                });
+
             modelBuilder.Entity("DevPilot.Domain.Entities.RepositoryWorkspace", b =>
                 {
                     b.Property<Guid>("Id")
@@ -500,6 +550,16 @@ namespace DevPilot.Infrastructure.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<Guid?>("ModelComparisonRunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("PinnedAiModelId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PinnedAiModelName")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
                     b.Property<Guid?>("PullRequestAttemptId")
                         .HasColumnType("uuid");
 
@@ -622,6 +682,9 @@ namespace DevPilot.Infrastructure.Migrations
                         .IsUnique()
                         .HasDatabaseName("IX_TaskExecutions_ActivePerTask")
                         .HasFilter("\"Status\" IN ('Pending', 'Running')");
+
+                    b.HasIndex("ModelComparisonRunId")
+                        .HasDatabaseName("IX_TaskExecutions_ModelComparisonRunId");
 
                     b.HasIndex("DevelopmentTaskId", "Status")
                         .HasDatabaseName("IX_TaskExecutions_DevelopmentTaskId_Status");
@@ -987,6 +1050,28 @@ namespace DevPilot.Infrastructure.Migrations
                     b.Navigation("TaskExecution");
                 });
 
+            modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparison", b =>
+                {
+                    b.HasOne("DevPilot.Domain.Entities.DevelopmentTask", "DevelopmentTask")
+                        .WithMany()
+                        .HasForeignKey("DevelopmentTaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("DevelopmentTask");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparisonRun", b =>
+                {
+                    b.HasOne("DevPilot.Domain.Entities.ModelComparison", "ModelComparison")
+                        .WithMany("Runs")
+                        .HasForeignKey("ModelComparisonId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ModelComparison");
+                });
+
             modelBuilder.Entity("DevPilot.Domain.Entities.RepositoryWorkspace", b =>
                 {
                     b.HasOne("DevPilot.Domain.Entities.GitHubInstallationConnection", "GitHubInstallationConnection")
@@ -1062,6 +1147,11 @@ namespace DevPilot.Infrastructure.Migrations
             modelBuilder.Entity("DevPilot.Domain.Entities.GitHubInstallationConnection", b =>
                 {
                     b.Navigation("Workspaces");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparison", b =>
+                {
+                    b.Navigation("Runs");
                 });
 
             modelBuilder.Entity("DevPilot.Domain.Entities.TaskExecution", b =>
