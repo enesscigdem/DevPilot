@@ -28,6 +28,7 @@ import {
 import { PageContainer } from "@/components/shared"
 import { Button, Panel, Badge, Meter, StatusDot, IconChip } from "@/components/ui/primitives"
 import { FormattedText } from "@/components/FormattedText"
+import { CompareModelsPanel } from "@/components/CompareModelsPanel"
 import { getTask, getTaskImpactAnalysis, analyzeTaskImpact, approveTask, rejectTask, startExecution, retryExecution, getExecutions } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import { deriveTaskImpactActionState, deriveTaskImpactLifecycle } from "@/lib/taskImpactState"
@@ -1152,6 +1153,11 @@ export function TaskImpact() {
                 </div>
               ) : null}
             </div>
+          )}
+
+          {/* Only an approved plan can be re-run with other models; never while a run is in progress. */}
+          {id && !activeExecution && task && (task.status === TaskStatus.Approved || task.status === TaskStatus.Failed || task.status === TaskStatus.Completed) && (
+            <CompareModelsPanel taskId={id} />
           )}
         </aside>
       </div>

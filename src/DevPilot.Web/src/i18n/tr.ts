@@ -13,6 +13,7 @@ import executions from "./locales/tr/executions"
 import tasks from "./locales/tr/tasks"
 import shared from "./locales/tr/shared"
 import models from "./locales/tr/models"
+import modelCompare from "./locales/tr/modelCompare"
 
 const tr: Resources = {
   common: {
@@ -43,6 +44,7 @@ const tr: Resources = {
     measure: "Ölç",
     settings: "Ayarlar",
     aiModels: "Yapay zeka modelleri",
+    modelComparison: "Model karşılaştırma",
     tasks: "Görevler",
     executions: "Çalıştırmalar",
     repository: "Depo",
@@ -95,6 +97,7 @@ const tr: Resources = {
   shared,
   tasks,
   models,
+  modelCompare,
 }
 
 export default tr

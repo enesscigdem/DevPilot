@@ -1234,3 +1234,29 @@ export interface AiStageAssignment {
   /** Null means the stage uses the default model. */
   aiModelConfigId: string | null;
 }
+
+// ---- Model comparison ----
+
+export type ModelComparisonStatus = 'Running' | 'Completed' | 'Cancelled';
+
+export type ModelComparisonRunState = 'Queued' | 'Running' | 'Finished' | 'Skipped';
+
+export interface ModelComparisonRun {
+  id: string;
+  position: number;
+  modelId: string;
+  modelName: string;
+  state: ModelComparisonRunState;
+  executionId: string | null;
+  executionStatus: string | number | null;
+}
+
+export interface ModelComparison {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  repositoryWorkspaceId: string;
+  createdAt: string;
+  status: ModelComparisonStatus;
+  runs: ModelComparisonRun[];
+}
