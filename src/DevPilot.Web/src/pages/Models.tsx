@@ -13,6 +13,7 @@ import {
 } from "@/api"
 import { fmt } from "@/i18n"
 import { cn } from "@/lib/utils"
+import { ModelPicker } from "@/components/ModelPicker"
 import { PageContainer, PageHeading, SectionHead } from "@/components/shared"
 import { Badge, Button, Panel } from "@/components/ui/primitives"
 import { AI_STAGES, type AiAdapterType, type AiModel, type AiModelOption, type AiStage, type SaveAiModelRequest } from "@/types"
@@ -310,25 +311,18 @@ function ModelForm({
           </Field>
           <Field label={t("models.form.modelName")}>
             <div className="flex gap-2">
-              <input
-                className={cn(fieldClass, "font-mono")}
+              <ModelPicker
                 value={draft.modelName}
-                list="ai-model-options"
-                onChange={(e) => set("modelName", e.target.value)}
+                onChange={(v) => set("modelName", v)}
+                options={modelOptions}
                 placeholder={preset?.modelHint ?? t("models.form.modelNamePlaceholder")}
+                inputClassName={cn(fieldClass, "font-mono")}
               />
               <Button type="button" size="md" onClick={() => void loadModels()} disabled={loadingModels || !draft.baseUrl.trim()}>
                 {loadingModels && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                 {t("models.form.loadModels")}
               </Button>
             </div>
-            <datalist id="ai-model-options">
-              {modelOptions.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.displayName ?? m.id}
-                </option>
-              ))}
-            </datalist>
             {modelsMessage && (
               <span className={cn("mt-1 block text-[11.5px]", modelsMessage.ok ? "text-success" : "text-danger")}>{modelsMessage.text}</span>
             )}
@@ -421,6 +415,19 @@ function ModelForm({
   )
 }
 
+/** Counts up while `active`, so a slow connection test shows it is still working. */
+function useElapsedSeconds(active: boolean): number {
+  const [seconds, setSeconds] = useState(0)
+  useEffect(() => {
+    if (!active) return
+    const started = Date.now()
+    setSeconds(0)
+    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [active])
+  return seconds
+}
+
 /* ------------------------------------ Card ------------------------------------- */
 
 function ModelCard({
@@ -441,6 +448,7 @@ function ModelCard({
   onMakeDefault: () => void
 }) {
   const { t } = useTranslation()
+  const elapsed = useElapsedSeconds(testing)
 
   const testBadge =
     model.lastTestSucceeded === true ? (
@@ -488,7 +496,7 @@ function ModelCard({
         <div className="flex flex-wrap items-center gap-1.5">
           <Button size="sm" onClick={onTest} disabled={testing}>
             {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
-            {testing ? t("models.testing") : t("models.test")}
+            {testing ? t("models.testingFor", { seconds: elapsed }) : t("models.test")}
           </Button>
           {!model.isDefault && model.isEnabled && (
             <Button size="sm" variant="subtle" onClick={onMakeDefault}>
