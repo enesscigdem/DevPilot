@@ -19,12 +19,13 @@ import {
   RotateCw,
   RotateCcw,
   Sparkles,
+  MessageSquareWarning,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { ExecutionTabs } from "@/components/ExecutionTabs"
 import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl, retryExecution } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl, retryExecution, requestExecutionChanges } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import {
   getExecutionStatusMeta,
@@ -222,6 +223,10 @@ export function CodeReview() {
   const [decisionError, setDecisionError] = useState<string | null>(null)
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReasonInput, setRejectionReasonInput] = useState("")
+  const [showChangesModal, setShowChangesModal] = useState(false)
+  const [changesInput, setChangesInput] = useState("")
+  const [isRequestingChanges, setIsRequestingChanges] = useState(false)
+  const [changesError, setChangesError] = useState<string | null>(null)
 
   const activeRequestIdRef = useRef(0)
   const hasSyncedSidebarWorkspaceRef = useRef<string | null>(null)
@@ -368,6 +373,12 @@ export function CodeReview() {
           canRequestPullRequest: true,
         } : null)
       }
+
+      // A fix pushed to the branch of an open pull request updates that same pull request on GitHub:
+      // refresh its state so CI and integrity are shown for the new head instead of the old one.
+      if (review.pullRequestStatus === "Open") {
+        void handleSyncPr()
+      }
     } catch (err) {
       setDecisionError(err instanceof Error ? err.message : t("review.errPush"))
     } finally {
@@ -482,6 +493,27 @@ export function CodeReview() {
       window.location.href = url
     } catch {
       // ignore
+    }
+  }
+
+  // The fix runs in the background on the same branch; the execution page shows its progress, and the
+  // review page comes back to life once it is done.
+  const handleRequestChanges = async () => {
+    const feedback = changesInput.trim()
+    if (!id || !review || isRequestingChanges || feedback.length === 0) return
+    setIsRequestingChanges(true)
+    setChangesError(null)
+
+    try {
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      await requestExecutionChanges(id, feedback, wsId)
+      setShowChangesModal(false)
+      setChangesInput("")
+      navigate(`/executions/${id}`)
+    } catch (err) {
+      setChangesError(err instanceof Error ? err.message : t("review.errRequestChanges"))
+    } finally {
+      setIsRequestingChanges(false)
     }
   }
 
@@ -603,6 +635,20 @@ export function CodeReview() {
               {review.branchName}
             </div>
           </div>
+          {review.canRequestChanges && (
+            <Button
+              variant="default"
+              size="sm"
+              disabled={isSubmittingDecision || isRequestingChanges}
+              onClick={() => {
+                setChangesError(null)
+                setShowChangesModal(true)
+              }}
+            >
+              <MessageSquareWarning className="h-3.5 w-3.5" />
+              {t("review.requestChanges")}
+            </Button>
+          )}
           {isPendingDecision && (
             <>
               <Button
@@ -910,6 +956,39 @@ export function CodeReview() {
 
           <div className="mt-5 space-y-3">
             <div className="tech-label">{t("review.decision")}</div>
+            {review.lastChangeRequest && (
+              <Panel className="space-y-2 border-primary/30 bg-primary-soft/30 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-[13px] font-semibold text-primary">
+                    <MessageSquareWarning className="h-4 w-4 shrink-0" />
+                    <span>{t("review.revisionTitle")}</span>
+                  </div>
+                  {(review.revisionCount ?? 0) > 0 && (
+                    <Badge tone="blue">{t("review.revisionNumber", { n: review.revisionCount })}</Badge>
+                  )}
+                </div>
+                <div className="rounded-[var(--radius-md)] border border-border bg-surface p-2.5 text-[12px] text-foreground">
+                  <span className="mb-0.5 block text-[10.5px] font-semibold uppercase tracking-wider text-subtle-foreground">
+                    {t("review.revisionFeedback")}
+                  </span>
+                  <span className="whitespace-pre-wrap break-words">{review.lastChangeRequest}</span>
+                </div>
+                {review.lastChangeRequestResult && (
+                  <div className="text-[12px] text-muted-foreground">
+                    <span className="font-semibold text-foreground">{t("review.revisionResult")}: </span>
+                    {review.lastChangeRequestResult}
+                  </div>
+                )}
+                {review.pullRequestStatus === "Open" && review.pullRequestNumber != null && review.pushStatus !== "Pushed" && (
+                  <div className="flex items-start gap-2 text-[11.5px] text-muted-foreground">
+                    <GitPullRequest className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {t(isPendingDecision ? "review.revisionPrNotePending" : "review.revisionPrNote", { n: review.pullRequestNumber })}
+                    </span>
+                  </div>
+                )}
+              </Panel>
+            )}
             {isPendingDecision && (() => {
               const isBlocked = review.verificationOutcome === "NeedsReview" || review.verificationOutcome === "Failed" || review.verificationOutcome === "Blocked"
               const validationPassed = !isBlocked
@@ -987,6 +1066,21 @@ export function CodeReview() {
                       {isSubmittingDecision ? <Loader2 className="h-4 w-4 animate-spin" /> : t("review.approve")}
                     </Button>
                   </div>
+                  {review.canRequestChanges && (
+                    <Button
+                      variant="default"
+                      size="md"
+                      disabled={isSubmittingDecision || isRequestingChanges}
+                      onClick={() => {
+                        setChangesError(null)
+                        setShowChangesModal(true)
+                      }}
+                      className="w-full"
+                    >
+                      <MessageSquareWarning className="h-4 w-4" />
+                      {t("review.requestChanges")}
+                    </Button>
+                  )}
                 </div>
               )
             })()}
@@ -1277,6 +1371,67 @@ export function CodeReview() {
           </div>
         </aside>
       </div>
+
+      {/* Request Changes Modal */}
+      {showChangesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-[520px] space-y-4 rounded-[var(--radius-lg)] border border-border bg-canvas p-6 shadow-xl">
+            <h3 className="flex items-center gap-2 text-[15px] font-semibold text-foreground">
+              <MessageSquareWarning className="h-4 w-4 text-primary" />
+              {t("review.changesModalTitle")}
+            </h3>
+            <p className="text-[12.5px] text-muted-foreground">{t("review.changesModalDesc")}</p>
+            {review.pullRequestStatus === "Open" && review.pullRequestNumber != null && (
+              <div className="flex items-start gap-2 rounded-[var(--radius-md)] border border-border bg-surface-2 p-2.5 text-[12px] text-muted-foreground">
+                <GitPullRequest className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>{t("review.changesModalPrOpen", { n: review.pullRequestNumber })}</span>
+              </div>
+            )}
+            <textarea
+              autoFocus
+              className="h-32 w-full rounded-[var(--radius-md)] border border-border bg-surface p-3 font-sans text-[13px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder={t("review.changesPlaceholder")}
+              maxLength={2000}
+              value={changesInput}
+              onChange={(e) => setChangesInput(e.target.value)}
+            />
+            <div className="text-right font-mono text-[11px] text-subtle-foreground">
+              {t("review.changesCounter", { n: changesInput.length, max: 2000 })}
+            </div>
+            {changesError && (
+              <div className="rounded-[var(--radius-md)] bg-danger-soft/60 p-2 text-[12px] text-danger">{changesError}</div>
+            )}
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                variant="default"
+                size="sm"
+                disabled={isRequestingChanges}
+                onClick={() => {
+                  setShowChangesModal(false)
+                  setChangesError(null)
+                }}
+              >
+                {t("review.cancel")}
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={isRequestingChanges || changesInput.trim().length === 0}
+                onClick={handleRequestChanges}
+              >
+                {isRequestingChanges ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    {t("review.sendingChanges")}
+                  </>
+                ) : (
+                  t("review.sendChanges")
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Reject Modal */}
       {showRejectModal && (

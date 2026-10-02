@@ -8,7 +8,7 @@ namespace DevPilot.Infrastructure.Executions;
 /// Enqueues an <see cref="ExecutionWorkerJob"/> fire-and-forget job so that the
 /// HTTP request returns immediately while the worker picks it up in the background.
 /// </summary>
-public sealed class HangfireExecutionDispatcher : IExecutionDispatcher
+public sealed class HangfireExecutionDispatcher : IExecutionDispatcher, IExecutionRevisionDispatcher
 {
     private readonly IBackgroundJobClient _jobClient;
 
@@ -25,5 +25,10 @@ public sealed class HangfireExecutionDispatcher : IExecutionDispatcher
     public void EnqueueVerifyExecution(Guid executionId, Guid leaseToken)
     {
         _jobClient.Enqueue<ExecutionWorkerJob>(job => job.VerifyAsync(executionId, leaseToken));
+    }
+
+    public void EnqueueReviseExecution(Guid executionId, Guid leaseToken)
+    {
+        _jobClient.Enqueue<ExecutionWorkerJob>(job => job.ReviseAsync(executionId, leaseToken));
     }
 }

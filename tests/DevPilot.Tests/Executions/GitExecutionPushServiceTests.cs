@@ -88,6 +88,77 @@ public sealed class GitExecutionPushServiceTests : IDisposable
         remoteSha.Trim().Should().Be(firstCommit.Trim());
     }
 
+    [Fact]
+    public async Task PushExecutionBranch_Revision_FastForwardsTheBranchOfTheOpenPullRequest()
+    {
+        var executionId = Guid.NewGuid();
+        var (worktreePath, bareRemotePath, commitSha, branchName) = await SetupLocalGitRepoWithBareRemoteAsync(executionId);
+
+        // The first delivery put HEAD~1 on the remote; the revision commit (HEAD) builds on it.
+        var lastDelivered = (await RunGitAsync(worktreePath, "rev-parse", "HEAD~1")).Trim();
+        await RunGitAsync(worktreePath, "push", "origin", $"{lastDelivered}:refs/heads/{branchName}");
+
+        var service = new GitExecutionPushService(new InMemoryExecutionRepository(), new GitProviders.FakeGitHubAppTokenService(), NullLogger<GitExecutionPushService>.Instance);
+        var execution = CreateExecution(executionId, worktreePath, branchName, commitSha);
+        execution.RevisionCount = 1;
+        execution.RemoteCommitSha = lastDelivered;
+
+        var result = await service.PushExecutionBranchAsync(execution, Guid.NewGuid());
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.RemoteCommitSha.Should().Be(commitSha);
+        (await RunGitAsync(bareRemotePath, "rev-parse", $"refs/heads/{branchName}")).Trim().Should().Be(commitSha);
+    }
+
+    [Fact]
+    public async Task PushExecutionBranch_Revision_RefusesWhenRemoteMovedSinceTheLastDelivery()
+    {
+        var executionId = Guid.NewGuid();
+        var (worktreePath, bareRemotePath, commitSha, branchName) = await SetupLocalGitRepoWithBareRemoteAsync(executionId);
+
+        var lastDelivered = (await RunGitAsync(worktreePath, "rev-parse", "HEAD~1")).Trim();
+        await RunGitAsync(worktreePath, "push", "origin", $"{lastDelivered}:refs/heads/{branchName}");
+
+        var service = new GitExecutionPushService(new InMemoryExecutionRepository(), new GitProviders.FakeGitHubAppTokenService(), NullLogger<GitExecutionPushService>.Instance);
+        var execution = CreateExecution(executionId, worktreePath, branchName, commitSha);
+        execution.RevisionCount = 1;
+        // Somebody else pushed to the branch: the remote is no longer where this execution left it.
+        execution.RemoteCommitSha = "1111111111111111111111111111111111111111";
+
+        var result = await service.PushExecutionBranchAsync(execution, Guid.NewGuid());
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("already exists at a different commit SHA");
+        (await RunGitAsync(bareRemotePath, "rev-parse", $"refs/heads/{branchName}")).Trim().Should().Be(lastDelivered);
+    }
+
+    [Fact]
+    public async Task PushExecutionBranch_Revision_RefusesACommitThatDoesNotBuildOnTheRemote()
+    {
+        var executionId = Guid.NewGuid();
+        var (worktreePath, bareRemotePath, commitSha, branchName) = await SetupLocalGitRepoWithBareRemoteAsync(executionId);
+
+        // The remote holds a commit that is not an ancestor of the revision commit.
+        await RunGitAsync(worktreePath, "checkout", "-q", "--detach", "HEAD~1");
+        await File.WriteAllTextAsync(Path.Combine(worktreePath, "other.txt"), "diverged");
+        await RunGitAsync(worktreePath, "add", "other.txt");
+        await RunGitAsync(worktreePath, "commit", "-m", "diverged");
+        var diverged = (await RunGitAsync(worktreePath, "rev-parse", "HEAD")).Trim();
+        await RunGitAsync(worktreePath, "push", "origin", $"{diverged}:refs/heads/{branchName}");
+        await RunGitAsync(worktreePath, "checkout", "-q", branchName);
+
+        var service = new GitExecutionPushService(new InMemoryExecutionRepository(), new GitProviders.FakeGitHubAppTokenService(), NullLogger<GitExecutionPushService>.Instance);
+        var execution = CreateExecution(executionId, worktreePath, branchName, commitSha);
+        execution.RevisionCount = 1;
+        execution.RemoteCommitSha = diverged;
+
+        var result = await service.PushExecutionBranchAsync(execution, Guid.NewGuid());
+
+        result.Success.Should().BeFalse();
+        result.ErrorMessage.Should().Contain("does not build on the pushed commit");
+        (await RunGitAsync(bareRemotePath, "rev-parse", $"refs/heads/{branchName}")).Trim().Should().Be(diverged);
+    }
+
     private async Task<(string WorktreePath, string BareRemotePath, string CommitSha, string BranchName)> SetupLocalGitRepoWithBareRemoteAsync(Guid executionId)
     {
         var tempBase = Path.Combine(Path.GetTempPath(), $"devpilot_push_test_{Guid.NewGuid():N}");

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
+using DevPilot.Application.Executions.Dtos;
 using DevPilot.Application.Executions.Models;
 using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
@@ -32,6 +33,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IBaselineVerificationService? _baselineVerificationService;
     private readonly IRepositoryFreshnessService? _freshnessService;
     private readonly IExecutionGitDiffReader? _gitDiffReader;
+    private readonly IReviewFeedbackAgent? _reviewFeedbackAgent;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
     private readonly int _maxCompileRepairRounds;
     private readonly int _maxTestRepairRounds;
@@ -51,8 +53,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IBaselineVerificationService? baselineVerificationService = null,
         ExecutionReliabilityOptions? reliabilityOptions = null,
         IRepositoryFreshnessService? freshnessService = null,
-        IExecutionGitDiffReader? gitDiffReader = null)
+        IExecutionGitDiffReader? gitDiffReader = null,
+        IReviewFeedbackAgent? reviewFeedbackAgent = null)
     {
+        _reviewFeedbackAgent = reviewFeedbackAgent;
         _freshnessService = freshnessService;
         _gitDiffReader = gitDiffReader;
         _workspaceManager = workspaceManager;
@@ -87,7 +91,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             context.ExecutionId,
             ExecutionStage.Workspace,
             ExecutionActivityStatus.Started,
-            context.IsVerifyOnly ? "Re-verification started on the existing worktree." : "Workspace preparation started.",
+            context.IsRevision ? "Requested changes started on the existing worktree." : context.IsVerifyOnly ? "Re-verification started on the existing worktree." : "Workspace preparation started.",
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         RepositoryFreshnessResult? freshness = null;
@@ -264,7 +268,16 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
 
             string? actualModel;
-            if (context.IsVerifyOnly)
+            if (context.IsRevision)
+            {
+                var revision = await ApplyReviewFeedbackAsync(context, prepResult, fileSets, cancellationToken).ConfigureAwait(false);
+                actualModel = revision.Model;
+                if (!revision.ShouldContinue)
+                {
+                    return;
+                }
+            }
+            else if (context.IsVerifyOnly)
             {
                 actualModel = await LoadVerifyOnlyChangesAsync(context, prepResult, fileSets, cancellationToken).ConfigureAwait(false);
                 if (fileSets.ActuallyModifiedFiles.Count == 0)
@@ -2093,6 +2106,135 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ResolvedNoChangeCount: fileSets.ResolvedNoChangeFiles.Count > 0
                     ? fileSets.ResolvedNoChangeFiles.Count
                     : null),
+            cancellationToken).ConfigureAwait(false);
+
+        return (true, actualModel);
+    }
+
+    /// <summary>
+    /// Gives the reviewer's feedback and the code the execution already produced to the AI, which edits the same
+    /// worktree. ShouldContinue=false when the AI changed nothing (the earlier verification result still stands).
+    /// A failure throws, like the initial generation, so the caller can report it.
+    /// </summary>
+    private async Task<(bool ShouldContinue, string? Model)> ApplyReviewFeedbackAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        ExecutionFileSets fileSets,
+        CancellationToken cancellationToken)
+    {
+        var changeRequest = context.ChangeRequest!;
+        if (_reviewFeedbackAgent == null)
+        {
+            throw new InvalidOperationException("Requesting changes needs a review feedback agent, but none is configured.");
+        }
+
+        if (_gitDiffReader == null)
+        {
+            throw new InvalidOperationException("Requesting changes needs a git diff reader.");
+        }
+
+        // The files this execution produced: everything already committed on the branch plus what is still uncommitted.
+        if (!string.IsNullOrWhiteSpace(changeRequest.CommittedBaseCommitSha))
+        {
+            var committed = await _gitDiffReader
+                .ReadCommittedDiffAsync(prepResult.WorkspacePath, changeRequest.CommittedBaseCommitSha, "HEAD", cancellationToken)
+                .ConfigureAwait(false);
+            if (committed.Success && committed.ChangedFiles != null)
+            {
+                foreach (var file in committed.ChangedFiles)
+                {
+                    fileSets.AddActuallyModified(file.Path.Replace('\\', '/'));
+                }
+            }
+        }
+
+        var uncommitted = await _gitDiffReader
+            .ReadWorkspaceDiffAsync(prepResult.WorkspacePath, prepResult.BranchName, cancellationToken)
+            .ConfigureAwait(false);
+        if (!uncommitted.Success)
+        {
+            throw new InvalidOperationException(
+                $"The requested fix could not read the worktree changes: {uncommitted.ErrorMessage}");
+        }
+
+        foreach (var file in uncommitted.ChangedFiles ?? Array.Empty<ExecutionReviewFileDto>())
+        {
+            fileSets.AddActuallyModified(file.Path.Replace('\\', '/'));
+        }
+
+        var execution = await _executionRepository
+            .GetByIdAsync(context.ExecutionId, cancellationToken)
+            .ConfigureAwait(false);
+        var model = !string.IsNullOrWhiteSpace(execution?.Model) ? execution.Model : execution?.PinnedAiModelName;
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Started,
+            $"Applying reviewer feedback (revision {changeRequest.RevisionNumber}).",
+            new ExecutionActivityMetadata(Model: model, EventKind: "ApplyingReviewFeedback"),
+            cancellationToken).ConfigureAwait(false);
+
+        var result = await _reviewFeedbackAgent.ApplyReviewFeedbackAsync(
+            new ReviewFeedbackRequest(
+                context.TaskId,
+                context.ExecutionId,
+                context.TaskTitle,
+                context.TaskDescription,
+                context.AcceptanceCriteria,
+                changeRequest.Feedback,
+                prepResult.WorkspacePath,
+                prepResult.BranchName,
+                fileSets.ActuallyModifiedFiles.ToList(),
+                model,
+                changeRequest.RevisionNumber),
+            cancellationToken).ConfigureAwait(false);
+
+        var actualModel = result.Model ?? model;
+        if (!result.Success)
+        {
+            // Reported as a Review-stage failure on purpose: the code is unchanged, so the verification verdict
+            // of the previous run (which the evaluator derives from Build/Test/DeveloperAgent activity) must not flip.
+            var error = result.ErrorMessage ?? "The reviewer feedback could not be applied.";
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Review,
+                ExecutionActivityStatus.Failed,
+                $"Requested fix could not be applied: {error}",
+                new ExecutionActivityMetadata(Model: actualModel, EventKind: "ReviewFeedbackFailed"),
+                cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(error);
+        }
+
+        if (result.ModifiedFiles == null || result.ModifiedFiles.Count == 0)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Review,
+                ExecutionActivityStatus.Completed,
+                "The AI made no code change for the requested fix; the earlier verification result still applies.",
+                new ExecutionActivityMetadata(
+                    Model: actualModel,
+                    EventKind: "ReviewFeedbackNoChange",
+                    ResolvedNoChangeCount: result.ResolvedNoChangeFiles?.Count),
+                cancellationToken).ConfigureAwait(false);
+            return (false, actualModel);
+        }
+
+        foreach (var file in result.ModifiedFiles)
+        {
+            fileSets.AddActuallyModified(file);
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.DeveloperAgent,
+            ExecutionActivityStatus.Completed,
+            "Reviewer feedback applied.",
+            new ExecutionActivityMetadata(
+                ModifiedFileCount: result.ModifiedFiles.Count,
+                Model: actualModel,
+                EventKind: "ReviewFeedbackApplied"),
             cancellationToken).ConfigureAwait(false);
 
         return (true, actualModel);

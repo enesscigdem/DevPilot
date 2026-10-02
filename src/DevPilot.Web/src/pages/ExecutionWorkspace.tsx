@@ -22,6 +22,7 @@ import {
   ChevronDown,
   ChevronUp,
   Cpu,
+  MessageSquareWarning,
 } from "lucide-react"
 import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
 import { ExecutionTabs } from "@/components/ExecutionTabs"
@@ -573,6 +574,32 @@ export function ExecutionWorkspace() {
         active="run"
         reviewAvailable={!isPending && !isRunning && execution.status === TaskExecutionStatus.Completed}
       />
+
+      {execution.lastChangeRequest && (
+        <div className="mx-auto max-w-[1500px] px-6 pt-4">
+          <div className="space-y-1.5 rounded-[var(--radius-md)] border border-primary/30 bg-primary-soft/30 p-3 text-[12.5px]">
+            <div className="flex items-center gap-2 font-semibold text-primary">
+              <MessageSquareWarning className="h-4 w-4 shrink-0" />
+              <span>{t("execWs.revisionTitle")}</span>
+              {(execution.revisionCount ?? 0) > 0 && (
+                <Badge tone="blue">{t("execWs.revisionNumber", { n: execution.revisionCount })}</Badge>
+              )}
+              {isRunning && !execution.lastChangeRequestResult && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            </div>
+            <p className="whitespace-pre-wrap break-words text-foreground">{execution.lastChangeRequest}</p>
+            {isRunning && !execution.lastChangeRequestResult ? (
+              <p className="text-muted-foreground">{t("execWs.revisionRunning")}</p>
+            ) : (
+              execution.lastChangeRequestResult && (
+                <p className="text-muted-foreground">
+                  <span className="font-semibold text-foreground">{t("execWs.revisionResult")}: </span>
+                  {execution.lastChangeRequestResult}
+                </p>
+              )
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="mx-auto grid max-w-[1500px] grid-cols-1 gap-0 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
         {/* LEFT — stage rail */}

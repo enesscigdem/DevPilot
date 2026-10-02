@@ -97,6 +97,8 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         var (buildDto, testDto) = ExecutionReviewStageClassifier.Classify(execution, activities);
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
         var (canRequestMerge, mergeBlockedReason) = ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks);
+        var canRequestChanges = Commands.RequestExecutionChanges.RequestExecutionChangesCommandHandler
+            .DescribeWhyChangesCannotBeRequested(execution) is null;
         var canRetry = execution.Status == TaskExecutionStatus.Completed &&
                        outcome == ExecutionVerificationOutcome.NeedsReview &&
                        execution.ReviewStatus == ExecutionReviewStatus.Pending;
@@ -186,7 +188,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 PredictedVsActual: null,
                 VerificationOutcome: outcome.ToString(),
                 Verdict: snapshot.Verdict,
-                Usage: snapshot.Usage);
+                Usage: snapshot.Usage,
+                CanRequestChanges: canRequestChanges,
+                RevisionCount: execution.RevisionCount,
+                LastChangeRequest: execution.LastChangeRequest,
+                LastChangeRequestAt: execution.LastChangeRequestAt,
+                LastChangeRequestResult: execution.LastChangeRequestResult);
 
             return GetExecutionReviewResult.Ok(committedReview);
         }
@@ -324,7 +331,12 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             PredictedVsActual: predictedVsActual,
             VerificationOutcome: outcome.ToString(),
                 Verdict: snapshot.Verdict,
-                Usage: snapshot.Usage);
+                Usage: snapshot.Usage,
+                CanRequestChanges: canRequestChanges,
+                RevisionCount: execution.RevisionCount,
+                LastChangeRequest: execution.LastChangeRequest,
+                LastChangeRequestAt: execution.LastChangeRequestAt,
+                LastChangeRequestResult: execution.LastChangeRequestResult);
 
         return GetExecutionReviewResult.Ok(review);
     }

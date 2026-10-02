@@ -119,6 +119,7 @@ public static class DependencyInjection
         services.AddScoped<EfExecutionRepository>();
         services.AddScoped<IExecutionRepository>(sp => sp.GetRequiredService<EfExecutionRepository>());
         services.AddScoped<IExecutionVerificationRerunStore>(sp => sp.GetRequiredService<EfExecutionRepository>());
+        services.AddScoped<IExecutionRevisionStore>(sp => sp.GetRequiredService<EfExecutionRepository>());
         services.AddScoped<IExecutionListReader, EfExecutionListReader>();
         services.AddScoped<IExecutionWorkspaceManager, GitExecutionWorkspaceManager>();
         // Single authoritative reliability configuration shared by the processor, DeveloperAgent and impact analysis.
@@ -132,8 +133,10 @@ public static class DependencyInjection
         services.AddScoped<IExecutionVerificationSnapshotRecorder, ExecutionVerificationSnapshotRecorder>();
         services.AddScoped<IExecutionProcessor, GitWorkspaceExecutionProcessor>();
         services.AddScoped<IExecutionDispatcher, HangfireExecutionDispatcher>();
+        services.AddScoped<IExecutionRevisionDispatcher, HangfireExecutionDispatcher>();
         services.AddScoped<IWorktreeEditApplier, WorktreeEditApplier>();
         services.AddScoped<IDeveloperAgent, DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent>();
+        services.AddScoped<IReviewFeedbackAgent, DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent>();
         services.AddScoped<IProcessRunner, BoundedProcessRunner>();
         services.AddScoped<IRepositoryCheckRunner, RepositoryNativeCheckRunner>();
         services.AddScoped<IRepositoryRepairContextProvider, DotNetRepositoryRepairContextProvider>();
@@ -165,6 +168,7 @@ public static class DependencyInjection
         services.AddHostedService<ExecutionStartupReconciler>();
         services.AddScoped<DevPilot.Application.Executions.Commands.CancelExecution.ICancelExecutionCommandHandler, DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionCommandHandler>();
         services.AddScoped<DevPilot.Application.Executions.Commands.VerifyExecution.IVerifyExecutionCommandHandler, DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionCommandHandler>();
+        services.AddScoped<DevPilot.Application.Executions.Commands.RequestExecutionChanges.IRequestExecutionChangesCommandHandler, DevPilot.Application.Executions.Commands.RequestExecutionChanges.RequestExecutionChangesCommandHandler>();
         services.AddScoped<IApproveExecutionReviewCommandHandler, ApproveExecutionReviewCommandHandler>();
         services.AddScoped<IRejectExecutionReviewCommandHandler, RejectExecutionReviewCommandHandler>();
         services.AddScoped<IMergeExecutionCommandHandler, MergeExecutionCommandHandler>();

@@ -343,6 +343,11 @@ export interface ExecutionDetail {
   verdict?: ExecutionVerdict | null;
   usage?: ExecutionUsage | null;
   canRetry?: boolean;
+  canRequestChanges?: boolean;
+  revisionCount?: number;
+  lastChangeRequest?: string | null;
+  lastChangeRequestAt?: string | null;
+  lastChangeRequestResult?: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -521,6 +526,11 @@ export interface ExecutionReview {
   canRequestMerge?: boolean;
   mergeBlockedReason?: string | null;
   canRetry?: boolean;
+  canRequestChanges?: boolean;
+  revisionCount?: number;
+  lastChangeRequest?: string | null;
+  lastChangeRequestAt?: string | null;
+  lastChangeRequestResult?: string | null;
   repositoryWorkspaceId?: string;
   repositoryOwner?: string;
   repositoryName?: string;

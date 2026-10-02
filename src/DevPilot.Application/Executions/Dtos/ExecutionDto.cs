@@ -77,6 +77,18 @@ public sealed class ExecutionDto
 
     public bool CanRetry { get; set; }
 
+    /// <summary>True when the reviewer may ask for a fix that is applied on this execution's own branch (and pull request).</summary>
+    public bool CanRequestChanges { get; set; }
+
+    /// <summary>How many requested fixes have changed the code on this branch so far.</summary>
+    public int RevisionCount { get; set; }
+
+    public string? LastChangeRequest { get; set; }
+
+    public DateTime? LastChangeRequestAt { get; set; }
+
+    public string? LastChangeRequestResult { get; set; }
+
     public int ProgressPercentage { get; set; }
 
     public string? Model { get; set; }

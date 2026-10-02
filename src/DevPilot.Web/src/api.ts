@@ -221,6 +221,23 @@ export async function rejectExecutionReview(
   });
 }
 
+/**
+ * "Request changes": the feedback is applied by the AI on the execution's own branch, build and test run again,
+ * the old approval is removed and the result returns to review. The same pull request is updated on approval.
+ */
+export async function requestExecutionChanges(
+  id: string,
+  feedback: string,
+  workspaceId?: string | null,
+  init?: RequestInit
+): Promise<{ message: string; revisionNumber: number }> {
+  return http<{ message: string; revisionNumber: number }>(appendWorkspaceQuery(`/executions/${id}/review/request-changes`, workspaceId), {
+    ...init,
+    method: 'POST',
+    body: JSON.stringify({ feedback }),
+  });
+}
+
 export async function commitExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<CommitExecutionResult> {
   return http<CommitExecutionResult>(appendWorkspaceQuery(`/executions/${id}/commit`, workspaceId), {
     ...init,

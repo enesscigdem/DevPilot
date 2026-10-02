@@ -166,6 +166,12 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             CanRequestMerge = ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks).CanMerge,
             VerificationOutcome = outcome.ToString(),
             CanRetry = canRetry,
+            CanRequestChanges = DevPilot.Application.Executions.Commands.RequestExecutionChanges.RequestExecutionChangesCommandHandler
+                .DescribeWhyChangesCannotBeRequested(execution) is null,
+            RevisionCount = execution.RevisionCount,
+            LastChangeRequest = execution.LastChangeRequest,
+            LastChangeRequestAt = execution.LastChangeRequestAt,
+            LastChangeRequestResult = execution.LastChangeRequestResult,
             ProgressPercentage = progressPercentage,
             Stages = stages,
         };

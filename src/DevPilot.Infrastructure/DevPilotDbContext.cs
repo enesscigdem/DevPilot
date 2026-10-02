@@ -233,6 +233,11 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.ReviewRejectionReason).HasMaxLength(1000);
             entity.Property(e => e.ApprovedChangeFingerprint).HasMaxLength(100);
             entity.Property(e => e.BaseCommitSha).HasMaxLength(100);
+            entity.Property(e => e.InitialBaseCommitSha).HasMaxLength(100);
+            entity.Property(e => e.RevisionCount).HasDefaultValue(0);
+            entity.Property(e => e.LastChangeRequest).HasMaxLength(2000);
+            entity.Property(e => e.LastChangeRequestAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.LastChangeRequestResult).HasMaxLength(500);
             entity.Property(e => e.CommitStatus)
                 .HasConversion<string>()
                 .HasMaxLength(50)
