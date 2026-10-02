@@ -37,6 +37,19 @@ public class AiModelServiceTests
         stored.ProtectedApiKey.Should().NotBe("sk-abcdef123456");
     }
 
+    [Theory]
+    [InlineData("https://yapayzekalab.org/v1/chat/completions", "https://yapayzekalab.org/v1")]
+    [InlineData("https://yapayzekalab.org/chat/completions/", "https://yapayzekalab.org")]
+    [InlineData("  https://api.deepseek.com/  ", "https://api.deepseek.com")]
+    public async Task Create_CleansUpPastedEndpointPaths(string typed, string stored)
+    {
+        await using var db = NewDb();
+
+        var created = await NewService(db).CreateAsync(Request(url: typed), CancellationToken.None);
+
+        created.BaseUrl.Should().Be(stored);
+    }
+
     [Fact]
     public async Task FirstModel_BecomesDefault_SecondDoesNot()
     {

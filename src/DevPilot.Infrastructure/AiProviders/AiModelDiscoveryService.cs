@@ -25,7 +25,7 @@ internal sealed class AiModelDiscoveryService : IAiModelDiscoveryService
 
     public async Task<DiscoverAiModelsResultDto> DiscoverAsync(DiscoverAiModelsRequest request, CancellationToken cancellationToken)
     {
-        var baseUrl = request.BaseUrl?.Trim().TrimEnd('/') ?? string.Empty;
+        var baseUrl = AiBaseUrl.Normalize(request.BaseUrl);
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri)
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
         {
@@ -197,6 +197,11 @@ internal sealed class AiModelDiscoveryService : IAiModelDiscoveryService
         if (string.IsNullOrWhiteSpace(body))
         {
             return "no details";
+        }
+
+        if (body.TrimStart().StartsWith('<'))
+        {
+            return "the server answered with a web page, not an API response. Check the base URL and the API type.";
         }
 
         try

@@ -37,6 +37,18 @@ public class ModelDiscoveryTests
     }
 
     [Fact]
+    public async Task PastedChatCompletionsEndpoint_IsStillResolvedToTheModelsList()
+    {
+        using var server = new FakeHttpServer(Json("""{"data":[{"id":"m"}]}"""));
+
+        var result = await NewService(NewDb()).DiscoverAsync(
+            new DiscoverAiModelsRequest { BaseUrl = server.BaseUrl + "/v1/chat/completions" }, CancellationToken.None);
+
+        result.Success.Should().BeTrue(result.Message);
+        server.Requests.Single().RequestLine.Should().StartWith("GET /v1/models");
+    }
+
+    [Fact]
     public async Task OpenAiCompatible_DoesNotDuplicateTheVersionSegment()
     {
         using var server = new FakeHttpServer(Json("""{"data":[{"id":"m"}]}"""));
@@ -155,6 +167,18 @@ public class ModelDiscoveryTests
 
         result.Success.Should().BeFalse();
         result.Message.Should().Contain("401");
+    }
+
+    [Fact]
+    public async Task AWebPageInsteadOfAnApiAnswer_GetsAFriendlyMessage()
+    {
+        using var server = new FakeHttpServer(new FakeHttpServer.Reply(404, "<!DOCTYPE html><html></html>", "text/html"));
+
+        var result = await NewService(NewDb()).DiscoverAsync(
+            new DiscoverAiModelsRequest { BaseUrl = server.BaseUrl, ApiKey = "k" }, CancellationToken.None);
+
+        result.Success.Should().BeFalse();
+        result.Message.Should().Contain("web page").And.NotContain("<html");
     }
 
     [Theory]

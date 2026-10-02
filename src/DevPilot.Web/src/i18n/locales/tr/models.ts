@@ -32,6 +32,11 @@ const models: Resources["models"] = {
   delete: "Sil",
   confirmDelete: "\"{{name}}\" modeli silinsin mi? Bu modele atanmış adımlar varsayılan modele döner.",
   makeDefault: "Varsayılan yap",
+  adapter: {
+    OpenAiCompatible: "OpenAI uyumlu",
+    Claude: "Claude (Anthropic)",
+    Gemini: "Gemini (Google)",
+  },
   stagesHeading: "Her adımı hangi model çalıştırır",
   stagesHint: "Seçim yapılmayan adımlar varsayılan modeli kullanır.",
   useDefault: "Varsayılan model",
@@ -51,6 +56,7 @@ const models: Resources["models"] = {
   },
   form: {
     preset: "Sağlayıcı",
+    adapterType: "API türü (DevPilot uç noktayla nasıl konuşur)",
     name: "Görünen ad",
     namePlaceholder: "örn. DeepSeek V3",
     baseUrl: "Temel URL",

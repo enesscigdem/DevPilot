@@ -30,6 +30,11 @@ const models = {
   delete: "Delete",
   confirmDelete: "Delete model \"{{name}}\"? Steps assigned to it will fall back to the default model.",
   makeDefault: "Make default",
+  adapter: {
+    OpenAiCompatible: "OpenAI-compatible",
+    Claude: "Claude (Anthropic)",
+    Gemini: "Gemini (Google)",
+  },
   stagesHeading: "Which model runs each step",
   stagesHint: "Steps without a choice use the default model.",
   useDefault: "Default model",
@@ -49,6 +54,7 @@ const models = {
   },
   form: {
     preset: "Provider",
+    adapterType: "API type (how DevPilot talks to the endpoint)",
     name: "Display name",
     namePlaceholder: "e.g. DeepSeek V3",
     baseUrl: "Base URL",

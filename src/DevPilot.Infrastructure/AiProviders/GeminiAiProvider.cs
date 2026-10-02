@@ -303,6 +303,11 @@ internal sealed class GeminiAiProvider : IAiProvider
             return "no details";
         }
 
+        if (body.TrimStart().StartsWith('<'))
+        {
+            return "the server answered with a web page, not an API response. Check the base URL and the API type.";
+        }
+
         try
         {
             var message = JsonNode.Parse(body)?["error"]?["message"]?.GetValue<string>();

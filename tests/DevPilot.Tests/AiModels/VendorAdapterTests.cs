@@ -216,6 +216,17 @@ public class VendorAdapterTests
         response.ErrorMessage.Should().Contain("bad things");
     }
 
+    [Fact]
+    public async Task Gemini_AWebPageInsteadOfAnApiAnswer_IsNotDumpedIntoTheErrorMessage()
+    {
+        using var server = new FakeHttpServer(new FakeHttpServer.Reply(404, "<!DOCTYPE html><html><body>Not Found</body></html>", "text/html"));
+
+        var response = await NewGemini(server).SendAsync(new AiRequest { UserPrompt = "x" });
+
+        response.IsSuccess.Should().BeFalse();
+        response.ErrorMessage.Should().Contain("web page").And.NotContain("<html").And.NotContain("DOCTYPE");
+    }
+
     private sealed class SimpleClientFactory : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => new();

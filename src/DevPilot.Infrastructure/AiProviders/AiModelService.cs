@@ -310,7 +310,7 @@ internal sealed class AiModelService : IAiModelService
     {
         model.Name = name;
         model.AdapterType = request.AdapterType;
-        model.BaseUrl = request.BaseUrl.Trim().TrimEnd('/');
+        model.BaseUrl = AiBaseUrl.Normalize(request.BaseUrl);
         model.ModelName = request.ModelName.Trim();
         model.MaxOutputTokens = request.MaxOutputTokens;
         model.SupportsReasoningEffort = request.SupportsReasoningEffort;

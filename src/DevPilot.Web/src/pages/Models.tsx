@@ -43,6 +43,8 @@ const PRESETS: Preset[] = [
   { id: "lmstudio", adapter: "OpenAiCompatible", name: "LM Studio (local)", baseUrl: "http://localhost:1234/v1", modelHint: "model-id" },
 ]
 
+const ADAPTERS: AiAdapterType[] = ["OpenAiCompatible", "Claude", "Gemini"]
+
 function isLocalUrl(url: string): boolean {
   try {
     const host = new URL(url).hostname
@@ -270,7 +272,7 @@ function ModelForm({
             ))}
             <button
               type="button"
-              onClick={() => set("presetId", "")}
+              onClick={() => setDraft((d) => ({ ...d, presetId: "", adapterType: "OpenAiCompatible" }))}
               className={cn(
                 "rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors",
                 draft.presetId === ""
@@ -284,6 +286,19 @@ function ModelForm({
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
+          <Field label={t("models.form.adapterType")} className="sm:col-span-2">
+            <select
+              className={fieldClass}
+              value={draft.adapterType}
+              onChange={(e) => setDraft((d) => ({ ...d, adapterType: e.target.value as AiAdapterType, presetId: "" }))}
+            >
+              {ADAPTERS.map((a) => (
+                <option key={a} value={a}>
+                  {t(`models.adapter.${a}`)}
+                </option>
+              ))}
+            </select>
+          </Field>
           <Field label={t("models.form.name")}>
             <input
               className={fieldClass}
@@ -450,7 +465,7 @@ function ModelCard({
             {!model.isEnabled && <Badge tone="gray">{t("models.disabled")}</Badge>}
           </div>
           <div className="mt-1 font-mono text-[12px] text-muted-foreground">
-            {model.modelName} · {hostOf(model.baseUrl)}
+            {model.modelName} · {hostOf(model.baseUrl)} · {t(`models.adapter.${model.adapterType}`)}
           </div>
           <div className="mt-2.5 flex flex-wrap items-center gap-2">
             {model.hasApiKey ? (
