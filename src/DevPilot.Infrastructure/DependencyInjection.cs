@@ -119,8 +119,11 @@ public static class DependencyInjection
         services.AddScoped<IExecutionWorkspaceManager, GitExecutionWorkspaceManager>();
         // Single authoritative reliability configuration shared by the processor, DeveloperAgent and impact analysis.
         services.AddSingleton(_ => ExecutionReliabilityOptionsFactory.Create(configuration));
-        services.AddSingleton(
-            configuration.GetSection(AiPricingOptions.SectionName).Get<AiPricingOptions>() ?? new AiPricingOptions());
+        // Prices set on models in the panel are read once per scope, so a price edit applies to the next
+        // request or execution; the optional global AiPricing section remains the fallback.
+        services.AddScoped(sp => AiPricingOptionsFactory.Build(
+            configuration.GetSection(AiPricingOptions.SectionName),
+            sp.GetRequiredService<DevPilotDbContext>()));
         services.AddScoped<IExecutionVerificationSnapshotStore, EfExecutionVerificationSnapshotStore>();
         services.AddScoped<IExecutionVerificationSnapshotRecorder, ExecutionVerificationSnapshotRecorder>();
         services.AddScoped<IExecutionProcessor, GitWorkspaceExecutionProcessor>();
@@ -221,23 +224,15 @@ public static class DependencyInjection
             sp.GetRequiredService<IAiProviderFactory>(),
             sp.GetRequiredKeyedService<IAiProvider>(LegacyAiProviderKey)));
 
-        switch (providerName)
+        // Models added in the panel are the primary path. The appsettings Kimi provider stays as a
+        // fallback for existing installs; any other value falls back to a provider that fails loudly.
+        if (providerName == AiProviderNames.Kimi)
         {
-            case AiProviderNames.Kimi:
-                services.AddKeyedScoped<IAiProvider, KimiAiProvider>(LegacyAiProviderKey);
-                break;
-            case AiProviderNames.OpenAI:
-                services.AddKeyedScoped<IAiProvider, OpenAiAiProvider>(LegacyAiProviderKey);
-                break;
-            case AiProviderNames.Claude:
-                services.AddKeyedScoped<IAiProvider, ClaudeAiProvider>(LegacyAiProviderKey);
-                break;
-            case AiProviderNames.Gemini:
-                services.AddKeyedScoped<IAiProvider, GeminiAiProvider>(LegacyAiProviderKey);
-                break;
-            default:
-                throw new InvalidOperationException(
-                    $"Unsupported AI provider '{providerName}'. Supported providers: {AiProviderNames.Kimi}, {AiProviderNames.OpenAI}, {AiProviderNames.Claude}, {AiProviderNames.Gemini}.");
+            services.AddKeyedScoped<IAiProvider, KimiAiProvider>(LegacyAiProviderKey);
+        }
+        else
+        {
+            services.AddKeyedScoped<IAiProvider, UnconfiguredAiProvider>(LegacyAiProviderKey);
         }
 
         return services;

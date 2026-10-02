@@ -52,11 +52,34 @@ internal sealed class AiProviderFactory : IAiProviderFactory
                     settings,
                     _loggerFactory.CreateLogger<OpenAiCompatibleProvider>());
 
+            case AiAdapterType.Claude:
+                return new AnthropicAiProvider(
+                    ToEndpointSettings(config, apiKey, forConnectionTest),
+                    _loggerFactory.CreateLogger<AnthropicAiProvider>());
+
+            case AiAdapterType.Gemini:
+                return new GeminiAiProvider(
+                    _httpClientFactory,
+                    ToEndpointSettings(config, apiKey, forConnectionTest),
+                    _loggerFactory.CreateLogger<GeminiAiProvider>());
+
             default:
-                // Claude and Gemini adapters arrive in a later step.
                 return null;
         }
     }
+
+    private AiEndpointSettings ToEndpointSettings(AiModelConfig config, string? apiKey, bool forConnectionTest) =>
+        new()
+        {
+            ProviderName = config.Name,
+            DisplayName = config.Name,
+            BaseUrl = config.BaseUrl,
+            Model = config.ModelName,
+            ApiKey = apiKey ?? string.Empty,
+            RequiresApiKey = RequiresApiKey(config),
+            MaxOutputTokens = config.MaxOutputTokens,
+            MaxAttempts = forConnectionTest ? 1 : 4,
+        };
 
     public bool RequiresApiKey(AiModelConfig config) =>
         !(Uri.TryCreate(config.BaseUrl, UriKind.Absolute, out var uri) && uri.IsLoopback);

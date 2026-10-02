@@ -67,15 +67,15 @@ public class AiModelServiceTests
     }
 
     [Fact]
-    public async Task Create_RejectsAdaptersThatAreNotImplementedYet()
+    public async Task Create_RejectsUnknownAdapterTypes()
     {
         await using var db = NewDb();
         var request = Request();
-        request.AdapterType = AiAdapterType.Claude;
+        request.AdapterType = (AiAdapterType)99;
 
         var act = () => NewService(db).CreateAsync(request, CancellationToken.None);
 
-        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*not available yet*");
+        await act.Should().ThrowAsync<ArgumentException>().WithMessage("*Unknown adapter*");
     }
 
     [Fact]

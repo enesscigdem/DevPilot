@@ -272,9 +272,9 @@ internal sealed class AiModelService : IAiModelService
             throw new ArgumentException("Name is required and must be at most 120 characters.");
         }
 
-        if (request.AdapterType != AiAdapterType.OpenAiCompatible)
+        if (!Enum.IsDefined(request.AdapterType))
         {
-            throw new ArgumentException($"The {request.AdapterType} adapter is not available yet. Use an OpenAI-compatible model for now.");
+            throw new ArgumentException("Unknown adapter type.");
         }
 
         if (!Uri.TryCreate(request.BaseUrl?.Trim(), UriKind.Absolute, out var uri)
