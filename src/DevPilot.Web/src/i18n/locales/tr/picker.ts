@@ -1,0 +1,38 @@
+import type { Resources } from "../../en"
+
+const picker: Resources["picker"] = {
+  search: "DevPilot ve GitHub genelinde depo ara…",
+  retry: "Tekrar dene",
+  errLoad: "GitHub depoları yüklenemedi.",
+  errAuthUrl: "GitHub yetkilendirme adresi oluşturulamadı.",
+  errConnect: "Depo çalışma alanı klonlanıp indekslenemedi.",
+  connectAccount: "GitHub Hesabını Bağla",
+  connectDesc:
+    "Depolara göz atmak, dal oluşturmak, değişiklikleri push etmek ve pull request açmak için GitHub hesabınızı veya organizasyonunuzu bağlayın.",
+  connectGitHub: "GitHub'ı Bağla",
+  connectedTitle: "DEVPILOT'A BAĞLI",
+  active: "Aktif",
+  indexed: "İndekslendi",
+  availableTitle: "GITHUB'DAN ERİŞİLEBİLİR",
+  noMatchingRepos: "\"{{query}}\" ile eşleşen kullanılabilir GitHub deposu yok",
+  allConnected: "Yetkilendirilen tüm depolar zaten bağlı.",
+  private: "Özel",
+  public: "Herkese açık",
+  noRepos: "\"{{query}}\" için depo bulunamadı",
+  addRepos: "Depo ekle",
+  manageAccess: "GitHub erişimini yönet",
+  connectAnother: "+ Başka bir hesap bağla",
+  connectAnotherTitle: "Başka bir GitHub hesabı veya organizasyonu bağlayın",
+  refresh: "Yenile",
+  navigate: "gezin",
+  select: "seç",
+  back: "Depo listesine dön",
+  connectRepo: "{{name}} deposunu bağla",
+  branchDesc: "DevPilot'a klonlanıp indekslenecek dalı seçin.",
+  branch: "Dal",
+  loadingBranches: "Dallar yükleniyor…",
+  default: "(varsayılan)",
+  cancel: "İptal",
+  connectIndex: "Bağla ve İndeksle",
+}
+export default picker

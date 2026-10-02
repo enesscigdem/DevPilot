@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
+import { fmt } from "@/i18n"
 import { Link as RouterLink, useNavigate, useParams as useReactParams } from "react-router-dom"
 import {
   ArrowLeft,
@@ -203,6 +205,9 @@ function DiffRow({ line }: { line: ParsedLine }) {
 }
 
 export function CodeReview() {
+  const { t } = useTranslation()
+  const statText = (s?: string | null) => t(`review.stat.${s}`, { defaultValue: s ?? "" })
+  const ciText = (s?: string | null) => t(`review.ci.${String(s).toLowerCase()}`, { defaultValue: String(s ?? "") })
   const { id } = useReactParams<{ id: string }>()
   const navigate = useNavigate()
   const { selectWorkspace, activeWorkspaceId } = useWorkspace()
@@ -255,7 +260,7 @@ export function CodeReview() {
       })
       .catch((err) => {
         if (!isCancelled && err.name !== "AbortError" && currentRequestId === activeRequestIdRef.current) {
-          setError(err instanceof Error ? err.message : "Failed to load execution review.")
+          setError(err instanceof Error ? err.message : t("review.errLoad"))
           setReview(null)
           setIsLoading(false)
         }
@@ -279,7 +284,7 @@ export function CodeReview() {
       const created = await retryExecution(review.taskId, review.repositoryWorkspaceId ?? activeWorkspaceId)
       navigate(`/executions/${created.id}`)
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to retry execution.")
+      setDecisionError(err instanceof Error ? err.message : t("review.errRetry"))
     } finally {
       setIsRetrying(false)
     }
@@ -307,7 +312,7 @@ export function CodeReview() {
         } : null)
       }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to approve review.")
+      setDecisionError(err instanceof Error ? err.message : t("review.errApprove"))
     } finally {
       setIsSubmittingDecision(false)
     }
@@ -335,7 +340,7 @@ export function CodeReview() {
         } : null)
       }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to commit changes.")
+      setDecisionError(err instanceof Error ? err.message : t("review.errCommit"))
     } finally {
       setIsSubmittingCommit(false)
     }
@@ -364,7 +369,7 @@ export function CodeReview() {
         } : null)
       }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to push execution branch.")
+      setDecisionError(err instanceof Error ? err.message : t("review.errPush"))
     } finally {
       setIsSubmittingPush(false)
     }
@@ -402,7 +407,7 @@ export function CodeReview() {
       }
       setShowMergeConfirmModal(false)
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "Failed to merge pull request."
+      const errorMsg = err instanceof Error ? err.message : t("review.errMerge")
       setMergeError(errorMsg)
       setDecisionError(errorMsg)
     } finally {
@@ -437,7 +442,7 @@ export function CodeReview() {
         setSyncError(res.syncError)
       }
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : "GitHub sync failed.")
+      setSyncError(err instanceof Error ? err.message : t("review.errSync"))
     } finally {
       setIsSyncingPr(false)
     }
@@ -465,7 +470,7 @@ export function CodeReview() {
         } : null)
       }
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to open pull request.")
+      setDecisionError(err instanceof Error ? err.message : t("review.errPr"))
     } finally {
       setIsSubmittingPr(false)
     }
@@ -503,7 +508,7 @@ export function CodeReview() {
       setShowRejectModal(false)
       setRejectionReasonInput("")
     } catch (err) {
-      setDecisionError(err instanceof Error ? err.message : "Failed to reject review.")
+      setDecisionError(err instanceof Error ? err.message : t("review.errReject"))
     } finally {
       setIsSubmittingDecision(false)
     }
@@ -514,7 +519,7 @@ export function CodeReview() {
       <PageContainer className="flex h-[calc(100vh-100px)] w-full items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-center">
           <Loader2 className="h-6 w-6 animate-spin text-subtle-foreground" />
-          <p className="text-[13.5px] font-medium text-foreground">Loading execution review…</p>
+          <p className="text-[13.5px] font-medium text-foreground">{t("review.loading")}</p>
         </div>
       </PageContainer>
     )
@@ -534,17 +539,17 @@ export function CodeReview() {
             <AlertCircle className="h-8 w-8 text-danger" />
             <div>
               <h2 className="text-[16px] font-semibold text-foreground">
-                {isNotFound ? "Execution Not Found" : isConflict ? "Review Unavailable" : "Failed to Load Code Review"}
+                {isNotFound ? t("review.notFound") : isConflict ? t("review.unavailable") : t("review.failedLoad")}
               </h2>
               <p className="mt-1 text-[13px] text-muted-foreground">
-                {error || `Review for execution "${id}" could not be retrieved.`}
+                {error || t("review.notRetrieved", { id })}
               </p>
             </div>
             <div className="mt-2 flex items-center gap-3">
               <RouterLink to="/executions">
                 <Button variant="default" size="sm">
                   <ArrowLeft className="h-3.5 w-3.5" />
-                  Back to Executions
+                  {t("review.backToExecutions")}
                 </Button>
               </RouterLink>
             </div>
@@ -583,15 +588,15 @@ export function CodeReview() {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="font-mono text-[11px] text-subtle-foreground">{review.taskId ? `TASK-${review.taskId.slice(0, 8)}` : review.executionId.slice(0, 8)}</span>
-              <Badge tone={statusMeta.tone}>{review.executionStatus}</Badge>
-              {review.verificationOutcome === "Verified" && <Badge tone="green">Verified</Badge>}
-              {review.verificationOutcome === "NoNewRegressions" && <Badge tone="green">No new regressions</Badge>}
-              {review.verificationOutcome === "PartiallyVerified" && <Badge tone="amber">Partially verified</Badge>}
-              {review.verificationOutcome === "VerificationUnavailable" && <Badge tone="gray">Verification unavailable</Badge>}
-              {review.verificationOutcome === "VerificationInfrastructureError" && <Badge tone="red">Verification infra error</Badge>}
-              {review.verificationOutcome === "NeedsReview" && <Badge tone="amber">Needs review</Badge>}
-              {isApproved && <Badge tone="green">Approved</Badge>}
-              {isRejected && <Badge tone="red">Rejected</Badge>}
+              <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+              {review.verificationOutcome === "Verified" && <Badge tone="green">{t("review.badge.Verified")}</Badge>}
+              {review.verificationOutcome === "NoNewRegressions" && <Badge tone="green">{t("review.badge.NoNewRegressions")}</Badge>}
+              {review.verificationOutcome === "PartiallyVerified" && <Badge tone="amber">{t("review.badge.PartiallyVerified")}</Badge>}
+              {review.verificationOutcome === "VerificationUnavailable" && <Badge tone="gray">{t("review.badge.VerificationUnavailable")}</Badge>}
+              {review.verificationOutcome === "VerificationInfrastructureError" && <Badge tone="red">{t("review.badge.VerificationInfrastructureError")}</Badge>}
+              {review.verificationOutcome === "NeedsReview" && <Badge tone="amber">{t("review.badge.NeedsReview")}</Badge>}
+              {isApproved && <Badge tone="green">{t("review.badge.approved")}</Badge>}
+              {isRejected && <Badge tone="red">{t("review.badge.rejected")}</Badge>}
             </div>
             <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-subtle-foreground">
               <GitBranch className="h-3 w-3" />
@@ -607,7 +612,7 @@ export function CodeReview() {
                 onClick={() => setShowRejectModal(true)}
                 className="border-danger/30 text-danger hover:bg-danger-soft"
               >
-                Reject changes
+                {t("review.rejectChanges")}
               </Button>
               <Button
                 variant="primary"
@@ -620,7 +625,7 @@ export function CodeReview() {
                 ) : (
                   <CheckCircle2 className="h-3.5 w-3.5" />
                 )}
-                Approve changes
+                {t("review.approveChanges")}
               </Button>
             </>
           )}
@@ -632,7 +637,7 @@ export function CodeReview() {
               className="inline-flex items-center gap-1.5 rounded-[var(--radius-md)] bg-success-soft px-3 py-1.5 font-mono text-[12px] font-semibold text-success hover:bg-success-soft/80"
             >
               <GitPullRequest className="h-3.5 w-3.5" />
-              PR #{review.pullRequestNumber}
+              {t("review.prNumber", { n: review.pullRequestNumber })}
             </a>
           ) : (
             <Button
@@ -647,7 +652,7 @@ export function CodeReview() {
               ) : (
                 <GitPullRequest className="h-3.5 w-3.5" />
               )}
-              {isSubmittingPr ? "Opening pull request..." : "Open pull request"}
+              {isSubmittingPr ? t("review.openingPr") : t("review.openPr")}
             </Button>
           )}
         </div>
@@ -667,7 +672,7 @@ export function CodeReview() {
                   onClick={handleConnectGitHubFromReview}
                   className="rounded bg-danger px-2.5 py-1 text-xs font-medium text-white hover:opacity-90 transition-opacity"
                 >
-                  Connect GitHub
+                  {t("review.connectGitHub")}
                 </button>
               )}
               {(decisionError.toLowerCase().includes("update repository") || decisionError.toLowerCase().includes("permissions")) && (
@@ -677,7 +682,7 @@ export function CodeReview() {
                   rel="noreferrer"
                   className="rounded border border-danger/40 bg-surface px-2.5 py-1 text-xs font-medium text-danger hover:bg-danger-soft transition-colors"
                 >
-                  Update GitHub Access ↗
+                  {t("review.updateAccess")}
                 </a>
               )}
               {decisionError.toLowerCase().includes("reconnect") && (
@@ -686,7 +691,7 @@ export function CodeReview() {
                   onClick={handleConnectGitHubFromReview}
                   className="rounded bg-danger px-2.5 py-1 text-xs font-medium text-white hover:opacity-90 transition-opacity"
                 >
-                  Reconnect GitHub
+                  {t("review.reconnectGitHub")}
                 </button>
               )}
               <button onClick={() => setDecisionError(null)} className="text-subtle-foreground hover:text-foreground">
@@ -703,35 +708,35 @@ export function CodeReview() {
             <div className="flex items-center justify-between gap-2 border-b border-border/40 pb-2 mb-2">
               <div className="flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-primary" />
-                <span className="text-[12.5px] font-semibold text-foreground">Predicted vs Actual Execution</span>
+                <span className="text-[12.5px] font-semibold text-foreground">{t("review.predicted")}</span>
               </div>
               <div className="flex items-center gap-2 font-mono text-[11px]">
-                <span className="text-success font-medium">{review.predictedVsActual.matchedFiles.length} matched</span>
+                <span className="text-success font-medium">{t("review.matched", { n: review.predictedVsActual.matchedFiles.length })}</span>
                 {review.predictedVsActual.unexpectedFiles.length > 0 && (
-                  <span className="text-amber-500 font-medium">· {review.predictedVsActual.unexpectedFiles.length} unexpected</span>
+                  <span className="text-amber-500 font-medium">{t("review.unexpected", { n: review.predictedVsActual.unexpectedFiles.length })}</span>
                 )}
                 {review.predictedVsActual.missingPredictedFiles.length > 0 && (
-                  <span className="text-muted-foreground">· {review.predictedVsActual.missingPredictedFiles.length} untouched</span>
+                  <span className="text-muted-foreground">{t("review.untouched", { n: review.predictedVsActual.missingPredictedFiles.length })}</span>
                 )}
               </div>
             </div>
 
             <div className="grid gap-2 sm:grid-cols-2 text-[11.5px]">
               <div>
-                <span className="tech-label text-[10px]">Verification & Checks</span>
+                <span className="tech-label text-[10px]">{t("review.verifChecks")}</span>
                 <div className="mt-1 flex items-center gap-1.5 text-muted-foreground">
                   <CheckCircle2 className="h-3.5 w-3.5 text-success shrink-0" />
                   <span>
                     {review.predictedVsActual.allExpectedChecksExecuted
-                      ? `All ${review.predictedVsActual.expectedChecks.length || review.predictedVsActual.executedChecks.length} expected checks executed`
-                      : `${review.predictedVsActual.executedChecks.length} check(s) executed`}
+                      ? t("review.allChecks", { n: review.predictedVsActual.expectedChecks.length || review.predictedVsActual.executedChecks.length })
+                      : t("review.someChecks", { n: review.predictedVsActual.executedChecks.length })}
                   </span>
                 </div>
               </div>
 
               {review.predictedVsActual.dimensionObservations.length > 0 && (
                 <div>
-                  <span className="tech-label text-[10px]">Grounding Observations</span>
+                  <span className="tech-label text-[10px]">{t("review.grounding")}</span>
                   <ul className="mt-1 space-y-0.5 text-muted-foreground">
                     {review.predictedVsActual.dimensionObservations.map((obs, idx) => (
                       <li key={idx} className="flex items-start gap-1">
@@ -753,12 +758,12 @@ export function CodeReview() {
         {/* LEFT — file tree */}
         <aside className="border-b border-border p-4 lg:border-b-0 lg:border-r">
           <div className="mb-3 flex items-center justify-between">
-            <span className="tech-label">Changed files</span>
+            <span className="tech-label">{t("review.changedFiles")}</span>
             <span className="font-mono text-[11px] text-subtle-foreground">{review.changedFileCount}</span>
           </div>
           <div className="space-y-1">
             {review.changedFiles.length === 0 ? (
-              <div className="p-2 text-[12px] text-subtle-foreground">No changed files</div>
+              <div className="p-2 text-[12px] text-subtle-foreground">{t("review.noChangedFiles")}</div>
             ) : (
               review.changedFiles.map((f: ExecutionReviewFile) => {
                 const isActive = selectedFile === f.path
@@ -794,24 +799,24 @@ export function CodeReview() {
         <section className="min-w-0 border-b border-border lg:border-b-0">
           <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
             <span className="font-mono text-[12px] text-foreground truncate">
-              {selectedFile ? selectedFile : "Combined Git Diff"}
+              {selectedFile ? selectedFile : t("review.combinedDiff")}
             </span>
             <span className="font-mono text-[11px] text-subtle-foreground">
-              {review.changedFileCount} {review.changedFileCount === 1 ? "file" : "files"} changed
+              {t("review.filesChanged", { count: review.changedFileCount })}
             </span>
           </div>
 
           {review.diffTruncated && (
             <div className="flex items-center gap-2 border-b border-amber/30 bg-amber-soft/80 px-4 py-2 font-mono text-[11.5px] text-accent">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-              <span>Diff is truncated because it exceeded maximum size limits.</span>
+              <span>{t("review.diffTruncated")}</span>
             </div>
           )}
 
           <div className="overflow-x-auto bg-surface">
             {diffLines.length === 0 ? (
               <div className="p-8 text-center text-[13px] text-subtle-foreground">
-                No file changes detected in this execution.
+                {t("review.noChanges")}
               </div>
             ) : (
               diffLines.map((line) => <DiffRow key={line.id} line={line} />)
@@ -821,7 +826,7 @@ export function CodeReview() {
 
         {/* RIGHT — stage status & decision */}
         <aside className="p-5 lg:border-l lg:border-border">
-          <div className="tech-label mb-3">Reviewer verdict</div>
+          <div className="tech-label mb-3">{t("review.verdictTitle")}</div>
 
           {review.verdict && (
             <div className="mb-3">
@@ -842,7 +847,7 @@ export function CodeReview() {
                         : "text-subtle-foreground",
                   )}
                 />
-                <span className="tech-label">Build</span>
+                <span className="tech-label">{t("review.build")}</span>
               </div>
               <div
                 className={cn(
@@ -854,7 +859,7 @@ export function CodeReview() {
                       : "text-muted-foreground",
                 )}
               >
-                {review.build.status}
+                {statText(review.build.status)}
               </div>
             </Panel>
             <Panel className="p-3">
@@ -869,7 +874,7 @@ export function CodeReview() {
                         : "text-subtle-foreground",
                   )}
                 />
-                <span className="tech-label">Tests</span>
+                <span className="tech-label">{t("review.tests")}</span>
               </div>
               <div
                 className={cn(
@@ -884,10 +889,10 @@ export function CodeReview() {
                 )}
               >
                 {review.test.status === "NoNewRegressions"
-                  ? "No new regressions"
+                  ? t("review.noNewRegressions")
                   : review.verificationOutcome === "PartiallyVerified" && review.test.status === "Unknown"
-                    ? "No suite"
-                    : review.test.status}
+                    ? t("review.noSuite")
+                    : statText(review.test.status)}
               </div>
               {review.test.detailSummary && (
                 <div className="mt-0.5 text-[11px] text-muted-foreground">
@@ -904,7 +909,7 @@ export function CodeReview() {
           )}
 
           <div className="mt-5 space-y-3">
-            <div className="tech-label">Review decision</div>
+            <div className="tech-label">{t("review.decision")}</div>
             {isPendingDecision && (() => {
               const isBlocked = review.verificationOutcome === "NeedsReview" || review.verificationOutcome === "Failed" || review.verificationOutcome === "Blocked"
               const validationPassed = !isBlocked
@@ -912,13 +917,13 @@ export function CodeReview() {
               return (
                 <div className="space-y-2">
                   <Panel className="p-3 text-[12px] text-muted-foreground">
-                    Review is pending developer decision. You may inspect the diff and approve or reject the changes.
+                    {t("review.pendingDecision")}
                   </Panel>
                   {review.verificationOutcome === "NeedsReview" && (
                     <div className="space-y-2">
                       <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[12px] text-amber-600 dark:text-amber-400">
                         <AlertCircle className="h-4 w-4 shrink-0" />
-                        <span>Execution has unresolved regressions (NeedsReview). Approval is blocked. Retry execution to produce a new attempt.</span>
+                        <span>{t("review.needsReviewBlocked")}</span>
                       </div>
                       {review.canRetry && (
                         <Button
@@ -933,7 +938,7 @@ export function CodeReview() {
                           ) : (
                             <RotateCcw className="h-3.5 w-3.5" />
                           )}
-                          {isRetrying ? "Retrying…" : "Retry execution"}
+                          {isRetrying ? t("review.retrying") : t("review.retryExecution")}
                         </Button>
                       )}
                     </div>
@@ -941,25 +946,25 @@ export function CodeReview() {
                   {review.verificationOutcome === "NoNewRegressions" && (
                     <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[12px] text-amber-600 dark:text-amber-400">
                       <Info className="h-4 w-4 shrink-0" />
-                      <span>Pre-existing repository failure(s) remain. Delivery is allowed.</span>
+                      <span>{t("review.preExisting")}</span>
                     </div>
                   )}
                   {review.verificationOutcome === "PartiallyVerified" && (
                     <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[12px] text-amber-600 dark:text-amber-400">
                       <Info className="h-4 w-4 shrink-0" />
-                      <span>Partially verified: build passed; no repository test suite discovered.</span>
+                      <span>{t("review.partial")}</span>
                     </div>
                   )}
                   {review.verificationOutcome === "VerificationUnavailable" && (
                     <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-border bg-surface-2 p-2.5 text-[12px] text-muted-foreground">
                       <Info className="h-4 w-4 shrink-0" />
-                      <span>Verification unavailable: repository verification is unconfigured.</span>
+                      <span>{t("review.unavailableMsg")}</span>
                     </div>
                   )}
                   {review.verificationOutcome === "VerificationInfrastructureError" && (
                     <div className="flex items-center gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-[12px] text-amber-600 dark:text-amber-400">
                       <AlertCircle className="h-4 w-4 shrink-0" />
-                      <span>Verification infrastructure error occurred during check execution.</span>
+                      <span>{t("review.infraError")}</span>
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-2">
@@ -970,7 +975,7 @@ export function CodeReview() {
                       onClick={() => setShowRejectModal(true)}
                       className="w-full border-danger/30 text-danger hover:bg-danger-soft"
                     >
-                      Reject
+                      {t("review.reject")}
                     </Button>
                     <Button
                       variant="primary"
@@ -979,7 +984,7 @@ export function CodeReview() {
                       onClick={handleApprove}
                       className="w-full"
                     >
-                      {isSubmittingDecision ? <Loader2 className="h-4 w-4 animate-spin" /> : "Approve"}
+                      {isSubmittingDecision ? <Loader2 className="h-4 w-4 animate-spin" /> : t("review.approve")}
                     </Button>
                   </div>
                 </div>
@@ -991,15 +996,15 @@ export function CodeReview() {
                 <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
                   <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
                     <CheckCircle2 className="h-4 w-4 shrink-0" />
-                    <span>Review Approved</span>
+                    <span>{t("review.reviewApproved")}</span>
                   </div>
                   {review.decidedAt && (
                     <div className="font-mono text-[11px] text-subtle-foreground">
-                      Decided at {new Date(review.decidedAt).toLocaleString()}
+                      {t("review.decidedAt", { when: fmt.dateTime(review.decidedAt) })}
                     </div>
                   )}
                   <p className="text-[12px] text-muted-foreground">
-                    Execution changes approved.
+                    {t("review.changesApproved")}
                   </p>
                 </Panel>
 
@@ -1008,12 +1013,12 @@ export function CodeReview() {
                     <Panel className="border-primary/30 bg-primary-soft/30 p-4 space-y-2">
                       <div className="flex items-center gap-2 text-primary font-semibold text-[13.5px]">
                         <GitBranch className="h-4 w-4 shrink-0" />
-                        <span>Committed locally</span>
+                        <span>{t("review.committedLocally")}</span>
                         <span className="font-mono text-[11px] text-muted-foreground">({review.commitSha?.slice(0, 7)})</span>
                       </div>
                       {review.committedAt && (
                         <div className="font-mono text-[11px] text-subtle-foreground">
-                          Committed at {new Date(review.committedAt).toLocaleString()}
+                          {t("review.committedAt", { when: fmt.dateTime(review.committedAt) })}
                         </div>
                       )}
                     </Panel>
@@ -1023,14 +1028,14 @@ export function CodeReview() {
                         <Panel className="border-success/30 bg-success-soft/30 p-4 space-y-2">
                           <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
                             <UploadCloud className="h-4 w-4 shrink-0" />
-                            <span>Pushed remotely</span>
+                            <span>{t("review.pushedRemotely")}</span>
                           </div>
                           <div className="font-mono text-[11.5px] text-foreground">
                             {review.remoteBranchName || review.branchName} <span className="text-subtle-foreground">({review.remoteCommitSha?.slice(0, 7)})</span>
                           </div>
                           {review.pushedAt && (
                             <div className="font-mono text-[11px] text-subtle-foreground">
-                              Pushed at {new Date(review.pushedAt).toLocaleString()}
+                              {t("review.pushedAt", { when: fmt.dateTime(review.pushedAt) })}
                             </div>
                           )}
                         </Panel>
@@ -1040,9 +1045,9 @@ export function CodeReview() {
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2 text-success font-semibold text-[13.5px]">
                                 <GitPullRequest className="h-4 w-4 shrink-0" />
-                                <span>PR #{review.pullRequestNumber}</span>
+                                <span>{t("review.prNumber", { n: review.pullRequestNumber })}</span>
                                 <Badge tone={review.pullRequestRemoteState === "Merged" ? "green" : review.pullRequestRemoteState === "Closed" ? "red" : "blue"}>
-                                  {review.pullRequestRemoteState ?? "Open"}
+                                  {ciText(review.pullRequestRemoteState ?? "Open")}
                                 </Badge>
                               </div>
                               <Button
@@ -1057,20 +1062,20 @@ export function CodeReview() {
                                 ) : (
                                   <RotateCw className="h-3 w-3" />
                                 )}
-                                Refresh
+                                {t("review.refresh")}
                               </Button>
                             </div>
 
                             {/* Integrity Badge */}
                             {review.pullRequestIntegrityStatus && review.pullRequestIntegrityStatus !== "Unknown" && (
                               <div className="flex items-center gap-1.5 text-[11.5px] font-mono">
-                                <span className="text-subtle-foreground">Integrity:</span>
+                                <span className="text-subtle-foreground">{t("review.integrity")}</span>
                                 {review.pullRequestIntegrityStatus === "Valid" ? (
-                                  <span className="text-success font-medium">✓ Approved commit</span>
+                                  <span className="text-success font-medium">{t("review.integrityValid")}</span>
                                 ) : review.pullRequestIntegrityStatus === "HeadChanged" ? (
-                                  <span className="text-danger font-medium">⚠ PR head changed after approval</span>
+                                  <span className="text-danger font-medium">{t("review.integrityHead")}</span>
                                 ) : (
-                                  <span className="text-danger font-medium">⚠ Identity mismatch</span>
+                                  <span className="text-danger font-medium">{t("review.integrityMismatch")}</span>
                                 )}
                               </div>
                             )}
@@ -1078,7 +1083,7 @@ export function CodeReview() {
                             {/* CI Aggregate Status */}
                             {review.ciStatus && (
                               <div className="flex items-center justify-between border-t border-border/40 pt-2 text-[12px]">
-                                <span className="text-subtle-foreground">CI Status:</span>
+                                <span className="text-subtle-foreground">{t("review.ciStatus")}</span>
                                 <Badge
                                   tone={
                                     review.ciStatus === "Success"
@@ -1090,7 +1095,7 @@ export function CodeReview() {
                                           : "neutral"
                                   }
                                 >
-                                  {review.ciStatus}
+                                  {ciText(review.ciStatus)}
                                 </Badge>
                               </div>
                             )}
@@ -1098,7 +1103,7 @@ export function CodeReview() {
                             {/* CI Checks List */}
                             {review.ciChecks && review.ciChecks.length > 0 && (
                               <div className="space-y-1.5 border-t border-border/40 pt-2 font-mono text-[11px]">
-                                <div className="text-subtle-foreground font-semibold text-[10px] uppercase">Checks ({review.ciChecks.length})</div>
+                                <div className="text-subtle-foreground font-semibold text-[10px] uppercase">{t("review.checks", { n: review.ciChecks.length })}</div>
                                 {review.ciChecks.map((check) => (
                                   <div key={check.id} className="flex items-center justify-between text-foreground">
                                     <span className="truncate max-w-[180px]" title={check.name}>{check.name}</span>
@@ -1112,7 +1117,7 @@ export function CodeReview() {
                                             : "text-amber-500"
                                       )}
                                     >
-                                      {check.conclusion || check.status}
+                                      {ciText(check.conclusion || check.status)}
                                     </span>
                                   </div>
                                 ))}
@@ -1121,13 +1126,13 @@ export function CodeReview() {
 
                             {syncError && (
                               <div className="text-[11px] text-danger bg-danger-soft/60 p-2 rounded-[var(--radius-md)]">
-                                Refresh failed: {syncError}
+                                {t("review.refreshFailed", { error: syncError })}
                               </div>
                             )}
 
                             {review.pullRequestLastSyncedAt && (
                               <div className="font-mono text-[10.5px] text-subtle-foreground">
-                                Last synced {new Date(review.pullRequestLastSyncedAt).toLocaleTimeString()}
+                                {t("review.lastSynced", { when: fmt.time(review.pullRequestLastSyncedAt) })}
                               </div>
                             )}
 
@@ -1138,7 +1143,7 @@ export function CodeReview() {
                                 rel="noreferrer"
                                 className="inline-flex items-center gap-1 font-mono text-[12px] text-primary hover:underline pt-1"
                               >
-                                View on GitHub &rarr;
+                                {t("review.viewGitHub")}
                               </a>
                             )}
 
@@ -1147,18 +1152,18 @@ export function CodeReview() {
                                 <div className="flex items-center justify-between text-emerald-400 font-semibold text-[12.5px]">
                                   <div className="flex items-center gap-1.5">
                                     <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
-                                    <span>Pull Request Merged</span>
+                                    <span>{t("review.prMerged")}</span>
                                   </div>
-                                  <Badge tone="green">Merged</Badge>
+                                  <Badge tone="green">{t("review.merged")}</Badge>
                                 </div>
                                 {review.mergeCommitSha && (
                                   <div className="text-subtle-foreground truncate">
-                                    Commit: <span className="text-foreground font-semibold">{review.mergeCommitSha.slice(0, 7)}</span>
+                                    {t("review.commitLabel")}<span className="text-foreground font-semibold">{review.mergeCommitSha.slice(0, 7)}</span>
                                   </div>
                                 )}
                                 {review.mergedAt && (
                                   <div className="text-subtle-foreground">
-                                    Merged: <span className="text-foreground">{new Date(review.mergedAt).toLocaleString()}</span>
+                                    {t("review.mergedLabel")}<span className="text-foreground">{fmt.dateTime(review.mergedAt)}</span>
                                   </div>
                                 )}
                               </div>
@@ -1175,7 +1180,7 @@ export function CodeReview() {
                                 ) : (
                                   <GitPullRequest className="h-4 w-4" />
                                 )}
-                                Merge pull request
+                                {t("review.mergePr")}
                               </Button>
                             ) : review.mergeBlockedReason ? (
                               <div className="mt-3 rounded-[var(--radius-md)] border border-amber-500/20 bg-amber-500/10 p-2.5 text-[11.5px] text-amber-400 flex items-start gap-2">
@@ -1197,7 +1202,7 @@ export function CodeReview() {
                             ) : (
                               <GitPullRequest className="h-4 w-4" />
                             )}
-                            Open pull request
+                            {t("review.openPr")}
                           </Button>
                         )}
                       </div>
@@ -1214,7 +1219,7 @@ export function CodeReview() {
                         ) : (
                           <UploadCloud className="h-4 w-4" />
                         )}
-                        Push branch
+                        {t("review.pushBranch")}
                       </Button>
                     )}
                   </div>
@@ -1222,13 +1227,13 @@ export function CodeReview() {
                   <Panel className="border-amber/30 bg-amber-soft/40 p-4 space-y-2">
                     <div className="flex items-center gap-2 text-accent font-semibold text-[13px]">
                       <AlertTriangle className="h-4 w-4 shrink-0" />
-                      <span>Approved snapshot changed</span>
+                      <span>{t("review.snapshotChanged")}</span>
                     </div>
                     <p className="text-[12px] text-muted-foreground">
-                      Worktree content differs from the approved review snapshot.
+                      {t("review.snapshotChangedDesc")}
                     </p>
                     <Button variant="default" size="md" disabled className="w-full opacity-50 cursor-not-allowed">
-                      Commit changes
+                      {t("review.commitChanges")}
                     </Button>
                   </Panel>
                 ) : (
@@ -1244,7 +1249,7 @@ export function CodeReview() {
                     ) : (
                       <GitBranch className="h-4 w-4" />
                     )}
-                    Commit changes
+                    {t("review.commitChanges")}
                   </Button>
                 )}
               </div>
@@ -1254,16 +1259,16 @@ export function CodeReview() {
               <Panel className="border-danger/30 bg-danger-soft/30 p-4 space-y-2">
                 <div className="flex items-center gap-2 text-danger font-semibold text-[13.5px]">
                   <XCircle className="h-4 w-4 shrink-0" />
-                  <span>Review Rejected</span>
+                  <span>{t("review.reviewRejected")}</span>
                 </div>
                 {review.decidedAt && (
                   <div className="font-mono text-[11px] text-subtle-foreground">
-                    Decided at {new Date(review.decidedAt).toLocaleString()}
+                    {t("review.decidedAt", { when: fmt.dateTime(review.decidedAt) })}
                   </div>
                 )}
                 {review.rejectionReason && (
                   <div className="mt-2 rounded-[var(--radius-md)] border border-danger/20 bg-surface p-2.5 text-[12px] text-foreground">
-                    <span className="font-semibold block mb-0.5 text-danger text-[11px] uppercase tracking-wider">Reason</span>
+                    <span className="font-semibold block mb-0.5 text-danger text-[11px] uppercase tracking-wider">{t("review.reason")}</span>
                     {review.rejectionReason}
                   </div>
                 )}
@@ -1277,13 +1282,13 @@ export function CodeReview() {
       {showRejectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
           <div className="w-full max-w-[480px] rounded-[var(--radius-lg)] border border-border bg-canvas p-6 shadow-xl space-y-4">
-            <h3 className="text-[15px] font-semibold text-foreground">Reject Execution Changes</h3>
+            <h3 className="text-[15px] font-semibold text-foreground">{t("review.rejectModalTitle")}</h3>
             <p className="text-[12.5px] text-muted-foreground">
-              Optional: provide a short reason for rejecting these changes. This will be persisted with the audit record.
+              {t("review.rejectModalDesc")}
             </p>
             <textarea
               className="w-full h-24 rounded-[var(--radius-md)] border border-border bg-surface p-3 font-sans text-[13px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-              placeholder="Reason for rejection (optional, max 1000 characters)"
+              placeholder={t("review.rejectPlaceholder")}
               maxLength={1000}
               value={rejectionReasonInput}
               onChange={(e) => setRejectionReasonInput(e.target.value)}
@@ -1298,7 +1303,7 @@ export function CodeReview() {
                   setRejectionReasonInput("")
                 }}
               >
-                Cancel
+                {t("review.cancel")}
               </Button>
               <Button
                 variant="default"
@@ -1307,7 +1312,7 @@ export function CodeReview() {
                 onClick={handleRejectSubmit}
                 className="bg-danger text-white hover:bg-danger/90 border-transparent"
               >
-                {isSubmittingDecision ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Confirm Rejection"}
+                {isSubmittingDecision ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t("review.confirmRejection")}
               </Button>
             </div>
           </div>
@@ -1320,7 +1325,7 @@ export function CodeReview() {
           <div className="w-full max-w-[520px] rounded-[var(--radius-lg)] border border-border bg-canvas p-6 shadow-xl space-y-4">
             <div className="flex items-center gap-2 text-foreground font-semibold text-[16px]">
               <GitPullRequest className="h-5 w-5 text-emerald-500" />
-              <span>Merge Pull Request #{review.pullRequestNumber}?</span>
+              <span>{t("review.mergeTitle", { n: review.pullRequestNumber })}</span>
             </div>
 
             {mergeError && (
@@ -1332,24 +1337,24 @@ export function CodeReview() {
 
             <div className="rounded-[var(--radius-md)] border border-border/60 bg-surface p-3.5 space-y-2 font-mono text-[12px]">
               <div className="flex justify-between text-subtle-foreground">
-                <span>Base branch:</span>
+                <span>{t("review.baseBranch")}</span>
                 <span className="text-foreground font-semibold">master</span>
               </div>
               <div className="flex justify-between text-subtle-foreground">
-                <span>Head branch:</span>
+                <span>{t("review.headBranch")}</span>
                 <span className="text-foreground font-semibold">{review.remoteBranchName}</span>
               </div>
               <div className="flex justify-between text-subtle-foreground">
-                <span>Approved commit:</span>
+                <span>{t("review.approvedCommit")}</span>
                 <span className="text-foreground font-semibold">{review.remoteCommitSha?.slice(0, 7)}</span>
               </div>
               <div className="flex justify-between text-subtle-foreground border-t border-border/40 pt-1.5">
-                <span>CI Status:</span>
-                <span className="text-emerald-400 font-semibold">{review.ciStatus}</span>
+                <span>{t("review.ciStatus")}</span>
+                <span className="text-emerald-400 font-semibold">{ciText(review.ciStatus)}</span>
               </div>
             </div>
             <p className="text-[12.5px] text-muted-foreground">
-              This will merge the execution's approved pull request into the base branch on GitHub using standard merge method.
+              {t("review.mergeDesc")}
             </p>
             <div className="flex items-center justify-end gap-3 pt-2">
               <Button
@@ -1361,7 +1366,7 @@ export function CodeReview() {
                   setMergeError(null)
                 }}
               >
-                Cancel
+                {t("review.cancel")}
               </Button>
               <Button
                 variant="primary"
@@ -1370,7 +1375,7 @@ export function CodeReview() {
                 onClick={handleConfirmMerge}
                 className="bg-emerald-600 hover:bg-emerald-500 text-white"
               >
-                {isSubmittingMerge ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Confirm merge"}
+                {isSubmittingMerge ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : t("review.confirmMerge")}
               </Button>
             </div>
           </div>

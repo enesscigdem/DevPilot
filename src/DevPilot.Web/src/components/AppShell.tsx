@@ -17,7 +17,10 @@ import {
   Loader2,
   AlertCircle,
   Command as CommandIcon,
+  Languages,
 } from "lucide-react"
+import { useTranslation } from "react-i18next"
+import { LANGUAGES, setLang, type Lang } from "@/i18n"
 import { useTheme } from "@/lib/theme"
 import { useWorkspace } from "@/lib/workspace"
 import { RepositoryWorkspaceStatus } from "@/types"
@@ -28,37 +31,38 @@ import { StatusDot } from "./ui/primitives"
 
 interface NavEntry {
   to: string
-  label: string
+  label: string // i18n key
   icon: typeof Boxes
   end?: boolean
 }
 
 // Grouped by the question each area answers, in the order work flows through DevPilot.
-const navOverview: NavEntry = { to: "/", label: "Overview", icon: Boxes, end: true }
+const navOverview: NavEntry = { to: "/", label: "nav.overview", icon: Boxes, end: true }
 
 const navGroups: { label: string; items: NavEntry[] }[] = [
   {
-    label: "Plan & run",
+    label: "nav.planRun",
     items: [
-      { to: "/tasks", label: "Tasks", icon: ListChecks },
-      { to: "/executions", label: "Executions", icon: Activity },
+      { to: "/tasks", label: "nav.tasks", icon: ListChecks },
+      { to: "/executions", label: "nav.executions", icon: Activity },
     ],
   },
   {
-    label: "Understand",
+    label: "nav.understand",
     items: [
-      { to: "/projects", label: "Repository", icon: FolderGit2 },
-      { to: "/architecture", label: "Impact map", icon: Network },
-      { to: "/brain", label: "Project Brain", icon: Sparkles },
+      { to: "/projects", label: "nav.repository", icon: FolderGit2 },
+      { to: "/architecture", label: "nav.impactMap", icon: Network },
+      { to: "/brain", label: "nav.projectBrain", icon: Sparkles },
     ],
   },
   {
-    label: "Measure",
-    items: [{ to: "/insights", label: "Insights", icon: BarChart3 }],
+    label: "nav.measure",
+    items: [{ to: "/insights", label: "nav.insights", icon: BarChart3 }],
   },
 ]
 
 function NavItem({ item }: { item: NavEntry }) {
+  const { t } = useTranslation()
   return (
     <NavLink
       to={item.to}
@@ -84,7 +88,7 @@ function NavItem({ item }: { item: NavEntry }) {
             className={cn("h-4 w-4", isActive ? "text-primary" : "text-subtle-foreground group-hover:text-foreground")}
             strokeWidth={2}
           />
-          {item.label}
+          {t(item.label)}
         </>
       )}
     </NavLink>
@@ -92,6 +96,7 @@ function NavItem({ item }: { item: NavEntry }) {
 }
 
 function Logo() {
+  const { t } = useTranslation()
   return (
     <div className="flex items-center gap-2.5">
       <div className="relative flex h-8 w-8 items-center justify-center rounded-[9px] bg-foreground text-canvas">
@@ -104,14 +109,15 @@ function Logo() {
       </div>
       <div className="leading-tight">
         <div className="text-[15px] font-semibold tracking-tight text-foreground">DevPilot</div>
-        <div className="font-mono text-[10px] tracking-wide text-subtle-foreground">engineering workspace</div>
+        <div className="font-mono text-[10px] tracking-wide text-subtle-foreground">{t("common.engineeringWorkspace")}</div>
       </div>
     </div>
   )
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { theme, toggle } = useTheme()
+  const { theme, setTheme } = useTheme()
+  const { t, i18n } = useTranslation()
   const {
     activeWorkspace,
   } = useWorkspace()
@@ -151,11 +157,11 @@ export function AppShell({ children }: { children: ReactNode }) {
               <div className="truncate font-mono text-[12px] font-medium text-foreground">
                 {activeWorkspace
                   ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
-                  : "No repository"}
+                  : t("shared.shell.noRepository")}
               </div>
               <div className="flex items-center gap-1 text-[11px] text-subtle-foreground">
                 <GitBranch className="h-3 w-3" />
-                <span className="font-mono">{activeWorkspace ? activeWorkspace.branch : "none"}</span>
+                <span className="font-mono">{activeWorkspace ? activeWorkspace.branch : t("shared.shell.none")}</span>
               </div>
             </div>
             <StatusDot
@@ -179,7 +185,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <NavItem item={navOverview} />
           {navGroups.map((group) => (
             <div key={group.label} className="mt-3 flex flex-col gap-0.5">
-              <div className="tech-label px-2.5 pb-1.5">{group.label}</div>
+              <div className="tech-label px-2.5 pb-1.5">{t(group.label)}</div>
               {group.items.map((item) => (
                 <NavItem key={item.to} item={item} />
               ))}
@@ -189,16 +195,44 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <div className="mt-auto px-3 pb-4">
           <ActiveExecutionMini />
-          <div className="mt-3 flex items-center justify-between rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-1.5">
-            <span className="tech-label">theme</span>
-            <button
-              onClick={toggle}
-              className="flex items-center gap-1.5 rounded-[var(--radius-sm)] px-1.5 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-surface-3 hover:text-foreground"
-              aria-label="Toggle theme"
-            >
-              {theme === "light" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-              {theme === "light" ? "Light" : "Dark"}
-            </button>
+          <div className="mt-3 flex items-center gap-1 rounded-[var(--radius-md)] border border-border bg-surface p-0.5">
+            <div role="group" aria-label={t("common.switchLanguage")} className="flex flex-1 gap-0.5">
+              {LANGUAGES.map((l) => (
+                <button
+                  key={l.code}
+                  type="button"
+                  onClick={() => setLang(l.code as Lang)}
+                  title={l.name}
+                  aria-pressed={i18n.language === l.code}
+                  className={cn(
+                    "flex-1 rounded-[6px] py-1 font-mono text-[11px] font-semibold transition-colors",
+                    i18n.language === l.code
+                      ? "bg-primary-soft text-primary"
+                      : "text-subtle-foreground hover:bg-surface-3 hover:text-foreground",
+                  )}
+                >
+                  {l.short}
+                </button>
+              ))}
+            </div>
+            <span className="h-4 w-px shrink-0 bg-border" aria-hidden="true" />
+            <div role="group" aria-label={t("common.toggleTheme")} className="flex flex-1 gap-0.5">
+              {([["light", Sun], ["dark", Moon]] as const).map(([mode, Icon]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setTheme(mode)}
+                  title={mode === "light" ? t("common.light") : t("common.dark")}
+                  aria-pressed={theme === mode}
+                  className={cn(
+                    "flex flex-1 items-center justify-center rounded-[6px] py-1 transition-colors",
+                    theme === mode ? "bg-primary-soft text-primary" : "text-subtle-foreground hover:bg-surface-3 hover:text-foreground",
+                  )}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </aside>
@@ -216,6 +250,7 @@ export function AppShell({ children }: { children: ReactNode }) {
 }
 
 function ActiveExecutionMini() {
+  const { t } = useTranslation()
   const { activeAgentExecution } = useWorkspace()
   const [, setTick] = useState(0)
 
@@ -234,17 +269,20 @@ function ActiveExecutionMini() {
       <div className="block rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-2 text-subtle-foreground">
         <div className="flex items-center gap-1.5">
           <StatusDot tone="neutral" />
-          <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">Agent idle</span>
+          <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">{t("shared.shell.agentIdle")}</span>
         </div>
-        <div className="mt-1 truncate text-[12px] text-muted-foreground">No active execution</div>
+        <div className="mt-1 truncate text-[12px] text-muted-foreground">{t("shared.shell.noActiveExecution")}</div>
       </div>
     )
   }
 
   const elapsedText = formatElapsed(activeAgentExecution.elapsedSeconds, activeAgentExecution.startedAt, activeAgentExecution.completedAt)
-  const currentStage = activeAgentExecution.currentStageKey
-    ? `${activeAgentExecution.currentStageKey.charAt(0).toUpperCase() + activeAgentExecution.currentStageKey.slice(1)} stage`
-    : "Running"
+  const stageKey = activeAgentExecution.currentStageKey
+  const currentStage = stageKey
+    ? t("shared.shell.stageSuffix", {
+        stage: t(`shared.stage.${stageKey}`, { defaultValue: stageKey.charAt(0).toUpperCase() + stageKey.slice(1) }),
+      })
+    : t("shared.shell.running")
 
   return (
     <NavLink
@@ -253,13 +291,13 @@ function ActiveExecutionMini() {
     >
       <div className="flex items-center gap-1.5">
         <StatusDot tone="blue" pulse />
-        <span className="font-mono text-[10px] uppercase tracking-wide text-primary">Agent running</span>
+        <span className="font-mono text-[10px] uppercase tracking-wide text-primary">{t("shared.shell.agentRunning")}</span>
       </div>
       <div className="mt-1 truncate text-[12px] font-medium text-foreground">
         {activeAgentExecution.taskDisplayId} · {currentStage}
       </div>
       <div className="mt-0.5 font-mono text-[11px] text-primary/80">
-        {elapsedText} elapsed
+        {t("shared.shell.elapsed", { time: elapsedText })}
       </div>
     </NavLink>
   )
@@ -319,26 +357,28 @@ function formatElapsed(elapsedSeconds?: number | null, startedAt?: string | null
 }
 
 const routeTitles: Record<string, string> = {
-  "/": "Overview",
-  "/projects": "Repository",
-  "/tasks": "Tasks",
-  "/brain": "Project Brain",
-  "/executions": "Executions",
-  "/executions/compare": "Compare executions",
-  "/architecture": "Impact map",
-  "/insights": "Insights",
+  "/": "nav.overview",
+  "/projects": "nav.repository",
+  "/tasks": "nav.tasks",
+  "/brain": "nav.projectBrain",
+  "/executions": "nav.executions",
+  "/executions/compare": "nav.compareExecutions",
+  "/architecture": "nav.impactMap",
+  "/insights": "nav.insights",
 }
 
 function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: string }) {
-  const title =
+  const { t } = useTranslation()
+  const titleKey =
     routeTitles[path] ??
     (path.startsWith("/tasks/")
-      ? "Task & Impact Analysis"
+      ? "nav.taskImpact"
       : path.startsWith("/executions/")
-        ? "Execution"
+        ? "nav.execution"
         : path.startsWith("/review/")
-          ? "Review & delivery"
+          ? "nav.reviewDelivery"
           : "DevPilot")
+  const title = t(titleKey, { defaultValue: titleKey })
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-4 border-b border-border bg-surface/80 px-6 backdrop-blur-sm">
@@ -353,7 +393,7 @@ function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: stri
         className="ml-auto flex h-9 w-full max-w-[340px] items-center gap-2.5 rounded-[var(--radius-md)] border border-border bg-surface-2 px-3 text-left text-[13px] text-subtle-foreground transition-colors hover:border-border-strong hover:bg-surface"
       >
         <Search className="h-4 w-4" strokeWidth={2} />
-        <span className="flex-1">Search or run a command…</span>
+        <span className="flex-1">{t("common.searchPlaceholder")}</span>
         <span className="flex items-center gap-0.5 font-mono text-[11px]">
           <CommandIcon className="h-3 w-3" />K
         </span>
@@ -362,7 +402,7 @@ function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: stri
       <div className="flex items-center gap-2">
         <div className="flex items-center gap-1.5 rounded-full border border-border bg-surface-2 px-2.5 py-1">
           <StatusDot tone="green" />
-          <span className="font-mono text-[11px] text-muted-foreground">indexed</span>
+          <span className="font-mono text-[11px] text-muted-foreground">{t("common.indexed")}</span>
         </div>
         <div className="h-7 w-7 rounded-full bg-foreground text-center font-mono text-[12px] font-semibold leading-7 text-canvas">
           E

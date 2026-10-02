@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
+import { useTranslation } from "react-i18next"
 import { Plus, Search, Sparkles, CornerDownLeft, Loader2, AlertCircle } from "lucide-react"
 import { PageContainer, PageHeading, TaskRow } from "@/components/shared"
 import { Button, Panel, Badge, Kbd } from "@/components/ui/primitives"
@@ -10,13 +11,13 @@ import { TaskStatus, TaskPriority, type TaskListItem } from "@/types"
 type FilterKey = "all" | "awaiting-approval" | "executing" | "blocked" | "done" | "failed" | "draft"
 
 const filterTabs: { key: FilterKey; label: string; tone: "amber" | "blue" | "red" | "green" | "gray" | "neutral" }[] = [
-  { key: "all", label: "All", tone: "neutral" },
-  { key: "awaiting-approval", label: "Awaiting approval", tone: "amber" },
-  { key: "executing", label: "Executing", tone: "blue" },
-  { key: "blocked", label: "Blocked", tone: "red" },
-  { key: "done", label: "Done", tone: "green" },
-  { key: "failed", label: "Failed", tone: "red" },
-  { key: "draft", label: "Draft", tone: "gray" },
+  { key: "all", label: "tasks.filters.all", tone: "neutral" },
+  { key: "awaiting-approval", label: "tasks.filters.awaitingApproval", tone: "amber" },
+  { key: "executing", label: "tasks.filters.executing", tone: "blue" },
+  { key: "blocked", label: "tasks.filters.blocked", tone: "red" },
+  { key: "done", label: "tasks.filters.done", tone: "green" },
+  { key: "failed", label: "tasks.filters.failed", tone: "red" },
+  { key: "draft", label: "tasks.filters.draft", tone: "gray" },
 ]
 
 function matchesFilter(task: TaskListItem, filter: FilterKey): boolean {
@@ -45,6 +46,7 @@ function matchesFilter(task: TaskListItem, filter: FilterKey): boolean {
 }
 
 export function Tasks() {
+  const { t: tr } = useTranslation()
   const navigate = useNavigate()
   const { activeWorkspace, activeWorkspaceId } = useWorkspace()
   const [tasks, setTasks] = useState<TaskListItem[]>([])
@@ -73,7 +75,7 @@ export function Tasks() {
       const data = await getTasks({ repositoryWorkspaceId: activeWorkspaceId })
       setTasks(data)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load tasks from server.")
+      setError(err instanceof Error ? err.message : tr("tasks.errLoad"))
     } finally {
       setIsLoading(false)
     }
@@ -86,7 +88,7 @@ export function Tasks() {
   const handleCreateTask = async () => {
     if (!title.trim() || isSubmitting) return
     if (!activeWorkspaceId) {
-      setCreateError("No active repository workspace. Please connect or select a workspace.")
+      setCreateError(tr("tasks.errNoWorkspace"))
       return
     }
 
@@ -104,7 +106,7 @@ export function Tasks() {
       setDescription("")
       navigate(`/tasks/${created.id}`)
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : "Failed to create task.")
+      setCreateError(err instanceof Error ? err.message : tr("tasks.errCreate"))
     } finally {
       setIsSubmitting(false)
     }
@@ -129,9 +131,9 @@ export function Tasks() {
   return (
     <PageContainer>
       <PageHeading
-        eyebrow="Tasks"
-        title="Engineering tasks"
-        description="Describe an engineering change in plain language. DevPilot analyzes the Roslyn workspace, proposes a plan, and waits for your approval before touching code."
+        eyebrow={tr("tasks.eyebrow")}
+        title={tr("tasks.title")}
+        description={tr("tasks.description")}
       />
 
       <Panel className="mb-6 overflow-hidden">
@@ -146,7 +148,7 @@ export function Tasks() {
               onChange={(e) => setTitle(e.target.value)}
               onKeyDown={handleKeyDown}
               maxLength={200}
-              placeholder="Task title (e.g. Add rate limiting to the public products endpoint)"
+              placeholder={tr("tasks.titlePlaceholder")}
               className="w-full bg-transparent text-[14px] font-medium text-foreground outline-none placeholder:text-subtle-foreground"
               required
             />
@@ -156,7 +158,7 @@ export function Tasks() {
               onKeyDown={handleKeyDown}
               maxLength={10000}
               rows={2}
-              placeholder="Description / details (optional)…"
+              placeholder={tr("tasks.descriptionPlaceholder")}
               className="w-full resize-none bg-transparent text-[13px] leading-relaxed text-foreground outline-none placeholder:text-subtle-foreground"
             />
             {createError && (
@@ -167,13 +169,13 @@ export function Tasks() {
             )}
             <div className="mt-2 flex items-center justify-between">
               <div className="flex items-center gap-2 font-mono text-[11px] text-subtle-foreground">
-                <span>Context</span>
+                <span>{tr("tasks.context")}</span>
                 <Badge tone="neutral" mono>
                   {activeWorkspace
                     ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
-                    : "No active workspace"}
+                    : tr("tasks.noActiveWorkspace")}
                 </Badge>
-                <span className="hidden sm:inline">· active workspace</span>
+                <span className="hidden sm:inline">{tr("tasks.activeWorkspace")}</span>
               </div>
               <Button
                 variant="primary"
@@ -185,7 +187,7 @@ export function Tasks() {
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
                   <>
-                    Analyze
+                    {tr("tasks.analyze")}
                     <Kbd>
                       <CornerDownLeft className="h-3 w-3" />
                     </Kbd>
@@ -218,7 +220,7 @@ export function Tasks() {
                   style={{ background: `var(--dot-${f.tone})` }}
                 />
               )}
-              {f.label}
+              {tr(f.label)}
               <span className="font-mono text-[11px] opacity-60">{count}</span>
             </button>
           )
@@ -228,7 +230,7 @@ export function Tasks() {
           <input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Filter tasks"
+            placeholder={tr("tasks.filterPlaceholder")}
             className="w-32 bg-transparent text-[12.5px] text-foreground outline-none placeholder:text-subtle-foreground"
           />
         </div>
@@ -238,17 +240,17 @@ export function Tasks() {
         {isLoading ? (
           <div className="flex flex-col items-center justify-center gap-2 px-4 py-16 text-center">
             <Loader2 className="h-5 w-5 animate-spin text-subtle-foreground" />
-            <p className="text-[13px] text-muted-foreground">Loading tasks from API…</p>
+            <p className="text-[13px] text-muted-foreground">{tr("tasks.loading")}</p>
           </div>
         ) : error ? (
           <div className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-center">
             <AlertCircle className="h-6 w-6 text-danger" />
             <div>
-              <p className="text-[13.5px] font-medium text-foreground">Failed to load tasks</p>
+              <p className="text-[13.5px] font-medium text-foreground">{tr("tasks.failedLoad")}</p>
               <p className="mt-0.5 text-[12.5px] text-muted-foreground">{error}</p>
             </div>
             <Button variant="default" size="sm" onClick={fetchTasks}>
-              Retry
+              {tr("common.retry")}
             </Button>
           </div>
         ) : filteredTasks.length === 0 ? (
@@ -256,10 +258,10 @@ export function Tasks() {
             <Plus className="h-5 w-5 text-subtle-foreground" />
             <p className="text-[13px] text-muted-foreground">
               {!activeWorkspaceId
-                ? "No active repository workspace. Connect or select a workspace to view tasks."
+                ? tr("tasks.noWorkspaceEmpty")
                 : searchQuery.trim() || activeFilter !== "all"
-                  ? "No tasks match the selected filter."
-                  : "No tasks found."}
+                  ? tr("tasks.noMatch")
+                  : tr("tasks.noTasks")}
             </p>
           </div>
         ) : (

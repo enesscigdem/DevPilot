@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
+import { useTranslation } from "react-i18next"
+import i18n, { fmt, srv } from "@/i18n"
 import {
   ArrowLeft,
   Check,
@@ -81,10 +83,9 @@ function getStageState(
 }
 
 function formatDateTime(dateStr: string | null): string {
-  if (!dateStr) return "Not available"
+  if (!dateStr) return i18n.t("execWs.notAvailable")
   try {
-    const d = new Date(dateStr)
-    return d.toLocaleString()
+    return fmt.dateTime(dateStr)
   } catch {
     return dateStr
   }
@@ -92,45 +93,50 @@ function formatDateTime(dateStr: string | null): string {
 
 function formatTimeOnly(dateStr: string): string {
   try {
-    const d = new Date(dateStr)
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    return fmt.time(dateStr, { hour: "2-digit", minute: "2-digit", second: "2-digit" })
   } catch {
     return dateStr
   }
 }
 
 function getMetadataDisplay(act: ExecutionActivityItem, verificationOutcome?: string | null): string | null {
+  const t = i18n.t.bind(i18n)
   if (act.metadata) {
     const m = act.metadata
     if (m.eventKind === "ProviderCall") {
-      const budget = m.requestedOutputTokens ? ` · budget ${m.requestedOutputTokens}` : ""
-      const actual = m.outputTokens !== undefined && m.outputTokens !== null ? ` · output ${m.outputTokens}` : ""
+      const budget = m.requestedOutputTokens ? ` · ${t("execWs.meta.budget")} ${m.requestedOutputTokens}` : ""
+      const actual = m.outputTokens !== undefined && m.outputTokens !== null ? ` · ${t("execWs.meta.output")} ${m.outputTokens}` : ""
       const duration = m.stageDurationMs !== undefined && m.stageDurationMs !== null ? ` · ${m.stageDurationMs}ms` : ""
       const contract = m.outputContract ? ` · ${m.outputContract}` : ""
       const retry = m.compactRetryReason ? ` · ${m.compactRetryReason}` : ""
-      return `${m.providerCallKind ?? "Provider call"}${contract}${budget}${actual}${retry}${duration}`
+      return `${m.providerCallKind ?? t("execWs.meta.providerCall")}${contract}${budget}${actual}${retry}${duration}`
     }
     if (m.eventKind === "CompactRetry") {
-      const budget = m.requestedOutputTokens ? ` · budget ${m.requestedOutputTokens}` : ""
-      return `Compact retry · ${m.compactRetryReason ?? "TokenTruncation"}${budget}`
+      const budget = m.requestedOutputTokens ? ` · ${t("execWs.meta.budget")} ${m.requestedOutputTokens}` : ""
+      return `${t("execWs.meta.compactRetryLine", { reason: m.compactRetryReason ?? "TokenTruncation" })}${budget}`
     }
     if (m.eventKind === "GenerationSummary") {
-      return `${m.logicalProviderCallCount ?? 0} calls · ${m.compactRetryCount ?? 0} compact · ${m.applicabilityRepairCount ?? 0} applicability · ${m.totalGenerationTimeMs ?? 0}ms`
+      return t("execWs.meta.calls", {
+        calls: m.logicalProviderCallCount ?? 0,
+        compact: m.compactRetryCount ?? 0,
+        applicability: m.applicabilityRepairCount ?? 0,
+        ms: m.totalGenerationTimeMs ?? 0,
+      })
     }
     if (m.eventKind === "ResolvedNoChange") {
       const reason = m.noChangeReason ? ` · ${m.noChangeReason}` : ""
-      return `No change required · ${m.targetFile ?? "target"}${reason}`
+      return `${t("execWs.meta.noChange", { target: m.targetFile ?? t("execWs.meta.target") })}${reason}`
     }
     if (m.eventKind === "RepositoryPreflight") {
-      const ecosystems = m.detectedEcosystems?.join(", ") || "unknown ecosystem"
-      const unresolved = m.verificationUnresolved ? " · partial discovery" : ""
-      return `${m.discoveredCheckCount ?? 0} checks · ${ecosystems}${unresolved}`
+      const ecosystems = m.detectedEcosystems?.join(", ") || t("execWs.meta.unknownEcosystem")
+      const unresolved = m.verificationUnresolved ? ` · ${t("execWs.meta.partialDiscovery")}` : ""
+      return `${t("execWs.meta.checks", { n: m.discoveredCheckCount ?? 0, eco: ecosystems })}${unresolved}`
     }
     if (m.repositoryCheckId && !(m.repairKind && m.repairRound)) {
       const duration = m.stageDurationMs !== undefined && m.stageDurationMs !== null ? ` · ${m.stageDurationMs}ms` : ""
-      const exitCode = m.processExitCode !== undefined && m.processExitCode !== null ? ` · exit ${m.processExitCode}` : ""
+      const exitCode = m.processExitCode !== undefined && m.processExitCode !== null ? ` · ${t("execWs.meta.exit")} ${m.processExitCode}` : ""
       const failure = m.verificationFailureCategory ? ` · ${m.verificationFailureCategory}` : ""
-      return `${m.repositoryCheckKind ?? "Check"} · ${m.repositoryCheckId}${exitCode}${failure}${duration}`
+      return `${m.repositoryCheckKind ?? t("execWs.meta.check")} · ${m.repositoryCheckId}${exitCode}${failure}${duration}`
     }
     if (m.repairKind && m.repairRound) {
       const targets = m.repairFiles?.length ? ` · ${m.repairFiles.join(", ")}` : ""
@@ -139,47 +145,46 @@ function getMetadataDisplay(act: ExecutionActivityItem, verificationOutcome?: st
       const testName = m.testName ? ` · ${m.testName}` : ""
       const evidence = m.diagnosticLines?.length ? ` · ${m.diagnosticLines.slice(0, 5).join(" | ")}` : ""
       const check = m.repositoryCheckKind ? ` · ${m.repositoryCheckKind}` : ""
-      return `${m.repairKind} repair ${m.repairRound}${targets}${reason}${testName}${progress}${check}${evidence}`
+      return `${t("execWs.meta.repair", { kind: m.repairKind, round: m.repairRound })}${targets}${reason}${testName}${progress}${check}${evidence}`
     }
     if (m.modifiedFileCount !== undefined && m.modifiedFileCount !== null) {
-      return `${m.modifiedFileCount} ${m.modifiedFileCount === 1 ? "file" : "files"} modified`
+      return t("execWs.meta.filesModified", { count: m.modifiedFileCount })
     }
     if (m.branchName) {
-      return `Branch: ${m.branchName}`
+      return t("execWs.meta.branch", { name: m.branchName })
     }
   }
   if (act.stage === "Execution" && act.status === "Completed") {
-    return verificationOutcome === "NeedsReview"
-      ? "Needs review — authoritative build or tests remain failed"
-      : "Ready for review"
+    return verificationOutcome === "NeedsReview" ? t("execWs.meta.needsReviewAuth") : t("execWs.meta.readyForReview")
   }
   return null
 }
 
 function getPrimaryActivityLabel(act: ExecutionActivityItem): string {
+  const t = i18n.t.bind(i18n)
   switch (act.metadata?.eventKind) {
     case "GeneratingChange":
-      return act.status === "Completed" ? "Generating change completed" : "Generating change"
+      return act.status === "Completed" ? t("execWs.act.generatingChangeDone") : t("execWs.act.generatingChange")
     case "VerifyingRepository":
-      return "Verifying repository"
     case "RepositoryPreflight":
-      return "Verifying repository"
+      return t("execWs.act.verifying")
     case "FixingBuildIssue":
-      return "Fixing build issue"
+      return t("execWs.act.fixingBuild")
     case "FixingFailingTest":
-      return "Fixing failing test"
+      return t("execWs.act.fixingTest")
     case "ReadyForReview":
-      return "Ready for review"
+      return t("execWs.act.ready")
     case "StoppedWithEvidence":
-      return "Stopped with evidence"
+      return t("execWs.act.stopped")
     case "ResolvedNoChange":
-      return "No change required"
+      return t("execWs.act.noChange")
     default:
-      return act.message
+      return srv(act.message)
   }
 }
 
 export function ExecutionWorkspace() {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const { id } = useParams<{ id: string }>()
   const { activeWorkspaceId, isLoading: isWorkspaceLoading, refreshOverview } = useWorkspace()
@@ -222,7 +227,7 @@ export function ExecutionWorkspace() {
       navigate(`/executions/${newExecution.id}`)
     } catch (err) {
       await fetchData(false)
-      setRetryError(err instanceof Error ? err.message : "Failed to retry execution.")
+      setRetryError(err instanceof Error ? err.message : t("execWs.errRetry"))
     } finally {
       setIsRetrying(false)
     }
@@ -238,7 +243,7 @@ export function ExecutionWorkspace() {
       refreshOverview(true)
       await fetchData(false)
     } catch (err) {
-      setCancelError(err instanceof Error ? err.message : "Failed to cancel execution.")
+      setCancelError(err instanceof Error ? err.message : t("execWs.errCancel"))
     } finally {
       setIsCanceling(false)
     }
@@ -264,7 +269,7 @@ export function ExecutionWorkspace() {
 
       if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
         if (activeWorkspaceId && execData.repositoryWorkspaceId && execData.repositoryWorkspaceId !== activeWorkspaceId) {
-          setError(`Execution run "${id}" does not belong to the selected workspace.`)
+          setError(t("execWs.wrongWorkspace", { id }))
           setExecution(null)
           setActiveExecutionForTask(null)
         } else {
@@ -284,7 +289,7 @@ export function ExecutionWorkspace() {
       if (signal?.aborted) return
       if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
         if (showLoadingSpinner) {
-          setError(err instanceof Error ? err.message : "Failed to load execution detail.")
+          setError(err instanceof Error ? err.message : t("execWs.errLoad"))
           setExecution(null)
           setActiveExecutionForTask(null)
         }
@@ -330,7 +335,7 @@ export function ExecutionWorkspace() {
       <div className="flex h-[calc(100vh-100px)] w-full items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-center">
           <Loader2 className="h-6 w-6 animate-spin text-subtle-foreground" />
-          <p className="text-[13.5px] font-medium text-foreground">Loading execution details…</p>
+          <p className="text-[13.5px] font-medium text-foreground">{t("execWs.loading")}</p>
         </div>
       </div>
     )
@@ -342,19 +347,19 @@ export function ExecutionWorkspace() {
         <Panel className="flex flex-col items-center justify-center gap-3 p-8 text-center">
           <AlertCircle className="h-8 w-8 text-danger" />
           <div>
-            <h2 className="text-[16px] font-semibold text-foreground">Execution Not Found</h2>
+            <h2 className="text-[16px] font-semibold text-foreground">{t("execWs.notFound")}</h2>
             <p className="mt-1 text-[13px] text-muted-foreground">
-              {error || `Execution run "${id}" could not be retrieved from the server.`}
+              {error || t("execWs.notFoundDesc", { id })}
             </p>
           </div>
           <div className="mt-2 flex items-center gap-3">
             <Button variant="default" size="sm" onClick={() => fetchData(true)}>
-              Retry
+              {t("common.retry")}
             </Button>
             <Link to="/executions">
               <Button variant="primary" size="sm">
                 <ArrowLeft className="h-3.5 w-3.5" />
-                Back to Executions
+                {t("execWs.backToExecutions")}
               </Button>
             </Link>
           </div>
@@ -434,7 +439,7 @@ export function ExecutionWorkspace() {
               onClick={() => navigate(`/tasks/${execution.developmentTaskId}`)}
             >
               <Eye className="h-3.5 w-3.5" />
-              View task
+              {t("execWs.viewTask")}
             </Button>
             {(isPending || isRunning) && (
               <Button
@@ -447,12 +452,12 @@ export function ExecutionWorkspace() {
                 {isCanceling ? (
                   <>
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    Canceling…
+                    {t("execWs.canceling")}
                   </>
                 ) : (
                   <>
                     <X className="h-3.5 w-3.5" />
-                    Cancel execution
+                    {t("execWs.cancelExecution")}
                   </>
                 )}
               </Button>
@@ -466,7 +471,7 @@ export function ExecutionWorkspace() {
                   onClick={() => navigate(`/executions/${activeExecutionForTask.id}`)}
                 >
                   <Play className="h-3.5 w-3.5 text-primary" />
-                  View active execution
+                  {t("execWs.viewActive")}
                 </Button>
               ) : (
                 <Button
@@ -478,12 +483,12 @@ export function ExecutionWorkspace() {
                   {isRetrying ? (
                     <>
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      Retrying…
+                      {t("execWs.retrying")}
                     </>
                   ) : (
                     <>
                       <RotateCcw className="h-3.5 w-3.5" />
-                      Retry execution
+                      {t("execWs.retryExecution")}
                     </>
                   )}
                 </Button>
@@ -496,7 +501,7 @@ export function ExecutionWorkspace() {
               onClick={() => navigate(`/review/${execution.id}`)}
             >
               <FileCode2 className="h-3.5 w-3.5" />
-              Code review
+              {t("execWs.codeReview")}
             </Button>
           </div>
         </div>
@@ -512,7 +517,7 @@ export function ExecutionWorkspace() {
       <div className="mx-auto grid max-w-[1500px] grid-cols-1 gap-0 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
         {/* LEFT — stage rail */}
         <aside className="border-b border-border p-5 lg:border-b-0 lg:border-r">
-          <div className="tech-label mb-3">Pipeline</div>
+          <div className="tech-label mb-3">{t("execWs.pipeline")}</div>
           <ol className="relative">
             {stages.map((st, i) => {
               const backendState = execution.stages?.[i]?.state?.toLowerCase()
@@ -570,23 +575,23 @@ export function ExecutionWorkspace() {
                     </div>
                     {state === "active" && (
                       <span className="font-mono text-[10.5px] text-primary">
-                        {i === 5 ? "review ready" : "in progress"}
+                        {i === 5 ? t("execWs.reviewReady") : t("execWs.inProgress")}
                       </span>
                     )}
                     {state === "done" && i === 5 && (
-                      <span className="font-mono text-[10.5px] text-success">approved</span>
+                      <span className="font-mono text-[10.5px] text-success">{t("execWs.approved")}</span>
                     )}
                     {state === "failed" && (
                       <span className="font-mono text-[10.5px] text-danger">
-                        {i === 5 ? "rejected" : "failed here"}
+                        {i === 5 ? t("execWs.rejected") : t("execWs.failedHere")}
                       </span>
                     )}
                     {state === "needsreview" && (
                       <span className="font-mono text-[10.5px] text-amber-600 dark:text-amber-400">
-                        needs review
+                        {t("execWs.needsReview")}
                       </span>
                     )}
-                    {state === "blocked" && <span className="font-mono text-[10.5px] text-accent">cancelled</span>}
+                    {state === "blocked" && <span className="font-mono text-[10.5px] text-accent">{t("execWs.cancelled")}</span>}
                   </div>
                 </li>
               )
@@ -599,10 +604,10 @@ export function ExecutionWorkspace() {
           <div className="flex items-center justify-between border-b border-border px-5 py-3">
             <div className="flex items-center gap-2">
               <Terminal className="h-3.5 w-3.5 text-subtle-foreground" />
-              <span className="text-[13px] font-semibold text-foreground">Execution activity</span>
+              <span className="text-[13px] font-semibold text-foreground">{t("execWs.activity")}</span>
             </div>
             <span className="font-mono text-[11px] text-subtle-foreground">
-              {activities.length} {activities.length === 1 ? "event" : "events"}
+              {t("execWs.events", { count: activities.length })}
             </span>
           </div>
 
@@ -611,18 +616,18 @@ export function ExecutionWorkspace() {
               isPending || isRunning ? (
                 <div className="flex flex-col items-center justify-center gap-2 py-16 text-center text-subtle-foreground">
                   <Clock className="h-6 w-6 animate-pulse text-primary" />
-                  <p className="text-[13.5px] font-medium text-foreground">Waiting for execution activity...</p>
+                  <p className="text-[13.5px] font-medium text-foreground">{t("execWs.waiting")}</p>
                   <p className="font-mono text-[11px]">
                     {isRunning
-                      ? `Started at ${formatDateTime(execution.startedAt)}`
-                      : `Created on ${formatDateTime(execution.createdAt)}`}
+                      ? t("execWs.startedAt", { when: formatDateTime(execution.startedAt) })
+                      : t("execWs.createdOn", { when: formatDateTime(execution.createdAt) })}
                   </p>
                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center gap-2 py-16 text-center text-subtle-foreground">
                   <Clock className="h-6 w-6 text-subtle-foreground" />
                   <p className="text-[13.5px] font-medium text-foreground">
-                    Detailed activity was not recorded for this execution.
+                    {t("execWs.noActivity")}
                   </p>
                 </div>
               )
@@ -648,11 +653,11 @@ export function ExecutionWorkspace() {
                   }> = []
 
                   let buildState: "idle" | "running" | "passed" | "failed" = "idle"
-                  let buildLabel = "Build"
+                  let buildLabel = t("execWs.build")
                   let buildDuration = ""
 
                   let testState: "idle" | "running" | "passed" | "failed" = "idle"
-                  let testLabel = "Tests"
+                  let testLabel = t("execWs.tests")
                   let testDuration = ""
 
                   // Single pass over activities in chronological order
@@ -688,7 +693,7 @@ export function ExecutionWorkspace() {
                       const existing = fileMap.get(fileName)
                       if (existing) {
                         existing.status = "retrying"
-                        existing.badge = `compact retry${budgetTransition} · output limit`
+                        existing.badge = `${t("execWs.compactRetry")}${budgetTransition} · ${t("execWs.outputLimit")}`
                       }
                     }
 
@@ -700,7 +705,7 @@ export function ExecutionWorkspace() {
                       const existing = fileMap.get(fileName)
                       if (existing) {
                         existing.status = "repairing"
-                        existing.badge = `applicability repair${reason}`
+                        existing.badge = `${t("execWs.applicabilityRepair")}${reason}`
                       }
                     }
 
@@ -724,11 +729,11 @@ export function ExecutionWorkspace() {
                     // 6. Compile repair / Stage repair
                     if (act.metadata?.repairKind && act.metadata?.repairRound) {
                       const fileCount = act.metadata.repairFiles?.length ?? act.metadata.modifiedFileCount
-                      const scope = fileCount ? ` · ${fileCount} ${fileCount === 1 ? "file" : "files"}` : ""
+                      const scope = fileCount ? ` · ${t("common.files", { count: fileCount })}` : ""
                       const fileNames = act.metadata.repairFiles?.map(f => f.split("/").pop()).filter(Boolean).join(", ")
                       repairItems.push({
                         id: act.id,
-                        message: `${act.metadata.repairKind} repair ${act.metadata.repairRound}${scope}`,
+                        message: `${t("execWs.meta.repair", { kind: act.metadata.repairKind, round: act.metadata.repairRound })}${scope}`,
                         detail: fileNames || undefined,
                         status: act.status === "Completed" ? "completed" : act.status === "Failed" ? "failed" : "running",
                       })
@@ -745,32 +750,32 @@ export function ExecutionWorkspace() {
                     if (act.stage === "Build") {
                       if (act.status === "Started") {
                         buildState = "running"
-                        buildLabel = "Build"
+                        buildLabel = t("execWs.build")
                       } else if (act.status === "Completed") {
                         buildState = "passed"
-                        buildLabel = "Build"
+                        buildLabel = t("execWs.build")
                         if (act.metadata?.stageDurationMs) {
-                          buildDuration = `${Math.round(act.metadata.stageDurationMs / 1000)}s`
+                          buildDuration = `${Math.round(act.metadata.stageDurationMs / 1000)}${t("shared.units.s")}`
                         }
                       } else if (act.status === "Failed") {
                         buildState = "failed"
-                        buildLabel = "Build"
+                        buildLabel = t("execWs.build")
                       }
                     }
 
                     if (act.stage === "Test") {
                       if (act.status === "Started") {
                         testState = "running"
-                        testLabel = "Tests"
+                        testLabel = t("execWs.tests")
                       } else if (act.status === "Completed") {
                         testState = "passed"
-                        testLabel = "Tests"
+                        testLabel = t("execWs.tests")
                         if (act.metadata?.stageDurationMs) {
-                          testDuration = `${Math.round(act.metadata.stageDurationMs / 1000)}s`
+                          testDuration = `${Math.round(act.metadata.stageDurationMs / 1000)}${t("shared.units.s")}`
                         }
                       } else if (act.status === "Failed") {
                         testState = "failed"
-                        testLabel = "Tests"
+                        testLabel = t("execWs.tests")
                       }
                     }
                   }
@@ -786,15 +791,17 @@ export function ExecutionWorkspace() {
                   const startedAtMs = execution.startedAt ? new Date(execution.startedAt).getTime() : 0
                   const completedAtMs = execution.completedAt ? new Date(execution.completedAt).getTime() : nowMs
                   const elapsedSec = startedAtMs > 0 ? Math.max(1, Math.floor(((execution.completedAt ? completedAtMs : nowMs) - startedAtMs) / 1000)) : undefined
-                  const elapsedFormatted = elapsedSec !== undefined ? (elapsedSec >= 60 ? `${Math.floor(elapsedSec / 60)}m ${elapsedSec % 60}s` : `${elapsedSec}s`) : "0s"
+                  const uS = t("shared.units.s")
+                  const uM = t("shared.units.m")
+                  const elapsedFormatted = elapsedSec !== undefined ? (elapsedSec >= 60 ? `${Math.floor(elapsedSec / 60)}${uM} ${elapsedSec % 60}${uS}` : `${elapsedSec}${uS}`) : `0${uS}`
 
                   const nextStageHint = !isGenComplete
-                    ? "Apply → Build → Tests"
+                    ? t("execWs.hintApply")
                     : buildState === "idle" || buildState === "running"
-                      ? "Build → Tests"
+                      ? t("execWs.hintBuild")
                       : testState === "idle" || testState === "running"
-                        ? "Tests → Code review"
-                        : "Code review"
+                        ? t("execWs.hintTests")
+                        : t("execWs.hintReview")
 
                   return (
                     <>
@@ -807,8 +814,8 @@ export function ExecutionWorkspace() {
                               <Cpu className="h-4 w-4 text-primary shrink-0" />
                               <span className="text-[13.5px] font-semibold text-foreground">
                                 {isGenComplete
-                                  ? `Changes generated · ${completedCount}/${totalFiles} complete · ${elapsedFormatted}`
-                                  : `Generating changes · ${completedCount}/${totalFiles || "…"} complete · ${elapsedFormatted}`}
+                                  ? t("execWs.changesGenerated", { done: completedCount, total: totalFiles, elapsed: elapsedFormatted })
+                                  : t("execWs.generating", { done: completedCount, total: totalFiles || "…", elapsed: elapsedFormatted })}
                               </span>
                             </div>
                             <span className="font-mono text-[11.5px] font-medium text-muted-foreground">
@@ -827,8 +834,8 @@ export function ExecutionWorkspace() {
                           </div>
 
                           <div className="mt-2 flex items-center justify-between text-[11px] text-subtle-foreground font-mono">
-                            <span>Stage: {isGenComplete ? (buildState === "running" || testState === "running" ? "Verification" : "Complete") : "Developer Agent"}</span>
-                            <span>Next: {nextStageHint}</span>
+                            <span>{t("execWs.stageLine", { stage: isGenComplete ? (buildState === "running" || testState === "running" ? t("execWs.stageVerification") : t("execWs.stageComplete")) : t("execWs.stageAgent") })}</span>
+                            <span>{t("execWs.nextLine", { hint: nextStageHint })}</span>
                           </div>
                         </div>
 
@@ -837,7 +844,7 @@ export function ExecutionWorkspace() {
                           <div className="rounded-[var(--radius-md)] border border-primary/20 bg-primary-soft/30 p-3">
                             <div className="tech-label text-[10.5px] text-primary mb-2 flex items-center gap-1.5">
                               <CircleDot className="h-3 w-3 animate-pulse-dot text-primary motion-reduce:animate-none" />
-                              Active file ({runningFiles.length})
+                              {t("execWs.activeFile", { n: runningFiles.length })}
                             </div>
                             <div className="space-y-2">
                               {runningFiles.map((rf) => {
@@ -855,7 +862,7 @@ export function ExecutionWorkspace() {
                                         </span>
                                       </div>
                                       <span className="font-mono text-[11px] text-primary shrink-0 ml-2">
-                                        {liveSeconds}s
+                                        {liveSeconds}{uS}
                                       </span>
                                     </div>
                                     {rf.badge && (
@@ -876,7 +883,7 @@ export function ExecutionWorkspace() {
                         {completedFiles.length > 0 && (
                           <div className="space-y-2">
                             <div className="tech-label text-[10.5px] text-subtle-foreground flex items-center justify-between">
-                              <span>Completed files ({completedFiles.length})</span>
+                              <span>{t("execWs.completedFiles", { n: completedFiles.length })}</span>
                             </div>
                             <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
                               {completedFiles.map((cf) => (
@@ -897,7 +904,7 @@ export function ExecutionWorkspace() {
                                   </div>
                                   {cf.durationSec !== undefined && (
                                     <span className="font-mono text-[10.5px] text-subtle-foreground shrink-0 ml-2">
-                                      {cf.durationSec}s
+                                      {cf.durationSec}{uS}
                                     </span>
                                   )}
                                 </div>
@@ -911,7 +918,7 @@ export function ExecutionWorkspace() {
                           <div className="rounded-[var(--radius-md)] border border-accent-line/40 bg-accent-soft/30 p-3 space-y-1.5">
                             <div className="tech-label text-[10.5px] text-accent flex items-center gap-1.5">
                               <RotateCcw className="h-3 w-3" />
-                              Repair & convergence
+                              {t("execWs.repairConvergence")}
                             </div>
                             <div className="space-y-1">
                               {repairItems.map((item) => (
@@ -927,7 +934,7 @@ export function ExecutionWorkspace() {
                                     )}
                                   </div>
                                   <Badge tone={item.status === "completed" ? "green" : item.status === "failed" ? "red" : "amber"} className="text-[10px] px-1 py-0">
-                                    {item.status}
+                                    {t(`execWs.repairStatus.${item.status}`)}
                                   </Badge>
                                 </div>
                               ))}
@@ -937,7 +944,7 @@ export function ExecutionWorkspace() {
 
                         {/* Verification Repository Checks Section */}
                         <div className="border-t border-border/50 pt-3 space-y-2">
-                          <div className="tech-label text-[10.5px]">Repository Checks</div>
+                          <div className="tech-label text-[10.5px]">{t("execWs.repoChecksTitle")}</div>
                           <div className="grid grid-cols-2 gap-2 text-[12px]">
                             {/* Build check */}
                             <div className="flex items-center justify-between rounded-[var(--radius-sm)] border border-border bg-surface-2 px-2.5 py-1.5">
@@ -958,7 +965,7 @@ export function ExecutionWorkspace() {
                                   <span className="font-mono text-[10.5px] text-subtle-foreground">{buildDuration}</span>
                                 )}
                                 <Badge tone={buildState === "passed" ? "green" : buildState === "failed" ? "red" : buildState === "running" ? "blue" : "neutral"} className="text-[9.5px] px-1 py-0 font-mono">
-                                  {buildState === "passed" ? "Passed" : buildState === "failed" ? "Failed" : buildState === "running" ? "Running" : "Waiting"}
+                                  {buildState === "passed" ? t("execWs.passed") : buildState === "failed" ? t("execWs.failed") : buildState === "running" ? t("execWs.running") : t("execWs.waitingBadge")}
                                 </Badge>
                               </div>
                             </div>
@@ -982,7 +989,7 @@ export function ExecutionWorkspace() {
                                   <span className="font-mono text-[10.5px] text-subtle-foreground">{testDuration}</span>
                                 )}
                                 <Badge tone={testState === "passed" ? "green" : testState === "failed" ? "red" : testState === "running" ? "blue" : "neutral"} className="text-[9.5px] px-1 py-0 font-mono">
-                                  {testState === "passed" ? "Passed" : testState === "failed" ? "Failed" : testState === "running" ? "Running" : "Waiting"}
+                                  {testState === "passed" ? t("execWs.passed") : testState === "failed" ? t("execWs.failed") : testState === "running" ? t("execWs.running") : t("execWs.waitingBadge")}
                                 </Badge>
                               </div>
                             </div>
@@ -999,9 +1006,9 @@ export function ExecutionWorkspace() {
                         >
                           <div className="flex items-center gap-2">
                             <Terminal className="h-3.5 w-3.5 text-subtle-foreground" />
-                            <span>Raw technical log</span>
+                            <span>{t("execWs.rawLog")}</span>
                             <span className="font-mono text-[11px] text-subtle-foreground">
-                              ({activities.length} {activities.length === 1 ? "event" : "events"})
+                              ({t("execWs.events", { count: activities.length })})
                             </span>
                           </div>
                           {showGenDetails ? (
@@ -1036,7 +1043,7 @@ export function ExecutionWorkspace() {
                                   </div>
                                   <div className="min-w-0 flex-1 font-mono">
                                     <div className="flex items-center justify-between gap-2">
-                                      <span className="text-foreground truncate">{act.message}</span>
+                                      <span className="text-foreground truncate">{srv(act.message)}</span>
                                       <span className="text-[10px] text-subtle-foreground shrink-0">{formattedTime}</span>
                                     </div>
                                     {metaText && (
@@ -1061,39 +1068,39 @@ export function ExecutionWorkspace() {
 
         {/* RIGHT — run telemetry */}
         <aside className="p-5 lg:border-l lg:border-border">
-          <div className="tech-label mb-3">Run telemetry</div>
+          <div className="tech-label mb-3">{t("execWs.telemetry")}</div>
           <div className="space-y-3">
             {execution.verdict && <VerdictCard verdict={execution.verdict} />}
             {execution.usage && <UsagePanel usage={execution.usage} />}
             <Panel className="p-3.5 space-y-2 font-mono text-[11px]">
               <div className="flex items-center justify-between text-subtle-foreground">
-                <span>Created</span>
+                <span>{t("execWs.created")}</span>
                 <span className="text-foreground">{formatDateTime(execution.createdAt)}</span>
               </div>
               <div className="flex items-center justify-between text-subtle-foreground">
-                <span>Started</span>
+                <span>{t("execWs.started")}</span>
                 <span className="text-foreground">{execution.startedAt ? formatDateTime(execution.startedAt) : "—"}</span>
               </div>
               <div className="flex items-center justify-between text-subtle-foreground">
-                <span>Completed</span>
+                <span>{t("execWs.completed")}</span>
                 <span className="text-foreground">{execution.completedAt ? formatDateTime(execution.completedAt) : "—"}</span>
               </div>
               {execution.commitStatus === "Committed" && (
                 <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
-                  <span>Local Commit</span>
-                  <span className="text-success font-semibold">{execution.commitSha?.slice(0, 7) ?? "Committed"}</span>
+                  <span>{t("execWs.localCommit")}</span>
+                  <span className="text-success font-semibold">{execution.commitSha?.slice(0, 7) ?? t("execWs.committed")}</span>
                 </div>
               )}
               {execution.pushStatus === "Pushed" && (
                 <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
-                  <span>Remote Push</span>
-                  <span className="text-success font-semibold">{execution.remoteCommitSha?.slice(0, 7) ?? "Pushed"}</span>
+                  <span>{t("execWs.remotePush")}</span>
+                  <span className="text-success font-semibold">{execution.remoteCommitSha?.slice(0, 7) ?? t("execWs.pushed")}</span>
                 </div>
               )}
               {execution.pullRequestStatus === "Open" && (
                 <>
                   <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
-                    <span>Pull Request</span>
+                    <span>{t("execWs.pullRequest")}</span>
                     {execution.pullRequestUrl ? (
                       <a href={execution.pullRequestUrl} target="_blank" rel="noreferrer" className="text-success font-semibold hover:underline">
                         #{execution.pullRequestNumber} ({execution.pullRequestRemoteState ?? "Open"}) &rarr;
@@ -1104,7 +1111,7 @@ export function ExecutionWorkspace() {
                   </div>
                   {execution.ciStatus && (
                     <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
-                      <span>CI Status</span>
+                      <span>{t("execWs.ciStatus")}</span>
                       <span className={cn(
                         "font-semibold",
                         execution.ciStatus === "Success" ? "text-success" : execution.ciStatus === "Failure" ? "text-danger" : "text-amber-500"
@@ -1115,9 +1122,9 @@ export function ExecutionWorkspace() {
                   )}
                   {execution.mergeStatus === "Merged" && (
                     <div className="flex items-center justify-between border-t border-border/40 pt-2 text-subtle-foreground">
-                      <span>Merge Status</span>
+                      <span>{t("execWs.mergeStatus")}</span>
                       <span className="text-emerald-400 font-semibold truncate">
-                        Merged ({execution.mergeCommitSha?.slice(0, 7) ?? "Confirmed"})
+                        {t("execWs.mergedConfirmed", { sha: execution.mergeCommitSha?.slice(0, 7) ?? t("execWs.confirmed") })}
                       </span>
                     </div>
                   )}
@@ -1127,37 +1134,37 @@ export function ExecutionWorkspace() {
 
             <Panel className="p-3.5">
               <div className="flex items-center justify-between">
-                <span className="tech-label">Model</span>
-                <span className="font-mono text-[11px] text-muted-foreground">{execution.model || "Not recorded"}</span>
+                <span className="tech-label">{t("execWs.model")}</span>
+                <span className="font-mono text-[11px] text-muted-foreground">{execution.model || t("execWs.notRecorded")}</span>
               </div>
             </Panel>
           </div>
 
-          <div className="tech-label mb-2 mt-5">Repository checks</div>
+          <div className="tech-label mb-2 mt-5">{t("execWs.repoChecks")}</div>
           <Panel className="p-3.5">
             <div className="flex items-center gap-2 text-[12.5px]">
               <Hammer className="h-3.5 w-3.5 text-subtle-foreground" />
-              <span className="text-foreground">Prerequisites</span>
+              <span className="text-foreground">{t("execWs.prerequisites")}</span>
               <Badge
                 tone={buildPassed ? "green" : buildFailed ? "red" : "neutral"}
                 className="ml-auto"
               >
-                {buildPassed ? "Passed" : buildFailed ? "Failed" : "—"}
+                {buildPassed ? t("execWs.passed") : buildFailed ? t("execWs.failed") : "—"}
               </Badge>
             </div>
             <div className="mt-1.5 flex items-center gap-2 text-[12.5px]">
               <FlaskConical className="h-3.5 w-3.5 text-subtle-foreground" />
-              <span className="text-foreground">Tests</span>
+              <span className="text-foreground">{t("execWs.tests")}</span>
               <Badge
                 tone={testPassed ? "green" : testFailed ? "red" : "neutral"}
                 className="ml-auto"
               >
                 {testPassed
-                  ? "Passed"
+                  ? t("execWs.passed")
                   : testFailed
-                    ? "Failed"
+                    ? t("execWs.failed")
                     : execution.verificationOutcome === "PartiallyVerified"
-                      ? "No suite"
+                      ? t("execWs.noSuite")
                       : "—"}
               </Badge>
             </div>
@@ -1170,7 +1177,7 @@ export function ExecutionWorkspace() {
             onClick={() => navigate(`/tasks/${execution.developmentTaskId}`)}
           >
             <FileText className="h-3.5 w-3.5" />
-            Open task detail
+            {t("execWs.openTask")}
           </Button>
         </aside>
       </div>

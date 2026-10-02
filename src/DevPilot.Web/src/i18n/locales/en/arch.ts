@@ -1,0 +1,28 @@
+const arch = {
+  eyebrow: "Impact map",
+  title: "Change impact map",
+  description:
+    "A live dependency graph of the solution, derived from the Roslyn symbol graph. Highlighted nodes are touched by the active task — trace how a change ripples across layers.",
+  showingImpacted: "Showing impacted",
+  highlightImpacted: "Highlight impacted",
+  errLoad: "Failed to load architecture graph.",
+  analyzing: "Analyzing solution architecture graph...",
+  failed: "Failed to load architecture",
+  noWorkspace: "No repository workspace selected",
+  noWorkspaceDesc: "Select or create a workspace in the sidebar to inspect its architecture.",
+  noProjects: "No projects found",
+  noProjectsDesc: "The selected workspace does not contain any analyzable .NET projects or frontend modules.",
+  legendImpacted: "Impacted by active task",
+  legendPath: "Selected dependency path",
+  inspector: "Node inspector",
+  impacted: "impacted",
+  whyImpacted: "Why it's impacted",
+  dependencies: "Dependencies",
+  dependedOnBy: "Depended on by",
+  dependsOn: "Depends on",
+  noDeps: "No project dependencies",
+  keyFiles: "Key files",
+  noFiles: "No source files detected",
+  selectNode: "Select a node to inspect its dependencies and key files.",
+}
+export default arch

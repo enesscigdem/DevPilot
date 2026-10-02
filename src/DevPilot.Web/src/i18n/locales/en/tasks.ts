@@ -1,0 +1,31 @@
+const tasks = {
+  eyebrow: "Tasks",
+  title: "Engineering tasks",
+  description:
+    "Describe an engineering change in plain language. DevPilot analyzes the Roslyn workspace, proposes a plan, and waits for your approval before touching code.",
+  titlePlaceholder: "Task title (e.g. Add rate limiting to the public products endpoint)",
+  descriptionPlaceholder: "Description / details (optional)…",
+  context: "Context",
+  noActiveWorkspace: "No active workspace",
+  activeWorkspace: "· active workspace",
+  analyze: "Analyze",
+  filterPlaceholder: "Filter tasks",
+  loading: "Loading tasks from API…",
+  failedLoad: "Failed to load tasks",
+  noWorkspaceEmpty: "No active repository workspace. Connect or select a workspace to view tasks.",
+  noMatch: "No tasks match the selected filter.",
+  noTasks: "No tasks found.",
+  errLoad: "Failed to load tasks from server.",
+  errNoWorkspace: "No active repository workspace. Please connect or select a workspace.",
+  errCreate: "Failed to create task.",
+  filters: {
+    all: "All",
+    awaitingApproval: "Awaiting approval",
+    executing: "Executing",
+    blocked: "Blocked",
+    done: "Done",
+    failed: "Failed",
+    draft: "Draft",
+  },
+}
+export default tasks

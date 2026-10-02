@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
+import { useTranslation } from "react-i18next"
+import { srv } from "@/i18n"
 import { AlertCircle, ArrowRight, BarChart3, GitCompareArrows, Loader2, ShieldCheck, TrendingUp } from "lucide-react"
 import { getWorkspaceInsights } from "@/api"
 import { PageContainer, PageHeading, SectionHead } from "@/components/shared"
@@ -35,18 +37,20 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 }
 
 function SignalCard({ signal }: { signal: InsightSignal }) {
+  useTranslation()
   return (
     <Panel className={cn("p-4", signal.count === 0 && "opacity-70")}>
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-[13px] font-semibold text-foreground">{signal.label}</span>
+        <span className="text-[13px] font-semibold text-foreground">{srv(signal.label)}</span>
         <span className="font-mono text-[18px] font-semibold text-foreground">{signal.count}</span>
       </div>
-      <p className="mt-1 text-[11.5px] leading-relaxed text-muted-foreground">{signal.description}</p>
+      <p className="mt-1 text-[11.5px] leading-relaxed text-muted-foreground">{srv(signal.description)}</p>
     </Panel>
   )
 }
 
 export function Insights() {
+  const { t } = useTranslation()
   const { activeWorkspaceId, activeWorkspace, isLoading: isWorkspaceLoading } = useWorkspace()
   const [insights, setInsights] = useState<WorkspaceInsights | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -67,7 +71,7 @@ export function Insights() {
       .then((data) => setInsights(data))
       .catch((err) => {
         if (controller.signal.aborted) return
-        setError(err instanceof Error ? err.message : "Failed to load insights.")
+        setError(err instanceof Error ? err.message : t("insights.errLoad"))
       })
       .finally(() => {
         if (!controller.signal.aborted) setIsLoading(false)
@@ -75,13 +79,13 @@ export function Insights() {
     return () => controller.abort()
   }, [activeWorkspaceId, isWorkspaceLoading])
 
-  const repoName = activeWorkspace ? `${activeWorkspace.owner}/${activeWorkspace.repository}` : "this repository"
+  const repoName = activeWorkspace ? `${activeWorkspace.owner}/${activeWorkspace.repository}` : t("insights.thisRepository")
 
   const heading = (
     <PageHeading
-      eyebrow="Insights"
-      title="Engineering insights"
-      description={`How reliably DevPilot turns tasks into verified, reviewable changes in ${repoName}: success, repair, latency and AI cost, computed from recorded executions.`}
+      eyebrow={t("insights.eyebrow")}
+      title={t("insights.title")}
+      description={t("insights.description", { repo: repoName })}
     />
   )
 
@@ -91,7 +95,7 @@ export function Insights() {
         {heading}
         <div className="flex items-center justify-center gap-2 py-20 text-subtle-foreground">
           <Loader2 className="h-5 w-5 animate-spin text-primary" />
-          <span className="tech-label">Loading insights…</span>
+          <span className="tech-label">{t("insights.loading")}</span>
         </div>
       </PageContainer>
     )
@@ -115,12 +119,12 @@ export function Insights() {
         {heading}
         <Panel className="flex flex-col items-center gap-2 p-10 text-center">
           <BarChart3 className="h-7 w-7 text-subtle-foreground" />
-          <h2 className="text-[15px] font-semibold text-foreground">No finished executions yet</h2>
+          <h2 className="text-[15px] font-semibold text-foreground">{t("insights.emptyTitle")}</h2>
           <p className="max-w-md text-[13px] text-muted-foreground">
-            Insights appear after the first execution finishes. Approve a task plan and run it to start measuring.
+            {t("insights.emptyDesc")}
           </p>
           <Link to="/tasks" className="mt-1 text-[13px] font-medium text-primary hover:underline">
-            Go to tasks
+            {t("insights.goTasks")}
           </Link>
         </Panel>
       </PageContainer>
@@ -136,54 +140,53 @@ export function Insights() {
       {heading}
 
       <div className="mb-2 text-[11.5px] text-subtle-foreground">
-        Based on the last {insights.windowSize} finished execution{insights.windowSize === 1 ? "" : "s"}
-        {totals.cancelled > 0 && ` (${totals.cancelled} cancelled, excluded from rates)`}.
+        {t("insights.basedOn", { count: insights.windowSize })}
+        {totals.cancelled > 0 && t("insights.cancelledNote", { n: totals.cancelled })}.
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <Stat
-          label="Delivery-ready"
+          label={t("insights.deliveryReady")}
           value={formatPercent(totals.deliveryReadyRate)}
-          hint={`${totals.deliveryReady} of ${totals.measured} runs`}
+          hint={t("insights.runsOf", { ready: totals.deliveryReady, total: totals.measured })}
         />
         <Stat
-          label="Fully verified"
+          label={t("insights.fullyVerified")}
           value={formatPercent(totals.verifiedRate)}
-          hint="build + tests, or no new regressions"
+          hint={t("insights.fullyVerifiedHint")}
         />
         <Stat
-          label="First pass"
+          label={t("insights.firstPass")}
           value={formatPercent(totals.firstPassRate)}
-          hint={`${totals.firstPass} runs needed no repair`}
+          hint={t("insights.firstPassHint", { n: totals.firstPass })}
         />
         <Stat
-          label="Repair recovery"
+          label={t("insights.repairRecovery")}
           value={formatPercent(totals.repairRecoveryRate)}
-          hint={`${totals.repairedRecovered} of ${totals.repaired} repaired runs`}
+          hint={t("insights.repairRecoveryHint", { ok: totals.repairedRecovered, total: totals.repaired })}
         />
         <Stat
-          label="Median run time"
+          label={t("insights.medianRun")}
           value={formatSeconds(totals.medianDurationSeconds)}
-          hint={`avg ${formatSeconds(totals.avgDurationSeconds)}`}
+          hint={t("insights.avg", { value: formatSeconds(totals.avgDurationSeconds) })}
         />
         <Stat
-          label={hasCost ? "AI cost" : "AI tokens"}
+          label={hasCost ? t("insights.aiCost") : t("insights.aiTokens")}
           value={hasCost ? formatCost(totals.totalCostUsd) : formatTokenCount(totals.totalTokens)}
           hint={
             hasCost
-              ? `${formatTokenCount(totals.totalTokens)} tokens`
+              ? t("insights.tokensHint", { n: formatTokenCount(totals.totalTokens) })
               : totals.avgTokensPerExecution != null
-                ? `~${formatTokenCount(totals.avgTokensPerExecution)} per run · set AiPricing for cost`
-                : "no token data recorded"
+                ? t("insights.perRunHint", { n: formatTokenCount(totals.avgTokensPerExecution) })
+                : t("insights.noTokenData")
           }
         />
       </div>
 
       <section className="mt-8">
-        <SectionHead title="What DevPilot caught or absorbed" />
+        <SectionHead title={t("insights.caught")} />
         <p className="mb-3 max-w-3xl text-[12.5px] text-muted-foreground">
-          These are the guarantees a plain coding agent does not give you: failures are compared with the base commit,
-          repairs are bounded, and risky automatic changes are escalated instead of hidden.
+          {t("insights.caughtDesc")}
         </p>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           {insights.signals.map((signal) => (
@@ -194,7 +197,7 @@ export function Insights() {
 
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
         <section>
-          <SectionHead title="Outcomes" />
+          <SectionHead title={t("insights.outcomes")} />
           <Panel className="space-y-2.5 p-4">
             {insights.outcomes.map((item) => {
               const meta = getOutcomeMeta(item.outcome)
@@ -217,17 +220,17 @@ export function Insights() {
         </section>
 
         <section>
-          <SectionHead title="Why runs needed a human" count={insights.topFailureReasons.length} />
+          <SectionHead title={t("insights.whyHuman")} count={insights.topFailureReasons.length} />
           <Panel className="divide-y divide-border">
             {insights.topFailureReasons.length === 0 ? (
               <div className="flex items-center gap-2 p-4 text-[12.5px] text-muted-foreground">
                 <ShieldCheck className="h-4 w-4 text-success" />
-                No runs ended in Needs review or Failed.
+                {t("insights.noneNeeded")}
               </div>
             ) : (
               insights.topFailureReasons.map((reason) => (
                 <div key={reason.reason} className="flex items-start justify-between gap-3 p-3.5">
-                  <span className="text-[12.5px] leading-relaxed text-foreground break-words">{reason.reason}</span>
+                  <span className="text-[12.5px] leading-relaxed text-foreground break-words">{srv(reason.reason)}</span>
                   <Badge tone="amber">{reason.count}×</Badge>
                 </div>
               ))
@@ -238,7 +241,7 @@ export function Insights() {
 
       {insights.retriedTasks.length > 0 && (
         <section className="mt-8">
-          <SectionHead title="Retried tasks" count={insights.retriedTasks.length} />
+          <SectionHead title={t("insights.retried")} count={insights.retriedTasks.length} />
           <Panel className="divide-y divide-border">
             {insights.retriedTasks.map((task) => {
               const first = getOutcomeMeta(task.firstOutcome)
@@ -250,14 +253,14 @@ export function Insights() {
                       {task.taskTitle}
                     </Link>
                     <div className="mt-1 flex items-center gap-1.5 text-[11.5px] text-subtle-foreground">
-                      {task.attempts} attempts
+                      {t("insights.attempts", { n: task.attempts })}
                       <span>·</span>
                       <Badge tone={first.tone}>{first.label}</Badge>
                       <ArrowRight className="h-3 w-3" />
                       <Badge tone={last.tone}>{last.label}</Badge>
                       {task.improved && (
                         <span className="flex items-center gap-1 text-success">
-                          <TrendingUp className="h-3 w-3" /> improved
+                          <TrendingUp className="h-3 w-3" /> {t("insights.improved")}
                         </span>
                       )}
                     </div>
@@ -267,7 +270,7 @@ export function Insights() {
                     className="flex items-center gap-1.5 rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground hover:border-border-strong hover:text-foreground"
                   >
                     <GitCompareArrows className="h-3.5 w-3.5" />
-                    Compare first vs latest
+                    {t("insights.compareFirstLatest")}
                   </Link>
                 </div>
               )
@@ -277,18 +280,18 @@ export function Insights() {
       )}
 
       <section className="mt-8">
-        <SectionHead title="Recent executions" count={insights.recent.length} />
+        <SectionHead title={t("insights.recent")} count={insights.recent.length} />
         <Panel className="overflow-x-auto">
           <table className="w-full min-w-[760px] text-left text-[12px]">
             <thead>
               <tr className="border-b border-border text-subtle-foreground">
-                <th className="px-3.5 py-2.5 font-medium">Task</th>
-                <th className="px-3 py-2.5 font-medium">Outcome</th>
-                <th className="px-3 py-2.5 text-right font-medium">Time</th>
-                <th className="px-3 py-2.5 text-right font-medium">Repairs</th>
-                <th className="px-3 py-2.5 text-right font-medium">AI calls</th>
-                <th className="px-3 py-2.5 text-right font-medium">Tokens</th>
-                <th className="px-3.5 py-2.5 text-right font-medium">Cost</th>
+                <th className="px-3.5 py-2.5 font-medium">{t("insights.th.task")}</th>
+                <th className="px-3 py-2.5 font-medium">{t("insights.th.outcome")}</th>
+                <th className="px-3 py-2.5 text-right font-medium">{t("insights.th.time")}</th>
+                <th className="px-3 py-2.5 text-right font-medium">{t("insights.th.repairs")}</th>
+                <th className="px-3 py-2.5 text-right font-medium">{t("insights.th.aiCalls")}</th>
+                <th className="px-3 py-2.5 text-right font-medium">{t("insights.th.tokens")}</th>
+                <th className="px-3.5 py-2.5 text-right font-medium">{t("insights.th.cost")}</th>
               </tr>
             </thead>
             <tbody>
@@ -297,11 +300,11 @@ export function Insights() {
                 return (
                   <tr key={row.executionId} className="border-b border-border/60 last:border-b-0 hover:bg-surface-2">
                     <td className="max-w-[340px] px-3.5 py-2.5">
-                      <Link to={`/executions/${row.executionId}`} className="block truncate font-medium text-foreground hover:text-primary" title={row.headline}>
+                      <Link to={`/executions/${row.executionId}`} className="block truncate font-medium text-foreground hover:text-primary" title={srv(row.headline)}>
                         {row.taskTitle}
                       </Link>
                       {row.attemptNumber > 1 && (
-                        <span className="font-mono text-[10.5px] text-subtle-foreground">attempt {row.attemptNumber}</span>
+                        <span className="font-mono text-[10.5px] text-subtle-foreground">{t("insights.attempt", { n: row.attemptNumber })}</span>
                       )}
                     </td>
                     <td className="px-3 py-2.5">

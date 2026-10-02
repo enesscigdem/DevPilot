@@ -1,3 +1,4 @@
+import i18n from "@/i18n"
 export interface TaskListItem {
   id: string;
   title: string;
@@ -250,11 +251,11 @@ export type TaskExecutionStatusValue = (typeof TaskExecutionStatus)[keyof typeof
 export type Tone = "neutral" | "blue" | "amber" | "green" | "red" | "gray";
 
 export const executionStatusMeta: Record<number, { label: string; tone: Tone }> = {
-  [TaskExecutionStatus.Pending]: { label: "Pending", tone: "amber" },
-  [TaskExecutionStatus.Running]: { label: "Running", tone: "blue" },
-  [TaskExecutionStatus.Completed]: { label: "Completed", tone: "green" },
-  [TaskExecutionStatus.Failed]: { label: "Failed", tone: "red" },
-  [TaskExecutionStatus.Cancelled]: { label: "Cancelled", tone: "gray" },
+  [TaskExecutionStatus.Pending]: { get label() { return i18n.t("executions.status.pending") }, tone: "amber" },
+  [TaskExecutionStatus.Running]: { get label() { return i18n.t("executions.status.running") }, tone: "blue" },
+  [TaskExecutionStatus.Completed]: { get label() { return i18n.t("executions.status.completed") }, tone: "green" },
+  [TaskExecutionStatus.Failed]: { get label() { return i18n.t("executions.status.failed") }, tone: "red" },
+  [TaskExecutionStatus.Cancelled]: { get label() { return i18n.t("executions.status.cancelled") }, tone: "gray" },
 };
 
 export function getExecutionStatusMeta(
@@ -263,10 +264,10 @@ export function getExecutionStatusMeta(
 ): { label: string; tone: Tone } {
   const outcome = String(verificationOutcome || "").toLowerCase()
   if (outcome === "needsreview" && (status === TaskExecutionStatus.Completed || String(status).toLowerCase() === "completed")) {
-    return { label: "Needs review", tone: "amber" }
+    return { label: i18n.t("executions.status.needsReview"), tone: "amber" }
   }
   if (typeof status === "number") {
-    return executionStatusMeta[status] ?? { label: `Status ${status}`, tone: "neutral" };
+    return executionStatusMeta[status] ?? { label: i18n.t("executions.status.other", { status }), tone: "neutral" };
   }
   const s = String(status).toLowerCase();
   if (s === "pending") return executionStatusMeta[TaskExecutionStatus.Pending];

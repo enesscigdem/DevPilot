@@ -1,3 +1,4 @@
+import i18n from "@/i18n"
 import type {
   CommitExecutionResult,
   CreateTaskRequest,
@@ -39,7 +40,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    let message = `Request failed: ${response.status} ${response.statusText}`;
+    let message = i18n.t("shared.errRequest", { status: response.status, text: response.statusText });
     try {
       const body = await response.json();
       if (body.error) {

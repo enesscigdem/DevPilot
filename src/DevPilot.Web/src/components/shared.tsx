@@ -1,6 +1,8 @@
 import type { ReactNode } from "react"
 import { Link } from "react-router-dom"
+import i18n, { fmt } from "@/i18n"
 import { ArrowUpRight } from "lucide-react"
+import { useTranslation } from "react-i18next"
 import { cn } from "@/lib/utils"
 import { Badge, StatusDot, type Tone } from "@/components/ui/primitives"
 import { TaskStatus, TaskPriority, type TaskListItem, type Task as ApiTask } from "@/types"
@@ -57,26 +59,25 @@ export function SectionHead({
 }
 
 function formatRelativeTime(dateString?: string): string {
-  if (!dateString) return 'just now'
+  if (!dateString) return i18n.t("common.justNow")
   const date = new Date(dateString)
   if (isNaN(date.getTime())) return dateString
 
-  const now = new Date()
-  const diffMs = now.getTime() - date.getTime()
-  const diffSec = Math.floor(diffMs / 1000)
+  const diffSec = Math.floor((Date.now() - date.getTime()) / 1000)
   const diffMin = Math.floor(diffSec / 60)
   const diffHours = Math.floor(diffMin / 60)
   const diffDays = Math.floor(diffHours / 24)
 
-  if (diffSec < 60) return 'just now'
-  if (diffMin < 60) return `${diffMin} min ago`
-  if (diffHours < 24) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`
-  if (diffDays === 1) return 'yesterday'
-  if (diffDays < 7) return `${diffDays} days ago`
-  return date.toLocaleDateString()
+  if (diffSec < 60) return i18n.t("common.justNow")
+  if (diffMin < 60) return i18n.t("shared.relative.minAgo", { n: diffMin })
+  if (diffHours < 24) return i18n.t("shared.relative.hoursAgo", { count: diffHours })
+  if (diffDays === 1) return i18n.t("shared.relative.yesterday")
+  if (diffDays < 7) return i18n.t("shared.relative.daysAgo", { n: diffDays })
+  return fmt.date(date)
 }
 
 export function TaskRow({ task }: { task: TaskListItem | ApiTask }) {
+  useTranslation()
   let statusTone: Tone = "gray"
   let statusLabel = ""
   let isExecuting = false
@@ -94,37 +95,37 @@ export function TaskRow({ task }: { task: TaskListItem | ApiTask }) {
 
     switch (task.status) {
       case TaskStatus.Draft:
-        statusTone = "gray"; statusLabel = "Draft"; break;
+        statusTone = "gray"; statusLabel = i18n.t("shared.taskStatus.draft"); break;
       case TaskStatus.ReadyForAnalysis:
-        statusTone = "neutral"; statusLabel = "Ready for Analysis"; break;
+        statusTone = "neutral"; statusLabel = i18n.t("shared.taskStatus.readyForAnalysis"); break;
       case TaskStatus.Analyzing:
-        statusTone = "blue"; statusLabel = "Analyzing"; isExecuting = true; break;
+        statusTone = "blue"; statusLabel = i18n.t("shared.taskStatus.analyzing"); isExecuting = true; break;
       case TaskStatus.AwaitingApproval:
-        statusTone = "amber"; statusLabel = "Awaiting approval"; break;
+        statusTone = "amber"; statusLabel = i18n.t("shared.taskStatus.awaitingApproval"); break;
       case TaskStatus.Approved:
-        statusTone = "blue"; statusLabel = "Approved"; break;
+        statusTone = "blue"; statusLabel = i18n.t("shared.taskStatus.approved"); break;
       case TaskStatus.Executing:
-        statusTone = "blue"; statusLabel = "Executing"; isExecuting = true; break;
+        statusTone = "blue"; statusLabel = i18n.t("shared.taskStatus.executing"); isExecuting = true; break;
       case TaskStatus.Completed:
-        statusTone = "green"; statusLabel = "Merged"; break;
+        statusTone = "green"; statusLabel = i18n.t("shared.taskStatus.merged"); break;
       case TaskStatus.Failed:
-        statusTone = "red"; statusLabel = "Failed"; break;
+        statusTone = "red"; statusLabel = i18n.t("shared.taskStatus.failed"); break;
       case TaskStatus.Rejected:
-        statusTone = "red"; statusLabel = "Rejected"; break;
+        statusTone = "red"; statusLabel = i18n.t("shared.taskStatus.rejected"); break;
       default:
-        statusTone = "gray"; statusLabel = "Unknown";
+        statusTone = "gray"; statusLabel = i18n.t("shared.taskStatus.unknown");
     }
 
     switch (task.priority) {
       case TaskPriority.Low:
-        riskTone = "green"; riskLabel = "Low priority"; break;
+        riskTone = "green"; riskLabel = i18n.t("shared.priority.low"); break;
       case TaskPriority.Medium:
-        riskTone = "amber"; riskLabel = "Medium priority"; break;
+        riskTone = "amber"; riskLabel = i18n.t("shared.priority.medium"); break;
       case TaskPriority.High:
       case TaskPriority.Critical:
-        riskTone = "red"; riskLabel = "High priority"; break;
+        riskTone = "red"; riskLabel = i18n.t("shared.priority.high"); break;
       default:
-        riskTone = "neutral"; riskLabel = "Normal";
+        riskTone = "neutral"; riskLabel = i18n.t("shared.priority.normal");
     }
   }
 

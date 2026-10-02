@@ -1,18 +1,21 @@
+import i18n from "@/i18n"
 import type { Tone } from "@/components/ui/primitives"
 
-const outcomeMeta: Record<string, { label: string; tone: Tone }> = {
-  Verified: { label: "Verified", tone: "green" },
-  NoNewRegressions: { label: "No new regressions", tone: "green" },
-  PartiallyVerified: { label: "Partially verified", tone: "amber" },
-  VerificationUnavailable: { label: "Not verified", tone: "gray" },
-  VerificationInfrastructureError: { label: "Verification infra error", tone: "red" },
-  NeedsReview: { label: "Needs review", tone: "amber" },
-  Failed: { label: "Failed", tone: "red" },
-  Blocked: { label: "Cancelled", tone: "gray" },
+const outcomeTones: Record<string, Tone> = {
+  Verified: "green",
+  NoNewRegressions: "green",
+  PartiallyVerified: "amber",
+  VerificationUnavailable: "gray",
+  VerificationInfrastructureError: "red",
+  NeedsReview: "amber",
+  Failed: "red",
+  Blocked: "gray",
 }
 
 export function getOutcomeMeta(outcome?: string | null): { label: string; tone: Tone } {
-  return outcomeMeta[outcome ?? ""] ?? { label: outcome || "Unknown", tone: "neutral" }
+  const tone = outcomeTones[outcome ?? ""]
+  if (!tone) return { label: outcome || i18n.t("shared.outcome.Unknown"), tone: "neutral" }
+  return { label: i18n.t(`shared.outcome.${outcome}`), tone }
 }
 
 /** Deliverable = a human may commit, push and open a PR (mirrors the server-side delivery eligibility). */
@@ -28,15 +31,15 @@ export function isDeliverableOutcome(outcome?: string | null): boolean {
 
 export function formatSeconds(seconds?: number | null): string {
   if (seconds == null) return "—"
-  if (seconds < 60) return `${seconds}s`
+  if (seconds < 60) return `${seconds}${i18n.t("shared.units.s")}`
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+  if (minutes < 60) return `${minutes}${i18n.t("shared.units.m")} ${seconds % 60}${i18n.t("shared.units.s")}`
+  return `${Math.floor(minutes / 60)}${i18n.t("shared.units.h")} ${minutes % 60}${i18n.t("shared.units.m")}`
 }
 
 export function formatMs(ms?: number | null): string {
   if (ms == null) return "—"
-  return ms < 1000 ? `${ms}ms` : formatSeconds(Math.round(ms / 1000))
+  return ms < 1000 ? `${ms}${i18n.t("shared.units.ms")}` : formatSeconds(Math.round(ms / 1000))
 }
 
 export function formatPercent(rate?: number | null): string {

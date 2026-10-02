@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
+import { useTranslation } from "react-i18next"
+import { setLang } from "@/i18n"
 import { Search, CornerDownLeft, ArrowUp, ArrowDown } from "lucide-react"
 import { getExecutions, getTasks } from "@/api"
 import { Kbd } from "@/components/ui/primitives"
@@ -9,7 +11,8 @@ import { cn } from "@/lib/utils"
 interface CommandItem {
   label: string
   hint: string
-  href: string
+  href?: string
+  action?: () => void
   group: string
 }
 
@@ -27,23 +30,30 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
   const inputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
   const { activeWorkspace, activeWorkspaceId } = useWorkspace()
+  const { t, i18n } = useTranslation()
 
-  const repoHint = activeWorkspace ? `${activeWorkspace.owner}/${activeWorkspace.repository}` : "No repository selected"
+  const repoHint = activeWorkspace ? `${activeWorkspace.owner}/${activeWorkspace.repository}` : t("command.noRepository")
 
   // Navigation entries mirror the real sidebar; task / execution entries come from the active repository.
   const commandItems = useMemo<CommandItem[]>(
     () => [
-      { label: "Go to Overview", hint: repoHint, href: "/", group: "Navigate" },
-      { label: "Open Repository", hint: "Structure and analyzer state", href: "/projects", group: "Navigate" },
-      { label: "View Tasks", hint: "Plan and approve changes", href: "/tasks", group: "Navigate" },
-      { label: "Open Project Brain", hint: "Ask the codebase", href: "/brain", group: "Navigate" },
-      { label: "View Executions", hint: "Runs and review", href: "/executions", group: "Navigate" },
-      { label: "Impact map", hint: "How changes ripple across layers", href: "/architecture", group: "Navigate" },
-      { label: "Insights", hint: "Success, repair, time and cost", href: "/insights", group: "Navigate" },
-      { label: "Compare executions", hint: "Original vs retry", href: "/executions/compare", group: "Navigate" },
+      { label: t("command.goOverview"), hint: repoHint, href: "/", group: t("command.groupNavigate") },
+      { label: t("command.openRepository"), hint: t("command.repositoryHint"), href: "/projects", group: t("command.groupNavigate") },
+      { label: t("command.viewTasks"), hint: t("command.tasksHint"), href: "/tasks", group: t("command.groupNavigate") },
+      { label: t("command.openBrain"), hint: t("command.brainHint"), href: "/brain", group: t("command.groupNavigate") },
+      { label: t("command.viewExecutions"), hint: t("command.executionsHint"), href: "/executions", group: t("command.groupNavigate") },
+      { label: t("nav.impactMap"), hint: t("command.impactHint"), href: "/architecture", group: t("command.groupNavigate") },
+      { label: t("nav.insights"), hint: t("command.insightsHint"), href: "/insights", group: t("command.groupNavigate") },
+      { label: t("nav.compareExecutions"), hint: t("command.compareHint"), href: "/executions/compare", group: t("command.groupNavigate") },
+      {
+        label: i18n.language === "tr" ? t("command.switchToEnglish") : t("command.switchToTurkish"),
+        hint: t("command.languageHint"),
+        action: () => setLang(i18n.language === "tr" ? "en" : "tr"),
+        group: t("command.groupSettings"),
+      },
       ...dynamicItems,
     ],
-    [repoHint, dynamicItems],
+    [repoHint, dynamicItems, t, i18n.language],
   )
 
   useEffect(() => {
@@ -62,14 +72,14 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
       if (tasksResult.status === "fulfilled") {
         tasksResult.value
           .slice()
-          .sort(byNewest((t) => t.updatedAt))
+          .sort(byNewest((tk) => tk.updatedAt))
           .slice(0, MAX_TASK_ITEMS)
-          .forEach((t) =>
+          .forEach((tk) =>
             items.push({
-              label: `Open task: ${t.title}`,
-              hint: `TASK-${t.id.slice(0, 8)}`,
-              href: `/tasks/${t.id}`,
-              group: "Tasks",
+              label: t("command.openTask", { title: tk.title }),
+              hint: `TASK-${tk.id.slice(0, 8)}`,
+              href: `/tasks/${tk.id}`,
+              group: t("nav.tasks"),
             }),
           )
       }
@@ -80,10 +90,10 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
           .slice(0, MAX_EXECUTION_ITEMS)
           .forEach((e) =>
             items.push({
-              label: `Open execution: ${e.taskTitle}`,
+              label: t("command.openExecution", { title: e.taskTitle }),
               hint: `EXEC-${e.id.slice(0, 8)}`,
               href: `/executions/${e.id}`,
-              group: "Executions",
+              group: t("nav.executions"),
             }),
           )
       }
@@ -93,7 +103,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
     return () => {
       cancelled = true
     }
-  }, [open, activeWorkspaceId])
+  }, [open, activeWorkspaceId, t])
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -124,8 +134,9 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
 
   const flat = Object.values(grouped).flat()
 
-  const select = (href: string) => {
-    navigate(href)
+  const select = (item: CommandItem) => {
+    if (item.action) item.action()
+    else if (item.href) navigate(item.href)
     onClose()
   }
 
@@ -138,7 +149,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
       setActive((a) => Math.max(a - 1, 0))
     } else if (e.key === "Enter") {
       e.preventDefault()
-      if (flat[active]) select(flat[active].href)
+      if (flat[active]) select(flat[active])
     } else if (e.key === "Escape") {
       onClose()
     }
@@ -163,7 +174,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search pages, tasks, executions…"
+            placeholder={t("command.placeholder")}
             className="h-12 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-subtle-foreground"
           />
           <Kbd>Esc</Kbd>
@@ -171,7 +182,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
 
         <div className="max-h-[52vh] overflow-y-auto py-1.5">
           {flat.length === 0 && (
-            <div className="px-4 py-8 text-center text-sm text-subtle-foreground">No matches for "{query}"</div>
+            <div className="px-4 py-8 text-center text-sm text-subtle-foreground">{t("command.noMatches", { query })}</div>
           )}
           {Object.entries(grouped).map(([group, items]) => (
             <div key={group} className="px-1.5 pb-1">
@@ -182,9 +193,9 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
                 const isActive = idx === active
                 return (
                   <button
-                    key={`${item.group}:${item.href}`}
+                    key={`${item.group}:${item.href ?? item.label}`}
                     onMouseEnter={() => setActive(idx)}
-                    onClick={() => select(item.href)}
+                    onClick={() => select(item)}
                     className={cn(
                       "flex w-full items-center justify-between gap-3 rounded-[var(--radius-md)] px-2.5 py-2 text-left transition-colors",
                       isActive ? "bg-primary-soft" : "hover:bg-surface-3",
@@ -204,10 +215,10 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
         <div className="flex items-center gap-4 border-t border-border bg-surface-2 px-3.5 py-2 text-[11px] text-subtle-foreground">
           <span className="flex items-center gap-1.5">
             <ArrowUp className="h-3 w-3" />
-            <ArrowDown className="h-3 w-3" /> navigate
+            <ArrowDown className="h-3 w-3" /> {t("command.navigate")}
           </span>
           <span className="flex items-center gap-1.5">
-            <CornerDownLeft className="h-3 w-3" /> open
+            <CornerDownLeft className="h-3 w-3" /> {t("command.open")}
           </span>
           <span className="ml-auto font-mono">DevPilot</span>
         </div>
