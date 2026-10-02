@@ -60,6 +60,34 @@ public class TaskExecution
 
     public string? BaseCommitSha { get; set; }
 
+    /// <summary>
+    /// Repository base the execution branched from. <see cref="BaseCommitSha"/> moves to the previously delivered commit
+    /// when a revision is committed on top of it, so baseline comparisons keep using this one.
+    /// </summary>
+    public string? InitialBaseCommitSha { get; set; }
+
+    /// <summary>Number of times the reviewer asked for a fix on this execution's branch after the first delivery or review.</summary>
+    public int RevisionCount { get; set; }
+
+    /// <summary>The reviewer's latest "request changes" feedback (the instruction the AI was given).</summary>
+    public string? LastChangeRequest { get; set; }
+
+    public DateTime? LastChangeRequestAt { get; set; }
+
+    /// <summary>How many fixes were requested on this execution (every attempt, including failed ones).</summary>
+    public int ChangeRequestCount { get; set; }
+
+    /// <summary>When the first generation run finished; kept because a requested fix reopens the execution.</summary>
+    public DateTime? InitialRunCompletedAt { get; set; }
+
+    /// <summary>Git snapshot (pinned commit) of the worktree before / after the latest requested fix.</summary>
+    public string? RevisionBaseSnapshotSha { get; set; }
+
+    public string? RevisionResultSnapshotSha { get; set; }
+
+    /// <summary>Short outcome of the latest requested fix (null while it is still running).</summary>
+    public string? LastChangeRequestResult { get; set; }
+
     public ExecutionCommitStatus CommitStatus { get; set; } = ExecutionCommitStatus.None;
 
     public Guid? CommitAttemptId { get; set; }

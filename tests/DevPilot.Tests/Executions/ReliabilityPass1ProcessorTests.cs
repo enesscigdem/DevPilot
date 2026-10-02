@@ -595,6 +595,174 @@ public sealed class ReliabilityPass1ProcessorTests
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
+    [Fact]
+    public async Task Revision_AppliesTheFeedbackOnTheExistingWorktree_ThenRunsBuildAndTestAgain()
+    {
+        var agent = new FakeAgent("should-not-be-written.cs");
+        var feedbackAgent = new FakeFeedbackAgent(DeveloperAgentResult.Ok(new[] { "src/A.cs" }, model: "test-model"));
+        var workspace = new FakeWorkspaceManager();
+        var runner = new BootstrapCheckRunner(ConfiguredNodeProfile(), ConfiguredNodeProfile());
+        var recorder = new FakeRecorder();
+        var worktree = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "devpilot-revision-" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            await CreateProcessor(
+                    agent,
+                    runner,
+                    recorder,
+                    workspace: workspace,
+                    gitDiffReader: new FakeDiffReader("src/A.cs", "src/A.test.cs"),
+                    reviewFeedbackAgent: feedbackAgent)
+                .ProcessAsync(RevisionContext(worktree.FullName, "Use a constant for the retry count."));
+        }
+        finally
+        {
+            worktree.Delete(recursive: true);
+        }
+
+        agent.GenerateCalls.Should().Be(0, "a revision edits what exists instead of regenerating");
+        workspace.PrepareCalls.Should().Be(0, "the existing branch and worktree are reused");
+        var request = feedbackAgent.Requests.Should().ContainSingle().Subject;
+        request.Feedback.Should().Be("Use a constant for the retry count.");
+        request.BranchName.Should().Be("devpilot/task");
+        request.RevisionNumber.Should().Be(2);
+        request.ChangedFiles.Should().BeEquivalentTo(new[] { "src/A.cs", "src/A.test.cs" });
+        runner.Executed.Select(r => r.Check.Id).Should().Equal("node:package.json:build", "node:package.json:test");
+        recorder.Activities.Should().Contain(a => a.Message.Contains("Applying reviewer feedback (revision 2)"));
+        recorder.Activities.Should().Contain(a => a.Stage == ExecutionStage.DeveloperAgent && a.Message == "Reviewer feedback applied.");
+        DetermineOutcome(recorder).Should().Be(ExecutionVerificationOutcome.Verified);
+    }
+
+    [Fact]
+    public async Task Revision_BuildFailureAfterTheFix_UsesTheExistingBoundedRepair()
+    {
+        const string oneFile = "src/A.cs(10,5): error CS0103: The name 'alpha' does not exist in the current context";
+        var agent = new FakeAgent("unused.cs");
+        var feedbackAgent = new FakeFeedbackAgent(DeveloperAgentResult.Ok(new[] { "src/A.cs" }));
+        var runner = new BootstrapCheckRunner(
+            ConfiguredNodeProfile(),
+            ConfiguredNodeProfile(),
+            buildResults: new[] { Fail(oneFile), Pass() });
+        var recorder = new FakeRecorder();
+        var worktree = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "devpilot-revision-" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            await CreateProcessor(agent, runner, recorder, gitDiffReader: new FakeDiffReader("src/A.cs"), reviewFeedbackAgent: feedbackAgent)
+                .ProcessAsync(RevisionContext(worktree.FullName, "Rename alpha."));
+        }
+        finally
+        {
+            worktree.Delete(recursive: true);
+        }
+
+        agent.GenerateCalls.Should().Be(0);
+        agent.RepairRequests.Should().HaveCount(1);
+        runner.Executed.Count(r => r.Check.Kind == RepositoryCheckKind.Build).Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Revision_WhenTheAgentFails_ReportsItOnTheReviewStage_WithoutChangingTheVerificationVerdict()
+    {
+        var feedbackAgent = new FakeFeedbackAgent(DeveloperAgentResult.Fail("The AI answer was not valid JSON."));
+        var runner = new BootstrapCheckRunner(ConfiguredNodeProfile(), ConfiguredNodeProfile());
+        var recorder = new FakeRecorder();
+        var worktree = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "devpilot-revision-" + Guid.NewGuid().ToString("N")));
+
+        Func<Task> act = async () =>
+        {
+            try
+            {
+                await CreateProcessor(new FakeAgent(), runner, recorder, gitDiffReader: new FakeDiffReader("src/A.cs"), reviewFeedbackAgent: feedbackAgent)
+                    .ProcessAsync(RevisionContext(worktree.FullName, "Fix it."));
+            }
+            finally
+            {
+                worktree.Delete(recursive: true);
+            }
+        };
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not valid JSON*");
+        runner.Executed.Should().BeEmpty("nothing changed, so there is nothing to verify again");
+        recorder.Activities.Should().Contain(a => a.Stage == ExecutionStage.Review && a.Status == ExecutionActivityStatus.Failed);
+        recorder.Activities.Should().NotContain(a => a.Stage == ExecutionStage.DeveloperAgent && a.Status == ExecutionActivityStatus.Failed);
+    }
+
+    [Fact]
+    public async Task Revision_WhenTheAgentChangesNothing_StopsBeforeVerification()
+    {
+        var feedbackAgent = new FakeFeedbackAgent(DeveloperAgentResult.Ok(
+            Array.Empty<string>(), resolvedNoChangeFiles: new[] { "src/A.cs" }));
+        var runner = new BootstrapCheckRunner(ConfiguredNodeProfile(), ConfiguredNodeProfile());
+        var recorder = new FakeRecorder();
+        var worktree = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "devpilot-revision-" + Guid.NewGuid().ToString("N")));
+
+        try
+        {
+            await CreateProcessor(new FakeAgent(), runner, recorder, gitDiffReader: new FakeDiffReader("src/A.cs"), reviewFeedbackAgent: feedbackAgent)
+                .ProcessAsync(RevisionContext(worktree.FullName, "Use a constant."));
+        }
+        finally
+        {
+            worktree.Delete(recursive: true);
+        }
+
+        runner.Executed.Should().BeEmpty();
+        recorder.Activities.Should().Contain(a =>
+            a.Stage == ExecutionStage.Review &&
+            a.Metadata != null &&
+            a.Metadata.EventKind == "ReviewFeedbackNoChange");
+        recorder.Activities.Should().NotContain(a => a.Metadata != null && a.Metadata.VerificationOutcome == "NeedsReview");
+    }
+
+    [Fact]
+    public async Task Revision_WithoutAFeedbackAgent_FailsClearly()
+    {
+        var worktree = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "devpilot-revision-" + Guid.NewGuid().ToString("N")));
+
+        Func<Task> act = async () =>
+        {
+            try
+            {
+                await CreateProcessor(
+                        new FakeAgent(),
+                        new BootstrapCheckRunner(ConfiguredNodeProfile(), ConfiguredNodeProfile()),
+                        new FakeRecorder(),
+                        gitDiffReader: new FakeDiffReader("src/A.cs"))
+                    .ProcessAsync(RevisionContext(worktree.FullName, "Fix it."));
+            }
+            finally
+            {
+                worktree.Delete(recursive: true);
+            }
+        };
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*review feedback agent*");
+    }
+
+    private static ExecutionProcessingContext RevisionContext(string worktreePath, string feedback) =>
+        NewContext() with
+        {
+            VerifyOnlyWorkspace = new ExecutionVerifyOnlyWorkspace(worktreePath, "devpilot/task", "base123"),
+            ChangeRequest = new ExecutionChangeRequest(feedback, RevisionNumber: 2, CommittedBaseCommitSha: "base123"),
+        };
+
+    private sealed class FakeFeedbackAgent : IReviewFeedbackAgent
+    {
+        private readonly DeveloperAgentResult _result;
+
+        public FakeFeedbackAgent(DeveloperAgentResult result) => _result = result;
+
+        public List<ReviewFeedbackRequest> Requests { get; } = new();
+
+        public Task<DeveloperAgentResult> ApplyReviewFeedbackAsync(ReviewFeedbackRequest request, CancellationToken cancellationToken = default)
+        {
+            Requests.Add(request);
+            return Task.FromResult(_result);
+        }
+    }
+
     private static RepositoryProfile UnconfiguredProfile() => new(
         RepositoryVerificationState.Unconfigured,
         Array.Empty<string>(),
@@ -626,7 +794,8 @@ public sealed class ReliabilityPass1ProcessorTests
         IExecutionChangeFingerprintCalculator? fingerprintCalculator = null,
         IRepositoryFreshnessService? freshness = null,
         FakeWorkspaceManager? workspace = null,
-        IExecutionGitDiffReader? gitDiffReader = null) =>
+        IExecutionGitDiffReader? gitDiffReader = null,
+        IReviewFeedbackAgent? reviewFeedbackAgent = null) =>
         new(
             workspace ?? new FakeWorkspaceManager(),
             new InMemoryExecutionRepository(),
@@ -639,7 +808,8 @@ public sealed class ReliabilityPass1ProcessorTests
             baselineVerificationService: baseline,
             reliabilityOptions: (options ?? new ExecutionReliabilityOptions()).Normalize(),
             freshnessService: freshness,
-            gitDiffReader: gitDiffReader);
+            gitDiffReader: gitDiffReader,
+            reviewFeedbackAgent: reviewFeedbackAgent);
 
     private static ExecutionProcessingContext NewContext() =>
         new(Guid.NewGuid(), Guid.NewGuid(), "Task", "Desc", null, Guid.NewGuid(), "/src", "Summary");

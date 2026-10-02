@@ -1,4 +1,5 @@
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Services;
 using DevPilot.Domain.Enums;
 using Microsoft.Extensions.Logging;
 
@@ -40,20 +41,12 @@ public sealed class CancelExecutionCommandHandler : ICancelExecutionCommandHandl
             return CancelExecutionResult.NotFound();
         }
 
-        // Check if already in terminal state
-        if (execution.Status is TaskExecutionStatus.Completed
-            or TaskExecutionStatus.Failed
-            or TaskExecutionStatus.Cancelled)
+        // Same rule the UI reads from the execution DTO. An active revision of a delivered execution is cancellable;
+        // only a delivery step that is executing right now is protected.
+        var blocked = ExecutionCancellationPolicy.DescribeWhyCannotCancel(execution);
+        if (blocked is not null)
         {
-            return CancelExecutionResult.Conflict($"Execution is already in a terminal state ({execution.Status}).");
-        }
-
-        // Check if reached irreversible Git operations
-        if (execution.CommitStatus != ExecutionCommitStatus.None ||
-            execution.PushStatus != ExecutionPushStatus.None ||
-            execution.PullRequestStatus != ExecutionPullRequestStatus.None)
-        {
-            return CancelExecutionResult.Conflict("Execution has reached an irreversible stage (commit/push/PR) and cannot be cancelled.");
+            return CancelExecutionResult.Conflict(blocked);
         }
 
         var requested = await _executionRepository

@@ -343,6 +343,16 @@ export interface ExecutionDetail {
   verdict?: ExecutionVerdict | null;
   usage?: ExecutionUsage | null;
   canRetry?: boolean;
+  canCancel?: boolean;
+  cancelBlockedReason?: string | null;
+  canRequestChanges?: boolean;
+  revisionCount?: number;
+  lastChangeRequest?: string | null;
+  lastChangeRequestAt?: string | null;
+  lastChangeRequestResult?: string | null;
+  revision?: ExecutionRevision | null;
+  /** Every requested fix, oldest first (the last one is `revision`). */
+  revisions?: ExecutionRevision[];
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -398,6 +408,11 @@ export interface ExecutionActivityMetadata {
   baseBehindCount?: number | null;
   /** UpToDate | FastForwarded | Behind | Diverged | Ahead | FetchFailed | NotApplicable */
   baseFreshness?: string | null;
+  modelConfigName?: string | null;
+  modelSource?: string | null;
+  modelFallbackReason?: string | null;
+  attemptOutcome?: string | null;
+  willRetry?: boolean | null;
   baseCommitSha?: string | null;
   baselineCacheHit?: boolean | null;
   preExistingFailureCount?: number | null;
@@ -521,6 +536,14 @@ export interface ExecutionReview {
   canRequestMerge?: boolean;
   mergeBlockedReason?: string | null;
   canRetry?: boolean;
+  canRequestChanges?: boolean;
+  revisionCount?: number;
+  lastChangeRequest?: string | null;
+  lastChangeRequestAt?: string | null;
+  lastChangeRequestResult?: string | null;
+  revision?: ExecutionRevision | null;
+  /** Every requested fix, oldest first (the last one is `revision`). */
+  revisions?: ExecutionRevision[];
   repositoryWorkspaceId?: string;
   repositoryOwner?: string;
   repositoryName?: string;
@@ -1192,6 +1215,8 @@ export interface AiModel {
   lastTestedAt: string | null;
   lastTestSucceeded: boolean | null;
   lastTestMessage: string | null;
+  lastTestOutcome?: "Ok" | "Timeout" | "HttpError" | "NetworkError" | "Failed" | null;
+  lastTestStatusCode?: number | null;
 }
 
 export interface SaveAiModelRequest {
@@ -1228,6 +1253,9 @@ export interface AiModelTestResult {
   model: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  outcome: "Ok" | "Timeout" | "HttpError" | "NetworkError" | "Failed";
+  statusCode?: number | null;
+  timeLimitSeconds: number;
 }
 
 export interface AiStageAssignment {
@@ -1260,4 +1288,62 @@ export interface ModelComparison {
   createdAt: string;
   status: ModelComparisonStatus;
   runs: ModelComparisonRun[];
+}
+
+/* ---------------------- Requested fix ("Request changes") ---------------------- */
+
+export type RevisionState = "Running" | "Applied" | "NoChange" | "Failed" | "Cancelled";
+export type RevisionStepState = "todo" | "active" | "done" | "failed" | "skipped";
+export type RevisionStepKey = "prepare" | "apply" | "build" | "test" | "ready";
+export type RevisionFileState = "Considered" | "Changed" | "Created" | "Deleted" | "Unchanged";
+export type RevisionNextAction =
+  | "Wait"
+  | "Review"
+  | "FixChecks"
+  | "RefineFeedback"
+  | "Commit"
+  | "Push"
+  | "PullRequestUpdated"
+  | "OpenPullRequest"
+  | "None";
+
+export interface ExecutionRevisionFile {
+  path: string;
+  state: RevisionFileState;
+  additions?: number | null;
+  deletions?: number | null;
+}
+
+export interface ExecutionRevision {
+  number: number;
+  state: RevisionState;
+  phase: string;
+  feedback: string;
+  requestedAt: string;
+  completedAt?: string | null;
+  durationMs?: number | null;
+  result?: string | null;
+  summary?: string | null;
+  unresolved?: string | null;
+  steps: { key: RevisionStepKey; state: RevisionStepState; detail?: string | null }[];
+  files: ExecutionRevisionFile[];
+  filesAreFinal: boolean;
+  build?: ExecutionReviewStageStatus | null;
+  test?: ExecutionReviewStageStatus | null;
+  verificationOutcome?: string | null;
+  changedFileCount: number;
+  additions: number;
+  deletions: number;
+  hasDiff: boolean;
+  nextAction: RevisionNextAction;
+  initialRun: { completedAt?: string | null; durationMs?: number | null; outcome?: string | null };
+  /** False for an older fix: it only covers the time between its own request and the next one. */
+  isLatest?: boolean;
+  windowEnd?: string | null;
+}
+
+export interface ExecutionRevisionDiff {
+  files: ExecutionReviewFile[];
+  diff: string;
+  truncated: boolean;
 }

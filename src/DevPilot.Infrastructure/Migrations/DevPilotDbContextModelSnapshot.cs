@@ -61,6 +61,13 @@ namespace DevPilot.Infrastructure.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
+                    b.Property<string>("LastTestOutcome")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int?>("LastTestStatusCode")
+                        .HasColumnType("integer");
+
                     b.Property<bool?>("LastTestSucceeded")
                         .HasColumnType("boolean");
 
@@ -276,6 +283,49 @@ namespace DevPilot.Infrastructure.Migrations
                     b.ToTable("ExecutionCiChecks");
                 });
 
+            modelBuilder.Entity("DevPilot.Domain.Entities.ExecutionRevision", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BaseSnapshotSha")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ExecutionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Feedback")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<int>("Number")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("RequestedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Result")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("ResultSnapshotSha")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExecutionId", "Number")
+                        .IsUnique();
+
+                    b.ToTable("ExecutionRevisions");
+                });
+
             modelBuilder.Entity("DevPilot.Domain.Entities.GitHubInstallationConnection", b =>
                 {
                     b.Property<Guid>("Id")
@@ -470,6 +520,11 @@ namespace DevPilot.Infrastructure.Migrations
                     b.Property<DateTime?>("CancelledAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("ChangeRequestCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
                     b.Property<DateTime?>("CiLastSyncedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -515,6 +570,24 @@ namespace DevPilot.Infrastructure.Migrations
 
                     b.Property<DateTime?>("HeartbeatAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("InitialBaseCommitSha")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTime?>("InitialRunCompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastChangeRequest")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<DateTime?>("LastChangeRequestAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastChangeRequestResult")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<DateTime?>("LeaseExpiresAt")
                         .HasColumnType("timestamp with time zone");
@@ -656,6 +729,19 @@ namespace DevPilot.Infrastructure.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasDefaultValue("Pending");
+
+                    b.Property<string>("RevisionBaseSnapshotSha")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int>("RevisionCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<string>("RevisionResultSnapshotSha")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
@@ -1048,6 +1134,15 @@ namespace DevPilot.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("TaskExecution");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.Entities.ExecutionRevision", b =>
+                {
+                    b.HasOne("DevPilot.Domain.Entities.TaskExecution", null)
+                        .WithMany()
+                        .HasForeignKey("ExecutionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparison", b =>

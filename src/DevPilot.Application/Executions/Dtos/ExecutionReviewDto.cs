@@ -83,4 +83,10 @@ public sealed record ExecutionReviewDto(
     PredictedVsActualComparisonDto? PredictedVsActual = null,
     string VerificationOutcome = "Verified",
     ExecutionVerdictDto? Verdict = null,
-    ExecutionUsageDto? Usage = null);
+    ExecutionUsageDto? Usage = null,
+    bool CanRequestChanges = false,
+    int RevisionCount = 0,
+    string? LastChangeRequest = null,
+    DateTime? LastChangeRequestAt = null,
+    string? LastChangeRequestResult = null,
+    ExecutionRevisionDto? Revision = null);

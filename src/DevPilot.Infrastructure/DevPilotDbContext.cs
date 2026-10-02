@@ -37,6 +37,7 @@ public class DevPilotDbContext : DbContext
     public DbSet<TaskExecution> TaskExecutions => Set<TaskExecution>();
 
     public DbSet<ExecutionActivity> ExecutionActivities => Set<ExecutionActivity>();
+    public DbSet<ExecutionRevision> ExecutionRevisions => Set<ExecutionRevision>();
 
     public DbSet<ExecutionCiCheck> ExecutionCiChecks => Set<ExecutionCiCheck>();
 
@@ -233,6 +234,15 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.ReviewRejectionReason).HasMaxLength(1000);
             entity.Property(e => e.ApprovedChangeFingerprint).HasMaxLength(100);
             entity.Property(e => e.BaseCommitSha).HasMaxLength(100);
+            entity.Property(e => e.InitialBaseCommitSha).HasMaxLength(100);
+            entity.Property(e => e.RevisionCount).HasDefaultValue(0);
+            entity.Property(e => e.LastChangeRequest).HasMaxLength(2000);
+            entity.Property(e => e.LastChangeRequestAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.LastChangeRequestResult).HasMaxLength(500);
+            entity.Property(e => e.ChangeRequestCount).HasDefaultValue(0);
+            entity.Property(e => e.InitialRunCompletedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.RevisionBaseSnapshotSha).HasMaxLength(100);
+            entity.Property(e => e.RevisionResultSnapshotSha).HasMaxLength(100);
             entity.Property(e => e.CommitStatus)
                 .HasConversion<string>()
                 .HasMaxLength(50)
@@ -293,6 +303,19 @@ public class DevPilotDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(e => e.DevelopmentTaskId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ExecutionRevision>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.ExecutionId, e.Number }).IsUnique();
+            entity.Property(e => e.Feedback).HasMaxLength(2000);
+            entity.Property(e => e.Result).HasMaxLength(500);
+            entity.Property(e => e.BaseSnapshotSha).HasMaxLength(100);
+            entity.Property(e => e.ResultSnapshotSha).HasMaxLength(100);
+            entity.Property(e => e.RequestedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.CompletedAt).HasColumnType("timestamp with time zone");
+            entity.HasOne<TaskExecution>().WithMany().HasForeignKey(e => e.ExecutionId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<ExecutionActivity>(entity =>
@@ -392,6 +415,7 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.InputPricePerMillionTokensUsd).HasPrecision(18, 6);
             entity.Property(e => e.OutputPricePerMillionTokensUsd).HasPrecision(18, 6);
             entity.Property(e => e.LastTestMessage).HasMaxLength(1000);
+            entity.Property(e => e.LastTestOutcome).HasMaxLength(20);
             entity.Property(e => e.LastTestedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
             entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");

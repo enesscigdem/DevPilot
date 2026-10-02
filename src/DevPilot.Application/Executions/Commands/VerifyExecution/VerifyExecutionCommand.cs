@@ -210,7 +210,7 @@ public sealed class VerifyExecutionCommandHandler : IVerifyExecutionCommandHandl
 
         if (_aiContext is not null)
         {
-            _aiContext.PinnedModelId = execution.PinnedAiModelId;
+            AiExecutionBinding.Bind(_aiContext, executionId, execution.PinnedAiModelId, _activityRecorder);
         }
 
         var task = execution.DevelopmentTask;

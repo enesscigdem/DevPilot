@@ -97,6 +97,13 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
         var (buildDto, testDto) = ExecutionReviewStageClassifier.Classify(execution, activities);
         var allowNoChecks = _mergePolicyOptions.Value.AllowNoChecks;
         var (canRequestMerge, mergeBlockedReason) = ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks);
+        var revisionDiff = ExecutionRevisionScope.HasRevision(execution) && !ExecutionRevisionScope.IsActive(execution) &&
+                           !string.IsNullOrWhiteSpace(execution.RevisionBaseSnapshotSha) && !string.IsNullOrWhiteSpace(execution.RevisionResultSnapshotSha)
+            ? await _gitDiffReader.ReadCommittedDiffAsync(execution.WorkspacePath, execution.RevisionBaseSnapshotSha, execution.RevisionResultSnapshotSha, cancellationToken).ConfigureAwait(false)
+            : null;
+        var revision = ExecutionRevisionBuilder.Build(execution, activities, outcome, revisionDiff);
+        var canRequestChanges = Commands.RequestExecutionChanges.RequestExecutionChangesCommandHandler
+            .DescribeWhyChangesCannotBeRequested(execution) is null;
         var canRetry = execution.Status == TaskExecutionStatus.Completed &&
                        outcome == ExecutionVerificationOutcome.NeedsReview &&
                        execution.ReviewStatus == ExecutionReviewStatus.Pending;
@@ -186,7 +193,13 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                 PredictedVsActual: null,
                 VerificationOutcome: outcome.ToString(),
                 Verdict: snapshot.Verdict,
-                Usage: snapshot.Usage);
+                Usage: snapshot.Usage,
+                CanRequestChanges: canRequestChanges,
+                RevisionCount: execution.RevisionCount,
+                LastChangeRequest: execution.LastChangeRequest,
+                LastChangeRequestAt: execution.LastChangeRequestAt,
+                LastChangeRequestResult: execution.LastChangeRequestResult,
+                Revision: revision);
 
             return GetExecutionReviewResult.Ok(committedReview);
         }
@@ -324,7 +337,13 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
             PredictedVsActual: predictedVsActual,
             VerificationOutcome: outcome.ToString(),
                 Verdict: snapshot.Verdict,
-                Usage: snapshot.Usage);
+                Usage: snapshot.Usage,
+                CanRequestChanges: canRequestChanges,
+                RevisionCount: execution.RevisionCount,
+                LastChangeRequest: execution.LastChangeRequest,
+                LastChangeRequestAt: execution.LastChangeRequestAt,
+                LastChangeRequestResult: execution.LastChangeRequestResult,
+                Revision: revision);
 
         return GetExecutionReviewResult.Ok(review);
     }

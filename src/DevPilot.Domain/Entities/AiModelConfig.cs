@@ -45,6 +45,12 @@ public class AiModelConfig
 
     public string? LastTestMessage { get; set; }
 
+    /// <summary>Why the last test ended: Ok, Timeout, HttpError, NetworkError or Failed.</summary>
+    public string? LastTestOutcome { get; set; }
+
+    /// <summary>HTTP status the provider answered with when the last test failed with one.</summary>
+    public int? LastTestStatusCode { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime UpdatedAt { get; set; }

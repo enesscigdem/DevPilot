@@ -170,11 +170,29 @@ public sealed class GitExecutionPushService : IExecutionGitPushService
                     await _executionRepository.SetPushCompletedAsync(execution.Id, attemptId, branchName, expectedCommitSha, now, cancellationToken).ConfigureAwait(false);
                     return new ExecutionPushResult(Success: true, IsAlreadyPushed: true, RemoteBranchName: branchName, RemoteCommitSha: expectedCommitSha, PushedAt: now);
                 }
-                else
+
+                // A revision updates the branch of the already open pull request: the remote must still sit at the
+                // commit this execution pushed last, and the new commit must build on it (a plain fast-forward).
+                var isRevisionFastForward = execution.RevisionCount > 0 &&
+                                            !string.IsNullOrWhiteSpace(execution.RemoteCommitSha) &&
+                                            string.Equals(remoteSha, execution.RemoteCommitSha, StringComparison.OrdinalIgnoreCase);
+
+                if (!isRevisionFastForward)
                 {
                     // Remote branch exists at a different SHA -> Conflict!
                     await _executionRepository.SetPushFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);
                     return new ExecutionPushResult(false, ErrorMessage: $"Remote branch '{branchName}' already exists at a different commit SHA '{remoteSha}'. Direct push refused.");
+                }
+
+                var ancestorCmd = await RunGitCommandAsync(
+                    fullWorkspacePath,
+                    cancellationToken,
+                    null,
+                    "merge-base", "--is-ancestor", remoteSha, expectedCommitSha).ConfigureAwait(false);
+                if (!ancestorCmd.IsSuccess)
+                {
+                    await _executionRepository.SetPushFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);
+                    return new ExecutionPushResult(false, ErrorMessage: $"The revision commit does not build on the pushed commit '{remoteSha}'. Direct push refused.");
                 }
             }
 

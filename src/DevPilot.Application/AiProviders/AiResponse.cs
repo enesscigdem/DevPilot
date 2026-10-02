@@ -30,6 +30,17 @@ public sealed class AiResponse
 
     public AiFailureKind FailureKind { get; set; } = AiFailureKind.None;
 
+    /// <summary>The registered model that answered (set by the router): its id and name.</summary>
+    public Guid? ModelConfigId { get; set; }
+
+    public string? ModelConfigName { get; set; }
+
+    /// <summary>Pinned, StageAssignment, Default, OnlyModel or Legacy: how the router chose the model.</summary>
+    public string? RoutingSource { get; set; }
+
+    /// <summary>Set when the model is not the one assigned to the stage, with the reason.</summary>
+    public string? FallbackReason { get; set; }
+
     public bool IsTransient =>
         FailureKind is AiFailureKind.TransientServiceUnavailable
                     or AiFailureKind.RateLimited

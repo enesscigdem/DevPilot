@@ -222,6 +222,18 @@ public sealed class CommitExecutionCommandHandler : ICommitExecutionCommandHandl
         }
 
         var taskTitle = execution.DevelopmentTask?.Title ?? "update changes";
+        if (execution.RevisionCount > 0)
+        {
+            // The commit subject is capped at 72 characters; shorten the title, never the revision marker.
+            var revisionSuffix = $" (revision {execution.RevisionCount})";
+            if (taskTitle.Length + revisionSuffix.Length > 72)
+            {
+                taskTitle = taskTitle[..Math.Max(1, 72 - revisionSuffix.Length)].TrimEnd();
+            }
+
+            taskTitle += revisionSuffix;
+        }
+
         var commitResult = await _gitCommitService
             .CommitApprovedExecutionAsync(execution, taskTitle, execution.CommitAttemptId ?? Guid.NewGuid(), cancellationToken)
             .ConfigureAwait(false);

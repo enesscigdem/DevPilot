@@ -11,7 +11,7 @@ internal sealed class AiModelService : IAiModelService
 
     // A connection test that has not answered by now is a result in itself: waiting for the 5 minute
     // client timeout would leave the user staring at a spinner.
-    private static readonly TimeSpan DefaultTestTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan DefaultTestTimeout = TimeSpan.FromSeconds(120);
 
     private readonly DevPilotDbContext _db;
     private readonly IAiKeyProtector _keyProtector;
@@ -95,6 +95,8 @@ internal sealed class AiModelService : IAiModelService
         model.LastTestedAt = null;
         model.LastTestSucceeded = null;
         model.LastTestMessage = null;
+        model.LastTestOutcome = null;
+        model.LastTestStatusCode = null;
 
         await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         if (model.IsDefault)
@@ -125,6 +127,8 @@ internal sealed class AiModelService : IAiModelService
         model.LastTestedAt = DateTime.UtcNow;
         model.LastTestSucceeded = result.Success;
         model.LastTestMessage = Truncate(result.Message, 1000);
+        model.LastTestOutcome = result.Outcome;
+        model.LastTestStatusCode = result.StatusCode;
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return result;
@@ -235,6 +239,8 @@ internal sealed class AiModelService : IAiModelService
                 Message = $"No answer within {(int)_testTimeout.TotalSeconds} seconds. The endpoint was reached but the model did not respond. " +
                           "Try again, or test a faster model to check the key and address.",
                 DurationMs = (long)_testTimeout.TotalMilliseconds,
+                Outcome = "Timeout",
+                TimeLimitSeconds = (int)_testTimeout.TotalSeconds,
                 Model = model.ModelName,
             };
         }
@@ -246,6 +252,9 @@ internal sealed class AiModelService : IAiModelService
         return new AiModelTestResultDto
         {
             Success = reachable,
+            Outcome = reachable ? "Ok" : response.StatusCode.HasValue ? "HttpError" : response.FailureKind == AiFailureKind.TimeoutOrConnection ? "NetworkError" : "Failed",
+            StatusCode = reachable ? null : response.StatusCode,
+            TimeLimitSeconds = (int)_testTimeout.TotalSeconds,
             Message = reachable
                 ? "Connection OK."
                 : response.ErrorMessage ?? "The model did not answer.",
@@ -384,6 +393,8 @@ internal sealed class AiModelService : IAiModelService
             LastTestedAt = m.LastTestedAt,
             LastTestSucceeded = m.LastTestSucceeded,
             LastTestMessage = m.LastTestMessage,
+            LastTestOutcome = m.LastTestOutcome,
+            LastTestStatusCode = m.LastTestStatusCode,
         };
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max];

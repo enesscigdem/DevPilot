@@ -106,5 +106,6 @@ const review: Resources["review"] = {
   approvedCommit: "Onaylanan commit:",
   mergeDesc: "Bu işlem, çalıştırmanın onaylanmış pull request'ini GitHub'da standart birleştirme yöntemiyle temel dala birleştirecek.",
   confirmMerge: "Birleştirmeyi onayla",
+  requestChanges: "Düzeltme iste",
 }
 export default review

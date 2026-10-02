@@ -22,17 +22,23 @@ import {
   ChevronDown,
   ChevronUp,
   Cpu,
+  MessageSquareWarning,
 } from "lucide-react"
 import { Button, Badge, Panel, StatusDot } from "@/components/ui/primitives"
 import { ExecutionTabs } from "@/components/ExecutionTabs"
 import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { cn } from "@/lib/utils"
-import { getExecution, getExecutionActivity, retryExecution, cancelExecution, verifyExecution, getExecutions, getModelComparisonsForTask } from "@/api"
+import { getExecution, getExecutionActivity, retryExecution, cancelExecution, verifyExecution, getExecutions, getModelComparisonsForTask, requestExecutionChanges } from "@/api"
+import { RevisionPanel } from "@/components/RevisionPanel"
+import { RunSelector, type RunKey } from "@/components/RunSelector"
+import { formatDuration } from "@/lib/duration"
+import { RequestChangesModal } from "@/components/RequestChangesModal"
 import { useWorkspace } from "@/lib/workspace"
 import {
   TaskExecutionStatus,
   getExecutionStatusMeta,
   type ExecutionDetail,
+  type ExecutionRevision,
   type ExecutionActivityItem,
   type ExecutionListItem,
 } from "@/types"
@@ -109,7 +115,9 @@ function getMetadataDisplay(act: ExecutionActivityItem, verificationOutcome?: st
       const duration = m.stageDurationMs !== undefined && m.stageDurationMs !== null ? ` · ${m.stageDurationMs}ms` : ""
       const contract = m.outputContract ? ` · ${m.outputContract}` : ""
       const retry = m.compactRetryReason ? ` · ${m.compactRetryReason}` : ""
-      return `${m.providerCallKind ?? t("execWs.meta.providerCall")}${contract}${budget}${actual}${retry}${duration}`
+      const used = m.modelConfigName ? ` · ${m.modelConfigName}${m.modelSource && m.modelSource !== "StageAssignment" ? ` (${m.modelSource})` : ""}` : m.model ? ` · ${m.model}` : ""
+      const attempts = m.providerAttemptCount && m.providerAttemptCount > 1 ? ` · ${m.providerAttemptCount} attempts` : ""
+      return `${m.providerCallKind ?? t("execWs.meta.providerCall")}${used}${contract}${budget}${actual}${retry}${attempts}${duration}`
     }
     if (m.eventKind === "CompactRetry") {
       const budget = m.requestedOutputTokens ? ` · ${t("execWs.meta.budget")} ${m.requestedOutputTokens}` : ""
@@ -194,8 +202,8 @@ export function ExecutionWorkspace() {
     activeReqWorkspaceIdRef.current = activeWorkspaceId
   }, [activeWorkspaceId])
 
-  const [execution, setExecution] = useState<ExecutionDetail | null>(null)
-  const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
+  const [rawExecution, setExecution] = useState<ExecutionDetail | null>(null)
+  const [rawActivities, setActivities] = useState<ExecutionActivityItem[]>([])
   const [activeExecutionForTask, setActiveExecutionForTask] = useState<ExecutionListItem | null>(null)
   const [comparisonId, setComparisonId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -208,8 +216,53 @@ export function ExecutionWorkspace() {
   const [verifyError, setVerifyError] = useState<string | null>(null)
   const [showGenDetails, setShowGenDetails] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [selectedRun, setSelectedRun] = useState<RunKey | null>(null)
+  const [showChangesModal, setShowChangesModal] = useState(false)
+  const [isRequestingChanges, setIsRequestingChanges] = useState(false)
+  const [changesError, setChangesError] = useState<string | null>(null)
 
-  const isRunningExecution = execution?.status === TaskExecutionStatus.Running
+  // The first run and every requested fix are separate runs of the same execution. The running fix opens by default,
+  // otherwise the latest one; an older run is one click away and never shares its dates, checks or events with another.
+  const revisions: ExecutionRevision[] = rawExecution?.revisions?.length
+    ? rawExecution.revisions
+    : rawExecution?.revision
+      ? [rawExecution.revision]
+      : []
+  const hasRevisions = revisions.length > 0
+  const activeRevision = revisions.find((r) => r.state === "Running") ?? null
+  const defaultRun: RunKey = activeRevision?.number ?? revisions[revisions.length - 1]?.number ?? "initial"
+  const run: RunKey =
+    selectedRun !== null && (selectedRun === "initial" || revisions.some((r) => r.number === selectedRun)) ? selectedRun : defaultRun
+  const revision = typeof run === "number" ? (revisions.find((r) => r.number === run) ?? null) : null
+  const showingOriginal = hasRevisions && run === "initial"
+  const initialRun = revisions[0]?.initialRun ?? null
+  const initialCutoffMs = initialRun?.completedAt ? new Date(initialRun.completedAt).getTime() : null
+
+  // A new fix (or one that starts running) takes the page over again.
+  const revisionCount = revisions.length
+  const activeRevisionNumber = activeRevision?.number ?? null
+  useEffect(() => {
+    setSelectedRun(null)
+  }, [revisionCount, activeRevisionNumber])
+
+  const execution: ExecutionDetail | null =
+    rawExecution && showingOriginal && initialRun
+      ? {
+          ...rawExecution,
+          status: TaskExecutionStatus.Completed,
+          completedAt: initialRun.completedAt ?? rawExecution.completedAt,
+          verificationOutcome: initialRun.outcome ?? rawExecution.verificationOutcome,
+          stages: [],
+          canRetry: false,
+          progressPercentage: 100,
+        }
+      : rawExecution
+  const activities =
+    showingOriginal && initialCutoffMs != null
+      ? rawActivities.filter((a) => new Date(a.createdAt).getTime() <= initialCutoffMs)
+      : rawActivities
+
+  const isRunningExecution = rawExecution?.status === TaskExecutionStatus.Running
 
   useEffect(() => {
     if (!isRunningExecution) return
@@ -250,6 +303,24 @@ export function ExecutionWorkspace() {
       setVerifyError(err instanceof Error ? err.message : t("execWs.errVerify"))
     } finally {
       setIsVerifying(false)
+    }
+  }
+
+  const handleRequestChanges = async (feedback: string) => {
+    if (!rawExecution || isRequestingChanges) return
+    setIsRequestingChanges(true)
+    setChangesError(null)
+
+    try {
+      await requestExecutionChanges(rawExecution.id, feedback, activeWorkspaceId)
+      setShowChangesModal(false)
+      setSelectedRun(null)
+      refreshOverview(true)
+      await fetchData(false)
+    } catch (err) {
+      setChangesError(err instanceof Error ? err.message : t("revision.modal.error"))
+    } finally {
+      setIsRequestingChanges(false)
     }
   }
 
@@ -342,10 +413,10 @@ export function ExecutionWorkspace() {
 
   // Polling loop while execution is Pending (0) or Running (1)
   useEffect(() => {
-    if (isWorkspaceLoading || !execution) return
+    if (isWorkspaceLoading || !rawExecution) return
     const isRunningOrPending =
-      execution.status === TaskExecutionStatus.Pending ||
-      execution.status === TaskExecutionStatus.Running
+      rawExecution.status === TaskExecutionStatus.Pending ||
+      rawExecution.status === TaskExecutionStatus.Running
 
     if (!isRunningOrPending) return
 
@@ -354,7 +425,7 @@ export function ExecutionWorkspace() {
     }, 2000)
 
     return () => clearInterval(interval)
-  }, [isWorkspaceLoading, execution, fetchData])
+  }, [isWorkspaceLoading, rawExecution, fetchData])
 
   if (isWorkspaceLoading || isLoading) {
     return (
@@ -399,7 +470,10 @@ export function ExecutionWorkspace() {
   const isPending = execution.status === TaskExecutionStatus.Pending
   const isFailed = execution.status === TaskExecutionStatus.Failed
   const isCancelled = execution.status === TaskExecutionStatus.Cancelled
-  const canRetryExecution = Boolean(execution.canRetry) || isFailed || isCancelled
+  // One rule for UI and backend: the server says whether Retry would be accepted. A failed or cancelled run that is
+  // blocked only by another active execution points to that execution instead of a Retry that would be refused.
+  const canRetryExecution = Boolean(execution.canRetry)
+  const retryBlockedByActive = (isFailed || isCancelled) && Boolean(activeExecutionForTask)
   const verificationMissing =
     !execution.verificationOutcome ||
     execution.verificationOutcome === "VerificationUnavailable" ||
@@ -409,7 +483,15 @@ export function ExecutionWorkspace() {
     (execution.pushStatus ?? "None") === "None" &&
     (execution.pullRequestStatus ?? "None") === "None" &&
     (execution.mergeStatus ?? "None") === "None"
+  // Only what happened between this fix's own request and the next one.
+  const revisionEvents = revision
+    ? rawActivities.filter((a) => {
+        const at = new Date(a.createdAt).getTime()
+        return at >= new Date(revision.requestedAt).getTime() && (!revision.windowEnd || at < new Date(revision.windowEnd).getTime())
+      })
+    : []
   const canVerifyExisting =
+    !showingOriginal &&
     execution.status === TaskExecutionStatus.Completed &&
     verificationMissing &&
     deliveryUntouched &&
@@ -438,6 +520,9 @@ export function ExecutionWorkspace() {
     lastTestMeta === false ||
     (lastTestAct ? lastTestAct.status === "Failed" : false)
 
+  const buildKnownFailing = buildFailed && lastBuildAct?.metadata?.verificationOutcome === "NoNewRegressions"
+  const testKnownFailing = testFailed && lastTestAct?.metadata?.verificationOutcome === "NoNewRegressions"
+
   const testPassed =
     !testFailed &&
     (lastTestMeta === true ||
@@ -459,7 +544,13 @@ export function ExecutionWorkspace() {
             <div className="flex items-center gap-2">
               <span className="font-mono text-[11px] text-subtle-foreground">{execution.id}</span>
               <h1 className="truncate text-[14.5px] font-semibold text-foreground">{execution.taskTitle}</h1>
-              <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+              {activeRevision && !showingOriginal ? (
+                <Badge tone="blue">
+                  {t("revision.state.Running")} · {t("revision.number", { n: activeRevision.number })}
+                </Badge>
+              ) : (
+                <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
+              )}
             </div>
             <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-subtle-foreground">
               <GitBranch className="h-3 w-3" />
@@ -485,7 +576,8 @@ export function ExecutionWorkspace() {
               <Button
                 variant="default"
                 size="sm"
-                disabled={isCanceling}
+                disabled={isCanceling || execution.canCancel === false}
+                title={execution.canCancel === false ? execution.cancelBlockedReason ?? undefined : undefined}
                 onClick={handleCancelExecution}
                 className="text-danger hover:bg-danger/10 hover:text-danger border-danger/30"
               >
@@ -522,7 +614,7 @@ export function ExecutionWorkspace() {
                 )}
               </Button>
             )}
-            {canRetryExecution && (
+            {(canRetryExecution || retryBlockedByActive) && (
               activeExecutionForTask ? (
                 <Button
                   variant="default"
@@ -554,6 +646,19 @@ export function ExecutionWorkspace() {
                 </Button>
               )
             )}
+            {rawExecution?.canRequestChanges && !isRunning && !showingOriginal && (
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => {
+                  setChangesError(null)
+                  setShowChangesModal(true)
+                }}
+              >
+                <MessageSquareWarning className="h-3.5 w-3.5" />
+                {t("review.requestChanges")}
+              </Button>
+            )}
             <Button
               variant={canRetryExecution || canVerifyExisting ? "default" : "primary"}
               size="sm"
@@ -574,6 +679,81 @@ export function ExecutionWorkspace() {
         reviewAvailable={!isPending && !isRunning && execution.status === TaskExecutionStatus.Completed}
       />
 
+      {hasRevisions && (
+        <RunSelector
+          runs={[
+            { key: "initial", state: "Initial", durationMs: initialRun?.durationMs },
+            ...revisions.map((r) => ({ key: r.number as RunKey, state: r.state, durationMs: r.durationMs })),
+          ]}
+          value={run}
+          onChange={setSelectedRun}
+        />
+      )}
+
+      {revision ? (
+        <div className="mx-auto max-w-[1040px] space-y-4 px-6 py-6">
+          <RevisionPanel
+            key={revision.number}
+            revision={revision}
+            executionId={rawExecution!.id}
+            workspaceId={activeWorkspaceId}
+            canRequestChanges={Boolean(rawExecution?.canRequestChanges)}
+            onRequestChanges={() => {
+              setChangesError(null)
+              setShowChangesModal(true)
+            }}
+            onOpenReview={() => navigate(`/review/${rawExecution!.id}`)}
+          />
+
+          <details open={revision.state === "Running"} className="group rounded-[var(--radius-md)] border border-border bg-surface">
+            <summary className="flex cursor-pointer items-center justify-between px-4 py-3 text-[12.5px] font-medium text-foreground">
+              <span className="flex items-center gap-2">
+                <Terminal className="h-3.5 w-3.5 text-subtle-foreground" />
+                {t("execWs.activity")}
+              </span>
+              <span className="font-mono text-[11px] text-subtle-foreground">
+                {t("execWs.events", { count: revisionEvents.length })}
+              </span>
+            </summary>
+            <ul className="max-h-[320px] space-y-1 overflow-y-auto border-t border-border px-4 py-3">
+              {revisionEvents.map((a) => (
+                <li key={a.id} className="flex gap-3 text-[12px]">
+                  <span className="shrink-0 font-mono text-[11px] text-subtle-foreground">{formatTimeOnly(a.createdAt)}</span>
+                  <span className="text-foreground">{srv(a.message)}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        </div>
+      ) : (
+        <>
+          {showingOriginal && (
+            <div className="mx-auto max-w-[1500px] px-6 pt-4">
+              <Panel className="space-y-2 p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Terminal className="h-4 w-4 shrink-0 text-subtle-foreground" />
+                  <span className="text-[13.5px] font-semibold text-foreground">{t("revision.run.initial")}</span>
+                  <Badge tone="green">{t("revision.run.initialDone")}</Badge>
+                  {initialRun?.durationMs != null && (
+                    <span className="ml-auto font-mono text-[11.5px] text-muted-foreground">
+                      {t("revision.tookFor", { time: formatDuration(initialRun.durationMs) })}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[12.5px] text-foreground">{execution.taskTitle}</p>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11.5px] text-muted-foreground">
+                  {initialRun?.outcome && (
+                    <span>
+                      {t("revision.previous.outcome", {
+                        outcome: t(`revision.outcomeLabel.${initialRun.outcome}`, { defaultValue: initialRun.outcome }),
+                      })}
+                    </span>
+                  )}
+                  <span>{t("revision.previous.note")}</span>
+                </div>
+              </Panel>
+            </div>
+          )}
       <div className="mx-auto grid max-w-[1500px] grid-cols-1 gap-0 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
         {/* LEFT — stage rail */}
         <aside className="border-b border-border p-5 lg:border-b-0 lg:border-r">
@@ -1214,22 +1394,24 @@ export function ExecutionWorkspace() {
               <Hammer className="h-3.5 w-3.5 text-subtle-foreground" />
               <span className="text-foreground">{t("execWs.prerequisites")}</span>
               <Badge
-                tone={buildPassed ? "green" : buildFailed ? "red" : "neutral"}
+                tone={buildPassed ? "green" : buildKnownFailing ? "amber" : buildFailed ? "red" : "neutral"}
                 className="ml-auto"
               >
-                {buildPassed ? t("execWs.passed") : buildFailed ? t("execWs.failed") : "—"}
+                {buildPassed ? t("execWs.passed") : buildKnownFailing ? t("execWs.failingOnBase") : buildFailed ? t("execWs.failed") : "—"}
               </Badge>
             </div>
             <div className="mt-1.5 flex items-center gap-2 text-[12.5px]">
               <FlaskConical className="h-3.5 w-3.5 text-subtle-foreground" />
               <span className="text-foreground">{t("execWs.tests")}</span>
               <Badge
-                tone={testPassed ? "green" : testFailed ? "red" : "neutral"}
+                tone={testPassed ? "green" : testKnownFailing ? "amber" : testFailed ? "red" : "neutral"}
                 className="ml-auto"
               >
                 {testPassed
                   ? t("execWs.passed")
-                  : testFailed
+                  : testKnownFailing
+                    ? t("execWs.failingOnBase")
+                    : testFailed
                     ? t("execWs.failed")
                     : execution.verificationOutcome === "PartiallyVerified"
                       ? t("execWs.noSuite")
@@ -1249,6 +1431,18 @@ export function ExecutionWorkspace() {
           </Button>
         </aside>
       </div>
+        </>
+      )}
+
+      {showChangesModal && (
+        <RequestChangesModal
+          pullRequestNumber={rawExecution?.pullRequestStatus === "Open" ? rawExecution.pullRequestNumber : null}
+          isSubmitting={isRequestingChanges}
+          error={changesError}
+          onClose={() => setShowChangesModal(false)}
+          onSubmit={handleRequestChanges}
+        />
+      )}
     </div>
   )
 }

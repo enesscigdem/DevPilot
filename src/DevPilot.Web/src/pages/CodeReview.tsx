@@ -19,12 +19,13 @@ import {
   RotateCw,
   RotateCcw,
   Sparkles,
+  MessageSquareWarning,
 } from "lucide-react"
 import { PageContainer } from "@/components/shared"
 import { ExecutionTabs } from "@/components/ExecutionTabs"
 import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl, retryExecution } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl, retryExecution, requestExecutionChanges } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import {
   getExecutionStatusMeta,
@@ -33,176 +34,9 @@ import {
   type ExecutionActivityItem,
 } from "@/types"
 import { cn } from "@/lib/utils"
-
-interface ParsedLine {
-  id: number
-  type: "header" | "hunk" | "add" | "del" | "context" | "info"
-  content: string
-  oldNo?: number
-  newNo?: number
-  filePath?: string
-}
-
-function parseGitDiff(diffText: string): ParsedLine[] {
-  if (!diffText) return []
-  const rawLines = diffText.split("\n")
-  const parsed: ParsedLine[] = []
-
-  let currentOldLine: number | undefined = undefined
-  let currentNewLine: number | undefined = undefined
-  let currentFile: string | undefined = undefined
-
-  for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i]
-
-    if (line.startsWith("diff --git ")) {
-      const match = line.match(/b\/(.+)$/)
-      if (match) {
-        currentFile = match[1]
-      }
-    }
-
-    if (
-      line.startsWith("diff --git") ||
-      line.startsWith("index ") ||
-      line.startsWith("--- ") ||
-      line.startsWith("+++ ") ||
-      line.startsWith("old mode") ||
-      line.startsWith("new mode") ||
-      line.startsWith("new file") ||
-      line.startsWith("deleted file") ||
-      line.startsWith("similarity index") ||
-      line.startsWith("rename from") ||
-      line.startsWith("rename to")
-    ) {
-      parsed.push({
-        id: i,
-        type: "header",
-        content: line,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    if (line.startsWith("@@ ")) {
-      const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
-      if (hunkMatch) {
-        currentOldLine = parseInt(hunkMatch[1], 10)
-        currentNewLine = parseInt(hunkMatch[2], 10)
-      } else {
-        currentOldLine = undefined
-        currentNewLine = undefined
-      }
-      parsed.push({
-        id: i,
-        type: "hunk",
-        content: line,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    if (
-      line.startsWith("[Redacted sensitive file content:") ||
-      line.startsWith("[Binary file diff not shown:")
-    ) {
-      parsed.push({
-        id: i,
-        type: "info",
-        content: line,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    if (line.startsWith("+")) {
-      parsed.push({
-        id: i,
-        type: "add",
-        content: line,
-        oldNo: undefined,
-        newNo: currentNewLine !== undefined ? currentNewLine++ : undefined,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    if (line.startsWith("-")) {
-      parsed.push({
-        id: i,
-        type: "del",
-        content: line,
-        oldNo: currentOldLine !== undefined ? currentOldLine++ : undefined,
-        newNo: undefined,
-        filePath: currentFile,
-      })
-      continue
-    }
-
-    parsed.push({
-      id: i,
-      type: "context",
-      content: line,
-      oldNo: currentOldLine !== undefined ? currentOldLine++ : undefined,
-      newNo: currentNewLine !== undefined ? currentNewLine++ : undefined,
-      filePath: currentFile,
-    })
-  }
-
-  return parsed
-}
-
-function DiffRow({ line }: { line: ParsedLine }) {
-  if (line.type === "hunk") {
-    return (
-      <div className="border-y border-primary/20 bg-primary-soft/40 px-3 py-1 font-mono text-[11px] text-primary">
-        {line.content}
-      </div>
-    )
-  }
-
-  if (line.type === "header") {
-    return (
-      <div
-        id={line.content.startsWith("diff --git") && line.filePath ? `file-diff-${line.filePath}` : undefined}
-        className="border-b border-border/40 bg-surface-2 px-3 py-1 font-mono text-[11px] text-subtle-foreground"
-      >
-        {line.content}
-      </div>
-    )
-  }
-
-  if (line.type === "info") {
-    return (
-      <div className="flex items-center gap-2 border-y border-accent/20 bg-amber-soft/60 px-4 py-2 font-mono text-[12px] font-medium text-accent">
-        <Info className="h-3.5 w-3.5 shrink-0" />
-        <span>{line.content}</span>
-      </div>
-    )
-  }
-
-  const tone = line.type === "add" ? "bg-success-soft/60" : line.type === "del" ? "bg-danger-soft/60" : ""
-  const sign = line.type === "add" ? "+" : line.type === "del" ? "−" : " "
-  const signColor = line.type === "add" ? "text-success" : line.type === "del" ? "text-danger" : "text-subtle-foreground"
-
-  const displayCode =
-    line.content.length > 0 && (line.content[0] === "+" || line.content[0] === "-" || line.content[0] === " ")
-      ? line.content.slice(1)
-      : line.content
-
-  return (
-    <div className={"flex font-mono text-[12px] leading-[1.6] " + tone}>
-      <span className="w-10 shrink-0 select-none border-r border-border/60 px-2 text-right text-subtle-foreground">
-        {line.oldNo ?? ""}
-      </span>
-      <span className="w-10 shrink-0 select-none border-r border-border/60 px-2 text-right text-subtle-foreground">
-        {line.newNo ?? ""}
-      </span>
-      <span className={"w-5 shrink-0 select-none text-center " + signColor}>{sign}</span>
-      <code className="whitespace-pre pr-4 text-foreground">{displayCode || " "}</code>
-    </div>
-  )
-}
+import { DiffRow, parseGitDiff } from "@/components/DiffView"
+import { RevisionPanel } from "@/components/RevisionPanel"
+import { RequestChangesModal } from "@/components/RequestChangesModal"
 
 export function CodeReview() {
   const { t } = useTranslation()
@@ -222,6 +56,9 @@ export function CodeReview() {
   const [decisionError, setDecisionError] = useState<string | null>(null)
   const [showRejectModal, setShowRejectModal] = useState(false)
   const [rejectionReasonInput, setRejectionReasonInput] = useState("")
+  const [showChangesModal, setShowChangesModal] = useState(false)
+  const [isRequestingChanges, setIsRequestingChanges] = useState(false)
+  const [changesError, setChangesError] = useState<string | null>(null)
 
   const activeRequestIdRef = useRef(0)
   const hasSyncedSidebarWorkspaceRef = useRef<string | null>(null)
@@ -368,6 +205,12 @@ export function CodeReview() {
           canRequestPullRequest: true,
         } : null)
       }
+
+      // A fix pushed to the branch of an open pull request updates that same pull request on GitHub:
+      // refresh its state so CI and integrity are shown for the new head instead of the old one.
+      if (review.pullRequestStatus === "Open") {
+        void handleSyncPr()
+      }
     } catch (err) {
       setDecisionError(err instanceof Error ? err.message : t("review.errPush"))
     } finally {
@@ -482,6 +325,25 @@ export function CodeReview() {
       window.location.href = url
     } catch {
       // ignore
+    }
+  }
+
+  // The fix runs in the background on the same branch; the execution page shows its progress, and the
+  // review page comes back to life once it is done.
+  const handleRequestChanges = async (feedback: string) => {
+    if (!id || !review || isRequestingChanges) return
+    setIsRequestingChanges(true)
+    setChangesError(null)
+
+    try {
+      const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
+      await requestExecutionChanges(id, feedback, wsId)
+      setShowChangesModal(false)
+      navigate(`/executions/${id}`)
+    } catch (err) {
+      setChangesError(err instanceof Error ? err.message : t("revision.modal.error"))
+    } finally {
+      setIsRequestingChanges(false)
     }
   }
 
@@ -603,6 +465,20 @@ export function CodeReview() {
               {review.branchName}
             </div>
           </div>
+          {review.canRequestChanges && (
+            <Button
+              variant="default"
+              size="sm"
+              disabled={isSubmittingDecision || isRequestingChanges}
+              onClick={() => {
+                setChangesError(null)
+                setShowChangesModal(true)
+              }}
+            >
+              <MessageSquareWarning className="h-3.5 w-3.5" />
+              {t("review.requestChanges")}
+            </Button>
+          )}
           {isPendingDecision && (
             <>
               <Button
@@ -867,11 +743,13 @@ export function CodeReview() {
                 <FlaskConical
                   className={cn(
                     "h-3.5 w-3.5",
-                    review.test.status === "Passed" || review.test.status === "NoNewRegressions"
+                    review.test.status === "Passed"
                       ? "text-success"
-                      : review.test.status === "Failed"
-                        ? "text-danger"
-                        : "text-subtle-foreground",
+                      : review.test.status === "NoNewRegressions"
+                        ? "text-amber-500"
+                        : review.test.status === "Failed"
+                          ? "text-danger"
+                          : "text-subtle-foreground",
                   )}
                 />
                 <span className="tech-label">{t("review.tests")}</span>
@@ -882,7 +760,7 @@ export function CodeReview() {
                   review.test.status === "Passed"
                     ? "text-success"
                     : review.test.status === "NoNewRegressions"
-                      ? "text-emerald-500"
+                      ? "text-amber-500"
                       : review.test.status === "Failed"
                         ? "text-danger"
                         : "text-muted-foreground",
@@ -910,6 +788,19 @@ export function CodeReview() {
 
           <div className="mt-5 space-y-3">
             <div className="tech-label">{t("review.decision")}</div>
+            {review.revision && (
+              <RevisionPanel
+                compact
+                revision={review.revision}
+                executionId={review.executionId}
+                workspaceId={review.repositoryWorkspaceId ?? activeWorkspaceId}
+                canRequestChanges={Boolean(review.canRequestChanges)}
+                onRequestChanges={() => {
+                  setChangesError(null)
+                  setShowChangesModal(true)
+                }}
+              />
+            )}
             {isPendingDecision && (() => {
               const isBlocked = review.verificationOutcome === "NeedsReview" || review.verificationOutcome === "Failed" || review.verificationOutcome === "Blocked"
               const validationPassed = !isBlocked
@@ -987,6 +878,21 @@ export function CodeReview() {
                       {isSubmittingDecision ? <Loader2 className="h-4 w-4 animate-spin" /> : t("review.approve")}
                     </Button>
                   </div>
+                  {review.canRequestChanges && (
+                    <Button
+                      variant="default"
+                      size="md"
+                      disabled={isSubmittingDecision || isRequestingChanges}
+                      onClick={() => {
+                        setChangesError(null)
+                        setShowChangesModal(true)
+                      }}
+                      className="w-full"
+                    >
+                      <MessageSquareWarning className="h-4 w-4" />
+                      {t("review.requestChanges")}
+                    </Button>
+                  )}
                 </div>
               )
             })()}
@@ -1277,6 +1183,17 @@ export function CodeReview() {
           </div>
         </aside>
       </div>
+
+      {/* Request Changes Modal */}
+      {showChangesModal && (
+        <RequestChangesModal
+          pullRequestNumber={review.pullRequestStatus === "Open" ? review.pullRequestNumber : null}
+          isSubmitting={isRequestingChanges}
+          error={changesError}
+          onClose={() => setShowChangesModal(false)}
+          onSubmit={handleRequestChanges}
+        />
+      )}
 
       {/* Reject Modal */}
       {showRejectModal && (

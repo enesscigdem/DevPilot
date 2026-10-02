@@ -104,5 +104,6 @@ const review = {
   approvedCommit: "Approved commit:",
   mergeDesc: "This will merge the execution's approved pull request into the base branch on GitHub using standard merge method.",
   confirmMerge: "Confirm merge",
+  requestChanges: "Request changes",
 }
 export default review

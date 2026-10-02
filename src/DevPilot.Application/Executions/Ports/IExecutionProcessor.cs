@@ -41,10 +41,24 @@ public sealed record ExecutionProcessingContext(
     /// When set, the already generated worktree is verified again instead of generating code: no new
     /// workspace is prepared and the Developer Agent is not asked for edits. Bounded repair still runs.
     /// </summary>
-    ExecutionVerifyOnlyWorkspace? VerifyOnlyWorkspace = null)
+    ExecutionVerifyOnlyWorkspace? VerifyOnlyWorkspace = null,
+    /// <summary>
+    /// When set together with <see cref="VerifyOnlyWorkspace"/>, the reviewer's feedback is applied to the existing
+    /// worktree by the Developer Agent first, then build and test run again on the result.
+    /// </summary>
+    ExecutionChangeRequest? ChangeRequest = null)
 {
     public bool IsVerifyOnly => VerifyOnlyWorkspace is not null;
+
+    public bool IsRevision => ChangeRequest is not null && VerifyOnlyWorkspace is not null;
 }
+
+/// <summary>Reviewer feedback to apply on top of what the execution already produced.</summary>
+public sealed record ExecutionChangeRequest(
+    string Feedback,
+    int RevisionNumber,
+    string? CommittedBaseCommitSha = null,
+    bool FeedbackAlreadyApplied = false);
 
 /// <summary>The existing worktree of a finished execution, re-verified without regenerating code.</summary>
 public sealed record ExecutionVerifyOnlyWorkspace(

@@ -174,6 +174,14 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
         // 4. Active Execution Selection: Latest relevant NON-TERMINAL workflow
         bool IsTerminal(TaskExecution e)
         {
+            // An execution that is running or queued right now is the agent's current work, whatever its earlier
+            // review, CI or pull request state says (a requested fix reopens a rejected or CI-failed execution).
+            if (e.Status is TaskExecutionStatus.Running or TaskExecutionStatus.Pending)
+            {
+                return e.MergeStatus == ExecutionMergeStatus.Merged ||
+                       e.PullRequestRemoteState == ExecutionPullRequestRemoteState.Merged;
+            }
+
             if (e.MergeStatus == ExecutionMergeStatus.Merged ||
                 e.PullRequestRemoteState == ExecutionPullRequestRemoteState.Merged)
                 return true;
@@ -315,6 +323,15 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
         List<ExecutionActivity> activities,
         AiPricingOptions? pricing)
     {
+        // While a requested fix runs, the sidebar shows that fix: its own stages, start time and usage. The finished
+        // first run (all done, old duration) must not stand in for it.
+        var revisionActive = ExecutionRevisionScope.IsActive(execution);
+        if (revisionActive)
+        {
+            activities = ExecutionRevisionScope.Since(execution, activities).ToList();
+        }
+
+        var startedAt = revisionActive ? execution.LastChangeRequestAt : execution.StartedAt;
         var usage = ExecutionVerdictBuilder.AggregateUsage(activities, pricing);
         var taskDisplayId = FormatTaskDisplayId(task.Id);
 
@@ -440,6 +457,13 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
             prState = WorkspaceStageState.Todo;
         }
 
+        if (revisionActive)
+        {
+            // Review and pull request come after the fix.
+            reviewState = WorkspaceStageState.Todo;
+            prState = WorkspaceStageState.Todo;
+        }
+
         var stageList = new List<WorkspaceStageStepDto>
         {
             new() { StageKey = "analyze", State = analyzeState },
@@ -465,10 +489,10 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
         }
 
         int? elapsedSeconds = null;
-        if (execution.StartedAt.HasValue)
+        if (startedAt.HasValue)
         {
             var end = execution.CompletedAt ?? DateTime.UtcNow;
-            elapsedSeconds = (int)Math.Max(0, (end - execution.StartedAt.Value).TotalSeconds);
+            elapsedSeconds = (int)Math.Max(0, (end - startedAt.Value).TotalSeconds);
         }
 
         // File touch count from metadata or analysis
@@ -503,7 +527,7 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
             TaskTitle = task.Title,
             CurrentStageKey = currentStageKey,
             Stages = stageList,
-            StartedAt = execution.StartedAt,
+            StartedAt = startedAt,
             CompletedAt = execution.CompletedAt,
             ElapsedSeconds = elapsedSeconds,
             // Aggregated from recorded provider calls; null (not zero) when no call reported token usage.

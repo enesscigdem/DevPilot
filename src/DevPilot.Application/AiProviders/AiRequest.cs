@@ -19,4 +19,7 @@ public sealed class AiRequest
     public int? MaxTokens { get; set; }
 
     public string? ReasoningEffort { get; set; }
+
+    /// <summary>Called as attempts time out, fail or are retried, so the caller can show it. Never throws into the provider.</summary>
+    public Func<AiAttemptEvent, Task>? OnAttempt { get; set; }
 }

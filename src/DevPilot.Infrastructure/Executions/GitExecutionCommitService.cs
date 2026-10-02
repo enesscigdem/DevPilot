@@ -122,7 +122,10 @@ public sealed class GitExecutionCommitService : IExecutionGitCommitService
             }
 
             // Stage worktree changes into alternate index
-            var addCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, envVars, "add", "-A", "--", ".").ConfigureAwait(false);
+            // Same scope as the approved fingerprint: dependency installs and build output are never committed.
+            var addArgs = new List<string> { "add", "-A", "--" };
+            addArgs.AddRange(WorkspaceChangeScope.WorktreePathspecs());
+            var addCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, envVars, addArgs.ToArray()).ConfigureAwait(false);
             if (!addCmd.IsSuccess)
             {
                 await _executionRepository.SetCommitFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);

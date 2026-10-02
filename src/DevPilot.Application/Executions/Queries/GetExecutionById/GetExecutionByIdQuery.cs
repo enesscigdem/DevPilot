@@ -33,15 +33,21 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
     private readonly IImpactAnalysisRepository _impactAnalysisRepository;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
     private readonly AiPricingOptions? _pricing;
+    private readonly IExecutionGitDiffReader? _gitDiffReader;
+    private readonly IExecutionRevisionStore? _revisionStore;
 
     public GetExecutionByIdQueryHandler(
         IExecutionRepository executionRepository,
         IExecutionActivityRepository activityRepository,
         IImpactAnalysisRepository impactAnalysisRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions,
-        AiPricingOptions? pricing = null)
+        AiPricingOptions? pricing = null,
+        IExecutionGitDiffReader? gitDiffReader = null,
+        IExecutionRevisionStore? revisionStore = null)
     {
         _pricing = pricing;
+        _gitDiffReader = gitDiffReader;
+        _revisionStore = revisionStore;
         _executionRepository = executionRepository;
         _activityRepository = activityRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
@@ -81,17 +87,42 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
         var hasActive = await _executionRepository
             .HasActiveExecutionForTaskAsync(execution.DevelopmentTaskId, cancellationToken)
             .ConfigureAwait(false);
+        // Same rule as the Retry command: failed runs, the latest cancelled run, or a run that needs review.
+        var isRetryableCancelled = execution.Status == DevPilot.Domain.Enums.TaskExecutionStatus.Cancelled &&
+                                   Commands.RetryExecution.RetryExecutionCommandHandler.IsRetryableCancelled(
+                                       execution,
+                                       await _executionRepository.GetAllAsync(cancellationToken).ConfigureAwait(false));
         var canRetry = !hasActive &&
-                       (execution.Status is DevPilot.Domain.Enums.TaskExecutionStatus.Failed
-                           or DevPilot.Domain.Enums.TaskExecutionStatus.Cancelled
+                       (execution.Status == DevPilot.Domain.Enums.TaskExecutionStatus.Failed
+                        || isRetryableCancelled
                         || (execution.Status == DevPilot.Domain.Enums.TaskExecutionStatus.Completed &&
                             outcome == DevPilot.Domain.Enums.ExecutionVerificationOutcome.NeedsReview));
 
         var analysis = await _impactAnalysisRepository.GetLatestByTaskIdAsync(execution.DevelopmentTaskId, cancellationToken).ConfigureAwait(false);
-        var stages = ExecutionStageEvaluator.EvaluateStages(execution, execution.DevelopmentTask, analysis, activities);
+        // While a requested fix runs, progress comes from that fix only; the first run is history.
+        var revisionActive = ExecutionRevisionScope.IsActive(execution);
+        var stages = ExecutionStageEvaluator.EvaluateStages(
+            execution,
+            execution.DevelopmentTask,
+            analysis,
+            revisionActive ? ExecutionRevisionScope.Since(execution, activities) : activities);
+        if (revisionActive)
+        {
+            stages = ExecutionRevisionScope.ForActiveRevision(stages);
+        }
+
         var progressPercentage = ExecutionStageEvaluator.CalculateProgressPercentage(stages);
 
         var dto = MapToDto(execution, allowNoChecks, activities, outcome, canRetry, stages, progressPercentage);
+        dto.Revisions = await ExecutionRevisionProjector
+            .BuildAsync(execution, _revisionStore, activities, outcome, _gitDiffReader, cancellationToken)
+            .ConfigureAwait(false);
+        dto.Revision = dto.Revisions.LastOrDefault();
+        if (revisionActive)
+        {
+            dto.StartedAt = execution.LastChangeRequestAt;
+            dto.VerificationOutcome = dto.Revision?.VerificationOutcome ?? string.Empty;
+        }
         var snapshot = ExecutionVerdictBuilder.Resolve(execution, activities, outcome, _pricing);
         dto.Usage = snapshot.Usage;
         if (execution.Status is not (DevPilot.Domain.Enums.TaskExecutionStatus.Pending or DevPilot.Domain.Enums.TaskExecutionStatus.Running))
@@ -166,6 +197,14 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
             CanRequestMerge = ExecutionMergeEligibility.EvaluateFromActivities(execution, activities, allowNoChecks).CanMerge,
             VerificationOutcome = outcome.ToString(),
             CanRetry = canRetry,
+            CanCancel = DevPilot.Application.Executions.Services.ExecutionCancellationPolicy.DescribeWhyCannotCancel(execution) is null,
+            CancelBlockedReason = DevPilot.Application.Executions.Services.ExecutionCancellationPolicy.DescribeWhyCannotCancel(execution),
+            CanRequestChanges = DevPilot.Application.Executions.Commands.RequestExecutionChanges.RequestExecutionChangesCommandHandler
+                .DescribeWhyChangesCannotBeRequested(execution) is null,
+            RevisionCount = execution.RevisionCount,
+            LastChangeRequest = execution.LastChangeRequest,
+            LastChangeRequestAt = execution.LastChangeRequestAt,
+            LastChangeRequestResult = execution.LastChangeRequestResult,
             ProgressPercentage = progressPercentage,
             Stages = stages,
         };

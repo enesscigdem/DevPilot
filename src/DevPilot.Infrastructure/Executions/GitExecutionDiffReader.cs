@@ -55,7 +55,7 @@ public sealed class GitExecutionDiffReader : IExecutionGitDiffReader
         var fullWorkspacePath = Path.GetFullPath(workspacePath);
 
         // 1. Run git status --porcelain=v1 -z --untracked-files=all to discover changed paths
-        var statusCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+        var statusCmd = await RunGitCommandAsync(fullWorkspacePath, cancellationToken, new[] { "status", "--porcelain=v1", "-z", "--untracked-files=all", "--" }.Concat(WorkspaceChangeScope.WorktreePathspecs()).ToArray())
             .ConfigureAwait(false);
 
         if (!statusCmd.IsSuccess)

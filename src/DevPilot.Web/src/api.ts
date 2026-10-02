@@ -1,5 +1,6 @@
 import i18n from "@/i18n"
 import type {
+  ExecutionRevisionDiff,
   CommitExecutionResult,
   CreateTaskRequest,
   ExecutionActivityItem,
@@ -221,6 +222,28 @@ export async function rejectExecutionReview(
   });
 }
 
+/**
+ * "Request changes": the feedback is applied by the AI on the execution's own branch, build and test run again,
+ * the old approval is removed and the result returns to review. The same pull request is updated on approval.
+ */
+export async function requestExecutionChanges(
+  id: string,
+  feedback: string,
+  workspaceId?: string | null,
+  init?: RequestInit
+): Promise<{ message: string; revisionNumber: number }> {
+  return http<{ message: string; revisionNumber: number }>(appendWorkspaceQuery(`/executions/${id}/review/request-changes`, workspaceId), {
+    ...init,
+    method: 'POST',
+    body: JSON.stringify({ feedback }),
+  });
+}
+
+export async function getExecutionRevisionDiff(id: string, workspaceId?: string | null, init?: RequestInit, number?: number): Promise<ExecutionRevisionDiff> {
+  const base = appendWorkspaceQuery(`/executions/${id}/revision/diff`, workspaceId);
+  return http<ExecutionRevisionDiff>(number != null ? `${base}${base.includes("?") ? "&" : "?"}number=${number}` : base, init);
+}
+
 export async function commitExecution(id: string, workspaceId?: string | null, init?: RequestInit): Promise<CommitExecutionResult> {
   return http<CommitExecutionResult>(appendWorkspaceQuery(`/executions/${id}/commit`, workspaceId), {
     ...init,
@@ -374,8 +397,14 @@ export async function deleteAiModel(id: string): Promise<void> {
   await http<void>(`/ai-models/${id}`, { method: 'DELETE' });
 }
 
-export async function testAiModel(id: string): Promise<AiModelTestResult> {
-  return http<AiModelTestResult>(`/ai-models/${id}/test`, { method: 'POST' });
+/** The server ends a connection test after this many seconds (AiModelService default test timeout). */
+export const MODEL_TEST_LIMIT_SECONDS = 120;
+
+/** The browser waits a little longer than the server limit, so the server's own timeout result always arrives first. */
+export const MODEL_TEST_CLIENT_GUARD_SECONDS = MODEL_TEST_LIMIT_SECONDS + 15;
+
+export async function testAiModel(id: string, init?: RequestInit): Promise<AiModelTestResult> {
+  return http<AiModelTestResult>(`/ai-models/${id}/test`, { ...init, method: 'POST' });
 }
 
 export async function discoverAiModels(request: {

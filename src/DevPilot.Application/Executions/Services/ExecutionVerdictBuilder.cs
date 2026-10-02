@@ -350,7 +350,7 @@ public static class ExecutionVerdictBuilder
             ExecutionVerificationOutcome.Verified =>
                 ("success", "Verified: build and tests passed on the final change.", "Review the diff and approve."),
             ExecutionVerificationOutcome.NoNewRegressions =>
-                ("success", $"No new regressions: {preExisting} pre-existing failure(s) on the base commit remain, none were introduced.",
+                ("warning", $"No new regressions: {preExisting} pre-existing failure(s) on the base commit remain, none were introduced.",
                     "Review the diff and approve; the pre-existing failures are not caused by this change."),
             ExecutionVerificationOutcome.PartiallyVerified when baselineUnverified =>
                 ("warning", "Partially verified: the baseline comparison was inconclusive.",

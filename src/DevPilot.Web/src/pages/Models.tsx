@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { AlertCircle, Check, Cpu, KeyRound, Loader2, Pencil, Plus, Trash2, Zap } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { AlertCircle, Check, Clock, Cpu, KeyRound, Loader2, Pencil, Plus, Trash2, X, Zap } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import {
   createAiModel,
@@ -8,6 +8,8 @@ import {
   getAiModels,
   getAiStageAssignments,
   setAiStageAssignments,
+  MODEL_TEST_CLIENT_GUARD_SECONDS,
+  MODEL_TEST_LIMIT_SECONDS,
   testAiModel,
   updateAiModel,
 } from "@/api"
@@ -435,6 +437,7 @@ function ModelCard({
   testing,
   note,
   onTest,
+  onCancelTest,
   onEdit,
   onDelete,
   onMakeDefault,
@@ -443,6 +446,7 @@ function ModelCard({
   testing: boolean
   note: string | null
   onTest: () => void
+  onCancelTest: () => void
   onEdit: () => void
   onDelete: () => void
   onMakeDefault: () => void
@@ -456,6 +460,16 @@ function ModelCard({
         <Check className="h-3 w-3" />
         {t("models.testOk")}
       </Badge>
+    ) : model.lastTestOutcome === "Timeout" ? (
+      // Our own time limit ran out: the provider never answered. Not an error the provider returned.
+      <Badge tone="amber">
+        <Clock className="h-3 w-3" />
+        {t("models.testTimedOut", { seconds: MODEL_TEST_LIMIT_SECONDS })}
+      </Badge>
+    ) : model.lastTestOutcome === "HttpError" ? (
+      <Badge tone="red">{t("models.testHttpError", { status: model.lastTestStatusCode ?? "" })}</Badge>
+    ) : model.lastTestOutcome === "NetworkError" ? (
+      <Badge tone="red">{t("models.testNetworkError")}</Badge>
     ) : model.lastTestSucceeded === false ? (
       <Badge tone="red">{t("models.testFailed")}</Badge>
     ) : (
@@ -487,17 +501,34 @@ function ModelCard({
             <span title={model.lastTestedAt ? fmt.dateTime(model.lastTestedAt) : undefined}>{testBadge}</span>
           </div>
           {model.lastTestSucceeded === false && model.lastTestMessage && (
-            <p className="mt-2 max-w-xl text-[12px] text-danger">{model.lastTestMessage}</p>
+            <p
+              className={cn(
+                "mt-2 max-w-xl text-[12px]",
+                model.lastTestOutcome === "Timeout" ? "text-amber-600 dark:text-amber-400" : "text-danger",
+              )}
+            >
+              {model.lastTestMessage}
+            </p>
           )}
           {/* A failed test already shows its message above; the live note would repeat it. */}
-          {note && model.lastTestSucceeded !== false && <p className="mt-2 text-[12px] text-muted-foreground">{note}</p>}
+          {note && !(model.lastTestSucceeded === false && model.lastTestMessage && note.includes(model.lastTestMessage)) && (
+            <p className="mt-2 text-[12px] text-muted-foreground">{note}</p>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
           <Button size="sm" onClick={onTest} disabled={testing}>
             {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
-            {testing ? t("models.testingFor", { seconds: elapsed }) : t("models.test")}
+            {testing
+              ? t("models.testingFor", { seconds: Math.min(elapsed, MODEL_TEST_LIMIT_SECONDS), limit: MODEL_TEST_LIMIT_SECONDS })
+              : t("models.test")}
           </Button>
+          {testing && (
+            <Button size="sm" variant="danger" onClick={onCancelTest}>
+              <X className="h-3.5 w-3.5" />
+              {t("models.cancelTest")}
+            </Button>
+          )}
           {!model.isDefault && model.isEnabled && (
             <Button size="sm" variant="subtle" onClick={onMakeDefault}>
               {t("models.makeDefault")}
@@ -586,16 +617,46 @@ export function Models() {
     }
   }
 
+  // The running test's controller, so the user can stop waiting. Cancelling aborts the request: the server
+  // sees the disconnect, stops the provider call and records nothing on the model.
+  const testAbort = useRef<{ id: string; controller: AbortController; cancelled: boolean } | null>(null)
+
+  const cancelTest = (id: string) => {
+    const current = testAbort.current
+    if (current?.id !== id) return
+    current.cancelled = true
+    current.controller.abort()
+  }
+
   const handleTest = async (m: AiModel) => {
+    const run = { id: m.id, controller: new AbortController(), cancelled: false }
+    testAbort.current = run
+    // The server ends the test at its own limit; the browser only steps in if the server stays silent past it.
+    let guardFired = false
+    const guard = setTimeout(() => {
+      guardFired = true
+      run.controller.abort()
+    }, MODEL_TEST_CLIENT_GUARD_SECONDS * 1000)
+
     setTestingId(m.id)
     setNotes((n) => ({ ...n, [m.id]: "" }))
     try {
-      const result = await testAiModel(m.id)
+      const result = await testAiModel(m.id, { signal: run.controller.signal })
       setNotes((n) => ({ ...n, [m.id]: t("models.testResult", { message: result.message, ms: result.durationMs }) }))
       await load()
     } catch (err) {
-      setNotes((n) => ({ ...n, [m.id]: err instanceof Error ? err.message : t("models.errTest") }))
+      const aborted = err instanceof DOMException && err.name === "AbortError"
+      const message = guardFired
+        ? t("models.testNoServerAnswer", { seconds: MODEL_TEST_CLIENT_GUARD_SECONDS })
+        : aborted && run.cancelled
+          ? t("models.testCancelled")
+          : err instanceof Error
+            ? err.message
+            : t("models.errTest")
+      setNotes((n) => ({ ...n, [m.id]: message }))
     } finally {
+      clearTimeout(guard)
+      if (testAbort.current === run) testAbort.current = null
       setTestingId(null)
     }
   }
@@ -705,6 +766,7 @@ export function Models() {
                 testing={testingId === m.id}
                 note={notes[m.id] || null}
                 onTest={() => void handleTest(m)}
+                onCancelTest={() => cancelTest(m.id)}
                 onEdit={() => openEdit(m)}
                 onDelete={() => handleDelete(m)}
                 onMakeDefault={() => handleMakeDefault(m)}

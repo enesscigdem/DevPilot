@@ -1259,15 +1259,25 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
 
     private static bool IsMissingRuntimeDependency(ProcessExecutionResult result)
     {
-        if (result.ExitCode is not (126 or 127))
+        if (result.ExitCode == 0)
         {
             return false;
         }
 
         var output = $"{result.StdOut}\n{result.StdErr}";
-        return output.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
-               output.Contains("is not recognized", StringComparison.OrdinalIgnoreCase) ||
-               output.Contains("could not determine executable", StringComparison.OrdinalIgnoreCase);
+
+        // Shells and package managers report a missing tool with exit 126/127 on POSIX but plain exit 1 on Windows and
+        // through npm scripts. A check whose tool never started did not verify anything, whatever its exit code.
+        if (output.Contains("is not recognized as an internal or external command", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("could not determine executable", StringComparison.OrdinalIgnoreCase) ||
+            Regex.IsMatch(output, @"(?:^|\n)\s*(?:sh|bash|zsh): .*(?:not found|No such file)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
+            Regex.IsMatch(output, @"(?:^|\n)[^\n]*\bcommand not found\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            return true;
+        }
+
+        return result.ExitCode is 126 or 127 &&
+               output.Contains("not found", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ComputeFingerprint(params string[] values)

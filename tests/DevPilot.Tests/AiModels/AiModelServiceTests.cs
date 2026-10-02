@@ -240,6 +240,76 @@ public class AiModelServiceTests
         var stored = await db.AiModelConfigs.SingleAsync();
         stored.LastTestSucceeded.Should().BeFalse();
         stored.LastTestMessage.Should().Contain("No answer");
+        result.Outcome.Should().Be("Timeout");
+        result.StatusCode.Should().BeNull();
+        stored.LastTestOutcome.Should().Be("Timeout");
+    }
+
+    [Theory]
+    [InlineData(401, AiFailureKind.Permanent, "HttpError", 401)]
+    [InlineData(503, AiFailureKind.TransientServiceUnavailable, "HttpError", 503)]
+    [InlineData(null, AiFailureKind.TimeoutOrConnection, "NetworkError", null)]
+    public async Task Test_ProviderErrors_AreNotReportedAsOurTimeout(int? status, AiFailureKind kind, string outcome, int? expectedStatus)
+    {
+        await using var db = NewDb();
+        var service = new AiModelService(db, new AiModelRoutingTests.FakeProtector(), new FailingFactory(status, kind));
+        var model = await NewService(db).CreateAsync(Request(), CancellationToken.None);
+
+        var result = await service.TestAsync(model.Id, CancellationToken.None);
+
+        result.Success.Should().BeFalse();
+        result.Outcome.Should().Be(outcome);
+        result.StatusCode.Should().Be(expectedStatus);
+        result.Message.Should().NotContain("No answer within");
+        var stored = await db.AiModelConfigs.SingleAsync();
+        stored.LastTestOutcome.Should().Be(outcome);
+        stored.LastTestStatusCode.Should().Be(expectedStatus);
+    }
+
+    [Fact]
+    public async Task Test_UsesAOneHundredTwentySecondLimit_ByDefault()
+    {
+        await using var db = NewDb();
+        var service = NewService(db);
+        var model = await service.CreateAsync(Request(), CancellationToken.None);
+
+        var result = await service.TestAsync(model.Id, CancellationToken.None);
+
+        result.Outcome.Should().Be("Ok");
+        result.TimeLimitSeconds.Should().Be(120);
+    }
+
+    private sealed class FailingFactory : IAiProviderFactory
+    {
+        private readonly int? _status;
+        private readonly AiFailureKind _kind;
+
+        public FailingFactory(int? status, AiFailureKind kind)
+        {
+            _status = status;
+            _kind = kind;
+        }
+
+        public bool RequiresApiKey(AiModelConfig config) => false;
+
+        public IAiProvider? Create(AiModelConfig config, string? apiKey, bool forConnectionTest = false) => new FailingProvider(_status, _kind);
+    }
+
+    private sealed class FailingProvider : IAiProvider
+    {
+        private readonly int? _status;
+        private readonly AiFailureKind _kind;
+
+        public FailingProvider(int? status, AiFailureKind kind)
+        {
+            _status = status;
+            _kind = kind;
+        }
+
+        public string ProviderName => "fail";
+
+        public Task<AiResponse> SendAsync(AiRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AiResponse { IsSuccess = false, StatusCode = _status, FailureKind = _kind, ErrorMessage = "provider said no" });
     }
 
     [Fact]

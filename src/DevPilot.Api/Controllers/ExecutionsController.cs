@@ -3,10 +3,12 @@ using DevPilot.Application.Executions.Commands.CommitExecution;
 using DevPilot.Application.Executions.Commands.CreatePullRequest;
 using DevPilot.Application.Executions.Commands.PushExecution;
 using DevPilot.Application.Executions.Commands.RejectExecutionReview;
+using DevPilot.Application.Executions.Commands.RequestExecutionChanges;
 using DevPilot.Application.Executions.Commands.SyncPullRequest;
 using DevPilot.Application.Executions.Queries.GetExecutionActivity;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
 using DevPilot.Application.Executions.Queries.GetExecutionReview;
+using DevPilot.Application.Executions.Queries.GetExecutionRevisionDiff;
 using DevPilot.Application.Executions.Queries.GetExecutions;
 using Microsoft.AspNetCore.Mvc;
 
@@ -14,6 +16,7 @@ namespace DevPilot.Api.Controllers;
 
 public sealed record ApproveExecutionReviewRequest(string ExpectedChangeFingerprint);
 public sealed record RejectExecutionReviewRequest(string? Reason);
+public sealed record RequestExecutionChangesRequest(string? Feedback);
 
 [ApiController]
 [Route("api/executions")]
@@ -160,6 +163,80 @@ public class ExecutionsController : ControllerBase
             RejectExecutionReviewResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
             RejectExecutionReviewResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Execution cannot be rejected." }),
             RejectExecutionReviewResultStatus.Success => Ok(result.Decision),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
+    /// <summary>
+    /// "Request changes": the feedback is applied by the AI on this execution's own branch, build and test run again,
+    /// the old approval is removed and the result returns to review. The same pull request is updated on approval.
+    /// </summary>
+    [HttpPost("{id:guid}/review/request-changes", Name = nameof(RequestExecutionChanges))]
+    public async Task<IActionResult> RequestExecutionChanges(
+        [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
+        [FromBody] RequestExecutionChangesRequest? request,
+        [FromServices] IRequestExecutionChangesCommandHandler changesHandler,
+        CancellationToken cancellationToken)
+    {
+        var result = await changesHandler
+            .RequestAsync(new RequestExecutionChangesCommand(id, request?.Feedback, repositoryWorkspaceId), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            RequestExecutionChangesResultStatus.BadRequest => BadRequest(new { error = result.ErrorMessage ?? "Invalid change request." }),
+            RequestExecutionChangesResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            RequestExecutionChangesResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "Changes cannot be requested for this execution." }),
+            RequestExecutionChangesResultStatus.Failed => StatusCode(500, new { error = result.ErrorMessage ?? "Changes could not be started." }),
+            RequestExecutionChangesResultStatus.Accepted => Accepted(new { message = "Changes requested.", revisionNumber = result.RevisionNumber }),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
+    /// <summary>
+    /// Resumes a revision that was interrupted (for example by a restart): verification and repair run again on the
+    /// existing worktree, the feedback is not applied again and no code is regenerated.
+    /// </summary>
+    [HttpPost("{id:guid}/review/resume-revision", Name = nameof(ResumeExecutionRevision))]
+    public async Task<IActionResult> ResumeExecutionRevision(
+        [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
+        [FromServices] IRequestExecutionChangesCommandHandler changesHandler,
+        CancellationToken cancellationToken)
+    {
+        var result = await changesHandler
+            .ResumeAsync(id, repositoryWorkspaceId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            RequestExecutionChangesResultStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            RequestExecutionChangesResultStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "The revision cannot be resumed." }),
+            RequestExecutionChangesResultStatus.Failed => StatusCode(500, new { error = result.ErrorMessage ?? "The revision could not be resumed." }),
+            RequestExecutionChangesResultStatus.Accepted => Accepted(new { message = "Revision resumed.", revisionNumber = result.RevisionNumber }),
+            _ => StatusCode(500, new { error = "An unexpected error occurred." })
+        };
+    }
+
+    /// <summary>The diff of just the latest requested fix.</summary>
+    [HttpGet("{id:guid}/revision/diff", Name = nameof(GetExecutionRevisionDiff))]
+    public async Task<IActionResult> GetExecutionRevisionDiff(
+        [FromRoute] Guid id,
+        [FromQuery] Guid? repositoryWorkspaceId,
+        [FromServices] IGetExecutionRevisionDiffQueryHandler diffHandler,
+        [FromQuery] int? number,
+        CancellationToken cancellationToken)
+    {
+        var result = await diffHandler
+            .HandleAsync(new GetExecutionRevisionDiffQuery(id, repositoryWorkspaceId, number), cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.Status switch
+        {
+            GetExecutionRevisionDiffStatus.NotFound => NotFound(new { error = result.ErrorMessage ?? "Execution not found." }),
+            GetExecutionRevisionDiffStatus.Conflict => Conflict(new { error = result.ErrorMessage ?? "No fix diff available." }),
+            GetExecutionRevisionDiffStatus.Success => Ok(result.Diff),
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
     }

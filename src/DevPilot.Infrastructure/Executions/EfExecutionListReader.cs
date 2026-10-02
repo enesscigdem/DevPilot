@@ -73,7 +73,18 @@ public sealed class EfExecutionListReader : IExecutionListReader
             activitiesByExecutionId.TryGetValue(e.Id, out var execActivities);
             execActivities ??= new List<ExecutionActivity>();
 
-            var stages = ExecutionStageEvaluator.EvaluateStages(e, task, analysis, execActivities);
+            // While a requested fix runs, the list shows that fix, not the finished first run.
+            var revisionActive = ExecutionRevisionScope.IsActive(e);
+            var stages = ExecutionStageEvaluator.EvaluateStages(
+                e,
+                task,
+                analysis,
+                revisionActive ? ExecutionRevisionScope.Since(e, execActivities) : execActivities);
+            if (revisionActive)
+            {
+                stages = ExecutionRevisionScope.ForActiveRevision(stages);
+            }
+
             var progress = ExecutionStageEvaluator.CalculateProgressPercentage(stages);
 
             result.Add(new ExecutionListItemDto
@@ -84,7 +95,7 @@ public sealed class EfExecutionListReader : IExecutionListReader
                 RepositoryName = task?.RepositoryWorkspace?.Repository ?? string.Empty,
                 Status = e.Status,
                 CreatedAt = e.CreatedAt,
-                StartedAt = e.StartedAt,
+                StartedAt = revisionActive ? e.LastChangeRequestAt : e.StartedAt,
                 CompletedAt = e.CompletedAt,
                 ReviewStatus = e.ReviewStatus.ToString(),
                 CommitStatus = e.CommitStatus.ToString(),

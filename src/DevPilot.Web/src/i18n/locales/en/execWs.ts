@@ -78,6 +78,7 @@ const execWs = {
   repoChecks: "Repository checks",
   prerequisites: "Prerequisites",
   noSuite: "No suite",
+  failingOnBase: "Failing on base too",
   openTask: "Open task detail",
   meta: {
     budget: "budget",

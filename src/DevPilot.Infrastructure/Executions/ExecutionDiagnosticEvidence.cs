@@ -1658,11 +1658,21 @@ public static class ExecutionDiagnosticEvidence
         var preExisting = new List<NormalizedFailureItem>();
         var newRegressions = new List<NormalizedFailureItem>();
         var changed = new List<NormalizedFailureItem>();
+        var unstructured = new List<NormalizedFailureItem>();
 
         foreach (var taskFailure in taskFailures)
         {
             var exactMatch = baselineFailures.FirstOrDefault(b =>
                 string.Equals(b.FailureKey, taskFailure.FailureKey, StringComparison.Ordinal));
+
+            // A failure with no test name and no source location says nothing about what failed ("build failed",
+            // a bare tool error). Two such messages being equal does not prove the task did not cause its own.
+            var isUnstructured = string.IsNullOrWhiteSpace(taskFailure.TestName) && string.IsNullOrWhiteSpace(taskFailure.Location);
+            if (isUnstructured)
+            {
+                unstructured.Add(taskFailure);
+                continue;
+            }
 
             if (exactMatch != null)
             {
@@ -1723,6 +1733,12 @@ public static class ExecutionDiagnosticEvidence
         {
             classification = BaselineFailureClassification.ChangedRegression;
             summary = $"Changed: {changed.Count} failure(s) changed ({preExisting.Count} pre-existing repository failure(s) remain).";
+        }
+        else if (unstructured.Count > 0)
+        {
+            // Never "No new regressions" for a failure that cannot be attributed to a test or a source location.
+            classification = BaselineFailureClassification.Unknown;
+            summary = "The check failed without a diagnostic that identifies a test or source location, so it cannot be compared with the base commit.";
         }
         else if (preExisting.Count > 0)
         {
