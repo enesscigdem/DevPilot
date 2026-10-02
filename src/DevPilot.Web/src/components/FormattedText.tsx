@@ -1,3 +1,4 @@
+import i18n from "@/i18n"
 import React from "react"
 import { cn } from "@/lib/utils"
 
@@ -52,7 +53,7 @@ function parseInlineFormatting(text: string): React.ReactNode[] {
 
 export function FormattedText({ text, className }: FormattedTextProps) {
   if (!text) {
-    return <span className="text-muted-foreground">No content provided.</span>
+    return <span className="text-muted-foreground">{i18n.t("shared.noContent")}</span>
   }
 
   const lines = text.split("\n")

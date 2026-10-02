@@ -183,6 +183,7 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         var preparedCreates = new List<(string ResolvedPath, string RelativePath, string Content)>();
         var preparedModifies = new List<(string ResolvedPath, string RelativePath, string NewContent, string OriginalContent, bool HasBom)>();
         var modifiedRelativePaths = new List<string>();
+        var resolvedNoChangePaths = new List<string>();
 
         foreach (var spec in editPlan.Files)
         {
@@ -204,6 +205,12 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             switch (spec.Action)
             {
                 case FileEditAction.Create:
+                    if (spec.NoChange)
+                    {
+                        return DeveloperAgentResult.Fail(
+                            $"Create action for '{spec.FilePath}' cannot use NoChange.");
+                    }
+
                     if (File.Exists(resolvedPath) || Directory.Exists(resolvedPath))
                     {
                         return DeveloperAgentResult.Fail(
@@ -235,6 +242,42 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                     break;
 
                 case FileEditAction.Modify:
+                    if (spec.NoChange)
+                    {
+                        if (!File.Exists(resolvedPath))
+                        {
+                            return DeveloperAgentResult.Fail(
+                                $"Strict Modify action failed: target file does not exist at '{spec.FilePath}'.");
+                        }
+
+                        if (spec.Action == FileEditAction.Create || spec.NewContent != null || spec.SearchReplaceEdits is { Count: > 0 })
+                        {
+                            return DeveloperAgentResult.Fail(
+                                $"Strict Modify NoChange failed: '{spec.FilePath}' must remain byte-identical and include no edits.");
+                        }
+
+                        if (!string.IsNullOrEmpty(spec.TargetContentHash))
+                        {
+                            var noChangeBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+                            if (IsBinaryContent(noChangeBytes))
+                            {
+                                return DeveloperAgentResult.Fail(
+                                    $"Target file '{spec.FilePath}' is a binary file and cannot be modified.");
+                            }
+
+                            var noChangeContent = DecodeUtf8Text(noChangeBytes, out _);
+                            var noChangeHash = ComputeContentHash(noChangeContent);
+                            if (!string.Equals(spec.TargetContentHash, noChangeHash, StringComparison.Ordinal))
+                            {
+                                return DeveloperAgentResult.Fail(
+                                    $"Target file '{spec.FilePath}' has changed since edit generation (stale target snapshot hash mismatch).");
+                            }
+                        }
+
+                        resolvedNoChangePaths.Add(spec.FilePath);
+                        break;
+                    }
+
                     if (!File.Exists(resolvedPath))
                     {
                         return DeveloperAgentResult.Fail(
@@ -404,7 +447,7 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
             return DeveloperAgentResult.Fail($"Post-edit Git safety check failed: {ex.Message}");
         }
 
-        return DeveloperAgentResult.Ok(modifiedRelativePaths);
+        return DeveloperAgentResult.Ok(modifiedRelativePaths, resolvedNoChangeFiles: resolvedNoChangePaths);
     }
 
     private static bool IsWindowsDriveRooted(string path)

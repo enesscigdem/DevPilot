@@ -3,7 +3,10 @@ using System.Text;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Application.Executions.Services;
+using DevPilot.Application.RepositoryClone;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
@@ -27,9 +30,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IExecutionChangeFingerprintCalculator? _changeFingerprintCalculator;
     private readonly IRepositoryRepairContextProvider? _repairContextProvider;
     private readonly IBaselineVerificationService? _baselineVerificationService;
+    private readonly IRepositoryFreshnessService? _freshnessService;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
     private readonly int _maxCompileRepairRounds;
     private readonly int _maxTestRepairRounds;
+    private readonly int _maxFlakeReruns;
 
     public GitWorkspaceExecutionProcessor(
         IExecutionWorkspaceManager workspaceManager,
@@ -42,8 +47,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IConfiguration? configuration = null,
         IExecutionChangeFingerprintCalculator? changeFingerprintCalculator = null,
         IRepositoryRepairContextProvider? repairContextProvider = null,
-        IBaselineVerificationService? baselineVerificationService = null)
+        IBaselineVerificationService? baselineVerificationService = null,
+        ExecutionReliabilityOptions? reliabilityOptions = null,
+        IRepositoryFreshnessService? freshnessService = null)
     {
+        _freshnessService = freshnessService;
         _workspaceManager = workspaceManager;
         _executionRepository = executionRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
@@ -55,16 +63,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         _baselineVerificationService = baselineVerificationService;
         _logger = logger;
 
-        _maxCompileRepairRounds = TryGetNonNegativeSetting(
-            configuration,
-            "ExecutionReliability:MaxCompileRepairRounds",
-            "DeveloperAgent:MaxCompileRepairRounds",
-            3);
-        _maxTestRepairRounds = TryGetNonNegativeSetting(
-            configuration,
-            "ExecutionReliability:MaxTestRepairRounds",
-            "DeveloperAgent:MaxTestRepairRounds",
-            2);
+        // Single authoritative reliability source shared with the DeveloperAgent.
+        var reliability = reliabilityOptions ?? ExecutionReliabilityOptionsFactory.Create(configuration);
+        _maxCompileRepairRounds = reliability.MaxCompileRepairRounds;
+        _maxTestRepairRounds = reliability.MaxTestRepairRounds;
+        // Bare processors (no configuration and no options, e.g. unit tests) stay deterministic: no reruns.
+        _maxFlakeReruns = reliabilityOptions == null && configuration == null ? 0 : reliability.MaxFlakeReruns;
     }
 
     public async Task ProcessAsync(
@@ -82,6 +86,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             ExecutionActivityStatus.Started,
             "Workspace preparation started.",
             cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        // Fetch origin and fast-forward the managed clone when provably safe, so the execution branches from a
+        // fresh base. Never fails or blocks the execution; the outcome is recorded as evidence below.
+        var freshness = await TryRefreshBaseAsync(context, cancellationToken).ConfigureAwait(false);
 
         var prepResult = await _workspaceManager.PrepareWorkspaceAsync(
             context.ExecutionId,
@@ -102,7 +110,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             throw new InvalidOperationException(error);
         }
 
-        var modifiedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fileSets = new ExecutionFileSets();
+        var flakeBudget = new FlakeBudget(_maxFlakeReruns);
 
         try
         {
@@ -119,6 +128,24 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 "Workspace prepared.",
                 new ExecutionActivityMetadata(BranchName: prepResult.BranchName),
                 cancellationToken).ConfigureAwait(false);
+
+            if (freshness != null)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Workspace,
+                    ExecutionActivityStatus.Completed,
+                    $"Base freshness: {freshness.Message}",
+                    new ExecutionActivityMetadata(
+                        BranchName: prepResult.BranchName,
+                        EventKind: "BaseFreshness",
+                        BaseCommitSha: prepResult.BaseCommitSha,
+                        BaseBranchName: freshness.BranchName ?? context.BaseBranch,
+                        RemoteBaseCommitSha: freshness.RemoteCommitSha,
+                        BaseBehindCount: freshness.BehindCount,
+                        BaseFreshness: freshness.Status.ToString()),
+                    cancellationToken).ConfigureAwait(false);
+            }
 
             var preAiVerification = await _workspaceManager.VerifyWorkspaceStateAsync(
                 prepResult.WorkspacePath,
@@ -287,6 +314,34 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             if (agentResult.ModifiedFiles == null || agentResult.ModifiedFiles.Count == 0)
             {
+                if (agentResult.HasResolvedNoChange)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.DeveloperAgent,
+                        ExecutionActivityStatus.Completed,
+                        "Developer Agent completed.",
+                        new ExecutionActivityMetadata(
+                            ModifiedFileCount: 0,
+                            Model: actualModel,
+                            EventKind: "GeneratingChange",
+                            ResolvedNoChangeCount: agentResult.ResolvedNoChangeFiles!.Count),
+                        cancellationToken).ConfigureAwait(false);
+
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Execution,
+                        ExecutionActivityStatus.Completed,
+                        "No code changes were required by the generated plan.",
+                        new ExecutionActivityMetadata(
+                            Model: actualModel,
+                            EventKind: "ReadyForReview",
+                            VerificationOutcome: "NeedsReview",
+                            ResolvedNoChangeCount: agentResult.ResolvedNoChangeFiles.Count),
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
                 const string error = "Developer Agent failed: Developer Agent returned success but produced zero modified files.";
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
@@ -300,7 +355,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             foreach (var file in agentResult.ModifiedFiles)
             {
-                modifiedFiles.Add(file);
+                fileSets.AddActuallyModified(file);
+            }
+
+            foreach (var file in agentResult.ResolvedNoChangeFiles ?? Array.Empty<string>())
+            {
+                fileSets.AddResolvedNoChange(file);
             }
 
             await SafeRecordActivityAsync(
@@ -309,9 +369,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ExecutionActivityStatus.Completed,
                 "Developer Agent completed.",
                 new ExecutionActivityMetadata(
-                    ModifiedFileCount: agentResult.ModifiedFiles.Count,
+                    ModifiedFileCount: fileSets.ActuallyModifiedFiles.Count,
                     Model: actualModel,
-                    EventKind: "GeneratingChange"),
+                    EventKind: "GeneratingChange",
+                    ResolvedNoChangeCount: fileSets.ResolvedNoChangeFiles.Count > 0
+                        ? fileSets.ResolvedNoChangeFiles.Count
+                        : null),
                 cancellationToken).ConfigureAwait(false);
 
             var prerequisiteChecks = requiredChecks.Where(check => check.Kind != RepositoryCheckKind.Test).ToList();
@@ -347,7 +410,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     analysis,
                     actualModel,
                     check,
-                    modifiedFiles,
+                    fileSets,
                     cancellationToken).ConfigureAwait(false);
 
                 if (!passed)
@@ -376,7 +439,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     prerequisiteChecks,
                     confirmedBuild,
                     index == testChecks.Count - 1,
-                    modifiedFiles,
+                    fileSets,
+                    flakeBudget,
                     cancellationToken).ConfigureAwait(false);
 
                 if (!passed)
@@ -419,7 +483,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 {
                     var purged = await VerificationSideEffectCleaner.PurgeSideEffectsAsync(
                         prepResult.WorkspacePath,
-                        modifiedFiles,
+                        fileSets.ActuallyModifiedFiles,
                         CancellationToken.None).ConfigureAwait(false);
 
                     if (purged.Count > 0)
@@ -438,13 +502,119 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         }
     }
 
+    /// <summary>Reads the current content of the repair targets that are test files (best effort).</summary>
+    private static Dictionary<string, string> SnapshotTestFiles(string workspacePath, IEnumerable<string> repairFiles)
+    {
+        var snapshot = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in repairFiles)
+        {
+            if (!ProjectGraphHelper.IsTestFileCandidate(file))
+            {
+                continue;
+            }
+
+            try
+            {
+                var fullPath = Path.GetFullPath(Path.Combine(workspacePath, file));
+                if (File.Exists(fullPath))
+                {
+                    snapshot[file] = File.ReadAllText(fullPath);
+                }
+            }
+            catch (Exception)
+            {
+                // Best effort: an unreadable file simply cannot be compared.
+            }
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Guards the "repair must not weaken tests" rule in code (not just in the prompt): if a test repair removed
+    /// assertions, added skip/ignore markers or deleted tests, the run is flagged and ends in NeedsReview.
+    /// </summary>
+    private async Task FlagTestWeakeningAsync(
+        ExecutionProcessingContext context,
+        RepositoryCheck check,
+        string workspacePath,
+        IReadOnlyDictionary<string, string> before,
+        int repairRound,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (file, beforeContent) in before)
+        {
+            string afterContent;
+            try
+            {
+                var fullPath = Path.GetFullPath(Path.Combine(workspacePath, file));
+                afterContent = File.Exists(fullPath) ? File.ReadAllText(fullPath) : string.Empty;
+            }
+            catch (Exception)
+            {
+                continue;
+            }
+
+            var result = TestWeakeningDetector.Analyze(beforeContent, afterContent);
+            if (!result.IsSuspected)
+            {
+                continue;
+            }
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Completed,
+                $"Test repair may have weakened tests ({result.Describe(file)}); flagged for review.",
+                CheckMetadata(
+                    check,
+                    "TestWeakeningSuspected",
+                    repairKind: "Test",
+                    repairRound: repairRound,
+                    repairFiles: new[] { file }) with { TestWeakeningSuspected = true },
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<RepositoryFreshnessResult?> TryRefreshBaseAsync(
+        ExecutionProcessingContext context,
+        CancellationToken cancellationToken)
+    {
+        if (_freshnessService == null ||
+            string.IsNullOrWhiteSpace(context.RepositoryOwner) ||
+            string.IsNullOrWhiteSpace(context.RepositoryName))
+        {
+            return null;
+        }
+
+        try
+        {
+            return await _freshnessService.RefreshAsync(
+                new RepositoryFreshnessRequest(
+                    context.WorkspaceLocalPath,
+                    context.RepositoryOwner,
+                    context.RepositoryName,
+                    context.BaseBranch),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Repository freshness refresh failed for execution {ExecutionId}; continuing.", context.ExecutionId);
+            return null;
+        }
+    }
+
     private async Task<bool> RunPrerequisiteCheckAsync(
         ExecutionProcessingContext context,
         ExecutionWorkspaceResult prepResult,
         TaskImpactAnalysis analysis,
         string? actualModel,
         RepositoryCheck check,
-        HashSet<string> modifiedFiles,
+        ExecutionFileSets fileSets,
         CancellationToken cancellationToken)
     {
         await SafeRecordActivityAsync(
@@ -468,6 +638,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         }
 
         BaselineFailureComparison? baseComparison = null;
+        var baselineUnverified = false;
         if (!result.Success && _baselineVerificationService != null && !string.IsNullOrWhiteSpace(prepResult.BaseCommitSha))
         {
             baseComparison = await _baselineVerificationService.EvaluateCompilerFailureAsync(
@@ -503,28 +674,25 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             if (baseComparison.Classification == BaselineFailureClassification.Unknown)
             {
-                await SafeRecordActivityAsync(
+                // Inconclusive baseline: keep going with bounded repair from the authoritative raw diagnostics,
+                // but never report the result as fully Verified.
+                baselineUnverified = true;
+                await RecordBaselineUnverifiedAsync(
                     context.ExecutionId,
                     ExecutionStage.Build,
-                    ExecutionActivityStatus.Failed,
-                    $"Needs review: baseline comparison was inconclusive ({baseComparison.Summary}).",
-                    CheckMetadata(
-                        check,
-                        "StoppedWithEvidence",
-                        result,
-                        buildPassed: false,
-                        baselineClassification: "Unknown",
-                        verificationOutcome: "NeedsReview",
-                        baseCommitSha: prepResult.BaseCommitSha,
-                        baselineCacheHit: baseComparison.CacheHit,
-                        stageDurationMs: stopwatch.ElapsedMilliseconds),
+                    check,
+                    result,
+                    baseComparison,
+                    prepResult.BaseCommitSha,
+                    stopwatch.ElapsedMilliseconds,
                     cancellationToken).ConfigureAwait(false);
-                return false;
             }
         }
 
         var repairRound = 0;
         string? previousFailureFingerprint = null;
+        // Files already attempted for the current failure fingerprint (reset whenever diagnostics change).
+        var attemptedForFingerprint = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         while (!result.Success && repairRound < _maxCompileRepairRounds)
         {
@@ -537,7 +705,23 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ? ExecutionDiagnosticEvidence.CreateActionableCompilerEvidence(actionableFailures, result.StdOut, result.StdErr, result.ErrorMessage)
                 : ExecutionDiagnosticEvidence.ParseVerificationFailure(result.StdOut, result.StdErr, result.ErrorMessage);
 
-            if (string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal))
+            var sameFailure = string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal);
+            if (!sameFailure)
+            {
+                attemptedForFingerprint.Clear();
+            }
+
+            var touchedSources = ExecutionDiagnosticEvidence.LoadTouchedSourceSnapshots(
+                prepResult.WorkspacePath,
+                fileSets.ActuallyModifiedFiles);
+            var selection = ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+                evidence,
+                fileSets.ActuallyModifiedFiles,
+                attemptedForCurrentFailureSet: attemptedForFingerprint,
+                touchedSources);
+
+            // Same diagnostics after a repair: rotate to the next exact candidate; stop only when none is left.
+            if (sameFailure && string.IsNullOrWhiteSpace(selection.FilePath))
             {
                 await SafeRecordActivityAsync(
                     context.ExecutionId,
@@ -556,7 +740,27 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 break;
             }
 
-            var repairFiles = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, modifiedFiles).ToList();
+            if (!string.IsNullOrWhiteSpace(selection.FilePath))
+            {
+                attemptedForFingerprint.Add(selection.FilePath);
+            }
+
+            var repairFiles = string.IsNullOrWhiteSpace(selection.FilePath)
+                ? new List<string>()
+                : new List<string> { selection.FilePath };
+            var scopedDiagnostics = repairFiles.Count == 1
+                ? ExecutionDiagnosticEvidence.ScopeToFile(evidence, repairFiles[0])
+                : null;
+            var repairDiagnosticLines = scopedDiagnostics != null && scopedDiagnostics.DiagnosticLines.Count > 0
+                ? scopedDiagnostics.DiagnosticLines
+                : evidence.DiagnosticLines;
+            var repairDiagnosticLocations = scopedDiagnostics != null && scopedDiagnostics.Locations.Count > 0
+                ? scopedDiagnostics.Locations
+                : evidence.Locations;
+            var sanitizedDiagnosticLines = ExecutionDiagnosticEvidence.SanitizeDiagnosticLinesForActivity(
+                repairDiagnosticLines,
+                prepResult.WorkspacePath);
+
             if (repairFiles.Count == 0)
             {
                 await SafeRecordActivityAsync(
@@ -571,7 +775,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         repairKind: "Compile",
                         repairRound: repairRound,
                         failureFingerprint: evidence.FailureFingerprint,
-                        progressResult: "Uncorrelated"),
+                        progressResult: "Uncorrelated",
+                        diagnosticLines: sanitizedDiagnosticLines),
                     cancellationToken).ConfigureAwait(false);
                 break;
             }
@@ -590,16 +795,18 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     repairKind: "Compile",
                     repairRound: repairRound,
                     repairFiles: repairFiles,
-                    failureFingerprint: evidence.FailureFingerprint),
+                    failureFingerprint: evidence.FailureFingerprint,
+                    diagnosticLines: sanitizedDiagnosticLines,
+                    repairSelectionReason: selection.Reason),
                 cancellationToken).ConfigureAwait(false);
 
             if (check.Kind == RepositoryCheckKind.Build)
             {
                 var repairSummary = new StringBuilder()
                     .AppendLine($"Build failed — {evidence.DiagnosticLines.Count} compiler error(s)");
-                foreach (var diagnostic in evidence.DiagnosticLines.Take(5))
+                foreach (var diagnostic in sanitizedDiagnosticLines)
                 {
-                    repairSummary.AppendLine(diagnostic.Trim());
+                    repairSummary.AppendLine(diagnostic);
                 }
                 repairSummary.AppendLine($"Repair round {repairRound}/{_maxCompileRepairRounds}");
                 repairSummary.AppendLine("Repairing:");
@@ -620,7 +827,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         repairKind: "Compile",
                         repairRound: repairRound,
                         repairFiles: repairFiles,
-                        failureFingerprint: evidence.FailureFingerprint),
+                        failureFingerprint: evidence.FailureFingerprint,
+                        diagnosticLines: sanitizedDiagnosticLines),
                     cancellationToken).ConfigureAwait(false);
             }
 
@@ -633,8 +841,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 WorkspacePath: prepResult.WorkspacePath,
                 BranchName: prepResult.BranchName,
                 RepairFiles: repairFiles,
-                DiagnosticEvidence: string.Join("\n", evidence.DiagnosticLines.Take(10)),
-                DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
+                DiagnosticEvidence: string.Join("\n", repairDiagnosticLines.Take(10)),
+                DiagnosticLocations: repairDiagnosticLocations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
                 LanguageContext: languageContext,
                 Model: actualModel);
 
@@ -677,12 +885,42 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
             {
-                modifiedFiles.Add(file);
+                fileSets.AddActuallyModified(file);
             }
 
             var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var noDiff = beforeFingerprint != null && afterFingerprint != null &&
                          string.Equals(beforeFingerprint, afterFingerprint, StringComparison.Ordinal);
+
+            // A no-op repair of this file does not prove the failure is unfixable: try the next exact candidate first.
+            if (noDiff && repairRound < _maxCompileRepairRounds &&
+                !string.IsNullOrWhiteSpace(ExecutionDiagnosticEvidence.SelectNextCompilerRepairTarget(
+                    evidence,
+                    fileSets.ActuallyModifiedFiles,
+                    attemptedForFingerprint,
+                    touchedSources).FilePath))
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Build,
+                    ExecutionActivityStatus.Completed,
+                    "Focused repair produced no worktree change; trying the next candidate file.",
+                    CheckMetadata(
+                        check,
+                        "FixingBuildIssue",
+                        result,
+                        repairKind: "Compile",
+                        repairRound: repairRound,
+                        repairFiles: repairFiles,
+                        failureFingerprint: evidence.FailureFingerprint,
+                        beforeFingerprint: beforeFingerprint,
+                        afterFingerprint: afterFingerprint,
+                        progressResult: "NoDiff",
+                        stageDurationMs: repairStopwatch.ElapsedMilliseconds),
+                    cancellationToken).ConfigureAwait(false);
+                previousFailureFingerprint = evidence.FailureFingerprint;
+                continue;
+            }
 
             await SafeRecordActivityAsync(
                 context.ExecutionId,
@@ -764,7 +1002,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     buildPassed: check.Kind == RepositoryCheckKind.Build ? false : null,
                     verificationOutcome: "NeedsReview",
                     newRegressionCount: baseComparison?.NewRegressionCount ?? 0,
-                    preExistingFailureCount: baseComparison?.PreExistingCount ?? 0),
+                    preExistingFailureCount: baseComparison?.PreExistingCount ?? 0,
+                    baselineUnverified: baselineUnverified ? true : null),
                 cancellationToken).ConfigureAwait(false);
             return false;
         }
@@ -779,8 +1018,9 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 "VerifyingRepository",
                 result,
                 buildPassed: check.Kind == RepositoryCheckKind.Build ? true : null,
-                verificationOutcome: "Verified",
-                stageDurationMs: stopwatch.ElapsedMilliseconds),
+                verificationOutcome: baselineUnverified ? "PartiallyVerified" : "Verified",
+                stageDurationMs: stopwatch.ElapsedMilliseconds,
+                baselineUnverified: baselineUnverified ? true : null),
             cancellationToken).ConfigureAwait(false);
         return true;
     }
@@ -794,7 +1034,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IReadOnlyList<RepositoryCheck> prerequisiteChecks,
         bool confirmedBuild,
         bool isFinalTest,
-        HashSet<string> modifiedFiles,
+        ExecutionFileSets fileSets,
+        FlakeBudget flakeBudget,
         CancellationToken cancellationToken)
     {
         await SafeRecordActivityAsync(
@@ -821,7 +1062,15 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             return false;
         }
 
+        result = await ConfirmFailureIsStableAsync(context, check, fullRequest, result, flakeBudget, cancellationToken).ConfigureAwait(false);
+        if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
+        {
+            await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Test, check, result, cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
         BaselineFailureComparison? baseComparison = null;
+        var baselineUnverified = false;
         if (!result.Success && _baselineVerificationService != null && !string.IsNullOrWhiteSpace(prepResult.BaseCommitSha))
         {
             baseComparison = await _baselineVerificationService.EvaluateTestFailureAsync(
@@ -859,23 +1108,16 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
             if (baseComparison.Classification == BaselineFailureClassification.Unknown)
             {
-                await SafeRecordActivityAsync(
+                baselineUnverified = true;
+                await RecordBaselineUnverifiedAsync(
                     context.ExecutionId,
                     ExecutionStage.Test,
-                    ExecutionActivityStatus.Failed,
-                    $"Needs review: baseline comparison was inconclusive ({baseComparison.Summary}).",
-                    CheckMetadata(
-                        check,
-                        "StoppedWithEvidence",
-                        result,
-                        testPassed: false,
-                        baselineClassification: "Unknown",
-                        verificationOutcome: "NeedsReview",
-                        baseCommitSha: prepResult.BaseCommitSha,
-                        baselineCacheHit: baseComparison.CacheHit,
-                        stageDurationMs: stopwatch.ElapsedMilliseconds),
+                    check,
+                    result,
+                    baseComparison,
+                    prepResult.BaseCommitSha,
+                    stopwatch.ElapsedMilliseconds,
                     cancellationToken).ConfigureAwait(false);
-                return false;
             }
         }
 
@@ -911,7 +1153,27 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 break;
             }
 
-            var repairFiles = ExecutionDiagnosticEvidence.SelectTestRepairFiles(evidence, modifiedFiles).ToList();
+            var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
+                evidence,
+                fileSets.VerificationEligiblePlannedFiles,
+                prepResult.WorkspacePath);
+            var repairFiles = selection.FilePaths.ToList();
+            var sanitizedTestEvidence = ExecutionDiagnosticEvidence.SanitizeTestEvidenceForActivity(evidence);
+
+            // The baseline proves this failure is new, so it was introduced by this task's edits even when the
+            // stack trace points at untouched files (shared fixtures, static state, auth/config interference).
+            // The touched files are then the only suspects; prefer test files over production files.
+            if (repairFiles.Count == 0 && actionableFailures is { Count: > 0 })
+            {
+                var touched = fileSets.ActuallyModifiedFiles.ToList();
+                var touchedTests = touched.Where(ProjectGraphHelper.IsTestFileCandidate).ToList();
+                repairFiles = (touchedTests.Count > 0 ? touchedTests : touched).Take(3).ToList();
+                if (repairFiles.Count > 0)
+                {
+                    selection = selection with { Reason = "BaselineRegressionTouchedFilesFallback" };
+                }
+            }
+
             if (repairFiles.Count == 0)
             {
                 await SafeRecordActivityAsync(
@@ -926,7 +1188,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         repairKind: "Test",
                         repairRound: repairRound,
                         failureFingerprint: evidence.FailureFingerprint,
-                        progressResult: "Uncorrelated"),
+                        progressResult: "Uncorrelated",
+                        verificationOutcome: "NeedsReview",
+                        diagnosticLines: sanitizedTestEvidence,
+                        repairSelectionReason: selection.Reason,
+                        testName: evidence.TestName),
                     cancellationToken).ConfigureAwait(false);
                 break;
             }
@@ -943,7 +1209,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     repairKind: "Test",
                     repairRound: repairRound,
                     repairFiles: repairFiles,
-                    failureFingerprint: evidence.FailureFingerprint),
+                    failureFingerprint: evidence.FailureFingerprint,
+                    diagnosticLines: sanitizedTestEvidence,
+                    repairSelectionReason: selection.Reason,
+                    testName: evidence.TestName),
                 cancellationToken).ConfigureAwait(false);
 
             var repairRequest = new FocusedRepairRequest(
@@ -957,9 +1226,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 DiagnosticEvidence: string.Join("\n", evidence.RelevantLines),
                 DiagnosticLocations: evidence.Locations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
                 LanguageContext: null,
-                Model: actualModel);
+                Model: actualModel,
+                TouchedFiles: fileSets.ActuallyModifiedFiles.ToList(),
+                TestName: evidence.TestName);
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+            var testFilesBeforeRepair = SnapshotTestFiles(prepResult.WorkspacePath, repairFiles);
             var repairStopwatch = Stopwatch.StartNew();
             DeveloperAgentResult repairResult;
             try
@@ -996,14 +1268,33 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 break;
             }
 
-            foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
-            {
-                modifiedFiles.Add(file);
-            }
-
+            var repairedThisRound = (repairResult.ModifiedFiles ?? Array.Empty<string>()).ToList();
+            await FlagTestWeakeningAsync(
+                context,
+                check,
+                prepResult.WorkspacePath,
+                testFilesBeforeRepair,
+                repairRound,
+                cancellationToken).ConfigureAwait(false);
             var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var noDiff = beforeFingerprint != null && afterFingerprint != null &&
                          string.Equals(beforeFingerprint, afterFingerprint, StringComparison.Ordinal);
+
+            IReadOnlyList<string> supersededNoChange = Array.Empty<string>();
+            if (noDiff)
+            {
+                foreach (var file in repairedThisRound)
+                {
+                    if (!fileSets.ResolvedNoChangeFiles.Contains(file))
+                    {
+                        fileSets.AddActuallyModified(file);
+                    }
+                }
+            }
+            else
+            {
+                supersededNoChange = fileSets.PromoteRepairedFiles(repairedThisRound);
+            }
 
             await SafeRecordActivityAsync(
                 context.ExecutionId,
@@ -1031,6 +1322,23 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 break;
             }
 
+            if (supersededNoChange.Count > 0)
+            {
+                await SafeRecordActivityAsync(
+                    context.ExecutionId,
+                    ExecutionStage.Test,
+                    ExecutionActivityStatus.Completed,
+                    "NoChange overridden by authoritative verification evidence.",
+                    new ExecutionActivityMetadata(
+                        EventKind: "NoChangeOverridden",
+                        RepairKind: "Test",
+                        RepairRound: repairRound,
+                        RepairFiles: supersededNoChange,
+                        ModifiedFileCount: fileSets.ActuallyModifiedFiles.Count,
+                        ResolvedNoChangeCount: fileSets.ResolvedNoChangeFiles.Count),
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             var prerequisiteFailed = false;
             foreach (var prerequisite in prerequisiteChecks)
             {
@@ -1044,29 +1352,42 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 }
 
                 prerequisiteFailed = true;
-                var newEvidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
-                    prerequisiteResult.StdOut,
-                    prerequisiteResult.StdErr,
-                    prerequisiteResult.ErrorMessage);
-
                 var isInfra = prerequisiteResult.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure;
-                await SafeRecordActivityAsync(
-                    context.ExecutionId,
-                    ExecutionStage.Build,
-                    ExecutionActivityStatus.Failed,
-                    isInfra
-                        ? "Repository check infrastructure failure after test repair."
-                        : "Stopped with evidence: repository check failed after focused test repair.",
-                    CheckMetadata(
-                        prerequisite,
-                        "StoppedWithEvidence",
-                        prerequisiteResult,
-                        repairKind: "Compile",
-                        repairRound: repairRound,
-                        failureFingerprint: newEvidence.FailureFingerprint,
-                        progressResult: "NewBuildFailure",
-                        verificationOutcome: isInfra ? "VerificationInfrastructureError" : "NeedsReview"),
+                if (isInfra)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Build,
+                        ExecutionActivityStatus.Failed,
+                        "Repository check infrastructure failure after test repair.",
+                        CheckMetadata(
+                            prerequisite,
+                            "StoppedWithEvidence",
+                            prerequisiteResult,
+                            repairKind: "Compile",
+                            repairRound: repairRound,
+                            progressResult: "NewBuildFailure",
+                            verificationOutcome: "VerificationInfrastructureError"),
+                        cancellationToken).ConfigureAwait(false);
+                    return false;
+                }
+
+                var bridged = await TryCompilerConvergenceBridgeAfterTestRepairAsync(
+                    context,
+                    prepResult,
+                    actualModel,
+                    prerequisite,
+                    prerequisiteResult,
+                    fileSets,
+                    repairedThisRound,
+                    repairRound,
                     cancellationToken).ConfigureAwait(false);
+                if (!bridged)
+                {
+                    return false;
+                }
+
+                prerequisiteFailed = false;
                 break;
             }
 
@@ -1111,6 +1432,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 result = await _repositoryCheckRunner.ExecuteAsync(fullRequest, cancellationToken).ConfigureAwait(false);
             }
 
+            result = await ConfirmFailureIsStableAsync(context, check, fullRequest, result, flakeBudget, cancellationToken).ConfigureAwait(false);
             previousFailureFingerprint = evidence.FailureFingerprint;
             if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
             {
@@ -1142,7 +1464,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     testPassed: false,
                     verificationOutcome: "NeedsReview",
                     newRegressionCount: baseComparison?.NewRegressionCount ?? 0,
-                    preExistingFailureCount: baseComparison?.PreExistingCount ?? 0),
+                    preExistingFailureCount: baseComparison?.PreExistingCount ?? 0,
+                    baselineUnverified: baselineUnverified ? true : null),
                 cancellationToken).ConfigureAwait(false);
             return false;
         }
@@ -1157,11 +1480,106 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 isFinalTest ? "ReadyForReview" : "VerifyingRepository",
                 result,
                 testPassed: true,
-                verificationOutcome: "Verified",
-                stageDurationMs: stopwatch.ElapsedMilliseconds),
+                verificationOutcome: baselineUnverified ? "PartiallyVerified" : "Verified",
+                stageDurationMs: stopwatch.ElapsedMilliseconds,
+                baselineUnverified: baselineUnverified ? true : null),
             cancellationToken).ConfigureAwait(false);
         return true;
     }
+
+    /// <summary>
+    /// Confirms a failed full test run is stable before it is sent to repair, spending at most
+    /// <see cref="ExecutionReliabilityOptions.MaxFlakeReruns"/> confirmations per execution (shared via <paramref name="budget"/>).
+    /// Prefers a deterministic targeted rerun of the single failing test: if it fails again the failure is stable and the
+    /// original full-run result is kept. If it passes (order/parallelism-dependent) or no reliable test name exists, one
+    /// full rerun decides. A passing rerun wins; otherwise the latest failing result is returned.
+    /// </summary>
+    private async Task<RepositoryCheckResult> ConfirmFailureIsStableAsync(
+        ExecutionProcessingContext context,
+        RepositoryCheck check,
+        RepositoryCheckExecutionRequest fullRequest,
+        RepositoryCheckResult result,
+        FlakeBudget budget,
+        CancellationToken cancellationToken)
+    {
+        if (result.Success ||
+            result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure ||
+            budget.Remaining <= 0)
+        {
+            return result;
+        }
+
+        budget.Remaining--;
+
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(result.StdOut, result.StdErr, result.ErrorMessage);
+        if (check.SupportsTargetedTest && evidence.HasReliableTestName)
+        {
+            var targeted = await _repositoryCheckRunner
+                .ExecuteAsync(fullRequest with { TestFilter = evidence.TestName }, cancellationToken)
+                .ConfigureAwait(false);
+            if (targeted.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
+            {
+                return result;
+            }
+
+            if (!targeted.Success)
+            {
+                _logger.LogInformation(
+                    "Failing test reproduced on targeted rerun for execution {ExecutionId}; treating as a stable failure.",
+                    context.ExecutionId);
+                return result;
+            }
+        }
+
+        var rerun = await _repositoryCheckRunner.ExecuteAsync(fullRequest, cancellationToken).ConfigureAwait(false);
+        if (rerun.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
+        {
+            return result;
+        }
+
+        if (rerun.Success)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Completed,
+                "Flaky failure detected: tests passed on confirmation rerun.",
+                CheckMetadata(check, "VerifyingRepository", rerun),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return rerun;
+    }
+
+    /// <summary>
+    /// Records that the baseline comparison was inconclusive and repair continues from raw diagnostics.
+    /// Recorded as a non-terminal (Started) activity so it never masquerades as a final verdict; the
+    /// <see cref="ExecutionActivityMetadata.BaselineUnverified"/> flag downgrades the final outcome.
+    /// </summary>
+    private Task RecordBaselineUnverifiedAsync(
+        Guid executionId,
+        ExecutionStage stage,
+        RepositoryCheck check,
+        RepositoryCheckResult result,
+        BaselineFailureComparison comparison,
+        string? baseCommitSha,
+        long stageDurationMs,
+        CancellationToken cancellationToken) =>
+        SafeRecordActivityAsync(
+            executionId,
+            stage,
+            ExecutionActivityStatus.Started,
+            $"Baseline comparison inconclusive ({comparison.Summary}); continuing bounded repair from raw diagnostics. Result will be reported as baseline-unverified.",
+            CheckMetadata(
+                check,
+                "BaselineUnverified",
+                result,
+                baselineClassification: "Unknown",
+                baseCommitSha: baseCommitSha,
+                baselineCacheHit: comparison.CacheHit,
+                stageDurationMs: stageDurationMs,
+                baselineUnverified: true),
+            cancellationToken);
 
     private async Task RecordInfrastructureFailureAsync(
         Guid executionId,
@@ -1183,6 +1601,233 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<bool> TryCompilerConvergenceBridgeAfterTestRepairAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        string? actualModel,
+        RepositoryCheck prerequisite,
+        RepositoryCheckResult prerequisiteResult,
+        ExecutionFileSets fileSets,
+        IReadOnlyList<string> repairedThisRound,
+        int testRepairRound,
+        CancellationToken cancellationToken)
+    {
+        var evidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
+            prerequisiteResult.StdOut,
+            prerequisiteResult.StdErr,
+            prerequisiteResult.ErrorMessage);
+        var implicated = ExecutionDiagnosticEvidence.SelectCompilerRepairFiles(evidence, fileSets.ActuallyModifiedFiles).ToList();
+        var repairedImplicated = implicated
+            .Where(path => repairedThisRound.Contains(path, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        string? target = null;
+        var reason = "Uncorrelated";
+        if (repairedImplicated.Count == 1)
+        {
+            target = repairedImplicated[0];
+            reason = "RepairedFileFromCompiler";
+        }
+        else if (implicated.Count == 1)
+        {
+            target = implicated[0];
+            reason = "TouchedFileFromCompiler";
+        }
+
+        var sanitized = ExecutionDiagnosticEvidence.SanitizeDiagnosticLinesForActivity(
+            evidence.DiagnosticLines,
+            prepResult.WorkspacePath);
+
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                "Stopped with evidence: repository check failed after focused test repair.",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    prerequisiteResult,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    failureFingerprint: evidence.FailureFingerprint,
+                    progressResult: "NewBuildFailure",
+                    verificationOutcome: "NeedsReview",
+                    diagnosticLines: sanitized,
+                    repairSelectionReason: reason),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        var scoped = ExecutionDiagnosticEvidence.ScopeToFile(evidence, target);
+        var diagnosticLines = scoped.DiagnosticLines.Count > 0 ? scoped.DiagnosticLines : evidence.DiagnosticLines;
+        var diagnosticLocations = scoped.Locations.Count > 0 ? scoped.Locations : evidence.Locations;
+        var languageContext = _repairContextProvider?.GetCompileRepairContext(
+            prerequisite,
+            prepResult.WorkspacePath,
+            new[] { target });
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Build,
+            ExecutionActivityStatus.Started,
+            "Compile repair started after test repair introduced a localized build failure.",
+            CheckMetadata(
+                prerequisite,
+                "FixingBuildIssue",
+                prerequisiteResult,
+                repairKind: "Compile",
+                repairRound: testRepairRound,
+                repairFiles: new[] { target },
+                failureFingerprint: evidence.FailureFingerprint,
+                progressResult: "CompilerConvergenceBridge",
+                diagnosticLines: sanitized,
+                repairSelectionReason: reason),
+            cancellationToken).ConfigureAwait(false);
+
+        var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+        DeveloperAgentResult repairResult;
+        try
+        {
+            repairResult = await _developerAgent.ExecuteFocusedRepairAsync(
+                new FocusedRepairRequest(
+                    TaskId: context.TaskId,
+                    ExecutionId: context.ExecutionId,
+                    TaskTitle: context.TaskTitle,
+                    AcceptanceCriteria: "Resolve the compiler failure introduced by the previous focused test repair without weakening existing tests.",
+                    WorkspacePath: prepResult.WorkspacePath,
+                    BranchName: prepResult.BranchName,
+                    RepairFiles: new[] { target },
+                    DiagnosticEvidence: string.Join("\n", diagnosticLines.Take(10)),
+                    DiagnosticLocations: diagnosticLocations.Select(l => $"{l.FilePath}:{l.Line}:{l.Column}").ToList(),
+                    LanguageContext: languageContext,
+                    Model: actualModel),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                $"Compile convergence repair failed with exception: {ex.Message}",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    prerequisiteResult,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    progressResult: "NewBuildFailure",
+                    verificationOutcome: "NeedsReview"),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        if (!repairResult.Success)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                $"Compile convergence repair failed: {repairResult.ErrorMessage}",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    prerequisiteResult,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    progressResult: "NewBuildFailure",
+                    verificationOutcome: "NeedsReview",
+                    diagnosticLines: sanitized,
+                    repairSelectionReason: reason),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        foreach (var file in repairResult.ModifiedFiles ?? Array.Empty<string>())
+        {
+            fileSets.AddActuallyModified(file);
+        }
+
+        var afterFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
+        if (beforeFingerprint != null && afterFingerprint != null &&
+            string.Equals(beforeFingerprint, afterFingerprint, StringComparison.Ordinal))
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                "Stopped with evidence: compile convergence repair produced no worktree change.",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    prerequisiteResult,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    repairFiles: new[] { target },
+                    progressResult: "NoDiff",
+                    verificationOutcome: "NeedsReview"),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        var rebuild = await _repositoryCheckRunner.ExecuteAsync(
+            new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, prerequisite),
+            cancellationToken).ConfigureAwait(false);
+
+        if (!rebuild.Success)
+        {
+            var rebuildEvidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(
+                rebuild.StdOut,
+                rebuild.StdErr,
+                rebuild.ErrorMessage);
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                "Stopped with evidence: repository check failed after focused test repair.",
+                CheckMetadata(
+                    prerequisite,
+                    "StoppedWithEvidence",
+                    rebuild,
+                    repairKind: "Compile",
+                    repairRound: testRepairRound,
+                    failureFingerprint: rebuildEvidence.FailureFingerprint,
+                    progressResult: "NewBuildFailure",
+                    verificationOutcome: "NeedsReview",
+                    diagnosticLines: ExecutionDiagnosticEvidence.SanitizeDiagnosticLinesForActivity(
+                        rebuildEvidence.DiagnosticLines,
+                        prepResult.WorkspacePath),
+                    repairSelectionReason: "BridgeRebuildFailed"),
+                cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Build,
+            ExecutionActivityStatus.Completed,
+            "Compile convergence repair restored the build after test repair.",
+            CheckMetadata(
+                prerequisite,
+                "VerifyingRepository",
+                rebuild,
+                repairKind: "Compile",
+                repairRound: testRepairRound,
+                repairFiles: new[] { target },
+                progressResult: "CompilerConvergenceBridge",
+                buildPassed: true,
+                repairSelectionReason: reason),
+            cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
     private static ExecutionActivityMetadata CheckMetadata(
         RepositoryCheck check,
         string? eventKind = null,
@@ -1202,7 +1847,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         int? preExistingFailureCount = null,
         int? newRegressionCount = null,
         string? baseCommitSha = null,
-        bool? baselineCacheHit = null) => new(
+        bool? baselineCacheHit = null,
+        IReadOnlyList<string>? diagnosticLines = null,
+        string? repairSelectionReason = null,
+        string? testName = null,
+        bool? baselineUnverified = null) => new(
             BuildPassed: buildPassed,
             TestPassed: testPassed,
             EventKind: eventKind,
@@ -1226,7 +1875,11 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             PreExistingFailureCount: preExistingFailureCount,
             NewRegressionCount: newRegressionCount,
             BaseCommitSha: baseCommitSha,
-            BaselineCacheHit: baselineCacheHit);
+            BaselineCacheHit: baselineCacheHit,
+            DiagnosticLines: diagnosticLines,
+            RepairSelectionReason: repairSelectionReason,
+            TestName: testName,
+            BaselineUnverified: baselineUnverified);
 
     private async Task<string?> GetChangeFingerprintAsync(string workspacePath, CancellationToken cancellationToken)
     {
@@ -1254,17 +1907,6 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         return !string.IsNullOrWhiteSpace(analysis.Summary) ? analysis.Summary : "No detailed proposed plan provided.";
     }
 
-    private static int TryGetNonNegativeSetting(
-        IConfiguration? configuration,
-        string primaryKey,
-        string legacyKey,
-        int defaultValue) =>
-        configuration != null &&
-        int.TryParse(configuration[primaryKey] ?? configuration[legacyKey], out var value) &&
-        value >= 0
-            ? value
-            : defaultValue;
-
     private async Task SafeRecordActivityAsync(
         Guid executionId,
         ExecutionStage stage,
@@ -1284,6 +1926,63 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Unexpected error recording activity for execution {ExecutionId}.", executionId);
+        }
+    }
+
+    private sealed class FlakeBudget
+    {
+        public FlakeBudget(int remaining) => Remaining = remaining;
+
+        public int Remaining { get; set; }
+    }
+
+    private sealed class ExecutionFileSets
+    {
+        public HashSet<string> ActuallyModifiedFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> VerificationEligiblePlannedFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> ResolvedNoChangeFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public void AddActuallyModified(string file)
+        {
+            if (string.IsNullOrWhiteSpace(file))
+            {
+                return;
+            }
+
+            ActuallyModifiedFiles.Add(file);
+            VerificationEligiblePlannedFiles.Add(file);
+        }
+
+        public void AddResolvedNoChange(string file)
+        {
+            if (string.IsNullOrWhiteSpace(file) || ActuallyModifiedFiles.Contains(file))
+            {
+                return;
+            }
+
+            ResolvedNoChangeFiles.Add(file);
+            VerificationEligiblePlannedFiles.Add(file);
+        }
+
+        public IReadOnlyList<string> PromoteRepairedFiles(IEnumerable<string> files)
+        {
+            var superseded = new List<string>();
+            foreach (var file in files)
+            {
+                if (string.IsNullOrWhiteSpace(file))
+                {
+                    continue;
+                }
+
+                if (ResolvedNoChangeFiles.Remove(file))
+                {
+                    superseded.Add(file);
+                }
+
+                AddActuallyModified(file);
+            }
+
+            return superseded;
         }
     }
 }

@@ -1,4 +1,6 @@
 using System.Text.RegularExpressions;
+using DevPilot.Application.Executions.Options;
+using DevPilot.Application.Executions.Services;
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
 using DevPilot.Application.RepositoryWorkspaces.Ports;
 using DevPilot.Domain.Entities;
@@ -13,13 +15,16 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
 {
     private readonly DevPilotDbContext _db;
     private readonly ILogger<EfWorkspaceOverviewReader> _logger;
+    private readonly AiPricingOptions? _pricing;
 
     public EfWorkspaceOverviewReader(
         DevPilotDbContext db,
-        ILogger<EfWorkspaceOverviewReader> logger)
+        ILogger<EfWorkspaceOverviewReader> logger,
+        AiPricingOptions? pricing = null)
     {
         _db = db;
         _logger = logger;
+        _pricing = pricing;
     }
 
     public async Task<WorkspaceOverviewDto?> ReadOverviewAsync(
@@ -240,7 +245,7 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
             activitiesByExecutionId.TryGetValue(activeWorkflow.Id, out var execActivities);
             execActivities ??= new List<ExecutionActivity>();
 
-            activeWorkflowDto = BuildActiveExecutionDto(activeWorkflow, activeWorkflowTask, activeAnalysis, execActivities);
+            activeWorkflowDto = BuildActiveExecutionDto(activeWorkflow, activeWorkflowTask, activeAnalysis, execActivities, _pricing);
         }
 
         WorkspaceActiveExecutionDto? activeAgentDto = null;
@@ -256,7 +261,7 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
                 activitiesByExecutionId.TryGetValue(activeAgentExecution.Id, out var execActivities);
                 execActivities ??= new List<ExecutionActivity>();
 
-                activeAgentDto = BuildActiveExecutionDto(activeAgentExecution, activeAgentTask, activeAgentAnalysis, execActivities);
+                activeAgentDto = BuildActiveExecutionDto(activeAgentExecution, activeAgentTask, activeAgentAnalysis, execActivities, _pricing);
             }
         }
 
@@ -293,8 +298,10 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
         TaskExecution execution,
         DevelopmentTask task,
         TaskImpactAnalysis? analysis,
-        List<ExecutionActivity> activities)
+        List<ExecutionActivity> activities,
+        AiPricingOptions? pricing)
     {
+        var usage = ExecutionVerdictBuilder.AggregateUsage(activities, pricing);
         var taskDisplayId = FormatTaskDisplayId(task.Id);
 
         // 7 stages: analyze, plan, approved, implement, build, review, pr
@@ -485,8 +492,10 @@ public sealed class EfWorkspaceOverviewReader : IWorkspaceOverviewReader
             StartedAt = execution.StartedAt,
             CompletedAt = execution.CompletedAt,
             ElapsedSeconds = elapsedSeconds,
-            TokensUsed = null, // Truthful null
-            EstimatedCost = null, // Truthful null
+            // Aggregated from recorded provider calls; null (not zero) when no call reported token usage.
+            TokensUsed = usage.TotalTokens > 0 ? (int)Math.Min(usage.TotalTokens, int.MaxValue) : null,
+            // Only reported when an AiPricing table is configured.
+            EstimatedCost = usage.TotalTokens > 0 ? usage.EstimatedCostUsd : null,
             ModifiedFileCount = filesTouched,
         };
     }

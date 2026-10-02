@@ -262,22 +262,13 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
             ErrorMessage = "Output token limit exceeded"
         });
 
-        // 3. Compact repair retry response succeeds with surgical edit
+        // 3. The single allowed MicroApplicabilityRepair also hits the token limit and must stop.
         _fakeAiProvider.StructuredResponsesToReturn.Enqueue(new AiResponse
         {
-            IsSuccess = true,
-            Content = """
-                {
-                  "filePath": "NetCaseStudy.Tests/Api/ProductsApiTests.cs",
-                  "action": "Modify",
-                  "searchReplaceEdits": [
-                    {
-                      "search": "    [Fact]\n    public async Task ExistingLastTest_ReturnsOk()",
-                      "replace": "    [Fact]\n    public async Task GetLowStockProducts_ReturnsOk()\n    {\n        var response = await _client.GetAsync(\"/api/products/low-stock\");\n        response.StatusCode.Should().Be(HttpStatusCode.OK);\n    }\n\n    [Fact]\n    public async Task ExistingLastTest_ReturnsOk()"
-                    }
-                  ]
-                }
-                """
+            IsSuccess = false,
+            FinishReason = "length",
+            FailureKind = AiFailureKind.TokenLimitExceeded,
+            ErrorMessage = "Output token limit exceeded"
         });
 
         var agent = new DeveloperAgent(
@@ -308,10 +299,15 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         modifiedContent.Should().Contain("ExistingLastTest_ReturnsOk");
 
         var messages = _activityRecorder.RecordedMessages.ToList();
-        messages.Should().Contain(m => m.StartsWith("Repair triggered for ProductsApiTests.cs"));
+        messages.Should().Contain(m => m.StartsWith("ApplicabilityRepair for ProductsApiTests.cs"));
+        messages.Should().Contain(m => m.Contains("MicroApplicabilityRepair for ProductsApiTests.cs"));
         messages.Should().NotContain(m => m.StartsWith("Performing compact repair retry for ProductsApiTests.cs"));
 
-        _fakeAiProvider.ReceivedRequests.Should().HaveCount(2, "applicability recovery owns one bounded call and cannot stack a compact retry");
+        _fakeAiProvider.ReceivedRequests.Should().HaveCount(3, "applicability TokenLimit may use exactly one MicroApplicabilityRepair, then stop");
+        _fakeAiProvider.ReceivedRequests[1].MaxTokens.Should().Be(4096);
+        _fakeAiProvider.ReceivedRequests[2].MaxTokens.Should().Be(2048);
+        _fakeAiProvider.ReceivedRequests[1].ReasoningEffort.Should().Be("low");
+        _fakeAiProvider.ReceivedRequests[2].ReasoningEffort.Should().Be("low");
     }
 
     [Fact]
@@ -374,7 +370,7 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         result.Success.Should().BeTrue();
 
         var messages = _activityRecorder.RecordedMessages.ToList();
-        messages.Should().Contain(m => m.Contains("Repair triggered for ServiceTests.cs"));
+        messages.Should().Contain(m => m.Contains("ApplicabilityRepair for ServiceTests.cs"));
 
         foreach (var msg in messages)
         {

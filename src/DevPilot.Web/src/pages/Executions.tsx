@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
+import { useTranslation } from "react-i18next"
+import { fmt } from "@/i18n"
 import { Activity, Clock, Coins, Cpu, ArrowUpRight, Search, Loader2, AlertCircle, Plus } from "lucide-react"
 import { PageContainer, PageHeading } from "@/components/shared"
 import { Panel, Badge, StatusDot, Meter, Button } from "@/components/ui/primitives"
@@ -11,17 +13,17 @@ import {
   type ExecutionListItem,
   type Tone,
 } from "@/types"
-import { stages as defaultStages } from "@/data/mock"
+import { stages as defaultStages } from "@/lib/executionStages"
 
 type FilterKey = "all" | "pending" | "running" | "completed" | "failed" | "cancelled"
 
 const filterTabs: { key: FilterKey; label: string; tone: Tone }[] = [
-  { key: "all", label: "All", tone: "neutral" },
-  { key: "running", label: "Running", tone: "blue" },
-  { key: "pending", label: "Pending", tone: "amber" },
-  { key: "completed", label: "Completed", tone: "green" },
-  { key: "failed", label: "Failed", tone: "red" },
-  { key: "cancelled", label: "Cancelled", tone: "gray" },
+  { key: "all", label: "executions.filters.all", tone: "neutral" },
+  { key: "running", label: "executions.filters.running", tone: "blue" },
+  { key: "pending", label: "executions.filters.pending", tone: "amber" },
+  { key: "completed", label: "executions.filters.completed", tone: "green" },
+  { key: "failed", label: "executions.filters.failed", tone: "red" },
+  { key: "cancelled", label: "executions.filters.cancelled", tone: "gray" },
 ]
 
 function matchesFilter(item: ExecutionListItem, filter: FilterKey): boolean {
@@ -62,14 +64,14 @@ function getProgressPercentage(status: number): number {
 
 function formatDate(dateStr: string): string {
   try {
-    const d = new Date(dateStr)
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' · ' + d.toLocaleDateString()
+    return fmt.time(dateStr, { hour: "2-digit", minute: "2-digit" }) + " · " + fmt.date(dateStr)
   } catch {
     return dateStr
   }
 }
 
 export function Executions() {
+  const { t } = useTranslation()
   const { activeWorkspaceId, isLoading: isWorkspaceLoading } = useWorkspace()
   const activeReqWorkspaceIdRef = useRef<string | null>(activeWorkspaceId)
 
@@ -100,7 +102,7 @@ export function Executions() {
     } catch (err) {
       if (signal?.aborted) return
       if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
-        setError(err instanceof Error ? err.message : "Failed to load executions.")
+        setError(err instanceof Error ? err.message : t("executions.errLoad"))
       }
     } finally {
       if (currentRequestId === activeRequestIdRef.current && activeReqWorkspaceIdRef.current === activeWorkspaceId) {
@@ -136,18 +138,18 @@ export function Executions() {
   return (
     <PageContainer>
       <PageHeading
-        eyebrow="Executions"
-        title="Execution runs"
-        description="Autonomous runs of approved plans. Each run streams the agents' activity, build and test results, and stops for review before opening a pull request."
+        eyebrow={t("executions.eyebrow")}
+        title={t("executions.title")}
+        description={t("executions.description")}
       />
 
       {/* Live summary strip */}
       <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
         {[
-          { icon: Activity, label: "Running", value: String(runningCount), tone: "blue" as const },
-          { icon: Clock, label: "Total runs", value: String(executions.length), tone: "neutral" as const },
-          { icon: Cpu, label: "Model", value: executions.find((e) => e.model)?.model || "Not recorded", tone: "neutral" as const, mono: true },
-          { icon: Coins, label: "Spend today", value: "—", tone: "neutral" as const },
+          { icon: Activity, label: t("executions.running"), value: String(runningCount), tone: "blue" as const },
+          { icon: Clock, label: t("executions.totalRuns"), value: String(executions.length), tone: "neutral" as const },
+          { icon: Cpu, label: t("executions.model"), value: executions.find((e) => e.model)?.model || t("executions.notRecorded"), tone: "neutral" as const, mono: true },
+          { icon: Coins, label: t("executions.spendToday"), value: "—", tone: "neutral" as const },
         ].map((m) => (
           <Panel key={m.label} className="p-3.5">
             <div className="flex items-center gap-1.5">
@@ -183,7 +185,7 @@ export function Executions() {
                   style={{ background: `var(--dot-${f.tone})` }}
                 />
               )}
-              {f.label}
+              {t(f.label)}
               <span className="font-mono text-[11px] opacity-60">{count}</span>
             </button>
           )
@@ -193,7 +195,7 @@ export function Executions() {
           <input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Filter executions"
+            placeholder={t("executions.filterPlaceholder")}
             className="w-36 bg-transparent text-[12.5px] text-foreground outline-none placeholder:text-subtle-foreground"
           />
         </div>
@@ -202,17 +204,17 @@ export function Executions() {
       {isWorkspaceLoading || isLoading ? (
         <Panel className="flex flex-col items-center justify-center gap-2 px-4 py-16 text-center">
           <Loader2 className="h-5 w-5 animate-spin text-subtle-foreground" />
-          <p className="text-[13px] text-muted-foreground">Loading executions from API…</p>
+          <p className="text-[13px] text-muted-foreground">{t("executions.loading")}</p>
         </Panel>
       ) : error ? (
         <Panel className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-center">
           <AlertCircle className="h-6 w-6 text-danger" />
           <div>
-            <p className="text-[13.5px] font-medium text-foreground">Failed to load executions</p>
+            <p className="text-[13.5px] font-medium text-foreground">{t("executions.failedLoad")}</p>
             <p className="mt-0.5 text-[12.5px] text-muted-foreground">{error}</p>
           </div>
           <Button variant="default" size="sm" onClick={() => fetchExecutions()}>
-            Retry
+            {t("common.retry")}
           </Button>
         </Panel>
       ) : filteredExecutions.length === 0 ? (
@@ -220,8 +222,8 @@ export function Executions() {
           <Plus className="h-5 w-5 text-subtle-foreground" />
           <p className="text-[13px] text-muted-foreground">
             {searchQuery.trim() || activeFilter !== "all"
-              ? "No executions match the selected filter."
-              : "No executions found."}
+              ? t("executions.noMatch")
+              : t("executions.none")}
           </p>
         </Panel>
       ) : (
@@ -256,7 +258,7 @@ export function Executions() {
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-[11px] text-subtle-foreground">{run.id}</span>
                         <span className="truncate text-[13.5px] font-medium text-foreground">{run.taskTitle}</span>
-                        {isLive && <Badge tone="blue">live</Badge>}
+                        {isLive && <Badge tone="blue">{t("executions.live")}</Badge>}
                       </div>
                       <div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">
                         {run.repositoryName} · {meta.label}

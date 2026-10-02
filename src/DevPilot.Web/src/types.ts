@@ -1,3 +1,4 @@
+import i18n from "@/i18n"
 export interface TaskListItem {
   id: string;
   title: string;
@@ -203,6 +204,21 @@ export interface StructuredResult {
   unknowns?: string[];
   riskReasons?: string[];
   metadata?: Record<string, unknown>;
+  /** Base commit / freshness evidence captured when the analysis was produced (absent on legacy analyses). */
+  baseSnapshot?: AnalysisBaseSnapshot | null;
+}
+
+export interface AnalysisBaseSnapshot {
+  branchName?: string | null;
+  baseCommitSha?: string | null;
+  remoteCommitSha?: string | null;
+  behindCount: number;
+  aheadCount: number;
+  /** UpToDate | FastForwarded | Behind | Diverged | Ahead | FetchFailed | NotApplicable */
+  freshness: string;
+  isStale: boolean;
+  message?: string | null;
+  capturedAt: string;
 }
 
 export interface ImpactAnalysis {
@@ -235,16 +251,23 @@ export type TaskExecutionStatusValue = (typeof TaskExecutionStatus)[keyof typeof
 export type Tone = "neutral" | "blue" | "amber" | "green" | "red" | "gray";
 
 export const executionStatusMeta: Record<number, { label: string; tone: Tone }> = {
-  [TaskExecutionStatus.Pending]: { label: "Pending", tone: "amber" },
-  [TaskExecutionStatus.Running]: { label: "Running", tone: "blue" },
-  [TaskExecutionStatus.Completed]: { label: "Completed", tone: "green" },
-  [TaskExecutionStatus.Failed]: { label: "Failed", tone: "red" },
-  [TaskExecutionStatus.Cancelled]: { label: "Cancelled", tone: "gray" },
+  [TaskExecutionStatus.Pending]: { get label() { return i18n.t("executions.status.pending") }, tone: "amber" },
+  [TaskExecutionStatus.Running]: { get label() { return i18n.t("executions.status.running") }, tone: "blue" },
+  [TaskExecutionStatus.Completed]: { get label() { return i18n.t("executions.status.completed") }, tone: "green" },
+  [TaskExecutionStatus.Failed]: { get label() { return i18n.t("executions.status.failed") }, tone: "red" },
+  [TaskExecutionStatus.Cancelled]: { get label() { return i18n.t("executions.status.cancelled") }, tone: "gray" },
 };
 
-export function getExecutionStatusMeta(status: number | string): { label: string; tone: Tone } {
+export function getExecutionStatusMeta(
+  status: number | string,
+  verificationOutcome?: string | null,
+): { label: string; tone: Tone } {
+  const outcome = String(verificationOutcome || "").toLowerCase()
+  if (outcome === "needsreview" && (status === TaskExecutionStatus.Completed || String(status).toLowerCase() === "completed")) {
+    return { label: i18n.t("executions.status.needsReview"), tone: "amber" }
+  }
   if (typeof status === "number") {
-    return executionStatusMeta[status] ?? { label: `Status ${status}`, tone: "neutral" };
+    return executionStatusMeta[status] ?? { label: i18n.t("executions.status.other", { status }), tone: "neutral" };
   }
   const s = String(status).toLowerCase();
   if (s === "pending") return executionStatusMeta[TaskExecutionStatus.Pending];
@@ -317,6 +340,8 @@ export interface ExecutionDetail {
   mergedAt?: string | null;
   canRequestMerge?: boolean;
   verificationOutcome?: string;
+  verdict?: ExecutionVerdict | null;
+  usage?: ExecutionUsage | null;
   canRetry?: boolean;
   createdAt: string;
   startedAt: string | null;
@@ -365,12 +390,27 @@ export interface ExecutionActivityMetadata {
   discoveredCheckEvidence?: string[] | null;
   repositoryCheckEvidence?: string | null;
   baselineClassification?: string | null;
+  /** True when the baseline comparison was inconclusive and repair continued from raw diagnostics. */
+  baselineUnverified?: boolean | null;
+  /** BaseFreshness activity: base branch / remote commit / how far behind origin the base was. */
+  baseBranchName?: string | null;
+  remoteBaseCommitSha?: string | null;
+  baseBehindCount?: number | null;
+  /** UpToDate | FastForwarded | Behind | Diverged | Ahead | FetchFailed | NotApplicable */
+  baseFreshness?: string | null;
   baseCommitSha?: string | null;
   baselineCacheHit?: boolean | null;
   preExistingFailureCount?: number | null;
   newRegressionCount?: number | null;
   targetedTestFilter?: string | null;
   verificationOutcome?: string | null;
+  diagnosticLines?: string[] | null;
+  outputContract?: string | null;
+  compactRetryReason?: string | null;
+  repairSelectionReason?: string | null;
+  testName?: string | null;
+  noChangeReason?: string | null;
+  resolvedNoChangeCount?: number | null;
 }
 
 export interface ExecutionActivityItem {
@@ -486,6 +526,56 @@ export interface ExecutionReview {
   repositoryName?: string;
   predictedVsActual?: PredictedVsActualComparison | null;
   verificationOutcome?: ExecutionVerificationOutcome | string;
+  verdict?: ExecutionVerdict | null;
+  usage?: ExecutionUsage | null;
+}
+
+export interface VerdictFinding {
+  kind: string;
+  /** info | success | warning | danger */
+  severity: string;
+  message: string;
+}
+
+/** Explanation of an execution's verification outcome (what happened, why, what next). */
+export interface ExecutionVerdict {
+  outcome: string;
+  /** success | warning | danger | neutral */
+  severity: string;
+  headline: string;
+  recommendedAction?: string | null;
+  findings: VerdictFinding[];
+  baselineUnverified: boolean;
+  flakeConfirmed: boolean;
+  testWeakeningSuspected: boolean;
+  staleBase: boolean;
+  compileRepairRounds: number;
+  testRepairRounds: number;
+  compactRetries: number;
+  applicabilityRepairs: number;
+  checksNotRun: string[];
+  baseFreshness?: string | null;
+  baseBehindCount?: number | null;
+  baseCommitSha?: string | null;
+}
+
+export interface ExecutionStageTiming {
+  stage: string;
+  durationMs: number;
+}
+
+/** AI usage and latency aggregated from recorded provider calls. */
+export interface ExecutionUsage {
+  providerCalls: number;
+  failedProviderCalls: number;
+  callsWithoutTokenData: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  providerTimeMs: number;
+  /** Null unless an AiPricing table is configured on the server. */
+  estimatedCostUsd?: number | null;
+  stageTimings: ExecutionStageTiming[];
 }
 
 export type ExecutionVerificationOutcome =
@@ -994,4 +1084,82 @@ export interface GitHubBranch {
   name: string;
   commitSha: string;
   isProtected: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Repository insights
+// ---------------------------------------------------------------------------
+export interface InsightOutcomeCount {
+  outcome: string;
+  count: number;
+}
+
+export interface InsightSignal {
+  key: string;
+  label: string;
+  description: string;
+  count: number;
+}
+
+export interface InsightFailureReason {
+  reason: string;
+  count: number;
+}
+
+export interface InsightExecutionRow {
+  executionId: string;
+  taskId: string;
+  taskTitle: string;
+  attemptNumber: number;
+  status: string;
+  outcome: string;
+  headline: string;
+  createdAt: string;
+  durationSeconds?: number | null;
+  repairRounds: number;
+  providerCalls: number;
+  totalTokens: number;
+  estimatedCostUsd?: number | null;
+}
+
+export interface InsightRetriedTask {
+  taskId: string;
+  taskTitle: string;
+  attempts: number;
+  firstExecutionId: string;
+  lastExecutionId: string;
+  firstOutcome: string;
+  lastOutcome: string;
+  improved: boolean;
+}
+
+export interface WorkspaceInsightsTotals {
+  executions: number;
+  cancelled: number;
+  measured: number;
+  deliveryReady: number;
+  deliveryReadyRate?: number | null;
+  verifiedRate?: number | null;
+  firstPass: number;
+  firstPassRate?: number | null;
+  repaired: number;
+  repairedRecovered: number;
+  repairRecoveryRate?: number | null;
+  avgDurationSeconds?: number | null;
+  medianDurationSeconds?: number | null;
+  totalTokens: number;
+  avgTokensPerExecution?: number | null;
+  avgProviderCalls?: number | null;
+  totalCostUsd?: number | null;
+}
+
+export interface WorkspaceInsights {
+  generatedAt: string;
+  windowSize: number;
+  totals: WorkspaceInsightsTotals;
+  outcomes: InsightOutcomeCount[];
+  signals: InsightSignal[];
+  topFailureReasons: InsightFailureReason[];
+  recent: InsightExecutionRow[];
+  retriedTasks: InsightRetriedTask[];
 }

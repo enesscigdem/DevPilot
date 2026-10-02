@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import { useTranslation } from "react-i18next"
 import {
   Search,
   GitFork,
@@ -36,6 +37,7 @@ interface RepositoryPickerModalProps {
 }
 
 export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPickerModalProps) {
+  const { t } = useTranslation()
   const { workspaces, activeWorkspaceId, selectWorkspace, connectWorkspace, refreshWorkspaces } = useWorkspace()
 
   const [step, setStep] = useState<"list" | "branch">("list")
@@ -85,7 +87,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
         setGhRepos([])
       }
     } catch (err: any) {
-      setGhError(err?.message || "Failed to load GitHub repositories.")
+      setGhError(err?.message || t("picker.errLoad"))
     } finally {
       setIsLoadingRepos(false)
     }
@@ -97,7 +99,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
       const { url } = await getGitHubConnectUrl(currentPath)
       window.location.href = url
     } catch (err: any) {
-      setGhError(err?.message || "Failed to generate GitHub authorization URL.")
+      setGhError(err?.message || t("picker.errAuthUrl"))
     }
   }
 
@@ -181,7 +183,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
       selectWorkspace(newWs.id)
       onClose()
     } catch (err: any) {
-      setConnectError(err?.message || "Failed to clone and index repository workspace.")
+      setConnectError(err?.message || t("picker.errConnect"))
     } finally {
       setIsConnecting(false)
     }
@@ -240,7 +242,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                 ref={inputRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search repositories across DevPilot & GitHub…"
+                placeholder={t("picker.search")}
                 className="h-12 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-subtle-foreground"
               />
               {isLoadingRepos && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-subtle-foreground" />}
@@ -256,7 +258,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                   onClick={loadGitHubData}
                   className="rounded px-2 py-0.5 font-medium hover:bg-amber-500/20"
                 >
-                  Retry
+                  {t("picker.retry")}
                 </button>
               </div>
             )}
@@ -269,16 +271,16 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                   <div className="mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-surface border border-border">
                     <FolderGit2 className="h-5 w-5 text-foreground" />
                   </div>
-                  <h3 className="text-sm font-semibold text-foreground">Connect GitHub Account</h3>
+                  <h3 className="text-sm font-semibold text-foreground">{t("picker.connectAccount")}</h3>
                   <p className="mx-auto mt-1 max-w-sm text-xs text-subtle-foreground">
-                    Connect your GitHub account or organization to browse repositories, create branches, push changes, and open pull requests.
+                    {t("picker.connectDesc")}
                   </p>
                   <button
                     onClick={handleConnectGitHub}
                     className="mt-3 inline-flex items-center gap-1.5 rounded-[var(--radius-md)] bg-foreground px-3.5 py-1.5 text-xs font-medium text-background transition-opacity hover:opacity-90"
                   >
                     <Plus className="h-3.5 w-3.5" />
-                    Connect GitHub
+                    {t("picker.connectGitHub")}
                   </button>
                 </div>
               )}
@@ -286,7 +288,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
               {/* Section 1: Connected to DevPilot */}
               {filteredConnected.length > 0 && (
                 <div className="px-2 pb-2">
-                  <div className="tech-label px-2.5 py-1.5">CONNECTED TO DEVPILOT</div>
+                  <div className="tech-label px-2.5 py-1.5">{t("picker.connectedTitle")}</div>
                   {filteredConnected.map((w) => {
                     const idx = flatItems.findIndex((item) => item.type === "connected" && item.data.id === w.id)
                     const isActive = idx === activeIdx
@@ -313,7 +315,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                               <span className="font-medium text-foreground">{w.owner}/{w.repository}</span>
                               {isCurrent && (
                                 <span className="rounded bg-emerald-500/10 px-1.5 py-0.2 text-[10px] font-medium text-emerald-500">
-                                  Active
+                                  {t("picker.active")}
                                 </span>
                               )}
                             </div>
@@ -323,7 +325,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                                 {w.branch}
                               </span>
                               <span>•</span>
-                              <span>Indexed</span>
+                              <span>{t("picker.indexed")}</span>
                             </div>
                           </div>
                         </div>
@@ -338,7 +340,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
               {ghStatus?.isConnected && (
                 <div className="px-2 pb-1 pt-2">
                   <div className="tech-label px-2.5 py-1.5 flex items-center justify-between">
-                    <span>AVAILABLE FROM GITHUB</span>
+                    <span>{t("picker.availableTitle")}</span>
                     {ghStatus.installations.length > 0 && (
                       <span className="text-[10px] lowercase text-subtle-foreground">
                         ({ghStatus.installations.map((i) => i.accountLogin).join(", ")})
@@ -348,7 +350,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
 
                   {filteredGitHubRepos.length === 0 && !isLoadingRepos && (
                     <div className="px-3 py-4 text-center text-xs text-subtle-foreground">
-                      {query ? `No available GitHub repositories matching "${query}"` : "All authorized repositories are already connected."}
+                      {query ? t("picker.noMatchingRepos", { query }) : t("picker.allConnected")}
                     </div>
                   )}
 
@@ -380,7 +382,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                             <div className="flex items-center gap-2">
                               <span className="font-medium text-foreground">{repo.fullName}</span>
                               <span className="rounded border border-border bg-surface px-1.5 py-0.2 text-[10px] text-subtle-foreground">
-                                {repo.isPrivate ? "Private" : "Public"}
+                                {repo.isPrivate ? t("picker.private") : t("picker.public")}
                               </span>
                             </div>
                             {repo.description && (
@@ -400,7 +402,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
 
               {flatItems.length === 0 && !isLoadingRepos && !ghError && (
                 <div className="px-4 py-8 text-center text-sm text-subtle-foreground">
-                  No repositories found for "{query}"
+                  {t("picker.noRepos", { query })}
                 </div>
               )}
             </div>
@@ -415,7 +417,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                     className="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
                   >
                     <Plus className="h-3.5 w-3.5" />
-                    Connect GitHub
+                    {t("picker.connectGitHub")}
                   </button>
                 ) : (
                   <>
@@ -426,7 +428,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                       className="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
                     >
                       <Plus className="h-3.5 w-3.5" />
-                      Add repositories
+                      {t("picker.addRepos")}
                     </a>
                     <a
                       href={manageUrl}
@@ -434,16 +436,16 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                       rel="noreferrer"
                       className="inline-flex items-center gap-1 text-subtle-foreground hover:text-foreground hover:underline"
                     >
-                      Manage GitHub access
+                      {t("picker.manageAccess")}
                       <ExternalLink className="h-3 w-3" />
                     </a>
                     <button
                       type="button"
                       onClick={handleConnectGitHub}
                       className="inline-flex items-center gap-1 text-subtle-foreground hover:text-foreground hover:underline"
-                      title="Connect another GitHub account or organization"
+                      title={t("picker.connectAnotherTitle")}
                     >
-                      + Connect another account
+                      {t("picker.connectAnother")}
                     </button>
                   </>
                 )}
@@ -454,12 +456,12 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                   className="inline-flex items-center gap-1 text-subtle-foreground hover:text-foreground"
                 >
                   <RefreshCw className={cn("h-3 w-3", isLoadingRepos && "animate-spin")} />
-                  Refresh
+                  {t("picker.refresh")}
                 </button>
               </div>
               <div className="hidden sm:flex items-center gap-2">
-                <span><Kbd>↑↓</Kbd> navigate</span>
-                <span><Kbd>↵</Kbd> select</span>
+                <span><Kbd>↑↓</Kbd> {t("picker.navigate")}</span>
+                <span><Kbd>↵</Kbd> {t("picker.select")}</span>
               </div>
             </div>
           </>
@@ -472,15 +474,15 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
               className="inline-flex items-center gap-1.5 text-xs font-medium text-subtle-foreground transition-colors hover:text-foreground"
             >
               <ArrowLeft className="h-3.5 w-3.5" />
-              Back to repository list
+              {t("picker.back")}
             </button>
 
             <div className="mt-3">
               <h2 className="text-base font-semibold text-foreground">
-                Connect {selectedRepo?.fullName}
+                {t("picker.connectRepo", { name: selectedRepo?.fullName })}
               </h2>
               <p className="mt-0.5 text-xs text-subtle-foreground">
-                Select the branch to clone and index into DevPilot.
+                {t("picker.branchDesc")}
               </p>
             </div>
 
@@ -493,11 +495,11 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
 
             <div className="mt-4 space-y-3">
               <div>
-                <label className="tech-label mb-1.5 block">Branch</label>
+                <label className="tech-label mb-1.5 block">{t("picker.branch")}</label>
                 {isLoadingBranches ? (
                   <div className="flex h-9 items-center gap-2 rounded-[var(--radius-md)] border border-border bg-surface px-3 text-xs text-subtle-foreground">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    Loading branches…
+                    {t("picker.loadingBranches")}
                   </div>
                 ) : (
                   <select
@@ -508,7 +510,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                   >
                     {branches.map((b) => (
                       <option key={b.name} value={b.name}>
-                        {b.name} {b.name === selectedRepo?.defaultBranch ? "(default)" : ""}
+                        {b.name} {b.name === selectedRepo?.defaultBranch ? t("picker.default") : ""}
                       </option>
                     ))}
                   </select>
@@ -523,7 +525,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                 disabled={isConnecting}
                 className="rounded-[var(--radius-md)] border border-border px-3.5 py-1.5 text-xs font-medium text-foreground hover:bg-surface-secondary"
               >
-                Cancel
+                {t("picker.cancel")}
               </button>
               <button
                 type="button"
@@ -532,7 +534,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                 className="inline-flex items-center gap-1.5 rounded-[var(--radius-md)] bg-foreground px-4 py-1.5 text-xs font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
               >
                 {isConnecting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                Connect & Index
+                {t("picker.connectIndex")}
               </button>
             </div>
           </div>

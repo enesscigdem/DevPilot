@@ -33,4 +33,7 @@ public sealed record ExecutionProcessingContext(
     string? AcceptanceCriteria,
     Guid WorkspaceId,
     string WorkspaceLocalPath,
-    string ImpactAnalysisSummary);
+    string ImpactAnalysisSummary,
+    string? RepositoryOwner = null,
+    string? RepositoryName = null,
+    string? BaseBranch = null);

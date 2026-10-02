@@ -6,8 +6,10 @@ using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.Executions.Models;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.ProjectBrain.Ports;
+using DevPilot.Application.RepositoryClone;
 using DevPilot.Application.TaskImpactAnalysis.Dtos;
 using DevPilot.Application.TaskImpactAnalysis.Ports;
 using DevPilot.Application.TaskImpactAnalysis.Services;
@@ -101,6 +103,8 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
     private readonly ISemanticSearchService _semanticSearchService;
     private readonly IRepositoryCheckRunner? _repositoryCheckRunner;
     private readonly ILogger<AnalyzeTaskImpactCommandHandler> _logger;
+    private readonly ExecutionReliabilityOptions _reliability;
+    private readonly IRepositoryFreshnessService? _freshnessService;
 
     public AnalyzeTaskImpactCommandHandler(
         ITaskRepository taskRepository,
@@ -111,8 +115,12 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         IEmbeddingProvider embeddingProvider,
         ISemanticSearchService semanticSearchService,
         ILogger<AnalyzeTaskImpactCommandHandler> logger,
-        IRepositoryCheckRunner? repositoryCheckRunner = null)
+        IRepositoryCheckRunner? repositoryCheckRunner = null,
+        ExecutionReliabilityOptions? reliabilityOptions = null,
+        IRepositoryFreshnessService? freshnessService = null)
     {
+        _reliability = (reliabilityOptions ?? new ExecutionReliabilityOptions()).Normalize();
+        _freshnessService = freshnessService;
         _taskRepository = taskRepository;
         _workspaceQuery = workspaceQuery;
         _analysisRepository = analysisRepository;
@@ -271,6 +279,10 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
         try
         {
+            // Fetch origin and fast-forward the managed clone when provably safe, so analysis is grounded on a
+            // fresh base. Never fails the analysis; the outcome is persisted as base-commit / stale-base evidence.
+            var baseSnapshot = await CaptureBaseSnapshotAsync(workspace, executionToken).ConfigureAwait(false);
+
             // Discover preflight repository verification profile (reuses PR #15 discovery logic)
             RepositoryProfile verificationProfile;
             if (_repositoryCheckRunner != null && !string.IsNullOrWhiteSpace(workspace.LocalPath) && Directory.Exists(workspace.LocalPath))
@@ -303,7 +315,10 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
             var evidenceProfile = ChangeIntelligenceEvidenceCollector.CollectEvidence(workspace.LocalPath, verificationProfile);
             var (context, roslynResult) = await BuildContextWithRoslynAsync(task, workspace, evidenceProfile, executionToken).ConfigureAwait(false);
 
-            const int defaultImpactMaxTokens = 2048;
+            // Bounded budgets from the single reliability options source: a normal budget sized for
+            // 10-20 file plans, and a larger (still capped) budget for compact recovery / grounding repair.
+            var defaultImpactMaxTokens = _reliability.ImpactAnalysisMaxOutputTokens;
+            var recoveryImpactMaxTokens = _reliability.ImpactAnalysisRecoveryMaxOutputTokens;
             var totalProviderCalls = 1;
             var compactRecoveryCount = 0;
 
@@ -351,7 +366,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                         "No explanations, no markdown fences, no conversational text. " +
                         "Keep summaries and reasons to 1 concise sentence. Output valid JSON only.",
                     UserPrompt = recoveryPrompt,
-                    MaxTokens = defaultImpactMaxTokens,
+                    MaxTokens = recoveryImpactMaxTokens,
                 };
 
                 var recoveryResponse = await _aiProvider
@@ -396,8 +411,9 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
             var parseResult = TryParseStructuredResult(rawResponse, evidenceProfile, workspace.LocalPath);
 
-            // Bounded single repair attempt if deterministic grounding failure occurs (ONLY if truncation recovery was not used)
-            if (!parseResult.Success && parseResult.IsGroundingError && parseResult.GroundingErrorDetails != null && compactRecoveryCount == 0)
+            // Bounded single repair attempt if deterministic grounding failure occurs (also after compact recovery,
+            // because the recovery prompt keeps the full grounding evidence).
+            if (!parseResult.Success && parseResult.IsGroundingError && parseResult.GroundingErrorDetails != null)
             {
                 _logger.LogWarning(
                     "Impact analysis for task {TaskId} encountered grounding error: {Error}. Initiating bounded 1-attempt impact plan repair.",
@@ -420,7 +436,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                         "Use Create/Add ONLY for new files that do not currently exist in the repository. " +
                         "Respond with a single JSON object only matching the required schema. Do not wrap in markdown fences or commentary.",
                     UserPrompt = repairPrompt,
-                    MaxTokens = defaultImpactMaxTokens,
+                    MaxTokens = recoveryImpactMaxTokens,
                 };
 
                 var repairAiResponse = await _aiProvider
@@ -458,6 +474,7 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
 
             var completedAt = DateTime.UtcNow;
             var structuredResult = parseResult.ResultData!;
+            structuredResult.BaseSnapshot = baseSnapshot;
 
             analysis.Status = ImpactAnalysisStatus.Completed;
             analysis.Summary = structuredResult.Summary;
@@ -525,6 +542,45 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 model,
                 providerName,
                 CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<AnalysisBaseSnapshot?> CaptureBaseSnapshotAsync(
+        RepositoryWorkspace workspace,
+        CancellationToken cancellationToken)
+    {
+        if (_freshnessService == null || string.IsNullOrWhiteSpace(workspace.LocalPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var freshness = await _freshnessService.RefreshAsync(
+                new RepositoryFreshnessRequest(workspace.LocalPath, workspace.Owner, workspace.Repository, workspace.Branch),
+                cancellationToken).ConfigureAwait(false);
+
+            return new AnalysisBaseSnapshot
+            {
+                BranchName = freshness.BranchName ?? workspace.Branch,
+                BaseCommitSha = freshness.LocalCommitSha,
+                RemoteCommitSha = freshness.RemoteCommitSha,
+                BehindCount = freshness.BehindCount,
+                AheadCount = freshness.AheadCount,
+                Freshness = freshness.Status.ToString(),
+                IsStale = freshness.IsStale,
+                Message = freshness.Message,
+                CapturedAt = DateTime.UtcNow,
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Repository freshness refresh failed for workspace {WorkspaceId}; continuing analysis.", workspace.Id);
+            return null;
         }
     }
 
@@ -1076,42 +1132,21 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
         string context,
         RepositoryEvidenceProfile evidence)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("# Task");
-        builder.AppendLine($"Title: {task.Title}");
-        if (!string.IsNullOrWhiteSpace(task.Description))
-        {
-            builder.AppendLine($"Description: {task.Description}");
-        }
-        if (!string.IsNullOrWhiteSpace(task.AcceptanceCriteria))
-        {
-            builder.AppendLine($"Acceptance Criteria: {task.AcceptanceCriteria}");
-        }
+        // Keep the full grounding evidence (project graph, technology profile, verification preflight,
+        // real file inventory, context) so the compact plan is validated against the same repository facts.
+        // Only the output size is constrained.
+        var builder = new StringBuilder(BuildUserPrompt(task, workspace, context, evidence));
         builder.AppendLine();
-
-        builder.AppendLine("# Candidate Repository Files");
-        var candidateFiles = evidence.InventoryFiles.Count > 0 ? evidence.InventoryFiles : evidence.InventoryCsFiles;
-        if (candidateFiles.Count > 0)
-        {
-            foreach (var f in candidateFiles.Take(25))
-            {
-                builder.AppendLine($"- {f}");
-            }
-            builder.AppendLine();
-        }
-
-        builder.AppendLine("# Minimal Compact Output Instructions");
+        builder.AppendLine("# Compact Output Override");
         builder.AppendLine(
             "CRITICAL: The previous response was truncated because it exceeded output token limits.\n" +
-            "Provide ONLY the minimal, ultra-compact JSON impact analysis without extra prose or nested duplicate fields.\n" +
+            "Re-emit the SAME analysis in a more compact form. All grounding rules above still apply.\n" +
             "- Output valid JSON only, no markdown code blocks.\n" +
+            "- Keep every genuinely impacted file entry; shorten text instead of dropping files.\n" +
             "- Max 200 chars for summary.\n" +
             "- Max 100 chars per file reason.\n" +
             "- Max 100 chars per plan step description.\n" +
             "- Do NOT repeat change briefs, expected checks, or file evidence details (DevPilot computes them deterministically).");
-        builder.AppendLine();
-        builder.AppendLine("Required JSON Schema:");
-        builder.AppendLine(JsonSchema);
 
         return builder.ToString();
     }
@@ -2000,6 +2035,20 @@ public sealed class AnalyzeTaskImpactCommandHandler : IAnalyzeTaskImpactCommandH
                 .ToList(),
             Unknowns = data.Unknowns,
             RiskReasons = data.RiskReasons,
+            BaseSnapshot = data.BaseSnapshot == null
+                ? null
+                : new AnalysisBaseSnapshotDto
+                {
+                    BranchName = data.BaseSnapshot.BranchName,
+                    BaseCommitSha = data.BaseSnapshot.BaseCommitSha,
+                    RemoteCommitSha = data.BaseSnapshot.RemoteCommitSha,
+                    BehindCount = data.BaseSnapshot.BehindCount,
+                    AheadCount = data.BaseSnapshot.AheadCount,
+                    Freshness = data.BaseSnapshot.Freshness,
+                    IsStale = data.BaseSnapshot.IsStale,
+                    Message = data.BaseSnapshot.Message,
+                    CapturedAt = data.BaseSnapshot.CapturedAt,
+                },
         };
     }
 

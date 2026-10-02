@@ -32,13 +32,16 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
     private readonly IExecutionActivityRepository _activityRepository;
     private readonly IImpactAnalysisRepository _impactAnalysisRepository;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
+    private readonly AiPricingOptions? _pricing;
 
     public GetExecutionByIdQueryHandler(
         IExecutionRepository executionRepository,
         IExecutionActivityRepository activityRepository,
         IImpactAnalysisRepository impactAnalysisRepository,
-        IOptions<MergePolicyOptions> mergePolicyOptions)
+        IOptions<MergePolicyOptions> mergePolicyOptions,
+        AiPricingOptions? pricing = null)
     {
+        _pricing = pricing;
         _executionRepository = executionRepository;
         _activityRepository = activityRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
@@ -88,10 +91,18 @@ public sealed class GetExecutionByIdQueryHandler : IGetExecutionByIdQueryHandler
         var stages = ExecutionStageEvaluator.EvaluateStages(execution, execution.DevelopmentTask, analysis, activities);
         var progressPercentage = ExecutionStageEvaluator.CalculateProgressPercentage(stages);
 
+        var dto = MapToDto(execution, allowNoChecks, activities, outcome, canRetry, stages, progressPercentage);
+        var snapshot = ExecutionVerdictBuilder.Resolve(execution, activities, outcome, _pricing);
+        dto.Usage = snapshot.Usage;
+        if (execution.Status is not (DevPilot.Domain.Enums.TaskExecutionStatus.Pending or DevPilot.Domain.Enums.TaskExecutionStatus.Running))
+        {
+            dto.Verdict = snapshot.Verdict;
+        }
+
         return new GetExecutionByIdResult
         {
             Found = true,
-            Execution = MapToDto(execution, allowNoChecks, activities, outcome, canRetry, stages, progressPercentage),
+            Execution = dto,
         };
     }
 

@@ -1,4 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from "react"
+import { useTranslation } from "react-i18next"
+import { srv } from "@/i18n"
 import { Layers, FileCode2, ArrowRight, Zap, Filter, Loader2, AlertCircle } from "lucide-react"
 import { PageContainer, PageHeading } from "@/components/shared"
 import { Button, Panel, Badge, StatusDot } from "@/components/ui/primitives"
@@ -115,6 +117,7 @@ function computeNodeLayout(rawNodes: WorkspaceArchitectureNode[]): LayoutNode[] 
 }
 
 export function Architecture() {
+  const { t } = useTranslation()
   const { activeWorkspaceId } = useWorkspace()
   const cached = activeWorkspaceId ? getCachedWorkspaceArchitecture(activeWorkspaceId) : { data: null, isStale: true }
   const [architecture, setArchitecture] = useState<WorkspaceArchitecture | null>(cached.data)
@@ -160,7 +163,7 @@ export function Architecture() {
         setSelectedId(null)
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to load architecture graph."
+      const msg = err instanceof Error ? err.message : t("arch.errLoad")
       const currentCache = getCachedWorkspaceArchitecture(workspaceId)
       if (!currentCache.data && !architecture) {
         setError(msg)
@@ -220,13 +223,13 @@ export function Architecture() {
   return (
     <PageContainer>
       <PageHeading
-        eyebrow="Architecture"
-        title="Impact map"
-        description="A live dependency graph of the solution, derived from the Roslyn symbol graph. Highlighted nodes are touched by the active task — trace how a change ripples across layers."
+        eyebrow={t("arch.eyebrow")}
+        title={t("arch.title")}
+        description={t("arch.description")}
         actions={
           <Button variant={onlyImpacted ? "primary" : "default"} size="sm" onClick={() => setOnlyImpacted((v) => !v)}>
             <Filter className="h-3.5 w-3.5" />
-            {onlyImpacted ? "Showing impacted" : "Highlight impacted"}
+            {onlyImpacted ? t("arch.showingImpacted") : t("arch.highlightImpacted")}
           </Button>
         }
       />
@@ -239,26 +242,26 @@ export function Architecture() {
           {isLoading ? (
             <div className="relative flex h-[560px] flex-col items-center justify-center gap-3 p-6 text-center">
               <Loader2 className="h-6 w-6 animate-spin text-primary" />
-              <div className="text-[13px] text-muted-foreground">Analyzing solution architecture graph...</div>
+              <div className="text-[13px] text-muted-foreground">{t("arch.analyzing")}</div>
             </div>
           ) : error && !architecture ? (
             <div className="relative flex h-[560px] flex-col items-center justify-center gap-3 p-6 text-center">
               <AlertCircle className="h-6 w-6 text-danger" />
-              <div className="text-[13px] font-medium text-foreground">Failed to load architecture</div>
+              <div className="text-[13px] font-medium text-foreground">{t("arch.failed")}</div>
               <div className="max-w-sm text-[12px] text-muted-foreground">{error}</div>
             </div>
           ) : !activeWorkspaceId ? (
             <div className="relative flex h-[560px] flex-col items-center justify-center gap-2 p-6 text-center">
-              <div className="text-[13px] font-medium text-foreground">No repository workspace selected</div>
+              <div className="text-[13px] font-medium text-foreground">{t("arch.noWorkspace")}</div>
               <div className="text-[12px] text-muted-foreground">
-                Select or create a workspace in the sidebar to inspect its architecture.
+                {t("arch.noWorkspaceDesc")}
               </div>
             </div>
           ) : layoutNodes.length === 0 ? (
             <div className="relative flex h-[560px] flex-col items-center justify-center gap-2 p-6 text-center">
-              <div className="text-[13px] font-medium text-foreground">No projects found</div>
+              <div className="text-[13px] font-medium text-foreground">{t("arch.noProjects")}</div>
               <div className="text-[12px] text-muted-foreground">
-                The selected workspace does not contain any analyzable .NET projects or frontend modules.
+                {t("arch.noProjectsDesc")}
               </div>
             </div>
           ) : (
@@ -347,18 +350,18 @@ export function Architecture() {
           <div className="relative flex items-center gap-4 border-t border-border px-4 py-2.5">
             <div className="flex items-center gap-1.5">
               <Zap className="h-3 w-3 text-accent" />
-              <span className="text-[11px] text-muted-foreground">Impacted by active task</span>
+              <span className="text-[11px] text-muted-foreground">{t("arch.legendImpacted")}</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="h-0.5 w-5 rounded bg-primary" />
-              <span className="text-[11px] text-muted-foreground">Selected dependency path</span>
+              <span className="text-[11px] text-muted-foreground">{t("arch.legendPath")}</span>
             </div>
           </div>
         </Panel>
 
         {/* inspector */}
         <aside>
-          <div className="tech-label mb-3">Node inspector</div>
+          <div className="tech-label mb-3">{t("arch.inspector")}</div>
           <Panel className="p-4">
             {selected ? (
               <>
@@ -370,7 +373,7 @@ export function Architecture() {
                     <div className="truncate text-[14px] font-semibold text-foreground">{selected.label}</div>
                     <div className="font-mono text-[10.5px] text-subtle-foreground">{selected.sub}</div>
                   </div>
-                  {selected.impacted && <Badge tone="amber" className="ml-auto">impacted</Badge>}
+                  {selected.impacted && <Badge tone="amber" className="ml-auto">{t("arch.impacted")}</Badge>}
                 </div>
 
                 <div className="mt-3 flex items-center gap-2">
@@ -380,17 +383,17 @@ export function Architecture() {
                 {selected.impacted && selected.why && (
                   <div className="mt-4 rounded-[var(--radius-md)] border border-accent-line/50 bg-accent-soft/50 p-3">
                     <div className="tech-label mb-1 flex items-center gap-1.5 text-accent">
-                      <Zap className="h-3 w-3" /> Why it&apos;s impacted
+                      <Zap className="h-3 w-3" /> {t("arch.whyImpacted")}
                     </div>
-                    <p className="text-[12px] leading-relaxed text-foreground text-pretty">{selected.why}</p>
+                    <p className="text-[12px] leading-relaxed text-foreground text-pretty">{srv(selected.why)}</p>
                   </div>
                 )}
 
-                <div className="tech-label mb-2 mt-4">Dependencies</div>
+                <div className="tech-label mb-2 mt-4">{t("arch.dependencies")}</div>
                 <div className="space-y-2.5">
                   {selected.incoming.length > 0 && (
                     <div>
-                      <div className="mb-1 text-[11px] text-subtle-foreground">Depended on by</div>
+                      <div className="mb-1 text-[11px] text-subtle-foreground">{t("arch.dependedOnBy")}</div>
                       {selected.incoming.map((id) => {
                         const target = nodeById(id)
                         if (!target) return null
@@ -410,7 +413,7 @@ export function Architecture() {
                   )}
                   {selected.outgoing.length > 0 && (
                     <div>
-                      <div className="mb-1 text-[11px] text-subtle-foreground">Depends on</div>
+                      <div className="mb-1 text-[11px] text-subtle-foreground">{t("arch.dependsOn")}</div>
                       {selected.outgoing.map((id) => {
                         const target = nodeById(id)
                         if (!target) return null
@@ -429,11 +432,11 @@ export function Architecture() {
                     </div>
                   )}
                   {selected.incoming.length === 0 && selected.outgoing.length === 0 && (
-                    <div className="text-[11.5px] text-muted-foreground">No project dependencies</div>
+                    <div className="text-[11.5px] text-muted-foreground">{t("arch.noDeps")}</div>
                   )}
                 </div>
 
-                <div className="tech-label mb-2 mt-4">Key files</div>
+                <div className="tech-label mb-2 mt-4">{t("arch.keyFiles")}</div>
                 <div className="space-y-1 max-h-52 overflow-y-auto pr-1">
                   {selected.files.length > 0 ? (
                     selected.files.map((f) => (
@@ -443,13 +446,13 @@ export function Architecture() {
                       </div>
                     ))
                   ) : (
-                    <div className="text-[11.5px] text-muted-foreground">No source files detected</div>
+                    <div className="text-[11.5px] text-muted-foreground">{t("arch.noFiles")}</div>
                   )}
                 </div>
               </>
             ) : (
               <div className="py-6 text-center text-[12px] text-muted-foreground">
-                Select a node to inspect its dependencies and key files.
+                {t("arch.selectNode")}
               </div>
             )}
           </Panel>

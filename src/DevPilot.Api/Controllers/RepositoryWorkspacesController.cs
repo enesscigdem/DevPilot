@@ -2,6 +2,7 @@ using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspa
 using DevPilot.Application.RepositoryWorkspaces.Dtos;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceArchitecture;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetWorkspaceInsights;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetWorkspaceOverview;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
@@ -22,14 +23,17 @@ public class RepositoryWorkspacesController : ControllerBase
     private readonly IGetRepositoryWorkspaceAnalysisQueryHandler _analysisQueryHandler;
     private readonly IGetRepositoryWorkspaceArchitectureQueryHandler _architectureQueryHandler;
     private readonly IGetWorkspaceOverviewQueryHandler _overviewQueryHandler;
+    private readonly IGetWorkspaceInsightsQueryHandler _insightsQueryHandler;
 
     public RepositoryWorkspacesController(
         DevPilotDbContext dbContext,
         ICreateRepositoryWorkspaceCommandHandler createWorkspaceHandler,
         IGetRepositoryWorkspaceAnalysisQueryHandler analysisQueryHandler,
         IGetRepositoryWorkspaceArchitectureQueryHandler architectureQueryHandler,
-        IGetWorkspaceOverviewQueryHandler overviewQueryHandler)
+        IGetWorkspaceOverviewQueryHandler overviewQueryHandler,
+        IGetWorkspaceInsightsQueryHandler insightsQueryHandler)
     {
+        _insightsQueryHandler = insightsQueryHandler;
         _dbContext = dbContext;
         _createWorkspaceHandler = createWorkspaceHandler;
         _analysisQueryHandler = analysisQueryHandler;
@@ -201,6 +205,31 @@ public class RepositoryWorkspacesController : ControllerBase
         }
 
         return Ok(result.Overview);
+    }
+
+    [HttpGet("{id:guid}/insights")]
+    public async Task<IActionResult> GetInsights(
+        [FromRoute] Guid id,
+        [FromQuery] int? window,
+        CancellationToken cancellationToken)
+    {
+        var result = await _insightsQueryHandler
+            .HandleAsync(new GetWorkspaceInsightsQuery(id, window ?? 100), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (result.NotFound)
+        {
+            return NotFound(new { error = result.ErrorMessage });
+        }
+
+        if (!result.Success)
+        {
+            return StatusCode(
+                StatusCodes.Status500InternalServerError,
+                new { error = result.ErrorMessage ?? "Failed to retrieve repository insights." });
+        }
+
+        return Ok(result.Insights);
     }
 
     public sealed class RepositoryWorkspaceListDto

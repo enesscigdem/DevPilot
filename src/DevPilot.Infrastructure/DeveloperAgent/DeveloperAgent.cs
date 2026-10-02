@@ -6,9 +6,11 @@ using DevPilot.Application.AiProviders;
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.DeveloperAgent.Ports;
 using DevPilot.Application.Executions.Models;
+using DevPilot.Application.Executions.Options;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Domain.Constants;
 using DevPilot.Domain.Enums;
+using DevPilot.Infrastructure.Executions;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Extensions.Configuration;
@@ -46,50 +48,36 @@ public sealed class DeveloperAgent : IDeveloperAgent
     private readonly int _maxManifestFiles;
     private readonly int _maxGenerationCalls;
     private readonly int _maxConcurrentFileGenerations;
+    private readonly string _mechanicalReasoningEffort;
+    private readonly string _modifyReasoningEffort;
 
     public DeveloperAgent(
         IAiProvider aiProvider,
         IWorktreeEditApplier editApplier,
         ILogger<DeveloperAgent> logger,
         IConfiguration? configuration = null,
-        IExecutionActivityRecorder? activityRecorder = null)
+        IExecutionActivityRecorder? activityRecorder = null,
+        ExecutionReliabilityOptions? reliabilityOptions = null)
     {
         _aiProvider = aiProvider;
         _editApplier = editApplier;
         _logger = logger;
         _activityRecorder = activityRecorder;
 
-        if (configuration != null &&
-            int.TryParse(configuration["DeveloperAgent:MaxOutputTokens"], out var cfgTokens) &&
-            cfgTokens > 0)
-        {
-            _maxOutputTokens = cfgTokens;
-        }
-        else
-        {
-            _maxOutputTokens = 32768;
-        }
+        // Single authoritative reliability source shared with the execution processor.
+        var reliability = reliabilityOptions ?? ExecutionReliabilityOptionsFactory.Create(configuration);
+        _maxOutputTokens = reliability.MaxOutputTokens;
+        _maxCompactRetryOutputTokens = reliability.EffectiveMaxCompactRetryOutputTokens;
 
-        if (configuration != null &&
-            int.TryParse(configuration["DeveloperAgent:MaxCompactRetryOutputTokens"], out var cfgRetryTokens) &&
-            cfgRetryTokens > 0)
-        {
-            _maxCompactRetryOutputTokens = cfgRetryTokens;
-        }
-        else
-        {
-            _maxCompactRetryOutputTokens = Math.Max(24576, _maxOutputTokens);
-        }
-
-        // Adaptive category budgets
-        _budgetDtoOrModel = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:DtoOrModel", 4096);
-        _budgetInterfaceOrContract = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:InterfaceOrContract", 4096);
-        _budgetQueryOrCommand = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:QueryOrCommand", 4096);
-        _budgetHandlerOrService = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:HandlerOrService", 8192);
-        _budgetController = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:Controller", 8192);
+        // Adaptive category budgets. Create defaults are ~20% below master's historical buckets.
+        _budgetDtoOrModel = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:DtoOrModel", 3276);
+        _budgetInterfaceOrContract = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:InterfaceOrContract", 3276);
+        _budgetQueryOrCommand = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:QueryOrCommand", 3276);
+        _budgetHandlerOrService = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:HandlerOrService", 6553);
+        _budgetController = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:Controller", 6553);
         _budgetModifyPatch = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:ModifyPatch", 4096);
-        _budgetTestFile = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:TestFile", 8192);
-        _budgetFallback = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:Fallback", 8192);
+        _budgetTestFile = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:TestFile", 6553);
+        _budgetFallback = ParseConfigBudget(configuration, "DeveloperAgent:TokenBudgets:Fallback", 6553);
 
         if (configuration != null &&
             int.TryParse(configuration["DeveloperAgent:MaxManifestFiles"], out var cfgManifest) &&
@@ -102,27 +90,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
             _maxManifestFiles = ExecutionCapacityPolicy.MaxImpactedFiles;
         }
 
-        if (configuration != null &&
-            int.TryParse(configuration["DeveloperAgent:MaxGenerationCalls"], out var cfgCalls) &&
-            cfgCalls > 0)
-        {
-            _maxGenerationCalls = cfgCalls;
-        }
-        else
-        {
-            _maxGenerationCalls = ExecutionCapacityPolicy.MaxGenerationCalls;
-        }
+        _maxGenerationCalls = reliability.MaxGenerationCalls;
+        _maxConcurrentFileGenerations = reliability.MaxConcurrentFileGenerations;
 
-        if (configuration != null &&
-            int.TryParse(configuration["DeveloperAgent:MaxConcurrentFileGenerations"], out var cfgConcurrent) &&
-            cfgConcurrent > 0)
-        {
-            _maxConcurrentFileGenerations = Math.Clamp(cfgConcurrent, 1, 4);
-        }
-        else
-        {
-            _maxConcurrentFileGenerations = 1;
-        }
+        var configuredReasoning = configuration?["DeveloperAgent:MechanicalReasoningEffort"];
+        _mechanicalReasoningEffort = string.IsNullOrWhiteSpace(configuredReasoning)
+            ? "low"
+            : configuredReasoning.Trim();
+
+        var configuredModifyReasoning = configuration?["DeveloperAgent:ModifyReasoningEffort"];
+        _modifyReasoningEffort = string.IsNullOrWhiteSpace(configuredModifyReasoning)
+            ? "low"
+            : configuredModifyReasoning.Trim();
     }
 
     private int ParseConfigBudget(IConfiguration? config, string key, int defaultValue)
@@ -138,15 +117,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         if (action == FileEditAction.Modify)
         {
-            if (targetContent != null && WorktreeEditApplier.IsSmallTextFile(targetContent))
-            {
-                var estimatedFullFileTokens = (targetContent.Length + 2) / 3 + 512;
-                var roundedBudget = ((estimatedFullFileTokens + 511) / 512) * 512;
-                return Math.Min(Math.Clamp(roundedBudget, 2048, 4096), _maxOutputTokens);
-            }
-
-            // SEARCH/REPLACE output is expected to contain only the changed blocks,
-            // so its budget must not scale with the size or role of the target file.
+            // Modify is patch-first. Budget is for compact SEARCH/REPLACE, not a full-file rewrite.
             return Math.Min(Math.Min(_budgetModifyPatch, 8192), _maxOutputTokens);
         }
 
@@ -174,6 +145,17 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return Math.Min(Math.Min(_budgetModifyPatch, 8192), _maxOutputTokens);
     }
 
+    public int DetermineMicroDiagnosticRepairBudget()
+    {
+        return Math.Min(2048, DetermineFocusedRepairBudget());
+    }
+
+    public string DetermineMechanicalReasoningEffort() => _mechanicalReasoningEffort;
+
+    public string DetermineModifyReasoningEffort() => _modifyReasoningEffort;
+
+    public int DetermineMicroApplicabilityRepairBudget() => Math.Min(2048, DetermineFocusedRepairBudget());
+
     public int DetermineCompactRetryBudget(int initialBudget, string? targetContent, ManifestFileEntry fileEntry, bool isRepair = false)
     {
         if (fileEntry.Action == FileEditAction.Modify)
@@ -185,26 +167,16 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 return initialBudget;
             }
 
-            return Math.Min(Math.Max(initialBudget * 2, 4096), Math.Min(8192, _maxCompactRetryOutputTokens));
+            return Math.Min(Math.Max(initialBudget * 2, 4096), Math.Min(16384, _maxCompactRetryOutputTokens));
         }
 
-        int targetLines = targetContent != null ? targetContent.Split('\n').Length : 0;
-        bool isLargeFile = targetLines > 100 || (targetContent?.Length ?? 0) > 4000;
-        bool isTestFile = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
-
-        int candidateBudget;
-        if (isLargeFile || isTestFile)
+        if (isRepair)
         {
-            candidateBudget = (isTestFile && isLargeFile) || targetLines > 150 || (targetContent?.Length ?? 0) > 6000
-                ? _maxCompactRetryOutputTokens
-                : (isRepair ? 16384 : 12288);
-        }
-        else
-        {
-            candidateBudget = Math.Max(initialBudget * 2, 8192);
+            return initialBudget;
         }
 
-        return Math.Min(Math.Max(candidateBudget, initialBudget), _maxCompactRetryOutputTokens);
+        var createRetryBudget = Math.Min(initialBudget * 2, Math.Min(8192, _maxOutputTokens));
+        return Math.Max(initialBudget, createRetryBudget);
     }
 
     public async Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(
@@ -220,7 +192,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         var filesToRepair = request.RepairFiles.Take(2).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var collectedEdits = new List<FileEditSpec>();
+        var appliedFiles = new List<string>();
 
         _logger.LogInformation(
             "DeveloperAgent: starting lightweight focused repair for task {TaskId} on {Count} file(s) in workspace '{Workspace}'.",
@@ -230,79 +202,141 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         foreach (var filePath in filesToRepair)
         {
-            string resolvedPath;
-            try
-            {
-                resolvedPath = WorktreeEditApplier.ValidateAndResolvePath(request.WorkspacePath, filePath);
-            }
-            catch (Exception ex)
-            {
-                return DeveloperAgentResult.Fail($"Failed to resolve path for '{filePath}': {ex.Message}", request.Model);
-            }
-
-            if (!File.Exists(resolvedPath))
-            {
-                return DeveloperAgentResult.Fail($"Repair target file '{filePath}' does not exist on disk.", request.Model);
-            }
-
-            var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
-            var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
-
-            var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
-            const bool useFullFileReplacement = false;
-            var budget = DetermineFocusedRepairBudget();
-            var peerContext = CollectFocusedRepairPeerContext(
-                request.WorkspacePath,
-                filePath,
+            var fileResult = await RepairAndApplySingleFocusedFileAsync(
                 request,
-                currentContent ?? string.Empty);
+                filePath,
+                cancellationToken).ConfigureAwait(false);
+            if (!fileResult.Success)
+            {
+                return DeveloperAgentResult.Fail(fileResult.ErrorMessage ?? "Focused repair failed.", request.Model);
+            }
 
-            var systemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath);
-            var userPrompt = BuildFocusedDiagnosticRepairUserPrompt(
+            foreach (var applied in fileResult.ModifiedFiles ?? Array.Empty<string>())
+            {
+                if (!appliedFiles.Contains(applied, StringComparer.OrdinalIgnoreCase))
+                {
+                    appliedFiles.Add(applied);
+                }
+            }
+        }
+
+        return DeveloperAgentResult.Ok(appliedFiles, model: request.Model);
+    }
+
+    private async Task<DeveloperAgentResult> RepairAndApplySingleFocusedFileAsync(
+        FocusedRepairRequest request,
+        string filePath,
+        CancellationToken cancellationToken)
+    {
+        string resolvedPath;
+        try
+        {
+            resolvedPath = WorktreeEditApplier.ValidateAndResolvePath(request.WorkspacePath, filePath);
+        }
+        catch (Exception ex)
+        {
+            return DeveloperAgentResult.Fail($"Failed to resolve path for '{filePath}': {ex.Message}", request.Model);
+        }
+
+        if (!File.Exists(resolvedPath))
+        {
+            return DeveloperAgentResult.Fail($"Repair target file '{filePath}' does not exist on disk.", request.Model);
+        }
+
+        var currentBytes = await File.ReadAllBytesAsync(resolvedPath, cancellationToken).ConfigureAwait(false);
+        var currentContent = WorktreeEditApplier.DecodeUtf8Text(currentBytes, out _);
+        var manifestEntry = new ManifestFileEntry(filePath, FileEditAction.Modify);
+        const bool useFullFileReplacement = false;
+        var peerContext = CollectFocusedRepairPeerContext(
+            request.WorkspacePath,
+            filePath,
+            request,
+            currentContent ?? string.Empty);
+        var behavioralEvidence = CollectFocusedRepairBehavioralEvidence(
+            filePath,
+            currentContent ?? string.Empty,
+            request);
+        var behavioralSignatures = BehavioralDependencyEvidence.CollectLockedSignatures(
+            behavioralEvidence,
+            workspacePath: request.WorkspacePath);
+
+        var primaryRequest = new AiRequest
+        {
+            UserPrompt = BuildFocusedDiagnosticRepairUserPrompt(
                 filePath,
                 currentContent ?? string.Empty,
                 request,
-                peerContext);
+                peerContext,
+                behavioralEvidence,
+                behavioralSignatures),
+            SystemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath),
+            MaxTokens = DetermineFocusedRepairBudget(),
+            Model = request.Model ?? string.Empty,
+            ReasoningEffort = _mechanicalReasoningEffort
+        };
 
-            var aiRequest = new AiRequest
+        AiResponse aiResponse;
+        try
+        {
+            aiResponse = await _aiProvider.SendAsync(primaryRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return DeveloperAgentResult.Fail($"Focused repair AI call failed: {ex.Message}", request.Model);
+        }
+
+        if (IsFocusedRepairTokenLimit(aiResponse))
+        {
+            var microRequest = new AiRequest
             {
-                UserPrompt = userPrompt,
-                SystemPrompt = systemPrompt,
-                MaxTokens = budget,
-                Model = request.Model ?? string.Empty
+                UserPrompt = BuildMicroDiagnosticRepairUserPrompt(
+                    filePath,
+                    currentContent ?? string.Empty,
+                    request,
+                    peerContext,
+                    behavioralEvidence,
+                    behavioralSignatures),
+                SystemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath),
+                MaxTokens = DetermineMicroDiagnosticRepairBudget(),
+                Model = request.Model ?? string.Empty,
+                ReasoningEffort = _mechanicalReasoningEffort
             };
 
-            AiResponse aiResponse;
             try
             {
-                aiResponse = await _aiProvider.SendAsync(aiRequest, cancellationToken).ConfigureAwait(false);
+                aiResponse = await _aiProvider.SendAsync(microRequest, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                return DeveloperAgentResult.Fail($"Focused repair AI call failed: {ex.Message}", request.Model);
+                return DeveloperAgentResult.Fail($"Micro diagnostic repair AI call failed: {ex.Message}", request.Model);
             }
 
-            if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
+            if (IsFocusedRepairTokenLimit(aiResponse))
             {
-                return DeveloperAgentResult.Fail($"Focused repair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
+                return DeveloperAgentResult.Fail(
+                    "Focused repair TokenLimitExceeded after one micro diagnostic fallback.",
+                    request.Model);
             }
-
-            FileEditSpec editSpec;
-            try
-            {
-                editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
-                ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
-                ValidateFocusedRepairSearchAnchors(editSpec, filePath);
-            }
-            catch (Exception parseEx)
-            {
-                return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseEx.Message}", request.Model);
-            }
-
-            collectedEdits.Add(editSpec);
         }
 
-        var structuredPlan = new StructuredEditPlan(collectedEdits);
+        if (aiResponse.FailureKind != AiFailureKind.None && string.IsNullOrWhiteSpace(aiResponse.Content))
+        {
+            return DeveloperAgentResult.Fail($"Focused repair AI provider call failed ({aiResponse.FailureKind}).", request.Model);
+        }
+
+        FileEditSpec editSpec;
+        try
+        {
+            editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
+            ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
+            ValidateFocusedRepairSearchAnchors(editSpec, filePath);
+        }
+        catch (Exception parseEx)
+        {
+            return DeveloperAgentResult.Fail($"Focused repair output was invalid: {parseEx.Message}", request.Model);
+        }
+
+        var structuredPlan = new StructuredEditPlan(new[] { editSpec });
         try
         {
             ValidateStructuredPlan(structuredPlan);
@@ -312,13 +346,89 @@ public sealed class DeveloperAgent : IDeveloperAgent
             return DeveloperAgentResult.Fail($"Focused repair plan validation failed: {planEx.Message}", request.Model);
         }
 
-        var applyResult = await _editApplier.ApplyEditsAsync(request.WorkspacePath, request.BranchName, structuredPlan, cancellationToken).ConfigureAwait(false);
+        var applyResult = await _editApplier.ApplyEditsAsync(
+            request.WorkspacePath,
+            request.BranchName,
+            structuredPlan,
+            cancellationToken).ConfigureAwait(false);
         if (!applyResult.Success)
         {
             return DeveloperAgentResult.Fail(applyResult.ErrorMessage ?? "Focused repair apply failed.", request.Model);
         }
 
-        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? filesToRepair, model: request.Model);
+        return DeveloperAgentResult.Ok(applyResult.ModifiedFiles ?? new[] { filePath }, model: request.Model);
+    }
+
+    private static bool IsFocusedRepairTokenLimit(AiResponse response) =>
+        IsTokenLimitResponse(response);
+
+    internal static bool IsTokenLimitResponse(AiResponse response) =>
+        response.FailureKind == AiFailureKind.TokenLimitExceeded ||
+        string.Equals(response.FinishReason, "length", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool TryMaterializeCompletedEdit(
+        string? content,
+        ManifestFileEntry fileEntry,
+        string? targetContent,
+        bool useFullFileReplacement,
+        out FileEditSpec? editSpec,
+        out string? candidateCode)
+    {
+        editSpec = null;
+        candidateCode = null;
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        try
+        {
+            var parsed = ParseSingleFileEditSpec(content, fileEntry);
+            ValidateSingleFileEditSpec(parsed, fileEntry, targetContent, useFullFileReplacement);
+
+            if (fileEntry.Action == FileEditAction.Modify)
+            {
+                if (parsed.NoChange)
+                {
+                    editSpec = parsed;
+                    candidateCode = targetContent;
+                    return true;
+                }
+
+                if (parsed.NewContent != null)
+                {
+                    editSpec = parsed;
+                    candidateCode = parsed.NewContent;
+                    return true;
+                }
+
+                var appResult = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
+                    targetContent!,
+                    parsed.SearchReplaceEdits,
+                    fileEntry.FilePath);
+                if (!appResult.Success)
+                {
+                    return false;
+                }
+
+                editSpec = parsed;
+                candidateCode = appResult.ModifiedContent;
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(parsed.NewContent))
+            {
+                return false;
+            }
+
+            editSpec = parsed;
+            candidateCode = parsed.NewContent;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public async Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(
@@ -538,6 +648,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
     {
         var inDegree = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var dependents = new Dictionary<string, List<ManifestFileEntry>>(StringComparer.OrdinalIgnoreCase);
+        var filesByPath = sortedFiles.ToDictionary(file => file.FilePath, StringComparer.OrdinalIgnoreCase);
 
         foreach (var file in sortedFiles)
         {
@@ -545,43 +656,47 @@ public sealed class DeveloperAgent : IDeveloperAgent
             dependents[file.FilePath] = new List<ManifestFileEntry>();
         }
 
-        for (int i = 0; i < sortedFiles.Count; i++)
+        var prerequisiteGraph = CollectGenerationPrerequisiteGraph(sortedFiles, contextFiles);
+        foreach (var prerequisite in prerequisiteGraph.Prerequisites)
         {
-            var target = sortedFiles[i];
-            var targetScore = GetSemanticLayerScore(target.FilePath);
-
-            for (int j = 0; j < sortedFiles.Count; j++)
+            if (!filesByPath.TryGetValue(prerequisite.ConsumerPath, out var consumer) ||
+                !dependents.ContainsKey(prerequisite.ProducerPath))
             {
-                if (i == j) continue;
-                var candidate = sortedFiles[j];
-                var candidateScore = GetSemanticLayerScore(candidate.FilePath);
-
-                bool dependsOn = false;
-                if (target.Dependencies != null && target.Dependencies.Contains(candidate.FilePath, StringComparer.OrdinalIgnoreCase))
-                {
-                    dependsOn = true;
-                }
-                else if (targetScore > candidateScore)
-                {
-                    var targetBase = Path.GetFileNameWithoutExtension(target.FilePath)
-                        .Replace("Handler", "").Replace("Tests", "").Replace("Test", "").Replace("Controller", "").Trim();
-                    var candBase = Path.GetFileNameWithoutExtension(candidate.FilePath);
-
-                    if (string.IsNullOrEmpty(targetBase) || candBase.Contains(targetBase, StringComparison.OrdinalIgnoreCase) ||
-                        ProjectGraphHelper.IsTestFileCandidate(target.FilePath) ||
-                        targetScore >= 50)
-                    {
-                        dependsOn = true;
-                    }
-                }
-
-                if (dependsOn)
-                {
-                    inDegree[target.FilePath]++;
-                    dependents[candidate.FilePath].Add(target);
-                }
+                continue;
             }
+
+            inDegree[consumer.FilePath]++;
+            dependents[prerequisite.ProducerPath].Add(consumer);
+            _logger.LogInformation(
+                "GenerationPrerequisite: {Producer} -> {Consumer} · {Reason}",
+                prerequisite.ProducerPath,
+                prerequisite.ConsumerPath,
+                prerequisite.Reason);
+
+            await SafeRecordActivityAsync(
+                request.ExecutionId,
+                $"GenerationPrerequisite: {prerequisite.ProducerPath} -> {prerequisite.ConsumerPath} · {prerequisite.Reason}",
+                cancellationToken,
+                ExecutionActivityStatus.Completed,
+                new ExecutionActivityMetadata(
+                    EventKind: "GenerationPrerequisite",
+                    PrerequisiteProducer: prerequisite.ProducerPath,
+                    PrerequisiteConsumer: prerequisite.ConsumerPath,
+                    PrerequisiteReason: prerequisite.Reason.ToString())).ConfigureAwait(false);
         }
+
+        await SafeRecordActivityAsync(
+            request.ExecutionId,
+            $"GenerationPrerequisiteSummary: {prerequisiteGraph.ManifestCount} manifest, {prerequisiteGraph.DirectCount} direct, {prerequisiteGraph.HeuristicCount} heuristic, {prerequisiteGraph.SuppressedConflictCount} suppressed-conflict, {prerequisiteGraph.SuppressedCycleCount} suppressed-cycle",
+            cancellationToken,
+            ExecutionActivityStatus.Completed,
+            new ExecutionActivityMetadata(
+                EventKind: "GenerationPrerequisiteSummary",
+                ManifestPrerequisiteCount: prerequisiteGraph.ManifestCount,
+                DirectPrerequisiteCount: prerequisiteGraph.DirectCount,
+                HeuristicPrerequisiteCount: prerequisiteGraph.HeuristicCount,
+                SuppressedConflictCount: prerequisiteGraph.SuppressedConflictCount,
+                SuppressedCycleCount: prerequisiteGraph.SuppressedCycleCount)).ConfigureAwait(false);
 
         var readyQueue = new System.Collections.Concurrent.ConcurrentQueue<ManifestFileEntry>();
         foreach (var file in sortedFiles)
@@ -732,9 +847,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
             targetContentHash = WorktreeEditApplier.ComputeContentHash(targetContent);
         }
 
-        var useFullFileReplacement = fileEntry.Action == FileEditAction.Modify &&
-                                     targetContent != null &&
-                                     WorktreeEditApplier.IsSmallTextFile(targetContent);
+        var useFullFileReplacement = ShouldUseFullFileReplacement(fileEntry.Action, targetContent);
+        var outputContract = fileEntry.Action == FileEditAction.Create
+            ? "Create"
+            : useFullFileReplacement ? "ModifyFullReplacement" : "ModifyPatch";
         var recoveryUsed = false;
 
         if (!callCounter.TryIncrement(out var callNumber))
@@ -754,7 +870,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             Model = request.Model ?? string.Empty,
             SystemPrompt = singleFileSystemPrompt,
             UserPrompt = singleFileUserPrompt,
-            MaxTokens = initialBudget
+            MaxTokens = initialBudget,
+            ReasoningEffort = fileEntry.Action == FileEditAction.Modify ? _modifyReasoningEffort : null
         };
 
         var fileSw = Stopwatch.StartNew();
@@ -780,6 +897,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         LogGenerationAudit(fileEntry.FilePath, fileEntry.Action.ToString(), callNumber, fileAiRequest, fileResponse, fileSw.Elapsed);
+        var primaryPromptContext = MeasureGenerationPromptContext(
+            fileEntry, targetContent, lockedContracts, virtualWorkspace, completedEdits, compactRetry: false);
         await RecordProviderCallActivityAsync(
             request.ExecutionId,
             fileEntry.FilePath,
@@ -787,11 +906,21 @@ public sealed class DeveloperAgent : IDeveloperAgent
             fileAiRequest,
             fileResponse,
             fileSw.Elapsed,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            outputContract: outputContract,
+            strongDependencyContractCount: primaryPromptContext.StrongCount,
+            heuristicInjectedContextCount: primaryPromptContext.HeuristicCount).ConfigureAwait(false);
 
         // Bounded Token Budget Escalation & Compact Retry (max 1 attempt if finish_reason == length)
-        if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
-            string.Equals(fileResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase))
+        // Salvage a length-truncated response only when it already parses and applies completely.
+        if (IsTokenLimitResponse(fileResponse) &&
+            !TryMaterializeCompletedEdit(
+                fileResponse.Content,
+                fileEntry,
+                targetContent,
+                useFullFileReplacement,
+                out _,
+                out _))
         {
             int compactBudget = DetermineCompactRetryBudget(initialBudget, targetContent, fileEntry, isRepair: false);
             if (compactBudget > initialBudget && callCounter.TryIncrement(out var escCallNumber))
@@ -801,10 +930,25 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 await SafeRecordActivityAsync(
                     request.ExecutionId,
                     $"Performing compact generation retry for {fileName} (budget {initialBudget} -> {compactBudget}) due to token length limit.",
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    ExecutionActivityStatus.Started,
+                    new ExecutionActivityMetadata(
+                        EventKind: "CompactRetry",
+                        TargetFile: fileEntry.FilePath,
+                        OutputContract: outputContract,
+                        CompactRetryReason: "TokenTruncation",
+                        RequestedOutputTokens: compactBudget,
+                        ReasoningEffort: fileEntry.Action == FileEditAction.Modify ? _modifyReasoningEffort : null)).ConfigureAwait(false);
 
                 var compactUserPrompt = BuildCompactSingleFileUserPrompt(
-                    request, fileEntry, targetContent, lockedContracts, useFullFileReplacement);
+                    request,
+                    fileEntry,
+                    targetContent,
+                    lockedContracts,
+                    useFullFileReplacement,
+                    contextFiles,
+                    completedEdits,
+                    virtualWorkspace);
                 var compactSystemPrompt = BuildCompactSingleFileSystemPrompt(fileEntry, useFullFileReplacement);
 
                 var compactRequest = new AiRequest
@@ -812,7 +956,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     Model = request.Model ?? string.Empty,
                     SystemPrompt = compactSystemPrompt,
                     UserPrompt = compactUserPrompt,
-                    MaxTokens = compactBudget
+                    MaxTokens = compactBudget,
+                    ReasoningEffort = fileEntry.Action == FileEditAction.Modify ? _modifyReasoningEffort : null
                 };
 
                 try
@@ -827,6 +972,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
 
                     LogGenerationAudit(fileEntry.FilePath, "CompactRetry", escCallNumber, compactRequest, compactResponse, escSw.Elapsed, isCompactRetry: true);
+                    var compactPromptContext = MeasureGenerationPromptContext(
+                        fileEntry, targetContent, lockedContracts, virtualWorkspace, completedEdits, compactRetry: true);
                     await RecordProviderCallActivityAsync(
                         request.ExecutionId,
                         fileEntry.FilePath,
@@ -834,7 +981,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         compactRequest,
                         compactResponse,
                         escSw.Elapsed,
-                        cancellationToken).ConfigureAwait(false);
+                        cancellationToken,
+                        outputContract: outputContract,
+                        compactRetryReason: "TokenTruncation",
+                        strongDependencyContractCount: compactPromptContext.StrongCount,
+                        heuristicInjectedContextCount: compactPromptContext.HeuristicCount).ConfigureAwait(false);
 
                     if (compactResponse.IsSuccess)
                     {
@@ -847,7 +998,9 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
                     else
                     {
-                        throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
+                        throw new InvalidOperationException(
+                            $"AI provider error during compact retry for '{fileEntry.FilePath}' " +
+                            $"(kind: {compactResponse.FailureKind}, status: {compactResponse.StatusCode}): {compactResponse.ErrorMessage}");
                     }
                 }
                 catch (InvalidOperationException)
@@ -861,12 +1014,21 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex, "DeveloperAgent: compact retry call failed for file '{FilePath}'.", fileEntry.FilePath);
-                    throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
+                    throw new InvalidOperationException(
+                        $"Compact retry call failed for '{fileEntry.FilePath}': {ex.GetType().Name}: {ex.Message}", ex);
                 }
             }
         }
 
-        if (!fileResponse.IsSuccess)
+        var salvagedCompletedEdit = TryMaterializeCompletedEdit(
+            fileResponse.Content,
+            fileEntry,
+            targetContent,
+            useFullFileReplacement,
+            out var salvagedSpec,
+            out var salvagedCandidate);
+
+        if (!fileResponse.IsSuccess && !salvagedCompletedEdit)
         {
             if (cancellationToken.IsCancellationRequested || fileResponse.FailureKind == AiFailureKind.Cancelled)
             {
@@ -874,8 +1036,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 throw new OperationCanceledException(cancellationToken);
             }
 
-            if (fileResponse.FailureKind == AiFailureKind.TokenLimitExceeded ||
-                string.Equals(fileResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
+            if (IsTokenLimitResponse(fileResponse) ||
                 (fileResponse.ErrorMessage != null && fileResponse.ErrorMessage.Contains("exhausted the configured output token limit", StringComparison.OrdinalIgnoreCase)))
             {
                 throw new InvalidOperationException($"AI response exhausted the configured output token limit while generating edits for '{fileEntry.FilePath}'.");
@@ -885,53 +1046,61 @@ public sealed class DeveloperAgent : IDeveloperAgent
             throw new InvalidOperationException(classifiedError);
         }
 
-        if (string.IsNullOrWhiteSpace(fileResponse.Content))
+        if (string.IsNullOrWhiteSpace(fileResponse.Content) && !salvagedCompletedEdit)
         {
             throw new InvalidOperationException($"AI provider returned empty edit response for file '{fileEntry.FilePath}'.");
         }
 
-        FileEditSpec? editSpec = null;
-        string? validationError = null;
+        FileEditSpec? editSpec = salvagedSpec;
+        string? validationError = salvagedCompletedEdit ? null : "Generated edit validation failed.";
         EditApplicabilityResult? applicabilityFailure = null;
-        string? candidateCode = null;
+        string? candidateCode = salvagedCandidate;
 
-        try
+        if (!salvagedCompletedEdit)
         {
-            editSpec = ParseSingleFileEditSpec(fileResponse.Content, fileEntry);
-            ValidateSingleFileEditSpec(editSpec, fileEntry, targetContent, useFullFileReplacement);
-
-            if (fileEntry.Action == FileEditAction.Modify)
+            validationError = null;
+            try
             {
-                if (editSpec.NewContent != null)
-                {
-                    candidateCode = editSpec.NewContent;
-                }
-                else
-                {
-                    var appResult = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
-                        targetContent!,
-                        editSpec.SearchReplaceEdits,
-                        fileEntry.FilePath);
+                editSpec = ParseSingleFileEditSpec(fileResponse.Content, fileEntry);
+                ValidateSingleFileEditSpec(editSpec, fileEntry, targetContent, useFullFileReplacement);
 
-                    if (!appResult.Success)
+                if (fileEntry.Action == FileEditAction.Modify && editSpec.NoChange)
+                {
+                    candidateCode = targetContent;
+                }
+                else if (fileEntry.Action == FileEditAction.Modify)
+                {
+                    if (editSpec.NewContent != null)
                     {
-                        validationError = appResult.ErrorMessage;
-                        applicabilityFailure = appResult;
+                        candidateCode = editSpec.NewContent;
                     }
                     else
                     {
-                        candidateCode = appResult.ModifiedContent;
+                        var appResult = WorktreeEditApplier.ValidateAndApplySearchReplaceEdits(
+                            targetContent!,
+                            editSpec.SearchReplaceEdits,
+                            fileEntry.FilePath);
+
+                        if (!appResult.Success)
+                        {
+                            validationError = appResult.ErrorMessage;
+                            applicabilityFailure = appResult;
+                        }
+                        else
+                        {
+                            candidateCode = appResult.ModifiedContent;
+                        }
                     }
                 }
+                else
+                {
+                    candidateCode = editSpec.NewContent;
+                }
             }
-            else
+            catch (Exception ex)
             {
-                candidateCode = editSpec.NewContent;
+                validationError = ex.Message;
             }
-        }
-        catch (Exception ex)
-        {
-            validationError = ex.Message;
         }
 
         if (validationError != null)
@@ -951,8 +1120,16 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             await SafeRecordActivityAsync(
                 request.ExecutionId,
-                $"Repair triggered for {fileName}: {sanitizedReason}",
-                cancellationToken).ConfigureAwait(false);
+                $"ApplicabilityRepair for {fileName}: {sanitizedReason}",
+                cancellationToken,
+                ExecutionActivityStatus.Started,
+                new ExecutionActivityMetadata(
+                    EventKind: "ApplicabilityRepair",
+                    TargetFile: fileEntry.FilePath,
+                    RepairKind: "ApplicabilityRepair",
+                    RequestedOutputTokens: DetermineInitialBudget(fileEntry.FilePath, fileEntry.Action, targetContent),
+                    ReasoningEffort: _mechanicalReasoningEffort,
+                    FailureFingerprint: sanitizedReason)).ConfigureAwait(false);
 
             if (!callCounter.TryIncrement(out var repairCallNumber))
             {
@@ -969,7 +1146,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     cancellationToken).ConfigureAwait(false);
                 targetContent = currentTarget.Content;
                 targetContentHash = currentTarget.Hash;
-                useFullFileReplacement = WorktreeEditApplier.IsSmallTextFile(targetContent);
+                useFullFileReplacement = ShouldUseFullFileReplacement(fileEntry.Action, targetContent);
 
                 if (editSpec?.SearchReplaceEdits is { Count: > 0 })
                 {
@@ -985,7 +1162,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 }
             }
 
-            var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace);
+            var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace, targetContent);
             var filteredLockedContracts = FilterRelevantContracts(fileEntry, lockedContracts, targetContent, request);
             var repairUserPrompt = BuildSingleFileRepairUserPrompt(
                 validationError ?? "Generated edit validation failed.",
@@ -1003,7 +1180,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 Model = request.Model ?? string.Empty,
                 SystemPrompt = BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement),
                 UserPrompt = repairUserPrompt,
-                MaxTokens = repairBudget
+                MaxTokens = repairBudget,
+                ReasoningEffort = _mechanicalReasoningEffort
             };
 
             var repairSw = Stopwatch.StartNew();
@@ -1040,21 +1218,30 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             if (!repairResponse.IsSuccess)
             {
-                if (string.Equals(repairResponse.FinishReason, "length", StringComparison.OrdinalIgnoreCase) ||
-                    repairResponse.FailureKind == AiFailureKind.TokenLimitExceeded)
+                if (IsTokenLimitResponse(repairResponse))
                 {
-                    throw new InvalidOperationException($"AI response exhausted the configured output token limit while repairing edits for '{fileEntry.FilePath}'.");
+                    repairResponse = await ExecuteMicroApplicabilityRepairAsync(
+                        request,
+                        fileEntry,
+                        targetContent,
+                        validationError ?? "Generated edit validation failed.",
+                        applicabilityFailure,
+                        callCounter,
+                        capturedModels,
+                        cancellationToken).ConfigureAwait(false);
                 }
+                else
+                {
+                    var rawError = !string.IsNullOrWhiteSpace(repairResponse.ErrorMessage)
+                        ? repairResponse.ErrorMessage
+                        : "AI provider repair request failed";
 
-                var rawError = !string.IsNullOrWhiteSpace(repairResponse.ErrorMessage)
-                    ? repairResponse.ErrorMessage
-                    : "AI provider repair request failed";
+                    var msg = rawError.Contains(fileEntry.FilePath, StringComparison.OrdinalIgnoreCase)
+                        ? rawError
+                        : $"{rawError.TrimEnd('.')} while repairing '{fileEntry.FilePath}'.";
 
-                var msg = rawError.Contains(fileEntry.FilePath, StringComparison.OrdinalIgnoreCase)
-                    ? rawError
-                    : $"{rawError.TrimEnd('.')} while repairing '{fileEntry.FilePath}'.";
-
-                throw new InvalidOperationException(msg);
+                    throw new InvalidOperationException(msg);
+                }
             }
 
             if (string.IsNullOrWhiteSpace(repairResponse.Content))
@@ -1068,7 +1255,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 ValidateSingleFileEditSpec(repEditSpec, fileEntry, targetContent, useFullFileReplacement);
 
                 string? repCandidateCode = null;
-                if (fileEntry.Action == FileEditAction.Modify)
+                if (fileEntry.Action == FileEditAction.Modify && repEditSpec.NoChange)
+                {
+                    repCandidateCode = targetContent;
+                }
+                else if (fileEntry.Action == FileEditAction.Modify)
                 {
                     if (repEditSpec.NewContent != null)
                     {
@@ -1114,22 +1305,45 @@ public sealed class DeveloperAgent : IDeveloperAgent
             editSpec = editSpec with { TargetContentHash = targetContentHash };
         }
 
+        if (editSpec.NoChange)
+        {
+            await SafeRecordActivityAsync(
+                request.ExecutionId,
+                $"Resolved NoChange for {fileName}.",
+                cancellationToken,
+                ExecutionActivityStatus.Completed,
+                new ExecutionActivityMetadata(
+                    EventKind: "ResolvedNoChange",
+                    TargetFile: fileEntry.FilePath,
+                    NoChangeReason: BehavioralDependencyEvidence.BoundReason(editSpec.NoChangeReason),
+                    OutputContract: "ModifyNoChange")).ConfigureAwait(false);
+        }
+
         // Store authoritative synthesized resulting content into the virtual workspace overlay
+        // BEFORE dependents are released by the scheduler.
         if (!string.IsNullOrWhiteSpace(candidateCode))
         {
             virtualWorkspace[fileEntry.FilePath] = candidateCode;
-        }
-
-        // Lock Public Contract for downstream consumers if C# file
-        if (fileEntry.FilePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(candidateCode))
-        {
-            var role = RoslynPatternHelper.ClassifyRole(fileEntry.FilePath) ?? "General";
-            RoslynPatternHelper.DiscoverNearestPattern(request.WorkspacePath, fileEntry.FilePath, out var refFile);
-            var contractSig = RoslynContractExtractor.ExtractPublicContracts(fileEntry.FilePath, candidateCode);
-            if (!string.IsNullOrWhiteSpace(contractSig))
+            if (fileEntry.FilePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             {
-                var provenanceHeader = $"// Provenance: Role={role}, PatternReference={refFile ?? "None"}, Status=ValidatedAgainstRepositoryPattern\n";
-                lockedContracts[fileEntry.FilePath] = provenanceHeader + contractSig;
+                var role = RoslynPatternHelper.ClassifyRole(fileEntry.FilePath) ?? "General";
+                RoslynPatternHelper.DiscoverNearestPattern(request.WorkspacePath, fileEntry.FilePath, out var refFile);
+                var contractSig = RoslynContractExtractor.ExtractPublicContracts(fileEntry.FilePath, candidateCode);
+                if (!string.IsNullOrWhiteSpace(contractSig))
+                {
+                    var provenanceHeader = $"// Provenance: Role={role}, PatternReference={refFile ?? "None"}, Status=ValidatedAgainstRepositoryPattern\n";
+                    lockedContracts[fileEntry.FilePath] = provenanceHeader + contractSig;
+                }
+            }
+            else
+            {
+                var contractExcerpt = PlannedFileDependencyResolver.ExtractLockedContractExcerpt(
+                    fileEntry.FilePath,
+                    candidateCode);
+                if (!string.IsNullOrWhiteSpace(contractExcerpt))
+                {
+                    lockedContracts[fileEntry.FilePath] = contractExcerpt;
+                }
             }
         }
 
@@ -1162,6 +1376,165 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var content = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
         return (content, WorktreeEditApplier.ComputeContentHash(content));
+    }
+
+    private async Task<AiResponse> ExecuteMicroApplicabilityRepairAsync(
+        DeveloperAgentRequest request,
+        ManifestFileEntry fileEntry,
+        string? targetContent,
+        string validationReason,
+        EditApplicabilityResult? applicabilityFailure,
+        ConcurrencyCallCounter callCounter,
+        ConcurrentBag<string> capturedModels,
+        CancellationToken cancellationToken)
+    {
+        if (!callCounter.TryIncrement(out var microCallNumber))
+        {
+            throw new InvalidOperationException($"Developer Agent exceeded maximum generation call limit ({_maxGenerationCalls}) during micro applicability repair of file '{fileEntry.FilePath}'.");
+        }
+
+        callCounter.RecordApplicabilityRepair();
+        var microBudget = DetermineMicroApplicabilityRepairBudget();
+        var microRequest = new AiRequest
+        {
+            Model = request.Model ?? string.Empty,
+            SystemPrompt = BuildMicroApplicabilityRepairSystemPrompt(fileEntry),
+            UserPrompt = BuildMicroApplicabilityRepairUserPrompt(
+                fileEntry,
+                targetContent,
+                validationReason,
+                applicabilityFailure),
+            MaxTokens = microBudget,
+            ReasoningEffort = _mechanicalReasoningEffort
+        };
+
+        await SafeRecordActivityAsync(
+            request.ExecutionId,
+            $"MicroApplicabilityRepair for {Path.GetFileName(fileEntry.FilePath)}: {SanitizeForDiagnostics(validationReason)}",
+            cancellationToken,
+            ExecutionActivityStatus.Started,
+            new ExecutionActivityMetadata(
+                EventKind: "MicroApplicabilityRepair",
+                TargetFile: fileEntry.FilePath,
+                RepairKind: "MicroApplicabilityRepair",
+                RequestedOutputTokens: microBudget,
+                ReasoningEffort: _mechanicalReasoningEffort,
+                FailureFingerprint: SanitizeForDiagnostics(validationReason))).ConfigureAwait(false);
+
+        var microSw = Stopwatch.StartNew();
+        AiResponse microResponse;
+        try
+        {
+            microResponse = await _aiProvider.SendAsync(microRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"AI micro applicability repair call failed for file '{fileEntry.FilePath}': {ex.Message}", ex);
+        }
+        microSw.Stop();
+
+        if (!string.IsNullOrWhiteSpace(microResponse.Model))
+        {
+            capturedModels.Add(microResponse.Model);
+        }
+
+        LogGenerationAudit(fileEntry.FilePath, "MicroApplicabilityRepair", microCallNumber, microRequest, microResponse, microSw.Elapsed);
+        await RecordProviderCallActivityAsync(
+            request.ExecutionId,
+            fileEntry.FilePath,
+            "MicroApplicabilityRepair",
+            microRequest,
+            microResponse,
+            microSw.Elapsed,
+            cancellationToken,
+            outputContract: "ModifyPatch").ConfigureAwait(false);
+
+        if (!microResponse.IsSuccess)
+        {
+            if (IsTokenLimitResponse(microResponse))
+            {
+                throw new InvalidOperationException($"AI response exhausted the configured output token limit while repairing edits for '{fileEntry.FilePath}' after micro applicability repair.");
+            }
+
+            var rawError = !string.IsNullOrWhiteSpace(microResponse.ErrorMessage)
+                ? microResponse.ErrorMessage
+                : "AI provider micro applicability repair request failed";
+            throw new InvalidOperationException(
+                rawError.Contains(fileEntry.FilePath, StringComparison.OrdinalIgnoreCase)
+                    ? rawError
+                    : $"{rawError.TrimEnd('.')} while repairing '{fileEntry.FilePath}'.");
+        }
+
+        if (string.IsNullOrWhiteSpace(microResponse.Content))
+        {
+            throw new InvalidOperationException($"AI provider returned empty edit response for file '{fileEntry.FilePath}' during micro applicability repair.");
+        }
+
+        return microResponse;
+    }
+
+    public static string BuildMicroApplicabilityRepairSystemPrompt(ManifestFileEntry fileEntry) =>
+        $$"""
+        Output ONLY the smallest valid SEARCH/REPLACE JSON object for '{{fileEntry.FilePath}}'.
+        No markdown, prose, reasoning, task restatement, or extra fields.
+        {"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact failed or unique anchor","replace":"replacement"}]}
+        """;
+
+    public static string BuildMicroApplicabilityRepairUserPrompt(
+        ManifestFileEntry fileEntry,
+        string? targetContent,
+        string validationReason,
+        EditApplicabilityResult? applicabilityFailure)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"Target File: {fileEntry.FilePath}");
+        sb.AppendLine("Action: Modify");
+        sb.AppendLine("Emit only compact searchReplaceEdits.");
+        sb.AppendLine();
+        sb.AppendLine("=== Exact Validation / Applicability Reason ===");
+        sb.AppendLine(validationReason);
+        sb.AppendLine();
+
+        if (applicabilityFailure != null && !applicabilityFailure.Success)
+        {
+            if (!string.IsNullOrEmpty(applicabilityFailure.FailedSearch))
+            {
+                sb.AppendLine("=== Exact Failed SEARCH Anchor ===");
+                sb.AppendLine(applicabilityFailure.FailedSearch);
+                sb.AppendLine();
+            }
+
+            if (!string.IsNullOrEmpty(applicabilityFailure.SurroundingContext))
+            {
+                sb.AppendLine("=== Bounded Surrounding Source ===");
+                sb.AppendLine(applicabilityFailure.SurroundingContext);
+                sb.AppendLine();
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(targetContent))
+        {
+            var window = BuildBoundedTargetSourceWindow(
+                targetContent,
+                applicabilityFailure,
+                ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath));
+            if (window.Length > 2400)
+            {
+                window = window[..2400] + "\n...[truncated]";
+            }
+
+            sb.AppendLine("=== Bounded Target Source Window ===");
+            sb.AppendLine(window);
+            sb.AppendLine("=== End Bounded Target Source Window ===");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine($"Output ONLY the corrected surgical edit JSON for '{fileEntry.FilePath}'.");
+        return sb.ToString();
     }
 
     private async Task SafeRecordActivityAsync(
@@ -1199,7 +1572,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
         AiRequest request,
         AiResponse response,
         TimeSpan duration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? outputContract = null,
+        string? compactRetryReason = null,
+        int? strongDependencyContractCount = null,
+        int? heuristicInjectedContextCount = null)
     {
         var metadata = new ExecutionActivityMetadata(
             EventKind: "ProviderCall",
@@ -1210,7 +1587,14 @@ public sealed class DeveloperAgent : IDeveloperAgent
             InputTokens: response.InputTokens,
             OutputTokens: response.OutputTokens,
             StageDurationMs: (long)duration.TotalMilliseconds,
-            TargetFile: targetFile);
+            TargetFile: targetFile,
+            OutputContract: outputContract,
+            CompactRetryReason: compactRetryReason,
+            ReasoningEffort: request.ReasoningEffort,
+            StrongDependencyContractCount: strongDependencyContractCount,
+            HeuristicInjectedContextCount: heuristicInjectedContextCount,
+            PromptSizeEstimate: EstimatePromptSize(request),
+            RepairKind: callKind is "ApplicabilityRepair" or "MicroApplicabilityRepair" ? callKind : null);
 
         await SafeRecordActivityAsync(
             executionId,
@@ -1656,12 +2040,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
 
         var actionSpecificRule = fileEntry.Action == FileEditAction.Create
-            ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content."
+            ? "For 'Create' actions, specify 'newContent' containing the complete, valid file content. Create can never use NoChange."
             : useFullFileReplacement
-                ? "This is a small-file Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
+                ? "This is a near-empty Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
-                    ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'."
-                    : "This is a large-file Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'.";
+                    ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult."
+                    : "This is a Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult.";
 
         var testGuidance = isTest
             ? fileEntry.Action == FileEditAction.Modify
@@ -1671,7 +2055,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
-            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"small exact unique anchor","replace":"replacement"}]}""";
+            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"small exact unique anchor","replace":"replacement"}]} or {"filePath":"{{fileEntry.FilePath}}","action":"Modify","noChange":true,"reason":"No matching change is required in the current target."}""";
 
         return $$"""
             You are a software developer agent implementing exact edits for a single target file: '{{fileEntry.FilePath}}' (Action: {{fileEntry.Action}}).
@@ -1699,12 +2083,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             : useFullFileReplacement
                 ? "Provide the complete resulting small file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
-                    ? "Output was previously truncated because too much code was emitted. For this test file, return ONLY minimal 2-5 line 'searchReplaceEdits' inserting the new test method(s) using a unique 2-5 line anchor (never a bare closing brace alone). NEVER repeat existing tests or the test class. Omit 'newContent'."
-                    : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods. Omit 'newContent'.";
+                    ? "Output was previously truncated because too much code was emitted. For this test file, return ONLY minimal 2-5 line 'searchReplaceEdits' inserting the new test method(s) using a unique 2-5 line anchor (never a bare closing brace alone). NEVER repeat existing tests or the test class. Omit 'newContent'. If the target already satisfies the requested file-specific change, return explicit NoChange instead of inventing a patch."
+                    : "Output was previously truncated because too much code was emitted. Return ONLY minimal 2-5 line 'searchReplaceEdits' targeting specific modified statements. NEVER repeat unchanged methods. Omit 'newContent'. If the target already satisfies the requested file-specific change, return explicit NoChange instead of inventing a patch.";
 
         var schema = fileEntry.Action == FileEditAction.Create || useFullFileReplacement
             ? $$"""{"filePath":"{{fileEntry.FilePath}}","action":"{{fileEntry.Action}}","newContent":"complete resulting file"}"""
-            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact anchor","replace":"replacement"}]}""";
+            : $$"""{"filePath":"{{fileEntry.FilePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact anchor","replace":"replacement"}]} or {"filePath":"{{fileEntry.FilePath}}","action":"Modify","noChange":true,"reason":"No matching change is required in the current target."}""";
 
         return $$"""
             Output ONLY the smallest valid JSON object. No markdown, prose, reasoning, or extra fields.
@@ -1867,15 +2251,61 @@ public sealed class DeveloperAgent : IDeveloperAgent
             6. Preserve all code not implicated by diagnostics.
 
             Required JSON shape:
-            {"filePath":"{{filePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact 2-5 line unique anchor","replace":"replacement"}]}
+            {"filePath":"{{filePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact 2-5 line unique excerpt","replace":"replacement"}]}
             """;
+    }
+
+    public static string BuildMicroDiagnosticRepairUserPrompt(
+        string filePath,
+        string currentContent,
+        FocusedRepairRequest request,
+        IReadOnlyDictionary<string, string>? peerContext = null,
+        IReadOnlyList<VerificationContractExcerpt>? behavioralEvidence = null,
+        IReadOnlyDictionary<string, string>? behavioralSignatures = null)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"Target File: {filePath}");
+        sb.AppendLine("Action: Modify");
+        if (!string.IsNullOrWhiteSpace(request.TestName))
+        {
+            sb.AppendLine($"Failing Test: {request.TestName}");
+        }
+        sb.AppendLine();
+        sb.AppendLine("=== Exact Compiler Diagnostics ===");
+        sb.AppendLine(request.DiagnosticEvidence);
+        sb.AppendLine("=== End Exact Compiler Diagnostics ===");
+        sb.AppendLine();
+
+        BehavioralDependencyEvidence.AppendPromptSection(sb, behavioralEvidence ?? Array.Empty<VerificationContractExcerpt>(), behavioralSignatures);
+
+        if (peerContext != null && peerContext.Count > 0)
+        {
+            sb.AppendLine("=== Direct Contract Evidence ===");
+            foreach (var (peerPath, peerContent) in peerContext.Take(2))
+            {
+                sb.AppendLine($"--- {peerPath} ---");
+                sb.AppendLine(BoundPeerContractExcerpt(peerContent, 800));
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("Edit Strategy: surgical SEARCH/REPLACE only. Use an exact existing unique 2-5 line anchor. Never use a bare closing brace alone. Never return full newContent.");
+        sb.AppendLine();
+        sb.AppendLine("=== Bounded Target Window ===");
+        sb.AppendLine(BuildBoundedTargetSourceWindow(currentContent ?? string.Empty, applicabilityFailure: null, isTestFile: false));
+        sb.AppendLine("=== End Bounded Target Window ===");
+        sb.AppendLine();
+        sb.AppendLine($"Output ONLY the corrected surgical searchReplaceEdits JSON for '{filePath}'.");
+        return sb.ToString();
     }
 
     public static string BuildFocusedDiagnosticRepairUserPrompt(
         string filePath,
         string currentContent,
         FocusedRepairRequest request,
-        IReadOnlyDictionary<string, string>? peerContext = null)
+        IReadOnlyDictionary<string, string>? peerContext = null,
+        IReadOnlyList<VerificationContractExcerpt>? behavioralEvidence = null,
+        IReadOnlyDictionary<string, string>? behavioralSignatures = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"Task Title: {request.TaskTitle}");
@@ -1886,11 +2316,17 @@ public sealed class DeveloperAgent : IDeveloperAgent
         sb.AppendLine();
         sb.AppendLine($"Target File: {filePath}");
         sb.AppendLine("Action: Modify");
+        if (!string.IsNullOrWhiteSpace(request.TestName))
+        {
+            sb.AppendLine($"Failing Test: {request.TestName}");
+        }
         sb.AppendLine();
         sb.AppendLine("=== Authoritative Verification Diagnostic Evidence ===");
         sb.AppendLine(request.DiagnosticEvidence);
         sb.AppendLine("=== End Verification Diagnostic Evidence ===");
         sb.AppendLine();
+
+        BehavioralDependencyEvidence.AppendPromptSection(sb, behavioralEvidence ?? Array.Empty<VerificationContractExcerpt>(), behavioralSignatures);
 
         if (request.DiagnosticLocations != null && request.DiagnosticLocations.Count > 0)
         {
@@ -1985,6 +2421,84 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         return peers;
+    }
+
+    public static IReadOnlyList<VerificationContractExcerpt> CollectFocusedRepairBehavioralEvidence(
+        string targetFilePath,
+        string currentContent,
+        FocusedRepairRequest request)
+    {
+        if (request == null || !VerificationContractEvidence.IsVerificationFile(targetFilePath))
+        {
+            return Array.Empty<VerificationContractExcerpt>();
+        }
+
+        return BehavioralDependencyEvidence.Collect(
+            targetFilePath,
+            currentContent,
+            request.TouchedFiles,
+            freshSources: null,
+            originalSnapshots: null,
+            request.WorkspacePath,
+            request.DiagnosticEvidence);
+    }
+
+    private static List<string> CollectBehavioralCandidatePaths(
+        DeveloperAgentRequest request,
+        ManifestFileEntry fileEntry,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
+        IReadOnlyDictionary<string, string>? contextFiles)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (request.ImpactedFilePaths != null)
+        {
+            foreach (var path in request.ImpactedFilePaths)
+            {
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    paths.Add(path);
+                }
+            }
+        }
+
+        if (fileEntry.Dependencies != null)
+        {
+            foreach (var path in fileEntry.Dependencies)
+            {
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    paths.Add(path);
+                }
+            }
+        }
+
+        if (virtualWorkspace != null)
+        {
+            foreach (var path in virtualWorkspace.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        if (completedEdits != null)
+        {
+            foreach (var path in completedEdits.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        if (contextFiles != null)
+        {
+            foreach (var path in contextFiles.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        paths.Remove(fileEntry.FilePath);
+        return paths.ToList();
     }
 
     public static void ValidateFocusedRepairSearchAnchors(FileEditSpec spec, string filePath)
@@ -2257,6 +2771,36 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return string.Join('/', parts);
     }
 
+    internal static void AppendSameRoleExemplarSection(
+        System.Text.StringBuilder sb,
+        string targetPath,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? alreadyLoaded)
+    {
+        var repositoryContents = RepositoryGenerationExemplar.CollectAvailableRepositoryContents(
+            targetPath,
+            workspacePath,
+            alreadyLoaded);
+        var exemplar = RepositoryGenerationExemplar.SelectSameRoleExemplar(targetPath, repositoryContents);
+        if (exemplar == null)
+        {
+            return;
+        }
+
+        sb.AppendLine("=== Same-Role Repository Exemplar ===");
+        sb.AppendLine($"Preserve repository conventions from this bounded structural evidence in {exemplar.FilePath}.");
+        sb.AppendLine($"--- Exemplar: {exemplar.FilePath} ---");
+        sb.AppendLine(exemplar.BoundedExcerpt);
+        sb.AppendLine("--- End Exemplar ---");
+        var sizeHint = RepositoryGenerationExemplar.BuildRepositorySizeHint(targetPath, repositoryContents);
+        if (!string.IsNullOrWhiteSpace(sizeHint))
+        {
+            sb.AppendLine(sizeHint);
+        }
+
+        sb.AppendLine();
+    }
+
     private static bool LooksLikePeerContractLine(string line)
     {
         var trimmed = line.TrimStart();
@@ -2337,6 +2881,11 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
         }
 
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            AppendSameRoleExemplarSection(sb, fileEntry.FilePath, request.WorkspacePath, contextFiles);
+        }
+
         var isTest = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
 
         // Relevant plan excerpt: extract plan steps relevant to this file or provide concise excerpt
@@ -2353,8 +2902,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
             var editStrategy = useFullFileReplacement
                 ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
                 : isTest
-                    ? "Edit Strategy: surgical test patch. Add only the new or modified test method(s) using a concise 2-5 line unique search anchor from the target file (such as the tail of the preceding test method with surrounding structural lines, or the target test signature; never use a bare closing brace alone). NEVER repeat existing unchanged tests, fixtures, or the full test class."
-                    : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits.";
+                    ? "Edit Strategy: surgical test patch. Add only the new or modified test method(s) using a concise 2-5 line unique search anchor from the target file (such as the tail of the preceding test method with surrounding structural lines, or the target test signature; never use a bare closing brace alone). NEVER repeat existing unchanged tests, fixtures, or the full test class. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch."
+                    : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult.";
 
             sb.AppendLine(editStrategy);
             sb.AppendLine("=== Current Content of Target File ===");
@@ -2371,28 +2920,64 @@ public sealed class DeveloperAgent : IDeveloperAgent
             }
             sb.AppendLine("=== End Current Content ===");
             sb.AppendLine();
+
+            contextFiles.TryGetValue(fileEntry.FilePath, out var verificationTargetSource);
+            var verificationEvidence = VerificationContractEvidence.Collect(
+                fileEntry.FilePath,
+                verificationTargetSource,
+                request.WorkspacePath,
+                contextFiles,
+                projectGraph);
+            VerificationContractEvidence.AppendPromptSection(sb, verificationEvidence);
+
+            if (VerificationContractEvidence.IsVerificationFile(fileEntry.FilePath))
+            {
+                var behavioralCandidates = CollectBehavioralCandidatePaths(
+                    request,
+                    fileEntry,
+                    virtualWorkspace,
+                    completedEdits,
+                    contextFiles);
+                var behavioralEvidence = BehavioralDependencyEvidence.Collect(
+                    fileEntry.FilePath,
+                    verificationTargetSource,
+                    behavioralCandidates,
+                    virtualWorkspace,
+                    contextFiles,
+                    request.WorkspacePath,
+                    diagnosticEvidence: null,
+                    fileEntry.Dependencies);
+                var behavioralSignatures = BehavioralDependencyEvidence.CollectLockedSignatures(
+                    behavioralEvidence,
+                    virtualWorkspace,
+                    contextFiles,
+                    request.WorkspacePath);
+                BehavioralDependencyEvidence.AppendPromptSection(sb, behavioralEvidence, behavioralSignatures);
+            }
         }
 
-        if (lockedContracts != null && lockedContracts.Count > 0)
-        {
-            sb.AppendLine("=== Authoritative Upstream Contracts (LOCKED) ===");
-            sb.AppendLine("The following upstream signatures are strictly locked. You MUST adhere precisely to these constructor parameter counts, types, method names, and return types:");
-            foreach (var (contractPath, contractSig) in lockedContracts)
-            {
-                sb.AppendLine($"--- Locked Contract: {contractPath} ---");
-                sb.AppendLine(contractSig);
-                sb.AppendLine("--- End Locked Contract ---");
-            }
-            sb.AppendLine();
-        }
+        contextFiles.TryGetValue(fileEntry.FilePath, out var targetSourceForRefs);
+        var authoritativeContracts = CollectAuthoritativeDependencyContracts(
+            fileEntry,
+            targetSourceForRefs,
+            lockedContracts,
+            virtualWorkspace,
+            completedEdits);
+        AppendAuthoritativeContracts(sb, authoritativeContracts);
 
         var directlyReferenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var plannedOrGenerated = CollectAvailableDependencyPaths(fileEntry, lockedContracts, virtualWorkspace, completedEdits);
+        var strongDependencyPaths = CollectStrongDependencyPaths(
+            fileEntry,
+            targetSourceForRefs,
+            plannedOrGenerated,
+            BuildContractSourceMap(lockedContracts, virtualWorkspace, completedEdits));
 
         // Include directly referenced dependency files: use authoritative virtual workspace if generated, else fallback to contextFiles
-        if (fileEntry.Dependencies != null && fileEntry.Dependencies.Count > 0)
+        if (strongDependencyPaths.Count > 0)
         {
             sb.AppendLine("=== Directly Referenced Dependency Snippets ===");
-            foreach (var depPath in fileEntry.Dependencies)
+            foreach (var depPath in strongDependencyPaths)
             {
                 if (virtualWorkspace != null && virtualWorkspace.TryGetValue(depPath, out var genDepContent) && !string.IsNullOrWhiteSpace(genDepContent))
                 {
@@ -2401,19 +2986,22 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     sb.AppendLine(genDepContent);
                     sb.AppendLine("--- End Dependency File ---");
                 }
-                else if (contextFiles.TryGetValue(depPath, out var depContent))
+                else if (completedEdits == null || !completedEdits.ContainsKey(depPath))
                 {
-                    directlyReferenced.Add(depPath);
-                    sb.AppendLine($"--- Dependency File: {depPath} ---");
-                    sb.AppendLine(depContent);
-                    sb.AppendLine("--- End Dependency File ---");
+                    if (contextFiles.TryGetValue(depPath, out var depContent))
+                    {
+                        directlyReferenced.Add(depPath);
+                        sb.AppendLine($"--- Dependency File: {depPath} ---");
+                        sb.AppendLine(depContent);
+                        sb.AppendLine("--- End Dependency File ---");
+                    }
                 }
             }
             sb.AppendLine();
         }
 
         // Include relevant in-memory generated dependency specs from earlier completed waves (excluding any already directly referenced)
-        var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace);
+        var relevantGenerated = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace, targetSourceForRefs);
         var nonRedundantGenerated = relevantGenerated
             .Where(kvp => !directlyReferenced.Contains(kvp.Key))
             .ToList();
@@ -2447,7 +3035,10 @@ public sealed class DeveloperAgent : IDeveloperAgent
         ManifestFileEntry fileEntry,
         string? targetContent,
         IReadOnlyDictionary<string, string>? lockedContracts = null,
-        bool useFullFileReplacement = false)
+        bool useFullFileReplacement = false,
+        IReadOnlyDictionary<string, string>? contextFiles = null,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits = null,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("=== COMPACT RETRY (TOKEN LIMIT DISCIPLINE) ===");
@@ -2455,16 +3046,32 @@ public sealed class DeveloperAgent : IDeveloperAgent
             ? "Emit only the JSON small-file replacement payload."
             : "Emit only the minimal JSON searchReplaceEdits payload.");
         sb.AppendLine();
-        sb.AppendLine($"Task Title: {request.TaskTitle}");
-        sb.AppendLine($"Task Description: {request.TaskDescription}");
-        if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
-        {
-            sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
-        }
-        sb.AppendLine();
         sb.AppendLine($"Target File: {fileEntry.FilePath}");
         sb.AppendLine($"Action: {fileEntry.Action}");
+        if (!string.IsNullOrWhiteSpace(fileEntry.Purpose))
+        {
+            sb.AppendLine($"Purpose: {fileEntry.Purpose}");
+        }
+        if (fileEntry.Action == FileEditAction.Modify && !string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+        {
+            sb.AppendLine($"Acceptance requirement: {TrimToBound(request.AcceptanceCriteria, 280)}");
+        }
         sb.AppendLine();
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            sb.AppendLine($"Task Title: {request.TaskTitle}");
+            if (!string.IsNullOrWhiteSpace(request.AcceptanceCriteria))
+            {
+                sb.AppendLine($"Acceptance Criteria: {request.AcceptanceCriteria}");
+            }
+
+            sb.AppendLine();
+        }
+
+        if (fileEntry.Action == FileEditAction.Create)
+        {
+            AppendSameRoleExemplarSection(sb, fileEntry.FilePath, request.WorkspacePath, contextFiles);
+        }
 
         if (fileEntry.Action == FileEditAction.Modify)
         {
@@ -2491,24 +3098,17 @@ public sealed class DeveloperAgent : IDeveloperAgent
             sb.AppendLine();
         }
 
-        // Filter locked contracts to only directly relevant ones
-        if (lockedContracts != null && lockedContracts.Count > 0)
-        {
-            var relevantContracts = FilterRelevantContracts(fileEntry, lockedContracts, targetContent, request);
-            if (relevantContracts.Count > 0)
-            {
-                sb.AppendLine("=== Required Upstream Contracts (LOCKED) ===");
-                foreach (var (contractPath, contractSig) in relevantContracts)
-                {
-                    sb.AppendLine($"--- Locked Contract: {contractPath} ---");
-                    sb.AppendLine(contractSig);
-                    sb.AppendLine("--- End Locked Contract ---");
-                }
-                sb.AppendLine();
-            }
-        }
+        var authoritativeContracts = CollectAuthoritativeDependencyContracts(
+            fileEntry,
+            targetContent,
+            lockedContracts,
+            virtualWorkspace,
+            completedEdits);
+        AppendAuthoritativeContracts(sb, authoritativeContracts);
 
-        sb.AppendLine($"Output ONLY the compact JSON object for '{fileEntry.FilePath}'.");
+        sb.AppendLine(fileEntry.Action == FileEditAction.Modify && !useFullFileReplacement
+            ? $"Output ONLY the compact SEARCH/REPLACE JSON object for '{fileEntry.FilePath}'."
+            : $"Output ONLY the compact JSON object for '{fileEntry.FilePath}'.");
         return sb.ToString();
     }
 
@@ -2518,72 +3118,258 @@ public sealed class DeveloperAgent : IDeveloperAgent
         string? targetContent = null,
         DeveloperAgentRequest? request = null)
     {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (lockedContracts == null || lockedContracts.Count == 0) return result;
+        _ = request;
+        return CollectAuthoritativeDependencyContracts(
+            fileEntry,
+            targetContent,
+            lockedContracts,
+            virtualWorkspace: null,
+            completedEdits: null);
+    }
 
-        // If locked contracts set is small (<= 5), retain all of them unconditionally
-        // to guarantee zero contract dropping for standard multi-file waves.
-        if (lockedContracts.Count <= 5)
+    public static IReadOnlyList<string> CollectStrongDependencyPaths(
+        ManifestFileEntry fileEntry,
+        string? targetSource,
+        IEnumerable<string> availablePaths,
+        IReadOnlyDictionary<string, string>? availableSources = null)
+    {
+        var available = (availablePaths ?? Array.Empty<string>())
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var strong = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void TryAdd(string? path)
         {
-            foreach (var (k, v) in lockedContracts)
+            if (string.IsNullOrWhiteSpace(path) ||
+                string.Equals(path, fileEntry.FilePath, StringComparison.OrdinalIgnoreCase) ||
+                !seen.Add(path))
             {
-                result[k] = v;
+                return;
             }
+
+            if (available.Any(candidate => string.Equals(candidate, path, StringComparison.OrdinalIgnoreCase)))
+            {
+                strong.Add(path);
+            }
+        }
+
+        if (fileEntry.Dependencies != null)
+        {
+            foreach (var dependency in fileEntry.Dependencies)
+            {
+                TryAdd(dependency);
+            }
+        }
+
+        foreach (var localRef in PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                     fileEntry.FilePath, targetSource, available))
+        {
+            TryAdd(localRef);
+        }
+
+        if (availableSources != null)
+        {
+            foreach (var owner in PlannedFileDependencyResolver.ResolveUniqueDeclaredTypeOwners(
+                         fileEntry.FilePath, targetSource, availableSources))
+            {
+                TryAdd(owner);
+            }
+        }
+
+        return strong;
+    }
+
+    public static Dictionary<string, string> CollectAuthoritativeDependencyContracts(
+        ManifestFileEntry fileEntry,
+        string? targetSource,
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits = null)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var availablePaths = CollectAvailableDependencyPaths(fileEntry, lockedContracts, virtualWorkspace, completedEdits);
+        if (availablePaths.Count == 0)
+        {
             return result;
         }
 
-        var targetFileName = Path.GetFileNameWithoutExtension(fileEntry.FilePath);
-        var targetBase = targetFileName
-            .Replace("Handler", "")
-            .Replace("Tests", "")
-            .Replace("Test", "")
-            .Replace("Controller", "")
-            .Replace("Repository", "")
-            .Replace("Service", "")
-            .Trim();
-
-        var combinedSearchText = string.Concat(
-            targetContent ?? string.Empty, " ",
-            fileEntry.Purpose ?? string.Empty, " ",
-            request?.TaskTitle ?? string.Empty, " ",
-            request?.TaskDescription ?? string.Empty, " ",
-            request?.AcceptanceCriteria ?? string.Empty);
-
-        foreach (var (contractPath, contractSig) in lockedContracts)
+        var sources = BuildContractSourceMap(lockedContracts, virtualWorkspace, completedEdits);
+        foreach (var path in CollectStrongDependencyPaths(fileEntry, targetSource, availablePaths, sources))
         {
-            // 1. Explicit dependency in manifest
-            if (fileEntry.Dependencies != null && fileEntry.Dependencies.Contains(contractPath, StringComparer.OrdinalIgnoreCase))
+            if (virtualWorkspace != null &&
+                virtualWorkspace.TryGetValue(path, out var generated) &&
+                !string.IsNullOrWhiteSpace(generated))
             {
-                result[contractPath] = contractSig;
+                var fresh = PlannedFileDependencyResolver.ExtractLockedContractExcerpt(path, generated);
+                if (!string.IsNullOrWhiteSpace(fresh))
+                {
+                    result[path] = fresh;
+                    continue;
+                }
+            }
+
+            if (lockedContracts != null && lockedContracts.TryGetValue(path, out var locked) && !string.IsNullOrWhiteSpace(locked))
+            {
+                result[path] = locked;
                 continue;
             }
 
-            var contractFileName = Path.GetFileNameWithoutExtension(contractPath);
-
-            // 2. Target file or prompt explicitly references the contract file name or type name
-            if (!string.IsNullOrWhiteSpace(contractFileName) &&
-                combinedSearchText.Contains(contractFileName, StringComparison.OrdinalIgnoreCase))
+            if (completedEdits != null &&
+                completedEdits.TryGetValue(path, out var spec) &&
+                !string.IsNullOrWhiteSpace(spec.NewContent))
             {
-                result[contractPath] = contractSig;
-                continue;
-            }
-
-            // 3. Name/feature correspondence
-            if (!string.IsNullOrWhiteSpace(targetBase) && targetBase.Length > 2 &&
-                contractFileName.Contains(targetBase, StringComparison.OrdinalIgnoreCase))
-            {
-                result[contractPath] = contractSig;
-                continue;
-            }
-
-            // 4. Test candidate files receive production contracts
-            if (ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath) && !ProjectGraphHelper.IsTestFileCandidate(contractPath))
-            {
-                result[contractPath] = contractSig;
+                var fromEdit = PlannedFileDependencyResolver.ExtractLockedContractExcerpt(path, spec.NewContent);
+                if (!string.IsNullOrWhiteSpace(fromEdit))
+                {
+                    result[path] = fromEdit;
+                }
             }
         }
 
         return result;
+    }
+
+    public static (int StrongCount, int HeuristicCount) MeasureGenerationPromptContext(
+        ManifestFileEntry fileEntry,
+        string? targetSource,
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
+        bool compactRetry)
+    {
+        var strong = CollectAuthoritativeDependencyContracts(
+            fileEntry,
+            targetSource,
+            lockedContracts,
+            virtualWorkspace,
+            completedEdits);
+        if (compactRetry)
+        {
+            return (strong.Count, 0);
+        }
+
+        var relevant = GetRelevantGeneratedEdits(fileEntry, completedEdits, virtualWorkspace, targetSource);
+        var heuristicCount = relevant.Keys.Count(path => !strong.ContainsKey(path));
+        return (strong.Count, heuristicCount);
+    }
+
+    private static void AppendAuthoritativeContracts(System.Text.StringBuilder sb, IReadOnlyDictionary<string, string> contracts)
+    {
+        if (contracts == null || contracts.Count == 0)
+        {
+            return;
+        }
+
+        sb.AppendLine("=== Authoritative Upstream Contracts (LOCKED) ===");
+        sb.AppendLine("The following upstream signatures are strictly locked and authoritative.");
+        sb.AppendLine("Consumers MUST use the exact published method and type names. Do not invent aliases or alternate spellings.");
+        sb.AppendLine("You MUST adhere precisely to these constructor parameter counts, types, method names, and return types:");
+        foreach (var (contractPath, contractSig) in contracts)
+        {
+            sb.AppendLine($"--- Locked Contract: {contractPath} ---");
+            sb.AppendLine(contractSig);
+            sb.AppendLine("--- End Locked Contract ---");
+        }
+        sb.AppendLine();
+    }
+
+    private static List<string> CollectAvailableDependencyPaths(
+        ManifestFileEntry fileEntry,
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (fileEntry.Dependencies != null)
+        {
+            foreach (var dependency in fileEntry.Dependencies)
+            {
+                paths.Add(dependency);
+            }
+        }
+
+        if (lockedContracts != null)
+        {
+            foreach (var path in lockedContracts.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        if (virtualWorkspace != null)
+        {
+            foreach (var path in virtualWorkspace.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        if (completedEdits != null)
+        {
+            foreach (var path in completedEdits.Keys)
+            {
+                paths.Add(path);
+            }
+        }
+
+        return paths.ToList();
+    }
+
+    private static Dictionary<string, string> BuildContractSourceMap(
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        IReadOnlyDictionary<string, string>? virtualWorkspace,
+        IReadOnlyDictionary<string, FileEditSpec>? completedEdits)
+    {
+        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (lockedContracts != null)
+        {
+            foreach (var (path, excerpt) in lockedContracts)
+            {
+                if (!string.IsNullOrWhiteSpace(excerpt))
+                {
+                    sources[path] = excerpt;
+                }
+            }
+        }
+
+        if (completedEdits != null)
+        {
+            foreach (var (path, spec) in completedEdits)
+            {
+                if (!string.IsNullOrWhiteSpace(spec.NewContent))
+                {
+                    sources[path] = spec.NewContent;
+                }
+            }
+        }
+
+        if (virtualWorkspace != null)
+        {
+            foreach (var (path, content) in virtualWorkspace)
+            {
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    sources[path] = content;
+                }
+            }
+        }
+
+        return sources;
+    }
+
+    private static int EstimatePromptSize(AiRequest request) =>
+        Math.Max(1, ((request.SystemPrompt?.Length ?? 0) + (request.UserPrompt?.Length ?? 0)) / 4);
+
+    private static string? ExtractGeneratedContract(string path, string content)
+    {
+        if (path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return RoslynContractExtractor.ExtractPublicContracts(path, content);
+        }
+
+        return PlannedFileDependencyResolver.ExtractLockedContractExcerpt(path, content);
     }
 
     private static string ExtractRelevantPlanSteps(string proposedPlan, string targetFilePath)
@@ -2607,7 +3393,8 @@ public sealed class DeveloperAgent : IDeveloperAgent
     public static Dictionary<string, string> GetRelevantGeneratedEdits(
         ManifestFileEntry fileEntry,
         IReadOnlyDictionary<string, FileEditSpec>? completedEdits,
-        IReadOnlyDictionary<string, string>? virtualWorkspace = null)
+        IReadOnlyDictionary<string, string>? virtualWorkspace = null,
+        string? targetSource = null)
     {
         var relevant = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (completedEdits == null || completedEdits.Count == 0) return relevant;
@@ -2622,6 +3409,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
             .Trim();
 
         bool isTestTarget = ProjectGraphHelper.IsTestFileCandidate(fileEntry.FilePath);
+        var localRefs = new HashSet<string>(
+            PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                fileEntry.FilePath,
+                targetSource,
+                completedEdits.Keys),
+            StringComparer.OrdinalIgnoreCase);
 
         foreach (var (path, spec) in completedEdits)
         {
@@ -2629,8 +3422,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
             bool isRelevant = false;
 
-            // 1. Explicit dependency
+            // 1. Explicit dependency or exact local repository reference
             if (fileEntry.Dependencies != null && fileEntry.Dependencies.Contains(path, StringComparer.OrdinalIgnoreCase))
+            {
+                isRelevant = true;
+            }
+            else if (localRefs.Contains(path))
             {
                 isRelevant = true;
             }
@@ -2679,7 +3476,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                     }
                     else
                     {
-                        var contract = RoslynContractExtractor.ExtractPublicContracts(path, generatedContent);
+                        var contract = ExtractGeneratedContract(path, generatedContent);
                         relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : generatedContent;
                     }
                 }
@@ -2701,7 +3498,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         }
                         else if (spec.NewContent.Length > 2000)
                         {
-                            var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
+                            var contract = ExtractGeneratedContract(path, spec.NewContent);
                             relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
                         }
                         else
@@ -2724,7 +3521,7 @@ public sealed class DeveloperAgent : IDeveloperAgent
                         }
                         else
                         {
-                            var contract = RoslynContractExtractor.ExtractPublicContracts(path, spec.NewContent);
+                            var contract = ExtractGeneratedContract(path, spec.NewContent);
                             relevant[path] = !string.IsNullOrWhiteSpace(contract) ? contract : spec.NewContent;
                         }
                     }
@@ -2808,6 +3605,18 @@ public sealed class DeveloperAgent : IDeveloperAgent
         return sb.ToString().Trim();
     }
 
+    public const int NearEmptyModifyReplacementChars = 50;
+
+    public static bool ShouldUseFullFileReplacement(FileEditAction action, string? targetContent)
+    {
+        if (action != FileEditAction.Modify || string.IsNullOrWhiteSpace(targetContent))
+        {
+            return false;
+        }
+
+        return targetContent.Trim().Length <= NearEmptyModifyReplacementChars;
+    }
+
     public static int GetSemanticLayerScore(string filePath)
     {
         var p = filePath.Replace('\\', '/').ToLowerInvariant();
@@ -2867,6 +3676,237 @@ public sealed class DeveloperAgent : IDeveloperAgent
         }
 
         return 35;
+    }
+
+    public static IReadOnlyList<GenerationPrerequisite> CollectGenerationPrerequisites(
+        IReadOnlyList<ManifestFileEntry> files,
+        IReadOnlyDictionary<string, string>? repositorySources = null) =>
+        CollectGenerationPrerequisiteGraph(files, repositorySources).Prerequisites;
+
+    public static GenerationPrerequisiteGraph CollectGenerationPrerequisiteGraph(
+        IReadOnlyList<ManifestFileEntry> files,
+        IReadOnlyDictionary<string, string>? repositorySources = null)
+    {
+        if (files == null || files.Count <= 1)
+        {
+            return GenerationPrerequisiteGraph.Empty;
+        }
+
+        var plannedPaths = files.Select(file => file.FilePath).ToList();
+        var strong = new List<GenerationPrerequisite>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var manifestCount = 0;
+        var directCount = 0;
+
+        foreach (var target in files)
+        {
+            string? targetSource = null;
+            repositorySources?.TryGetValue(target.FilePath, out targetSource);
+            var localRefs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var resolved in PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                         target.FilePath, targetSource, plannedPaths))
+            {
+                localRefs.Add(resolved);
+            }
+
+            if (repositorySources != null)
+            {
+                foreach (var owner in PlannedFileDependencyResolver.ResolveUniqueCsharpTypeOwners(
+                             target.FilePath, targetSource, repositorySources))
+                {
+                    localRefs.Add(owner);
+                }
+            }
+
+            foreach (var candidate in files)
+            {
+                if (string.Equals(target.FilePath, candidate.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                GenerationPrerequisiteReason? reason = null;
+                if (target.Dependencies != null &&
+                    target.Dependencies.Contains(candidate.FilePath, StringComparer.OrdinalIgnoreCase))
+                {
+                    reason = GenerationPrerequisiteReason.ManifestDependency;
+                }
+                else if (localRefs.Contains(candidate.FilePath))
+                {
+                    reason = GenerationPrerequisiteReason.DirectLocalReference;
+                }
+
+                if (reason == null)
+                {
+                    continue;
+                }
+
+                var key = EdgeKey(candidate.FilePath, target.FilePath);
+                if (!seen.Add(key))
+                {
+                    continue;
+                }
+
+                strong.Add(new GenerationPrerequisite(candidate.FilePath, target.FilePath, reason.Value));
+                if (reason == GenerationPrerequisiteReason.ManifestDependency)
+                {
+                    manifestCount++;
+                }
+                else
+                {
+                    directCount++;
+                }
+            }
+        }
+
+        var accepted = new List<GenerationPrerequisite>(strong);
+        var heuristicCount = 0;
+        var suppressedConflict = 0;
+        var suppressedCycle = 0;
+
+        foreach (var target in files)
+        {
+            foreach (var candidate in files)
+            {
+                if (string.Equals(target.FilePath, candidate.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (seen.Contains(EdgeKey(candidate.FilePath, target.FilePath)))
+                {
+                    continue;
+                }
+
+                if (!ExistingHeuristicDependsOn(target, candidate))
+                {
+                    continue;
+                }
+
+                if (seen.Contains(EdgeKey(target.FilePath, candidate.FilePath)))
+                {
+                    suppressedConflict++;
+                    continue;
+                }
+
+                if (HasPrerequisitePath(accepted, target.FilePath, candidate.FilePath))
+                {
+                    suppressedCycle++;
+                    continue;
+                }
+
+                seen.Add(EdgeKey(candidate.FilePath, target.FilePath));
+                accepted.Add(new GenerationPrerequisite(
+                    candidate.FilePath,
+                    target.FilePath,
+                    GenerationPrerequisiteReason.ExistingHeuristic));
+                heuristicCount++;
+            }
+        }
+
+        return new GenerationPrerequisiteGraph(
+            accepted,
+            manifestCount,
+            directCount,
+            heuristicCount,
+            suppressedConflict,
+            suppressedCycle);
+    }
+
+    private static string EdgeKey(string producer, string consumer) => $"{producer}|{consumer}";
+
+    private static bool HasPrerequisitePath(
+        IReadOnlyList<GenerationPrerequisite> edges,
+        string from,
+        string to)
+    {
+        if (string.Equals(from, to, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var adjacency = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var edge in edges)
+        {
+            if (!adjacency.TryGetValue(edge.ProducerPath, out var consumers))
+            {
+                consumers = new List<string>();
+                adjacency[edge.ProducerPath] = consumers;
+            }
+
+            consumers.Add(edge.ConsumerPath);
+        }
+
+        var queue = new Queue<string>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        queue.Enqueue(from);
+        visited.Add(from);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (!adjacency.TryGetValue(current, out var next))
+            {
+                continue;
+            }
+
+            foreach (var consumer in next)
+            {
+                if (!visited.Add(consumer))
+                {
+                    continue;
+                }
+
+                if (string.Equals(consumer, to, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                queue.Enqueue(consumer);
+            }
+        }
+
+        return false;
+    }
+
+    private static readonly HashSet<string> NonSourceDataConfigExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".json", ".yml", ".yaml", ".toml", ".xml", ".env", ".properties", ".csv", ".ini", ".config"
+    };
+
+    public static bool IsNonSourceDataConfigFile(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return false;
+        }
+
+        return NonSourceDataConfigExtensions.Contains(Path.GetExtension(filePath));
+    }
+
+    private static bool ExistingHeuristicDependsOn(ManifestFileEntry target, ManifestFileEntry candidate)
+    {
+        if (IsNonSourceDataConfigFile(target.FilePath) || IsNonSourceDataConfigFile(candidate.FilePath))
+        {
+            return false;
+        }
+
+        var targetScore = GetSemanticLayerScore(target.FilePath);
+        var candidateScore = GetSemanticLayerScore(candidate.FilePath);
+        if (targetScore <= candidateScore)
+        {
+            return false;
+        }
+
+        var targetBase = Path.GetFileNameWithoutExtension(target.FilePath)
+            .Replace("Handler", "")
+            .Replace("Tests", "")
+            .Replace("Test", "")
+            .Replace("Controller", "")
+            .Trim();
+        var candBase = Path.GetFileNameWithoutExtension(candidate.FilePath);
+        return !string.IsNullOrWhiteSpace(targetBase) &&
+               targetBase.Length >= 3 &&
+               candBase.Contains(targetBase, StringComparison.OrdinalIgnoreCase);
     }
 
     public static IReadOnlyList<ManifestFileEntry> SortManifestEntries(
@@ -2977,13 +4017,13 @@ public sealed class DeveloperAgent : IDeveloperAgent
 
                     // Direct FileEditSpec object
                     if (root.TryGetProperty("filePath", out _) || root.TryGetProperty("action", out _) ||
-                        root.TryGetProperty("newContent", out _) || root.TryGetProperty("searchReplaceEdits", out _))
+                        root.TryGetProperty("newContent", out _) || root.TryGetProperty("searchReplaceEdits", out _) ||
+                        HasExplicitNoChangeProperty(root))
                     {
                         var spec = JsonSerializer.Deserialize<FileEditSpec>(candidate, JsonOpts);
                         if (spec != null)
                         {
-                            var normalizedPath = string.IsNullOrWhiteSpace(spec.FilePath) ? expectedEntry.FilePath : spec.FilePath;
-                            return new FileEditSpec(normalizedPath, spec.Action == default ? expectedEntry.Action : spec.Action, spec.NewContent, spec.SearchReplaceEdits);
+                            return NormalizeParsedEditSpec(spec, expectedEntry, root);
                         }
                     }
                 }
@@ -3005,6 +4045,71 @@ public sealed class DeveloperAgent : IDeveloperAgent
         throw lastException ?? new FormatException($"Failed to parse valid edit spec for '{expectedEntry.FilePath}'.");
     }
 
+    private static bool HasExplicitNoChangeProperty(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        foreach (var property in root.EnumerateObject())
+        {
+            if (string.Equals(property.Name, "noChange", StringComparison.OrdinalIgnoreCase) &&
+                property.Value.ValueKind == JsonValueKind.True)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static FileEditSpec NormalizeParsedEditSpec(
+        FileEditSpec spec,
+        ManifestFileEntry expectedEntry,
+        JsonElement root)
+    {
+        var normalizedPath = string.IsNullOrWhiteSpace(spec.FilePath) ? expectedEntry.FilePath : spec.FilePath;
+        var action = spec.Action == default ? expectedEntry.Action : spec.Action;
+        var explicitNoChange = HasExplicitNoChangeProperty(root);
+        return new FileEditSpec(
+            normalizedPath,
+            action,
+            spec.NewContent,
+            spec.SearchReplaceEdits,
+            spec.TargetContentHash,
+            explicitNoChange,
+            explicitNoChange ? spec.NoChangeReason : null);
+    }
+
+    public static void ValidateExplicitNoChange(FileEditSpec spec, ManifestFileEntry expectedEntry)
+    {
+        if (!spec.NoChange)
+        {
+            throw new FormatException($"NoChange was not explicit for '{expectedEntry.FilePath}'.");
+        }
+
+        if (expectedEntry.Action == FileEditAction.Create || spec.Action == FileEditAction.Create)
+        {
+            throw new FormatException($"Create action for '{expectedEntry.FilePath}' cannot use NoChange.");
+        }
+
+        if (spec.Action != FileEditAction.Modify)
+        {
+            throw new FormatException($"NoChange is only valid for Modify action '{expectedEntry.FilePath}'.");
+        }
+
+        if (spec.NewContent != null)
+        {
+            throw new FormatException($"NoChange for '{expectedEntry.FilePath}' must not include 'newContent'.");
+        }
+
+        if (spec.SearchReplaceEdits is { Count: > 0 })
+        {
+            throw new FormatException($"NoChange for '{expectedEntry.FilePath}' must not include 'searchReplaceEdits'.");
+        }
+    }
+
     public static void ValidateSingleFileEditSpec(
         FileEditSpec spec,
         ManifestFileEntry expectedEntry,
@@ -3014,6 +4119,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (spec == null)
         {
             throw new FormatException($"Edit spec is null for '{expectedEntry.FilePath}'.");
+        }
+
+        if (spec.NoChange)
+        {
+            ValidateExplicitNoChange(spec, expectedEntry);
+            return;
         }
 
         if (spec.Action == FileEditAction.Create)
@@ -3260,6 +4371,12 @@ public sealed class DeveloperAgent : IDeveloperAgent
                 throw new FormatException("FileEditSpec contains an empty or missing 'filePath'.");
             }
 
+            if (file.NoChange)
+            {
+                ValidateExplicitNoChange(file, new ManifestFileEntry(file.FilePath, file.Action));
+                continue;
+            }
+
             if (file.Action == FileEditAction.Create)
             {
                 if (file.NewContent == null)
@@ -3345,6 +4462,17 @@ public sealed class DeveloperAgent : IDeveloperAgent
         if (string.IsNullOrWhiteSpace(input)) return string.Empty;
         var sanitized = input.Length > 300 ? input.Substring(0, 300) + "..." : input;
         return sanitized.Replace("\r", " ").Replace("\n", " ");
+    }
+
+    private static string TrimToBound(string? value, int maxChars)
+    {
+        if (string.IsNullOrWhiteSpace(value) || maxChars <= 0)
+        {
+            return string.Empty;
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.Length <= maxChars ? trimmed : trimmed[..maxChars];
     }
 
     private sealed class ConcurrencyCallCounter

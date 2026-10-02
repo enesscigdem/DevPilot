@@ -1,0 +1,48 @@
+import type { Resources } from "../../en"
+
+const compare: Resources["compare"] = {
+  back: "Çalıştırmalar",
+  eyebrow: "Karşılaştır",
+  title: "Çalıştırmaları karşılaştır",
+  description:
+    "İki çalıştırmayı yan yana koyun — genellikle ilk deneme ve yeniden denemesi — sonuç, onarım, süre ve YZ maliyetinde neyin değiştiğini görün.",
+  baselineRun: "Baseline çalıştırma",
+  comparedRun: "Karşılaştırılan çalıştırma",
+  selectPlaceholder: "Bir çalıştırma seçin…",
+  attemptN: "Deneme {{n}}",
+  choose: "Karşılaştırmak için yukarıdan iki çalıştırma seçin.",
+  loading: "Çalıştırmalar yükleniyor…",
+  errLoad: "Çalıştırmalar yüklenemedi.",
+  differentTasks: "Bu çalıştırmalar farklı görevlere ait; bu yüzden farklar yeniden deneme etkisi değildir.",
+  baseline: "Baseline",
+  compared: "Karşılaştırılan",
+  rows: {
+    outcome: "Sonuç",
+    runTime: "Çalışma süresi",
+    compileRounds: "Derleme onarım turları",
+    testRounds: "Test onarım turları",
+    applicability: "Uygulanabilirlik onarımları",
+    compact: "Kompakt yeniden denemeler",
+    aiCalls: "YZ çağrıları",
+    tokens: "Token",
+    estCost: "Tah. maliyet",
+    genTime: "Üretim süresi",
+    buildTime: "Derleme süresi",
+    testTime: "Test süresi",
+    repairTime: "Onarım süresi",
+    filesChanged: "Değişen dosyalar",
+    signals: "Sinyaller",
+    checksNotRun: "Çalıştırılmayan kontroller",
+  },
+  flags: {
+    baselineUnverified: "baseline doğrulanamadı",
+    flake: "kararsız test sönümlendi",
+    weakening: "test zayıflatma şüphesi",
+    staleBase: "eski taban",
+    none: "yok",
+  },
+  onlyBaseline: "Yalnızca baseline çalıştırmada",
+  inBoth: "Her iki çalıştırmada",
+  onlyCompared: "Yalnızca karşılaştırılan çalıştırmada",
+}
+export default compare

@@ -413,4 +413,32 @@ public sealed class ExecutionStageEvaluatorTests
         Assert.Equal(ExecutionStageStepState.NeedsReview, stages[4].State);
         Assert.NotEqual(ExecutionStageStepState.Failed, stages[4].State);
     }
+
+    [Fact]
+    public void EvaluateStages_WhenTestRepairCompletedButFinalTestsFailed_IsNeedsReviewNotDone()
+    {
+        var task = CreateTask(DevelopmentTaskStatus.Completed);
+        var execution = CreateExecution(task.Id, TaskExecutionStatus.Completed);
+        var activities = new List<ExecutionActivity>
+        {
+            new() { Id = Guid.NewGuid(), ExecutionId = execution.Id, Stage = ExecutionStage.DeveloperAgent, Status = ExecutionActivityStatus.Completed, CreatedAt = DateTime.UtcNow },
+            new() { Id = Guid.NewGuid(), ExecutionId = execution.Id, Stage = ExecutionStage.Build, Status = ExecutionActivityStatus.Completed, Message = "Build passed.", CreatedAt = DateTime.UtcNow.AddSeconds(1) },
+            new() { Id = Guid.NewGuid(), ExecutionId = execution.Id, Stage = ExecutionStage.Test, Status = ExecutionActivityStatus.Completed, Message = "Test repair completed (round 1).", CreatedAt = DateTime.UtcNow.AddSeconds(2) },
+            new()
+            {
+                Id = Guid.NewGuid(),
+                ExecutionId = execution.Id,
+                Stage = ExecutionStage.Test,
+                Status = ExecutionActivityStatus.Failed,
+                Message = "Test validation failed: repository test check failed.",
+                MetadataJson = "{\"RepositoryCheckId\":\"test\",\"VerificationOutcome\":\"NeedsReview\",\"RepairSelectionReason\":\"Uncorrelated\",\"TestName\":\"DevPilot.Tests.Todos.TodoServiceTests.Filters_completed_todos\"}",
+                CreatedAt = DateTime.UtcNow.AddSeconds(3)
+            }
+        };
+
+        var stages = ExecutionStageEvaluator.EvaluateStages(execution, task, null, activities);
+
+        Assert.Equal(ExecutionStageStepState.NeedsReview, stages[4].State);
+        Assert.NotEqual(ExecutionStageStepState.Done, stages[4].State);
+    }
 }

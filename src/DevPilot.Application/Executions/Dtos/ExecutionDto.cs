@@ -82,6 +82,12 @@ public sealed class ExecutionDto
     public string? Model { get; set; }
 
     public IReadOnlyList<ExecutionStageStepDto> Stages { get; set; } = Array.Empty<ExecutionStageStepDto>();
+
+    /// <summary>Explanation of the verification outcome (null while the execution is still running).</summary>
+    public ExecutionVerdictDto? Verdict { get; set; }
+
+    /// <summary>AI usage and latency aggregated from recorded provider calls.</summary>
+    public ExecutionUsageDto? Usage { get; set; }
 }
 
 public sealed class ExecutionListItemDto

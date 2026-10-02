@@ -26,7 +26,10 @@ builder.Services.AddHangfire(configuration =>
         options.UseNpgsqlConnection(connectionString);
     });
 });
-builder.Services.AddHangfireServer();
+// Each execution runs dotnet builds/tests plus AI calls; cap parallel workers (default 2) so queued
+// executions wait instead of competing for CPU, disk and provider rate limits.
+var hangfireWorkerCount = Math.Max(1, builder.Configuration.GetValue<int?>("Hangfire:WorkerCount") ?? 2);
+builder.Services.AddHangfireServer(options => options.WorkerCount = hangfireWorkerCount);
 
 var app = builder.Build();
 

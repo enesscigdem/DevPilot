@@ -117,4 +117,10 @@ public class TaskExecution
     public DateTime? MergedAt { get; set; }
 
     public string? MergeMethod { get; set; }
+
+    /// <summary>Terminal verification outcome captured when the execution finished (history; null for older rows).</summary>
+    public string? VerificationOutcome { get; set; }
+
+    /// <summary>JSON of the terminal verdict + usage snapshot (null for older rows).</summary>
+    public string? VerificationSnapshotJson { get; set; }
 }

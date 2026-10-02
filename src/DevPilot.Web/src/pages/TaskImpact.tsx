@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
+import { useTranslation } from "react-i18next"
+import i18n from "@/i18n"
 import {
   ArrowLeft,
   Check,
@@ -40,19 +42,18 @@ import {
   type ExecutionListItem,
   type Tone,
 } from "@/types"
-import { activeTask, affectedFiles as mockAffectedFiles, impactSummary as mockImpactSummary, riskMeta } from "@/data/mock"
 
 function getPriorityToneAndLabel(priority: number): { tone: Tone; label: string } {
   switch (priority) {
     case TaskPriority.Low:
-      return { tone: "green", label: "Low" }
+      return { tone: "green", label: i18n.t("impact.level.low") }
     case TaskPriority.Medium:
-      return { tone: "amber", label: "Medium" }
+      return { tone: "amber", label: i18n.t("impact.level.medium") }
     case TaskPriority.High:
     case TaskPriority.Critical:
-      return { tone: "red", label: "High" }
+      return { tone: "red", label: i18n.t("impact.level.high") }
     default:
-      return { tone: "neutral", label: "Normal" }
+      return { tone: "neutral", label: i18n.t("impact.level.normal") }
   }
 }
 
@@ -70,7 +71,14 @@ function getImpactLevelTone(level: string): Tone {
   }
 }
 
+const levelText = (level?: string | null) => {
+  const k = String(level ?? "").toLowerCase()
+  if (k === "critical") return i18n.t("impact.level.high")
+  return ["low", "medium", "high"].includes(k) ? i18n.t(`impact.level.${k}`) : (level ?? "")
+}
+
 export function TaskImpact() {
+  const { t } = useTranslation()
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { activeWorkspaceId, refreshOverview } = useWorkspace()
@@ -88,9 +96,9 @@ export function TaskImpact() {
   const [selectedFileIndex, setSelectedFileIndex] = useState(0)
 
   const [isApproving, setIsApproving] = useState(false)
+  const [acknowledgedRisks, setAcknowledgedRisks] = useState(false)
   const [isRejecting, setIsRejecting] = useState(false)
   const [approvalError, setApprovalError] = useState<string | null>(null)
-  const [mockStatus, setMockStatus] = useState<string>("awaiting-approval")
 
   const [isStartingExecution, setIsStartingExecution] = useState(false)
   const [startExecutionError, setStartExecutionError] = useState<string | null>(null)
@@ -105,23 +113,16 @@ export function TaskImpact() {
     return () => clearInterval(ticker)
   }, [])
 
-  // Fallback to mock data if viewing mock task ID
-  const isMockView = !id || id === activeTask.id || id === "TASK-142"
-
   const lifecycleState = deriveTaskImpactLifecycle(
     task,
     analysis,
     activeExecution,
-    isMockView,
-    mockStatus,
     nowMs,
   )
 
   const actionState = deriveTaskImpactActionState(
     task?.status,
     activeExecution,
-    isMockView,
-    mockStatus,
   )
 
   const handleStartExecution = async () => {
@@ -134,7 +135,7 @@ export function TaskImpact() {
       refreshOverview(true)
       navigate(`/executions/${execution.id}`)
     } catch (err) {
-      setStartExecutionError(err instanceof Error ? err.message : "Failed to start execution.")
+      setStartExecutionError(err instanceof Error ? err.message : t("impact.errStart"))
     } finally {
       setIsStartingExecution(false)
     }
@@ -150,14 +151,14 @@ export function TaskImpact() {
       refreshOverview(true)
       navigate(`/executions/${execution.id}`)
     } catch (err) {
-      setRetryExecutionError(err instanceof Error ? err.message : "Failed to retry execution.")
+      setRetryExecutionError(err instanceof Error ? err.message : t("impact.errRetry"))
     } finally {
       setIsRetryingExecution(false)
     }
   }
 
   const loadData = useCallback(async () => {
-    if (!id || id === activeTask.id || id === "TASK-142") {
+    if (!id) {
       setIsLoading(false)
       return
     }
@@ -189,7 +190,7 @@ export function TaskImpact() {
         setAnalysis(null)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Task not found.")
+      setError(err instanceof Error ? err.message : t("impact.errNotFound"))
     } finally {
       setIsLoading(false)
     }
@@ -202,7 +203,7 @@ export function TaskImpact() {
   // Dedicated scoped polling while analysis is in progress
   const isPollingAnalysisRef = useRef(false)
   useEffect(() => {
-    if (!lifecycleState.isAnalyzing || !id || isMockView) return
+    if (!lifecycleState.isAnalyzing || !id) return
 
     const interval = setInterval(async () => {
       if (isPollingAnalysisRef.current) return
@@ -224,7 +225,7 @@ export function TaskImpact() {
     return () => {
       clearInterval(interval)
     }
-  }, [id, lifecycleState.isAnalyzing, isMockView])
+  }, [id, lifecycleState.isAnalyzing])
 
   // Scoped polling while task has an actual active execution OR task.status claims Executing
   const isPollingExecRef = useRef(false)
@@ -232,7 +233,7 @@ export function TaskImpact() {
     const isExecutingOrSyncing =
       activeExecution != null || task?.status === TaskStatus.Executing
 
-    if (!isExecutingOrSyncing || !id || isMockView) return
+    if (!isExecutingOrSyncing || !id) return
 
     const interval = setInterval(async () => {
       if (isPollingExecRef.current) return
@@ -257,7 +258,7 @@ export function TaskImpact() {
     }, 3500)
 
     return () => clearInterval(interval)
-  }, [id, activeWorkspaceId, activeExecution, task?.status, isMockView])
+  }, [id, activeWorkspaceId, activeExecution, task?.status])
 
   const handleStartAnalysis = async () => {
     if (!id || isAnalyzing) return
@@ -303,7 +304,7 @@ export function TaskImpact() {
         console.error("Failed to refresh task state after analysis", err)
       }
     } catch (err) {
-      setAnalysisError(err instanceof Error ? err.message : "Failed to generate impact analysis.")
+      setAnalysisError(err instanceof Error ? err.message : t("impact.errAnalysis"))
       // Re-fetch authoritative terminal state (Completed or Failed)
       try {
         const [updatedTask, updatedAnalysis] = await Promise.all([
@@ -325,15 +326,11 @@ export function TaskImpact() {
     setIsApproving(true)
     setApprovalError(null)
     try {
-      if (isMockView) {
-        setMockStatus("approved")
-      } else {
-        await approveTask(id)
-        const updatedTask = await getTask(id)
-        setTask(updatedTask)
-      }
+      await approveTask(id)
+      const updatedTask = await getTask(id)
+      setTask(updatedTask)
     } catch (err) {
-      setApprovalError(err instanceof Error ? err.message : "Failed to approve task.")
+      setApprovalError(err instanceof Error ? err.message : t("impact.errApprove"))
     } finally {
       setIsApproving(false)
     }
@@ -344,15 +341,11 @@ export function TaskImpact() {
     setIsRejecting(true)
     setApprovalError(null)
     try {
-      if (isMockView) {
-        setMockStatus("rejected")
-      } else {
-        await rejectTask(id)
-        const updatedTask = await getTask(id)
-        setTask(updatedTask)
-      }
+      await rejectTask(id)
+      const updatedTask = await getTask(id)
+      setTask(updatedTask)
     } catch (err) {
-      setApprovalError(err instanceof Error ? err.message : "Failed to reject task.")
+      setApprovalError(err instanceof Error ? err.message : t("impact.errReject"))
     } finally {
       setIsRejecting(false)
     }
@@ -363,47 +356,43 @@ export function TaskImpact() {
       <PageContainer className="flex items-center justify-center py-24">
         <div className="flex flex-col items-center gap-3">
           <Loader2 className="h-6 w-6 animate-spin text-primary" />
-          <span className="tech-label">Loading task impact analysis…</span>
+          <span className="tech-label">{t("impact.loading")}</span>
         </div>
       </PageContainer>
     )
   }
 
-  if (error || (!isMockView && !task)) {
+  if (error || !task) {
     return (
       <PageContainer className="py-12">
         <div className="mx-auto max-w-md text-center">
           <AlertCircle className="mx-auto h-8 w-8 text-danger" />
-          <h2 className="mt-3 text-[15px] font-semibold text-foreground">Task not found</h2>
-          <p className="mt-1 text-[13px] text-muted-foreground">{error || "The requested task could not be loaded."}</p>
+          <h2 className="mt-3 text-[15px] font-semibold text-foreground">{t("impact.notFound")}</h2>
+          <p className="mt-1 text-[13px] text-muted-foreground">{error || t("impact.notFoundDesc")}</p>
           <Button variant="default" size="md" className="mt-4" onClick={() => navigate("/tasks")}>
             <ArrowLeft className="h-4 w-4" />
-            Back to tasks
+            {t("impact.backToTasks")}
           </Button>
         </div>
       </PageContainer>
     )
   }
 
-  const displayTitle = isMockView ? activeTask.title : task?.title || "Untitled task"
-  const displayId = isMockView ? activeTask.id : `TASK-${task?.id.slice(0, 6).toUpperCase()}`
-  const displayBranch = isMockView ? activeTask.branch : `feature/${task?.title.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30)}`
+  const displayTitle = task?.title || t("impact.untitled")
+  const displayId = `TASK-${task?.id.slice(0, 6).toUpperCase()}`
+  const displayBranch = `feature/${task?.title.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30)}`
 
-  const priorityInfo = isMockView
-    ? { tone: riskMeta[activeTask.risk].tone, label: activeTask.risk === "low" ? "Low" : activeTask.risk === "high" ? "High" : "Medium" }
-    : task
-      ? getPriorityToneAndLabel(task.priority)
-      : { tone: "neutral" as Tone, label: "Normal" }
+  const priorityInfo = task
+    ? getPriorityToneAndLabel(task.priority)
+    : { tone: "neutral" as Tone, label: t("impact.level.normal") }
 
   const structured = analysis?.structuredResult
 
   const hasCompletedAnalysis = lifecycleState.isSucceeded
 
-  // Risk badge comes ONLY from real persisted impact analysis data (or mock view)
+  // Risk badge comes ONLY from real persisted impact analysis data
   let analysisRiskInfo: { tone: Tone; label: string } | null = null
-  if (isMockView) {
-    analysisRiskInfo = { tone: riskMeta[activeTask.risk].tone, label: riskMeta[activeTask.risk].label }
-  } else if (hasCompletedAnalysis && structured?.risks && structured.risks.length > 0) {
+  if (hasCompletedAnalysis && structured?.risks && structured.risks.length > 0) {
     const levels = structured.risks.map((r) => r.level?.toLowerCase())
     let topLevel = "low"
     if (levels.includes("critical") || levels.includes("high")) topLevel = "high"
@@ -411,25 +400,21 @@ export function TaskImpact() {
 
     analysisRiskInfo = {
       tone: getImpactLevelTone(topLevel),
-      label: topLevel === "high" ? "High risk" : topLevel === "medium" ? "Medium risk" : "Low risk",
+      label: topLevel === "high" ? t("impact.riskLabel.high") : topLevel === "medium" ? t("impact.riskLabel.medium") : t("impact.riskLabel.low"),
     }
   }
 
-  const confidence = isMockView
-    ? activeTask.confidence
-    : structured?.confidence ?? analysis?.confidence ?? null
+  const confidence = structured?.confidence ?? analysis?.confidence ?? null
 
-  const requirementText = isMockView ? activeTask.requirement : task?.description || "No description provided."
+  const requirementText = task?.description || t("impact.noDescription")
 
-  const acceptanceList = isMockView
-    ? activeTask.acceptance
-    : task?.acceptanceCriteria && task.acceptanceCriteria.trim().length > 0
+  const acceptanceList =
+    task?.acceptanceCriteria && task.acceptanceCriteria.trim().length > 0
       ? task.acceptanceCriteria.split("\n").filter((line) => line.trim().length > 0)
       : []
 
-  const planSteps = isMockView
-    ? activeTask.planSteps
-    : structured?.proposedPlan && structured.proposedPlan.length > 0
+  const planSteps =
+    structured?.proposedPlan && structured.proposedPlan.length > 0
       ? structured.proposedPlan.map((s) => ({
           title: s.title,
           detail: s.description,
@@ -439,9 +424,15 @@ export function TaskImpact() {
 
   const realFiles: ImpactedFile[] = structured?.impactedFiles || []
 
-  const selectedFile = isMockView
-    ? mockAffectedFiles[selectedFileIndex] || mockAffectedFiles[0]
-    : hasCompletedAnalysis && realFiles.length > 0
+  // Approval checklist: the facts a developer should have seen before approving, derived from the plan itself.
+  const uncertainFileCount = realFiles.filter((f) => f.isUncertain).length
+  const unknownCount = structured?.unknowns?.length ?? 0
+  const staleBase = structured?.baseSnapshot?.isStale ?? false
+  const expectedCheckCount = structured?.changeBrief?.expectedChecks?.length ?? 0
+  const requiresAcknowledgement = uncertainFileCount > 0 || staleBase
+
+  const selectedFile =
+    hasCompletedAnalysis && realFiles.length > 0
       ? realFiles[selectedFileIndex] || realFiles[0]
       : null
 
@@ -480,17 +471,17 @@ export function TaskImpact() {
           {lifecycleState.durationFormatted && (
             <Badge tone="neutral" className="shrink-0 font-mono text-[11px]">
               {lifecycleState.isSucceeded
-                ? `Completed in ${lifecycleState.durationFormatted}`
-                : `Failed after ${lifecycleState.durationFormatted}`}
+                ? t("impact.completedIn", { time: lifecycleState.durationFormatted })
+                : t("impact.failedAfter", { time: lifecycleState.durationFormatted })}
             </Badge>
           )}
-          <Badge tone={priorityInfo.tone} className="shrink-0">Priority: {priorityInfo.label}</Badge>
+          <Badge tone={priorityInfo.tone} className="shrink-0">{t("impact.priority", { level: priorityInfo.label })}</Badge>
           {analysisRiskInfo && (
             <Badge tone={analysisRiskInfo.tone} className="shrink-0">{analysisRiskInfo.label}</Badge>
           )}
           {hasCompletedAnalysis && confidence !== null && (
             <div className="hidden items-center gap-1.5 md:flex shrink-0">
-              <span className="tech-label">Confidence</span>
+              <span className="tech-label">{t("impact.confidence")}</span>
               <span className="font-mono text-[13px] font-semibold text-foreground">{confidence}%</span>
             </div>
           )}
@@ -502,7 +493,7 @@ export function TaskImpact() {
         {/* LEFT — Requirement + plan */}
         <aside className="border-b border-border p-5 lg:border-b-0 lg:border-r min-w-0 overflow-hidden max-h-[calc(100vh-140px)] min-h-0 overflow-y-auto pr-3">
           <div className="sticky top-0 bg-canvas/95 backdrop-blur-sm z-10 pb-2 mb-2 border-b border-border/40 flex items-center justify-between">
-            <span className="tech-label">Requirement</span>
+            <span className="tech-label">{t("impact.requirement")}</span>
           </div>
           <div className="text-[13px] leading-relaxed text-foreground min-w-0">
             <FormattedText text={requirementText} />
@@ -510,7 +501,7 @@ export function TaskImpact() {
 
           {acceptanceList.length > 0 && (
             <>
-              <div className="tech-label mb-2 mt-6">Acceptance criteria</div>
+              <div className="tech-label mb-2 mt-6">{t("impact.acceptance")}</div>
               <ul className="space-y-2 min-w-0">
                 {acceptanceList.map((a, i) => (
                   <li key={i} className="flex gap-2 text-[12.5px] leading-relaxed text-muted-foreground min-w-0">
@@ -526,7 +517,7 @@ export function TaskImpact() {
             <>
               <div className="tech-label mb-3 mt-6 flex items-center gap-1.5">
                 <Sparkles className="h-3 w-3 shrink-0" />
-                Proposed plan
+                {t("impact.plan")}
               </div>
               <ol className="relative space-y-0 border-l border-border pl-0 min-w-0">
                 {planSteps.map((step, i) => (
@@ -563,26 +554,26 @@ export function TaskImpact() {
           {lifecycleState.lifecycle === "analyzing" ? (
             <div className="flex flex-col items-center justify-center rounded-[var(--radius-lg)] border border-border bg-surface-2/40 px-6 py-16 text-center">
               <Loader2 className="h-8 w-8 text-primary animate-spin" />
-              <h3 className="mt-3 text-[14px] font-semibold text-foreground">Analyzing workspace…</h3>
+              <h3 className="mt-3 text-[14px] font-semibold text-foreground">{t("impact.analyzingTitle")}</h3>
               <p className="mt-1 max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
-                DevPilot is inspecting Roslyn project references, symbol graphs, and generating impact predictions.
+                {t("impact.analyzingDesc")}
               </p>
               <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 font-mono text-[12px] text-subtle-foreground">
                 <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
-                Elapsed: {lifecycleState.elapsedSeconds}s
+                {t("impact.elapsed", { n: lifecycleState.elapsedSeconds })}
               </div>
             </div>
           ) : lifecycleState.lifecycle === "failed" ? (
             <div className="flex flex-col items-center justify-center rounded-[var(--radius-lg)] border border-danger/30 bg-danger-soft/20 px-6 py-12 text-center min-w-0">
               <AlertCircle className="h-9 w-9 text-danger" />
-              <h3 className="mt-3 text-[14.5px] font-semibold text-foreground">Impact analysis failed</h3>
+              <h3 className="mt-3 text-[14.5px] font-semibold text-foreground">{t("impact.analysisFailed")}</h3>
               {lifecycleState.durationFormatted && (
                 <span className="mt-0.5 font-mono text-[11.5px] text-muted-foreground">
-                  Failed after {lifecycleState.durationFormatted}
+                  {t("impact.failedAfter", { time: lifecycleState.durationFormatted })}
                 </span>
               )}
               <div className="mt-4 max-w-lg w-full text-left rounded-[var(--radius-md)] border border-danger/30 bg-surface p-3.5 text-[12px] leading-relaxed text-foreground break-words font-mono">
-                {lifecycleState.sanitizedErrorMessage || analysisError || "Impact analysis failed."}
+                {lifecycleState.sanitizedErrorMessage || analysisError || t("impact.analysisFailedShort")}
               </div>
 
               <Button
@@ -593,15 +584,15 @@ export function TaskImpact() {
                 onClick={handleStartAnalysis}
               >
                 <RotateCcw className="h-4 w-4" />
-                Retry analysis
+                {t("impact.retryAnalysis")}
               </Button>
             </div>
           ) : lifecycleState.lifecycle === "idle" ? (
             <div className="flex flex-col items-center justify-center rounded-[var(--radius-lg)] border border-dashed border-border px-6 py-16 text-center">
               <BrainCircuit className="h-8 w-8 text-primary opacity-80" />
-              <h3 className="mt-3 text-[14px] font-semibold text-foreground">No impact analysis generated yet</h3>
+              <h3 className="mt-3 text-[14px] font-semibold text-foreground">{t("impact.noAnalysis")}</h3>
               <p className="mt-1 max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
-                DevPilot can analyze the Roslyn workspace graph, identify affected files, build a step-by-step implementation plan, and estimate risk.
+                {t("impact.noAnalysisDesc")}
               </p>
 
               {analysisError && (
@@ -619,7 +610,7 @@ export function TaskImpact() {
                 onClick={handleStartAnalysis}
               >
                 <Sparkles className="h-4 w-4" />
-                Run Impact Analysis
+                {t("impact.runAnalysis")}
               </Button>
             </div>
           ) : (
@@ -630,22 +621,22 @@ export function TaskImpact() {
                   <div className="flex items-center justify-between gap-2 border-b border-border/40 pb-2.5 mb-3">
                     <div className="flex items-center gap-2">
                       <Sparkles className="h-4 w-4 text-primary" />
-                      <span className="text-[13px] font-semibold text-foreground">Change Brief</span>
+                      <span className="text-[13px] font-semibold text-foreground">{t("impact.changeBrief")}</span>
                     </div>
                     <div className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-                      <span className="font-semibold text-foreground">{structured.changeBrief.fileCount}</span> files
+                      <span className="font-semibold text-foreground">{structured.changeBrief.fileCount}</span> {t("impact.filesCount")}
                       <span>·</span>
-                      <span className="font-semibold text-foreground">{structured.changeBrief.projectCount}</span> project(s)
+                      <span className="font-semibold text-foreground">{structured.changeBrief.projectCount}</span> {t("impact.projectsCount")}
                       <span>·</span>
                       <Badge tone={analysisRiskInfo?.tone ?? "neutral"} className="px-1.5 py-0 text-[10.5px]">
-                        {structured.changeBrief.riskLevel} Risk
+                        {t("impact.riskWord", { level: levelText(structured.changeBrief.riskLevel) })}
                       </Badge>
                     </div>
                   </div>
 
                   <div className="grid gap-3 sm:grid-cols-2 text-[12px]">
                     <div>
-                      <span className="tech-label text-[10.5px]">Explainable Risk</span>
+                      <span className="tech-label text-[10.5px]">{t("impact.explainableRisk")}</span>
                       <ul className="mt-1 space-y-1 text-[11.5px] text-muted-foreground">
                         {structured.changeBrief.riskReasons.map((reason, idx) => (
                           <li key={idx} className="flex items-start gap-1.5">
@@ -657,9 +648,9 @@ export function TaskImpact() {
                     </div>
 
                     <div>
-                      <span className="tech-label text-[10.5px]">Verification Preflight</span>
+                      <span className="tech-label text-[10.5px]">{t("impact.preflight")}</span>
                       <p className="mt-1 text-[11.5px] text-muted-foreground break-words">
-                        {structured.changeBrief.verificationSummary || "Standard repository preflight checks"}
+                        {structured.changeBrief.verificationSummary || t("impact.standardPreflight")}
                       </p>
                       {structured.changeBrief.expectedChecks && structured.changeBrief.expectedChecks.length > 0 && (
                         <div className="mt-1.5 flex flex-wrap gap-1">
@@ -681,9 +672,9 @@ export function TaskImpact() {
 
               <div className="mb-3 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-[13px] font-semibold text-foreground">Impacted files</h2>
+                  <h2 className="text-[13px] font-semibold text-foreground">{t("impact.impactedFiles")}</h2>
                   <span className="rounded-full bg-surface-3 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-                    {isMockView ? mockAffectedFiles.length : realFiles.length} files
+                    {t("common.files", { count: realFiles.length })}
                   </span>
                 </div>
               </div>
@@ -691,47 +682,7 @@ export function TaskImpact() {
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)] min-w-0">
                 {/* file list */}
                 <div className="overflow-hidden rounded-[var(--radius-lg)] border border-border min-w-0">
-                  {isMockView
-                    ? mockAffectedFiles.map((f, idx) => {
-                        const isSel = idx === selectedFileIndex
-                        return (
-                          <button
-                            key={f.path}
-                            onClick={() => setSelectedFileIndex(idx)}
-                            className={
-                              "flex w-full items-center gap-2.5 border-b border-border px-3 py-2.5 text-left transition-colors last:border-b-0 min-w-0 " +
-                              (isSel ? "bg-primary-soft/70" : "hover:bg-surface-2")
-                            }
-                          >
-                            {f.changeType === "added" ? (
-                              <Plus className="h-3.5 w-3.5 shrink-0 text-success" />
-                            ) : (
-                              <Pencil className="h-3.5 w-3.5 shrink-0 text-accent" />
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span
-                                  className={
-                                    "truncate text-[12.5px] font-medium " +
-                                    (isSel ? "text-primary" : "text-foreground")
-                                  }
-                                >
-                                  {f.name}
-                                </span>
-                              </div>
-                              <div className="truncate font-mono text-[10.5px] text-subtle-foreground" title={f.path}>
-                                {f.path}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1.5 font-mono text-[10.5px] shrink-0">
-                              <span className="text-success">+{f.additions}</span>
-                              <span className="text-danger">−{f.deletions}</span>
-                            </div>
-                            {isSel && <ChevronRight className="h-4 w-4 shrink-0 text-primary" />}
-                          </button>
-                        )
-                      })
-                    : realFiles.map((f, idx) => {
+                  {realFiles.map((f, idx) => {
                         const isSel = idx === selectedFileIndex
                         const fileName = f.filePath.split("/").pop() || f.filePath
                         const isAdded = f.changeType === "Add"
@@ -766,7 +717,7 @@ export function TaskImpact() {
                                 )}
                                 {f.isUncertain && (
                                   <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1 py-0.2 font-mono text-[10px] text-amber-500">
-                                    Uncertain
+                                    {t("impact.uncertain")}
                                   </span>
                                 )}
                               </div>
@@ -789,55 +740,40 @@ export function TaskImpact() {
                       </IconChip>
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[13px] font-semibold text-foreground">
-                          {"name" in selectedFile
-                            ? selectedFile.name
-                            : selectedFile.filePath.split("/").pop() || selectedFile.filePath}
+                          {selectedFile.filePath.split("/").pop() || selectedFile.filePath}
                         </div>
                         <div className="truncate font-mono text-[10.5px] text-subtle-foreground">
-                          {"project" in selectedFile
-                            ? selectedFile.project
-                            : selectedFile.filePath.split("/")[1] || selectedFile.filePath.split("/")[0]}
+                          {selectedFile.filePath.split("/")[1] || selectedFile.filePath.split("/")[0]}
                         </div>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      <Badge
-                        tone={
-                          "changeType" in selectedFile &&
-                          (selectedFile.changeType === "added" || selectedFile.changeType === "Add")
-                            ? "green"
-                            : "amber"
-                        }
-                      >
-                        {"changeType" in selectedFile
-                          ? selectedFile.changeType === "added" || selectedFile.changeType === "Add"
-                            ? "New file"
-                            : selectedFile.changeType
-                          : "Modified"}
+                      <Badge tone={selectedFile.changeType === "Add" ? "green" : "amber"}>
+                        {selectedFile.changeType === "Add" ? t("impact.newFile") : selectedFile.changeType}
                       </Badge>
-                      {"evidenceType" in selectedFile && selectedFile.evidenceType && (
+                      {selectedFile.evidenceType && (
                         <Badge tone="neutral" className="font-mono text-[10.5px]">
                           {selectedFile.evidenceType}
                         </Badge>
                       )}
-                      {"isUncertain" in selectedFile && selectedFile.isUncertain && (
+                      {selectedFile.isUncertain && (
                         <Badge tone="amber" className="text-[10.5px]">
-                          Uncertain
+                          {t("impact.uncertain")}
                         </Badge>
                       )}
                     </div>
 
                     <div>
-                      <div className="tech-label mb-1">Why it changes</div>
+                      <div className="tech-label mb-1">{t("impact.whyChanges")}</div>
                       <p className="text-[12px] leading-relaxed text-muted-foreground text-pretty break-words">
                         {selectedFile.reason}
                       </p>
                     </div>
 
-                    {"evidenceDetails" in selectedFile && selectedFile.evidenceDetails && (
+                    {selectedFile.evidenceDetails && (
                       <div className="rounded-[var(--radius-md)] border border-border/60 bg-surface-2 p-2.5">
-                        <div className="tech-label text-[10px] mb-1">Repository Evidence</div>
+                        <div className="tech-label text-[10px] mb-1">{t("impact.evidence")}</div>
                         <p className="text-[11.5px] leading-relaxed text-foreground font-mono break-words">
                           {selectedFile.evidenceDetails}
                         </p>
@@ -846,7 +782,7 @@ export function TaskImpact() {
 
                     <div>
                       <div className="flex items-center justify-between">
-                        <span className="tech-label">Confidence</span>
+                        <span className="tech-label">{t("impact.confidence")}</span>
                         <span className="font-mono text-[12px] font-semibold text-foreground">
                           {selectedFile.confidence}%
                         </span>
@@ -873,30 +809,9 @@ export function TaskImpact() {
         {/* RIGHT — System impact + Unknowns + decision */}
         <aside className="p-5 lg:border-l lg:border-border min-w-0 overflow-hidden space-y-4">
           <div>
-            <div className="tech-label mb-2.5">System impact & dimensions</div>
+            <div className="tech-label mb-2.5">{t("impact.systemImpact")}</div>
             <div className="space-y-2.5 min-w-0">
-              {isMockView
-                ? [
-                    { label: "API surface", icon: Network, items: mockImpactSummary.apiChanges },
-                    { label: "Database", icon: Database, items: mockImpactSummary.database },
-                    { label: "Integrations", icon: ShieldCheck, items: mockImpactSummary.integrations },
-                    { label: "Tests", icon: FlaskConical, items: mockImpactSummary.tests },
-                  ].map((g) => {
-                    const item = g.items[0]
-                    const Icon = g.icon
-                    return (
-                      <div key={g.label} className="rounded-[var(--radius-md)] border border-border bg-surface p-3 min-w-0">
-                        <div className="mb-1.5 flex items-center gap-2 min-w-0">
-                          <Icon className="h-3.5 w-3.5 text-subtle-foreground shrink-0" />
-                          <span className="truncate text-[12px] font-semibold text-foreground">{g.label}</span>
-                          <StatusDot tone={item.tone} className="ml-auto shrink-0" />
-                        </div>
-                        <div className="text-[12px] font-medium text-foreground break-words">{item.label}</div>
-                        <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground break-words">{item.detail}</p>
-                      </div>
-                    )
-                  })
-                : structured?.dimensions && structured.dimensions.length > 0
+              {structured?.dimensions && structured.dimensions.length > 0
                   ? structured.dimensions.map((dim, i) => {
                       const tone = getImpactLevelTone(dim.impactLevel)
                       const Icon = dim.area.toUpperCase() === "API"
@@ -948,25 +863,45 @@ export function TaskImpact() {
                               <span className="truncate text-[12px] font-semibold text-foreground">{si.area}</span>
                               <StatusDot tone={tone} className="ml-auto shrink-0" />
                             </div>
-                            <div className="text-[12px] font-medium text-foreground">{si.impactLevel} Impact</div>
+                            <div className="text-[12px] font-medium text-foreground">{t("impact.impactWord", { level: levelText(si.impactLevel) })}</div>
                             <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground break-words">{si.description}</p>
                           </div>
                         )
                       })
                     : (
                         <div className="rounded-[var(--radius-md)] border border-border bg-surface p-3 text-[12px] text-muted-foreground">
-                          No system impacts recorded.
+                          {t("impact.noSystemImpacts")}
                         </div>
                       )}
             </div>
           </div>
+
+          {/* Base freshness evidence captured when this analysis was produced */}
+          {structured?.baseSnapshot?.isStale && (
+            <div className="rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/5 p-3 min-w-0">
+              <div className="mb-1 flex items-center gap-1.5 text-[12px] font-semibold text-amber-500">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>{t("impact.staleBase")}</span>
+              </div>
+              <p className="text-[11.5px] leading-relaxed text-muted-foreground break-words">
+                {structured.baseSnapshot.message ??
+                  t("impact.staleBaseMsg", { n: structured.baseSnapshot.behindCount })}
+                {structured.baseSnapshot.baseCommitSha && (
+                  <span className="mt-1 block font-mono text-[10.5px] text-subtle-foreground">
+                    {t("impact.baseSha", { sha: structured.baseSnapshot.baseCommitSha.slice(0, 7) })}
+                    {structured.baseSnapshot.remoteCommitSha ? t("impact.originSha", { sha: structured.baseSnapshot.remoteCommitSha.slice(0, 7) }) : ""}
+                  </span>
+                )}
+              </p>
+            </div>
+          )}
 
           {/* Unknowns section */}
           {structured?.unknowns && structured.unknowns.length > 0 && (
             <div className="rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/5 p-3 min-w-0">
               <div className="mb-1.5 flex items-center gap-1.5 text-[12px] font-semibold text-amber-500">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                <span>Unknowns & Boundaries</span>
+                <span>{t("impact.unknowns")}</span>
               </div>
               <ul className="space-y-1 text-[11.5px] leading-relaxed text-muted-foreground">
                 {structured.unknowns.map((u, i) => (
@@ -988,7 +923,7 @@ export function TaskImpact() {
                       <Loader2 className="h-4 w-4 animate-spin" />
                     </IconChip>
                     <div className="min-w-0 flex-1">
-                      <div className="text-[13px] font-semibold text-foreground">Execution in progress</div>
+                      <div className="text-[13px] font-semibold text-foreground">{t("impact.inProgress")}</div>
                       <div className="text-[12px] text-muted-foreground">
                         {actionState.message}
                       </div>
@@ -1003,7 +938,7 @@ export function TaskImpact() {
                       onClick={() => navigate(`/executions/${actionState.activeExecutionId}`)}
                     >
                       <Play className="h-4 w-4" />
-                      View live execution
+                      {t("impact.viewLive")}
                     </Button>
                   )}
                 </div>
@@ -1014,7 +949,7 @@ export function TaskImpact() {
                       <Loader2 className="h-4 w-4 animate-spin" />
                     </IconChip>
                     <div className="min-w-0 flex-1">
-                      <div className="text-[13px] font-semibold text-foreground">Execution state is syncing…</div>
+                      <div className="text-[13px] font-semibold text-foreground">{t("impact.syncingTitle")}</div>
                       <div className="text-[12px] text-muted-foreground">
                         {actionState.message}
                       </div>
@@ -1025,19 +960,18 @@ export function TaskImpact() {
                 <>
                   <div className="flex items-center gap-2 min-w-0">
                     <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
-                    <span className="text-[13px] font-semibold text-foreground truncate">Ready for your approval</span>
+                    <span className="text-[13px] font-semibold text-foreground truncate">{t("impact.readyApproval")}</span>
                   </div>
                   <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground break-words">
-                    DevPilot will implement the plan on branch{" "}
-                    <span className="font-mono text-foreground break-all">{displayBranch}</span>, run the build and tests, then hand the
-                    diff back for review. Nothing merges without you.
+                    {t("impact.approvalDesc1")}
+                    <span className="font-mono text-foreground break-all">{displayBranch}</span>{t("impact.approvalDesc2")}
                   </p>
 
                   {realFiles.length > 20 && (
                     <div className="mt-3 flex items-start gap-2 rounded-[var(--radius-sm)] border border-danger/30 bg-danger/10 p-2.5 text-[12px] text-danger leading-relaxed">
                       <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                       <span>
-                        Plan proposes <strong>{realFiles.length} files</strong>, exceeding maximum executable capacity (20 files). Please decompose the task into smaller focused tasks before executing.
+                        {t("impact.tooManyA")}<strong>{t("impact.tooManyB", { n: realFiles.length })}</strong>{t("impact.tooManyC")}
                       </span>
                     </div>
                   )}
@@ -1049,36 +983,66 @@ export function TaskImpact() {
                     </div>
                   )}
 
+                  <div className="mt-3 space-y-1.5 rounded-[var(--radius-md)] border border-border bg-surface-2 p-3 text-[11.5px]">
+                    <div className="tech-label mb-1">{t("impact.beforeApprove")}</div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>{t("impact.filesInPlan")}</span>
+                      <span className="font-mono text-foreground">{realFiles.length} / 20</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>{t("impact.uncertainFiles")}</span>
+                      <span className={uncertainFileCount > 0 ? "font-mono text-amber-500" : "font-mono text-foreground"}>{uncertainFileCount}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>{t("impact.openUnknowns")}</span>
+                      <span className={unknownCount > 0 ? "font-mono text-amber-500" : "font-mono text-foreground"}>{unknownCount}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>{t("impact.checksVerify")}</span>
+                      <span className="font-mono text-foreground">{expectedCheckCount > 0 ? expectedCheckCount : t("impact.noneDiscovered")}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                      <span>{t("impact.baseVsOrigin")}</span>
+                      <span className={staleBase ? "font-mono text-amber-500" : "font-mono text-foreground"}>
+                        {structured?.baseSnapshot ? (staleBase ? t("impact.behind", { n: structured.baseSnapshot.behindCount }) : structured.baseSnapshot.freshness) : t("impact.unknown")}
+                      </span>
+                    </div>
+                    {requiresAcknowledgement && (
+                      <label className="mt-2 flex cursor-pointer items-start gap-2 border-t border-border/60 pt-2 text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={acknowledgedRisks}
+                          onChange={(e) => setAcknowledgedRisks(e.target.checked)}
+                          className="mt-0.5 h-3.5 w-3.5 accent-[var(--color-primary)]"
+                        />
+                        <span className="leading-snug">
+                          {t("impact.ack.reviewed", { what: uncertainFileCount > 0 && staleBase ? t("impact.ack.both") : uncertainFileCount > 0 ? t("impact.ack.uncertainFiles") : t("impact.ack.staleBase") })}
+                        </span>
+                      </label>
+                    )}
+                  </div>
+
                   <div className="mt-3 flex flex-col gap-2">
                     <Button
                       variant="primary"
                       size="lg"
                       className="w-full"
-                      disabled={isApproving || isRejecting || realFiles.length > 20}
+                      disabled={isApproving || isRejecting || realFiles.length > 20 || (requiresAcknowledgement && !acknowledgedRisks)}
                       onClick={handleApprove}
                     >
                       {isApproving ? (
                         <>
                           <Loader2 className="h-4 w-4 animate-spin" />
-                          Approving plan…
+                          {t("impact.approving")}
                         </>
                       ) : (
                         <>
                           <Check className="h-4 w-4" />
-                          Approve plan
+                          {t("impact.approve")}
                         </>
                       )}
                     </Button>
                     <div className="flex gap-2">
-                      <Button
-                        variant="default"
-                        size="md"
-                        className="flex-1"
-                        disabled={isApproving || isRejecting}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                        Edit plan
-                      </Button>
                       <Button
                         variant="danger"
                         size="md"
@@ -1089,10 +1053,10 @@ export function TaskImpact() {
                         {isRejecting ? (
                           <>
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            Rejecting…
+                            {t("impact.rejecting")}
                           </>
                         ) : (
-                          "Reject"
+                          t("impact.reject")
                         )}
                       </Button>
                     </div>
@@ -1105,8 +1069,8 @@ export function TaskImpact() {
                       <Check className="h-4 w-4" />
                     </IconChip>
                     <div className="min-w-0 flex-1">
-                      <div className="text-[13px] font-semibold text-foreground">Plan approved</div>
-                      <div className="text-[12px] text-muted-foreground">This task has been approved and is ready for execution.</div>
+                      <div className="text-[13px] font-semibold text-foreground">{t("impact.planApproved")}</div>
+                      <div className="text-[12px] text-muted-foreground">{t("impact.planApprovedDesc")}</div>
                     </div>
                   </div>
 
@@ -1127,12 +1091,12 @@ export function TaskImpact() {
                     {isStartingExecution ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        Starting execution…
+                        {t("impact.startingExecution")}
                       </>
                     ) : (
                       <>
                         <Play className="h-4 w-4" />
-                        Start execution
+                        {t("impact.startExecution")}
                       </>
                     )}
                   </Button>
@@ -1143,8 +1107,8 @@ export function TaskImpact() {
                     <AlertCircle className="h-4 w-4 text-danger" />
                   </IconChip>
                   <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold text-foreground">Plan rejected</div>
-                    <div className="text-[12px] text-muted-foreground">This task plan was rejected.</div>
+                    <div className="text-[13px] font-semibold text-foreground">{t("impact.planRejected")}</div>
+                    <div className="text-[12px] text-muted-foreground">{t("impact.planRejectedDesc")}</div>
                   </div>
                 </div>
               ) : actionState.kind === "failed" ? (
@@ -1154,8 +1118,8 @@ export function TaskImpact() {
                       <AlertCircle className="h-4 w-4 text-danger" />
                     </IconChip>
                     <div className="min-w-0 flex-1">
-                      <div className="text-[13px] font-semibold text-foreground">Execution failed</div>
-                      <div className="text-[12px] text-muted-foreground">The previous execution attempt failed. You can retry execution with the approved plan.</div>
+                      <div className="text-[13px] font-semibold text-foreground">{t("impact.execFailed")}</div>
+                      <div className="text-[12px] text-muted-foreground">{t("impact.execFailedDesc")}</div>
                     </div>
                   </div>
 
@@ -1176,12 +1140,12 @@ export function TaskImpact() {
                     {isRetryingExecution ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        Retrying execution…
+                        {t("impact.retryingExecution")}
                       </>
                     ) : (
                       <>
                         <RotateCcw className="h-4 w-4" />
-                        Retry execution
+                        {t("impact.retryExecution")}
                       </>
                     )}
                   </Button>

@@ -9,6 +9,8 @@ import { ExecutionWorkspace } from "./pages/ExecutionWorkspace"
 import { CodeReview } from "./pages/CodeReview"
 import { ProjectBrain } from "./pages/ProjectBrain"
 import { Architecture } from "./pages/Architecture"
+import { Insights } from "./pages/Insights"
+import { ExecutionCompare } from "./pages/ExecutionCompare"
 
 export default function App() {
   return (
@@ -19,10 +21,12 @@ export default function App() {
         <Route path="/tasks" element={<Tasks />} />
         <Route path="/tasks/:id" element={<TaskImpact />} />
         <Route path="/executions" element={<Executions />} />
+        <Route path="/executions/compare" element={<ExecutionCompare />} />
         <Route path="/executions/:id" element={<ExecutionWorkspace />} />
         <Route path="/review/:id" element={<CodeReview />} />
         <Route path="/brain" element={<ProjectBrain />} />
         <Route path="/architecture" element={<Architecture />} />
+        <Route path="/insights" element={<Insights />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppShell>

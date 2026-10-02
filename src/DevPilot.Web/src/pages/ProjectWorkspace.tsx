@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { Link } from "react-router-dom"
+import { useTranslation } from "react-i18next"
+import { fmt, relativeTime, srv } from "@/i18n"
 import {
   ChevronRight,
   Folder,
@@ -50,26 +52,14 @@ const techToneMap: Record<string, "blue" | "neutral"> = {
 }
 
 function formatRelativeTime(dateStr?: string): string {
-  if (!dateStr) return "—"
-  try {
-    const d = new Date(dateStr)
-    if (isNaN(d.getTime())) return "—"
-    const now = new Date()
-    const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000)
-    if (diffSec < 60) return "Just now"
-    const diffMin = Math.floor(diffSec / 60)
-    if (diffMin < 60) return `${diffMin}m ago`
-    const diffHours = Math.floor(diffMin / 60)
-    if (diffHours < 24) return `${diffHours}h ago`
-    return d.toLocaleDateString()
-  } catch {
-    return "—"
-  }
+  if (!dateStr || isNaN(new Date(dateStr).getTime())) return "—"
+  return relativeTime(dateStr)
 }
 
 import { getCachedWorkspaceAnalysis, setCachedWorkspaceAnalysis } from "@/lib/workspaceCache"
 
 export function ProjectWorkspace() {
+  const { t } = useTranslation()
   const { activeWorkspace, activeWorkspaceId } = useWorkspace()
   const cached = activeWorkspaceId ? getCachedWorkspaceAnalysis(activeWorkspaceId) : { data: null, isStale: true }
   const [analysis, setAnalysis] = useState<WorkspaceAnalysis | null>(cached.data)
@@ -95,7 +85,7 @@ export function ProjectWorkspace() {
       setAnalysis(data)
       setCachedWorkspaceAnalysis(workspaceId, data)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to load workspace analysis."
+      const msg = err instanceof Error ? err.message : t("repo.errLoad")
       const currentCache = getCachedWorkspaceAnalysis(workspaceId)
       if (!currentCache.data && !analysis) {
         setError(msg)
@@ -123,13 +113,13 @@ export function ProjectWorkspace() {
 
   const repoFullName = activeWorkspace
     ? `${activeWorkspace.owner}/${activeWorkspace.repository}`
-    : analysis?.repository.fullName ?? "No workspace selected"
+    : analysis?.repository.fullName ?? t("repo.noWorkspace")
   const branchName = activeWorkspace
     ? activeWorkspace.branch
     : analysis?.repository.branch ?? "—"
   const repoName = activeWorkspace
     ? activeWorkspace.repository
-    : analysis?.repository.repository ?? "Repository"
+    : analysis?.repository.repository ?? t("repo.repositoryFallback")
   const commitSha = analysis?.repository.commitSha
     ? (analysis.repository.commitSha.length > 7 ? analysis.repository.commitSha.slice(0, 7) : analysis.repository.commitSha)
     : activeWorkspace?.commitSha
@@ -150,21 +140,21 @@ export function ProjectWorkspace() {
             : "gray"
 
   const statusText = !activeWorkspaceId
-    ? "No workspace selected"
+    ? t("repo.noWorkspace")
     : isLoading
-      ? "Analyzing workspace..."
+      ? t("repo.analyzing")
       : error
-        ? "Analysis error"
+        ? t("repo.analysisError")
         : analysis?.summary.status === "Ready"
-          ? "Analysis ready"
+          ? t("repo.analysisReady")
           : analysis?.summary.status === "Partial"
-            ? "Analysis ready (partial)"
-            : "Analysis complete"
+            ? t("repo.analysisPartial")
+            : t("repo.analysisComplete")
 
-  const engineText = analysis?.summary.engine ?? "Roslyn workspace analysis"
-  const symbolsText = analysis ? analysis.summary.symbolsCount.toLocaleString() : "—"
-  const typesText = analysis ? analysis.summary.typesCount.toLocaleString() : "—"
-  const referencesText = analysis ? analysis.summary.referencesCount.toLocaleString() : "—"
+  const engineText = analysis?.summary.engine ?? t("repo.engineFallback")
+  const symbolsText = analysis ? fmt.number(analysis.summary.symbolsCount) : "—"
+  const typesText = analysis ? fmt.number(analysis.summary.typesCount) : "—"
+  const referencesText = analysis ? fmt.number(analysis.summary.referencesCount) : "—"
   const lastRunText = analysis ? formatRelativeTime(analysis.summary.analyzedAt) : "—"
   const steps = analysis?.summary.steps ?? []
 
@@ -176,9 +166,9 @@ export function ProjectWorkspace() {
   return (
     <PageContainer>
       <PageHeading
-        eyebrow="Project workspace"
+        eyebrow={t("repo.eyebrow")}
         title={repoFullName}
-        description="Structure, detected technologies and analyzer state derived from Roslyn workspace analysis of the master branch."
+        description={t("repo.description")}
         actions={
           <>
             <div className="flex items-center gap-1.5 rounded-[var(--radius-md)] border border-border bg-surface px-2.5 py-1.5 font-mono text-[12px] text-muted-foreground">
@@ -193,7 +183,7 @@ export function ProjectWorkspace() {
               disabled={!activeWorkspaceId || isLoading || isRefreshing}
             >
               <RotateCcw className={cn("h-3.5 w-3.5", (isLoading || isRefreshing) && "animate-spin")} />
-              Re-analyze
+              {t("repo.reanalyze")}
             </Button>
           </>
         }
@@ -210,15 +200,15 @@ export function ProjectWorkspace() {
             </div>
           </div>
           <div className="hidden h-8 w-px bg-border sm:block" />
-          <IndexStat label="Symbols" value={symbolsText} />
-          <IndexStat label="Types" value={typesText} />
-          <IndexStat label="References" value={referencesText} />
-          <IndexStat label="Last run" value={lastRunText} mono />
+          <IndexStat label={t("repo.symbols")} value={symbolsText} />
+          <IndexStat label={t("repo.types")} value={typesText} />
+          <IndexStat label={t("repo.references")} value={referencesText} />
+          <IndexStat label={t("repo.lastRun")} value={lastRunText} mono />
           <div className="ml-auto flex items-center gap-1.5">
             {steps.map((s) => (
-              <div key={s.label} className="flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5" title={s.label}>
+              <div key={s.label} className="flex items-center gap-1 rounded-full bg-success-soft px-2 py-0.5" title={srv(s.label)}>
                 <CircleCheck className="h-3 w-3 text-success" />
-                <span className="hidden font-mono text-[10.5px] text-success lg:inline">{s.label}</span>
+                <span className="hidden font-mono text-[10.5px] text-success lg:inline">{srv(s.label)}</span>
               </div>
             ))}
           </div>
@@ -228,7 +218,7 @@ export function ProjectWorkspace() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[300px_1fr]">
         {/* File tree */}
         <div>
-          <SectionHead title="Repository structure" />
+          <SectionHead title={t("repo.structure")} />
           <Panel className="overflow-hidden">
             <div className="flex items-center gap-2 border-b border-border bg-surface-2 px-3 py-2 font-mono text-[11px] text-subtle-foreground">
               <Folder className="h-3.5 w-3.5" />
@@ -242,7 +232,7 @@ export function ProjectWorkspace() {
                 ))
               ) : (
                 <div className="p-3 font-mono text-[11.5px] text-subtle-foreground">
-                  {isLoading ? "Loading repository files..." : error ? "Failed to load files" : "No files available"}
+                  {isLoading ? t("repo.loadingFiles") : error ? t("repo.failedFiles") : t("repo.noFiles")}
                 </div>
               )}
             </div>
@@ -252,7 +242,7 @@ export function ProjectWorkspace() {
         <div className="flex flex-col gap-6">
           {/* Solution projects */}
           <section>
-            <SectionHead title="Solution & projects" count={projects.length} />
+            <SectionHead title={t("repo.solution")} count={projects.length} />
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {projects.map((p) => {
                 const tone = layerToneMap[p.layer] ?? "neutral"
@@ -260,7 +250,7 @@ export function ProjectWorkspace() {
                   <Panel key={p.name} className="p-3.5">
                     <div className="flex items-start justify-between">
                       <LayerIcon layer={p.layer} tone={tone} />
-                      <span className="font-mono text-[11px] text-subtle-foreground">{p.fileCount} files</span>
+                      <span className="font-mono text-[11px] text-subtle-foreground">{t("common.files", { count: p.fileCount })}</span>
                     </div>
                     <div className="mt-3 font-mono text-[13px] font-medium text-foreground">{p.name}</div>
                     <div className="mt-0.5 flex items-center gap-2 text-[11.5px] text-muted-foreground">
@@ -273,7 +263,7 @@ export function ProjectWorkspace() {
               })}
               {projects.length === 0 && !isLoading && (
                 <Panel className="col-span-full p-4 font-mono text-[12px] text-subtle-foreground">
-                  No solution projects discovered
+                  {t("repo.noProjects")}
                 </Panel>
               )}
             </div>
@@ -281,30 +271,30 @@ export function ProjectWorkspace() {
 
           {/* Technologies */}
           <section>
-            <SectionHead title="Detected technologies" count={technologies.length} />
+            <SectionHead title={t("repo.technologies")} count={technologies.length} />
             <Panel className="flex flex-wrap gap-2 p-4">
-              {technologies.map((t) => {
-                const tone = techToneMap[t.kind] ?? "neutral"
+              {technologies.map((tech) => {
+                const tone = techToneMap[tech.kind] ?? "neutral"
                 return (
                   <div
-                    key={t.name}
+                    key={tech.name}
                     className="flex items-center gap-2 rounded-[var(--radius-md)] border border-border bg-surface-2 py-1.5 pl-2.5 pr-3"
                   >
                     <span className={cn("h-1.5 w-1.5 rounded-full", tone === "blue" ? "bg-primary" : "bg-subtle-foreground")} />
-                    <span className="text-[12.5px] font-medium text-foreground">{t.name}</span>
-                    {t.version && <span className="font-mono text-[11px] text-subtle-foreground">{t.version}</span>}
+                    <span className="text-[12.5px] font-medium text-foreground">{tech.name}</span>
+                    {tech.version && <span className="font-mono text-[11px] text-subtle-foreground">{tech.version}</span>}
                   </div>
                 )
               })}
               {technologies.length === 0 && !isLoading && (
-                <span className="font-mono text-[12px] text-subtle-foreground">No technologies detected</span>
+                <span className="font-mono text-[12px] text-subtle-foreground">{t("repo.noTechnologies")}</span>
               )}
             </Panel>
           </section>
 
           {/* Endpoints */}
           <section>
-            <SectionHead title="Controllers & endpoints" count={endpoints.length} />
+            <SectionHead title={t("repo.endpoints")} count={endpoints.length} />
             <Panel className="overflow-hidden">
               {endpoints.map((e, i) => (
                 <div
@@ -324,7 +314,7 @@ export function ProjectWorkspace() {
                 </div>
               ))}
               {endpoints.length === 0 && !isLoading && (
-                <div className="px-4 py-3 font-mono text-[12px] text-subtle-foreground">No controller endpoints discovered</div>
+                <div className="px-4 py-3 font-mono text-[12px] text-subtle-foreground">{t("repo.noEndpoints")}</div>
               )}
             </Panel>
           </section>
@@ -332,16 +322,16 @@ export function ProjectWorkspace() {
           {/* Recent tasks */}
           <section>
             <SectionHead
-              title="Recent tasks in this repository"
+              title={t("repo.recentTasks")}
               action={
                 <Link to="/tasks" className="text-[12px] font-medium text-primary hover:underline">
-                  All tasks
+                  {t("repo.allTasks")}
                 </Link>
               }
             />
             <Panel className="overflow-hidden">
               <div className="px-4 py-3 font-mono text-[12px] text-subtle-foreground">
-                No recent tasks in this repository
+                {t("repo.noRecentTasks")}
               </div>
             </Panel>
           </section>

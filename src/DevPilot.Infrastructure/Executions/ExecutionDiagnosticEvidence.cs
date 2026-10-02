@@ -1,5 +1,6 @@
 using DevPilot.Application.DeveloperAgent.Models;
 using DevPilot.Application.Executions.Ports;
+using DevPilot.Infrastructure.DeveloperAgent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -12,6 +13,24 @@ public sealed record CompilerFailureEvidence(
     string FailureFingerprint,
     IReadOnlyList<string> DiagnosticLines,
     IReadOnlyList<DiagnosticSourceLocation> Locations);
+
+public sealed record FileScopedCompilerDiagnostics(
+    IReadOnlyList<string> DiagnosticLines,
+    IReadOnlyList<DiagnosticSourceLocation> Locations);
+
+public sealed record CompilerRepairSelection(
+    string? FilePath,
+    IReadOnlyList<string> ImplicatedFiles,
+    string Reason);
+
+public sealed record TestRepairSelection(
+    IReadOnlyList<string> FilePaths,
+    string Reason,
+    string? FailingTestName = null,
+    string? ErrorSummary = null,
+    IReadOnlyList<string>? EvidenceLines = null);
+
+public sealed record MissingContractReference(string TypeName, string? MemberName = null);
 
 public sealed record TestFailureEvidence(
     string FailureFingerprint,
@@ -34,6 +53,9 @@ public static class ExecutionDiagnosticEvidence
     private const int MaxCompilerDiagnostics = 20;
     private const int MaxTestEvidenceLines = 80;
     private const int MaxTestEvidenceChars = 12000;
+    public const int MaxScopedDiagnosticsPerFile = 8;
+    public const int MaxSanitizedActivityDiagnosticLines = 5;
+    public const int MaxSanitizedActivityDiagnosticChars = 240;
 
     private const string SourceExtensionPattern = @"(?:cs|fs|vb|ts|tsx|js|jsx|py|java|kt|go|rs)";
 
@@ -256,11 +278,380 @@ public static class ExecutionDiagnosticEvidence
             .ToList();
     }
 
-    public static IReadOnlyList<string> SelectTestRepairFiles(
-        TestFailureEvidence evidence,
-        IEnumerable<string> modifiedFiles)
+    public static FileScopedCompilerDiagnostics ScopeToFile(
+        CompilerFailureEvidence evidence,
+        string filePath,
+        int maxLines = MaxScopedDiagnosticsPerFile)
+    {
+        if (evidence == null || string.IsNullOrWhiteSpace(filePath))
+        {
+            return new FileScopedCompilerDiagnostics(Array.Empty<string>(), Array.Empty<DiagnosticSourceLocation>());
+        }
+
+        var target = new[] { filePath };
+        var locations = evidence.Locations
+            .Where(location => MatchModifiedFile(location.FilePath, target) != null)
+            .Take(Math.Max(1, maxLines))
+            .ToList();
+
+        var lines = new List<string>();
+        foreach (var line in evidence.DiagnosticLines)
+        {
+            if (!DiagnosticLineBelongsToFile(line, filePath))
+            {
+                continue;
+            }
+
+            lines.Add(line);
+            if (lines.Count >= maxLines)
+            {
+                break;
+            }
+        }
+
+        return new FileScopedCompilerDiagnostics(lines, locations);
+    }
+
+    public static bool IsCompilerDiagnosticLine(string diagnosticLine)
+    {
+        if (string.IsNullOrWhiteSpace(diagnosticLine))
+        {
+            return false;
+        }
+
+        return ParenthesizedDiagnosticRegex.IsMatch(diagnosticLine) ||
+               ColonDiagnosticRegex.IsMatch(diagnosticLine);
+    }
+
+    public static bool DiagnosticLineBelongsToFile(string diagnosticLine, string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(diagnosticLine) || string.IsNullOrWhiteSpace(filePath))
+        {
+            return false;
+        }
+
+        var match = ParenthesizedDiagnosticRegex.Match(diagnosticLine);
+        if (!match.Success)
+        {
+            match = ColonDiagnosticRegex.Match(diagnosticLine);
+        }
+
+        if (match.Success)
+        {
+            return MatchModifiedFile(match.Groups["path"].Value, new[] { filePath }) != null;
+        }
+
+        var normalizedTarget = NormalizePath(filePath);
+        var fileName = Path.GetFileName(normalizedTarget);
+        var normalizedLine = diagnosticLine.Replace('\\', '/');
+        return normalizedLine.Contains(normalizedTarget, StringComparison.OrdinalIgnoreCase) ||
+               (!string.IsNullOrWhiteSpace(fileName) &&
+                normalizedLine.Contains(fileName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static IReadOnlyList<string> ListImplicatedCompilerFiles(
+        CompilerFailureEvidence evidence,
+        IEnumerable<string>? modifiedFiles = null)
+    {
+        var modified = (modifiedFiles ?? Array.Empty<string>()).ToList();
+        var ordered = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var location in evidence.Locations)
+        {
+            if (string.IsNullOrWhiteSpace(location.FilePath))
+            {
+                continue;
+            }
+
+            var matched = modified.Count > 0
+                ? MatchModifiedFile(location.FilePath, modified)
+                : null;
+            var candidate = matched ?? NormalizePath(location.FilePath);
+            if (string.IsNullOrWhiteSpace(candidate) || !seen.Add(candidate))
+            {
+                continue;
+            }
+
+            ordered.Add(candidate);
+        }
+
+        return ordered;
+    }
+
+    public static CompilerRepairSelection SelectNextCompilerRepairTarget(
+        CompilerFailureEvidence evidence,
+        IEnumerable<string> modifiedFiles,
+        IEnumerable<string>? attemptedForCurrentFailureSet = null,
+        IReadOnlyDictionary<string, string>? touchedFileContents = null)
     {
         var modified = modifiedFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var attempted = new HashSet<string>(
+            (attemptedForCurrentFailureSet ?? Array.Empty<string>()).Where(path => !string.IsNullOrWhiteSpace(path)),
+            StringComparer.OrdinalIgnoreCase);
+        var implicated = ListImplicatedCompilerFiles(evidence, modified);
+
+        var matchedImplicated = implicated
+            .Select(path => MatchModifiedFile(path, modified) ?? (modified.Contains(path, StringComparer.OrdinalIgnoreCase) ? path : null))
+            .Where(path => path != null)
+            .Cast<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var contractOwner = TrySelectUniqueSharedContractOwner(evidence, modified, touchedFileContents);
+        if (!string.IsNullOrWhiteSpace(contractOwner) && !attempted.Contains(contractOwner))
+        {
+            return new CompilerRepairSelection(
+                contractOwner,
+                matchedImplicated.Count > 0 ? matchedImplicated : new[] { contractOwner },
+                "UniqueContractOwner");
+        }
+
+        var unattemptedMatched = matchedImplicated
+            .Where(path => !attempted.Contains(path))
+            .ToList();
+        if (unattemptedMatched.Count > 0)
+        {
+            return new CompilerRepairSelection(
+                unattemptedMatched[0],
+                matchedImplicated,
+                "NextUnattemptedFile");
+        }
+
+        return new CompilerRepairSelection(
+            null,
+            matchedImplicated,
+            matchedImplicated.Count == 0 ? "Uncorrelated" : "AllImplicatedFilesExhausted");
+    }
+
+    public static string? TrySelectUniqueSharedContractOwner(
+        CompilerFailureEvidence evidence,
+        IEnumerable<string> modifiedFiles,
+        IReadOnlyDictionary<string, string>? touchedFileContents)
+    {
+        if (evidence == null || touchedFileContents == null || touchedFileContents.Count == 0)
+        {
+            return null;
+        }
+
+        var shared = TryGetSharedMissingContract(evidence.DiagnosticLines);
+        if (shared == null)
+        {
+            return null;
+        }
+
+        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var modified in modifiedFiles.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var (path, content) in touchedFileContents)
+            {
+                if (MatchModifiedFile(path, new[] { modified }) != null ||
+                    string.Equals(path, modified, StringComparison.OrdinalIgnoreCase))
+                {
+                    sources[modified] = content;
+                    break;
+                }
+            }
+        }
+
+        return PlannedFileDependencyResolver.FindUniqueDeclarationOwner(shared.TypeName, sources);
+    }
+
+    public static MissingContractReference? TryGetSharedMissingContract(IEnumerable<string>? diagnosticLines)
+    {
+        if (diagnosticLines == null)
+        {
+            return null;
+        }
+
+        var parsed = diagnosticLines
+            .Select(TryParseMissingContract)
+            .Where(item => item != null)
+            .Cast<MissingContractReference>()
+            .ToList();
+        if (parsed.Count < 2)
+        {
+            return null;
+        }
+
+        var typeName = parsed[0].TypeName;
+        if (parsed.Any(item => !string.Equals(item.TypeName, typeName, StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        var members = parsed
+            .Select(item => item.MemberName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (members.Count > 1)
+        {
+            return null;
+        }
+
+        return new MissingContractReference(typeName, members.Count == 1 ? members[0] : parsed[0].MemberName);
+    }
+
+    public static MissingContractReference? TryParseMissingContract(string? diagnosticLine)
+    {
+        if (string.IsNullOrWhiteSpace(diagnosticLine))
+        {
+            return null;
+        }
+
+        var propertyMatch = Regex.Match(
+            diagnosticLine,
+            @"Property\s+'([A-Za-z_][\w]*)'\s+does not exist on type\s+'([A-Za-z_][\w]*)'",
+            RegexOptions.IgnoreCase);
+        if (propertyMatch.Success)
+        {
+            return new MissingContractReference(propertyMatch.Groups[2].Value, propertyMatch.Groups[1].Value);
+        }
+
+        var objectLiteralMatch = Regex.Match(
+            diagnosticLine,
+            @"'([A-Za-z_][\w]*)'\s+does not exist in type\s+'([A-Za-z_][\w]*)'",
+            RegexOptions.IgnoreCase);
+        if (objectLiteralMatch.Success)
+        {
+            return new MissingContractReference(objectLiteralMatch.Groups[2].Value, objectLiteralMatch.Groups[1].Value);
+        }
+
+        var definitionMatch = Regex.Match(
+            diagnosticLine,
+            @"'([A-Za-z_][\w]*)'\s+does not contain a definition for\s+'([A-Za-z_][\w]*)'",
+            RegexOptions.IgnoreCase);
+        if (definitionMatch.Success)
+        {
+            return new MissingContractReference(definitionMatch.Groups[1].Value, definitionMatch.Groups[2].Value);
+        }
+
+        return null;
+    }
+
+    public static IReadOnlyDictionary<string, string> LoadTouchedSourceSnapshots(
+        string? workspacePath,
+        IEnumerable<string> modifiedFiles,
+        int maxFiles = 20,
+        int maxCharsPerFile = 16_384)
+    {
+        var snapshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(workspacePath) || modifiedFiles == null)
+        {
+            return snapshots;
+        }
+
+        foreach (var filePath in modifiedFiles.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (snapshots.Count >= maxFiles || string.IsNullOrWhiteSpace(filePath))
+            {
+                break;
+            }
+
+            var content = TryReadBoundedEvidenceText(filePath, workspacePath, fileContents: null);
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                continue;
+            }
+
+            snapshots[filePath] = content.Length > maxCharsPerFile ? content[..maxCharsPerFile] : content;
+        }
+
+        return snapshots;
+    }
+
+    public static IReadOnlyList<string> SanitizeDiagnosticLinesForActivity(
+        IEnumerable<string>? lines,
+        string? workspaceRoot = null,
+        int maxLines = MaxSanitizedActivityDiagnosticLines,
+        int maxCharsPerLine = MaxSanitizedActivityDiagnosticChars)
+    {
+        var sanitized = new List<string>();
+        if (lines == null)
+        {
+            return sanitized;
+        }
+
+        foreach (var raw in lines)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                continue;
+            }
+
+            var line = raw.Trim();
+            if (!IsCompilerDiagnosticLine(line) &&
+                !Regex.IsMatch(line, @"\b(?:error|fatal)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(workspaceRoot))
+            {
+                line = MakeRepositoryRelative(line, workspaceRoot);
+                var normalizedRoot = NormalizePath(workspaceRoot).TrimEnd('/');
+                if (!string.IsNullOrWhiteSpace(normalizedRoot))
+                {
+                    line = line.Replace(normalizedRoot + "/", string.Empty, StringComparison.OrdinalIgnoreCase);
+                    line = line.Replace(normalizedRoot, string.Empty, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+
+            if (line.Length > maxCharsPerLine)
+            {
+                line = line[..maxCharsPerLine];
+            }
+
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            sanitized.Add(line);
+            if (sanitized.Count >= maxLines)
+            {
+                break;
+            }
+        }
+
+        return sanitized;
+    }
+
+    public static IReadOnlyList<string> BuildVerificationEligiblePlannedFiles(
+        IEnumerable<string>? actuallyModifiedFiles,
+        IEnumerable<string>? resolvedNoChangeFiles)
+    {
+        var eligible = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in (actuallyModifiedFiles ?? Array.Empty<string>()).Concat(resolvedNoChangeFiles ?? Array.Empty<string>()))
+        {
+            if (string.IsNullOrWhiteSpace(file) || !seen.Add(file))
+            {
+                continue;
+            }
+
+            eligible.Add(file);
+        }
+
+        return eligible;
+    }
+
+    public static IReadOnlyList<string> SelectTestRepairFiles(
+        TestFailureEvidence evidence,
+        IEnumerable<string> modifiedFiles,
+        string? workspacePath = null,
+        IReadOnlyDictionary<string, string>? fileContents = null) =>
+        SelectTestRepairTarget(evidence, modifiedFiles, workspacePath, fileContents).FilePaths;
+
+    public static TestRepairSelection SelectTestRepairTarget(
+        TestFailureEvidence evidence,
+        IEnumerable<string> modifiedFiles,
+        string? workspacePath = null,
+        IReadOnlyDictionary<string, string>? fileContents = null)
+    {
+        var modified = modifiedFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var evidenceLines = SanitizeTestEvidenceForActivity(evidence);
         var explicitMatches = evidence.Locations
             .Select(location => MatchModifiedFile(location.FilePath, modified))
             .Where(path => path != null)
@@ -282,7 +673,12 @@ public static class ExecutionDiagnosticEvidence
                 selected.Add(relatedAcrossBoundary);
             }
 
-            return selected;
+            return new TestRepairSelection(
+                selected,
+                "TouchedFileFromStack",
+                evidence.TestName,
+                evidence.ErrorSummary,
+                evidenceLines);
         }
 
         var testClassName = GetTestClassName(evidence.TestName);
@@ -293,15 +689,604 @@ public static class ExecutionDiagnosticEvidence
                 string.Equals(Path.GetFileNameWithoutExtension(path), testClassName, StringComparison.OrdinalIgnoreCase));
             if (testFile != null)
             {
-                return new[] { testFile };
+                return new TestRepairSelection(
+                    new[] { testFile },
+                    "TouchedTestClassName",
+                    evidence.TestName,
+                    evidence.ErrorSummary,
+                    evidenceLines);
             }
+        }
+
+        var helperFromFailingTest = TrySelectTouchedTestHelper(
+            evidence,
+            modified,
+            workspacePath,
+            fileContents);
+        if (helperFromFailingTest != null)
+        {
+            return helperFromFailingTest;
+        }
+
+        var productionFromUntouchedTest = TrySelectProductionFromUntouchedTest(
+            evidence,
+            modified,
+            workspacePath,
+            fileContents);
+        if (productionFromUntouchedTest.FilePaths.Count > 0)
+        {
+            return productionFromUntouchedTest;
+        }
+
+        var productionViaHelper = TrySelectProductionViaTestHelper(
+            evidence,
+            modified,
+            workspacePath,
+            fileContents);
+        if (productionViaHelper.FilePaths.Count > 0)
+        {
+            return productionViaHelper;
         }
 
         var mentionedFile = modified.FirstOrDefault(path =>
             evidence.RelevantLines.Any(line =>
                 line.Contains(Path.GetFileName(path), StringComparison.OrdinalIgnoreCase)));
 
-        return mentionedFile != null ? new[] { mentionedFile } : Array.Empty<string>();
+        return mentionedFile != null
+            ? new TestRepairSelection(
+                new[] { mentionedFile },
+                "MentionedModifiedFile",
+                evidence.TestName,
+                evidence.ErrorSummary,
+                evidenceLines)
+            : new TestRepairSelection(
+                Array.Empty<string>(),
+                "Uncorrelated",
+                evidence.TestName,
+                evidence.ErrorSummary,
+                evidenceLines);
+    }
+
+    public static IReadOnlyList<string> SanitizeTestEvidenceForActivity(
+        TestFailureEvidence? evidence,
+        int maxLines = MaxSanitizedActivityDiagnosticLines,
+        int maxCharsPerLine = MaxSanitizedActivityDiagnosticChars)
+    {
+        var lines = new List<string>();
+        if (evidence == null)
+        {
+            return lines;
+        }
+
+        if (!string.IsNullOrWhiteSpace(evidence.TestName))
+        {
+            lines.Add(BoundActivityLine($"Failed test: {evidence.TestName}", maxCharsPerLine));
+        }
+
+        if (!string.IsNullOrWhiteSpace(evidence.ErrorSummary))
+        {
+            lines.Add(BoundActivityLine($"Error: {evidence.ErrorSummary}", maxCharsPerLine));
+        }
+
+        foreach (var raw in evidence.RelevantLines ?? Array.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(raw) ||
+                (!StackFrameRegex.IsMatch(raw) &&
+                 !PythonStackLocationRegex.IsMatch(raw) &&
+                 !raw.Contains(" at ", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            lines.Add(BoundActivityLine(raw.Trim(), maxCharsPerLine));
+            if (lines.Count >= maxLines)
+            {
+                break;
+            }
+        }
+
+        return lines.Take(maxLines).ToList();
+    }
+
+    private static TestRepairSelection? TrySelectTouchedTestHelper(
+        TestFailureEvidence evidence,
+        IReadOnlyList<string> candidateFiles,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var failingTestPath = evidence.Locations
+            .Select(location => location.FilePath)
+            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && ProjectGraphHelper.IsTestFileCandidate(path));
+        if (string.IsNullOrWhiteSpace(failingTestPath))
+        {
+            return null;
+        }
+
+        var testSource = TryReadBoundedEvidenceText(failingTestPath, workspacePath, fileContents);
+        if (string.IsNullOrWhiteSpace(testSource))
+        {
+            return null;
+        }
+
+        var relativeFailingTest = !string.IsNullOrWhiteSpace(workspacePath)
+            ? MakeRepositoryRelative(failingTestPath, workspacePath)
+            : NormalizePath(failingTestPath);
+        if (fileContents != null)
+        {
+            var contentMatch = fileContents.Keys.FirstOrDefault(path =>
+                MatchModifiedFile(failingTestPath, new[] { path }) != null);
+            if (!string.IsNullOrWhiteSpace(contentMatch))
+            {
+                relativeFailingTest = contentMatch;
+            }
+        }
+
+        var helpers = ResolveHelperCandidates(
+            string.IsNullOrWhiteSpace(relativeFailingTest) ? failingTestPath : relativeFailingTest,
+            testSource,
+            workspacePath,
+            fileContents);
+        if (helpers.Count == 0)
+        {
+            return null;
+        }
+
+        var matched = helpers
+            .Select(helper => MatchModifiedFile(helper, candidateFiles))
+            .Where(path => path != null &&
+                           MatchModifiedFile(failingTestPath, new[] { path }) == null)
+            .Cast<string>()
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (matched.Count == 0)
+        {
+            return null;
+        }
+
+        if (matched.Count > 1)
+        {
+            return new TestRepairSelection(
+                Array.Empty<string>(),
+                "Uncorrelated",
+                evidence.TestName,
+                evidence.ErrorSummary,
+                SanitizeTestEvidenceForActivity(evidence));
+        }
+
+        return new TestRepairSelection(
+            matched,
+            "TouchedTestHelper",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+    }
+
+    private static TestRepairSelection TrySelectProductionFromUntouchedTest(
+        TestFailureEvidence evidence,
+        IReadOnlyList<string> modifiedFiles,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var empty = new TestRepairSelection(
+            Array.Empty<string>(),
+            "Uncorrelated",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+
+        var failingTestPath = evidence.Locations
+            .Select(location => location.FilePath)
+            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && ProjectGraphHelper.IsTestFileCandidate(path));
+
+        if (string.IsNullOrWhiteSpace(failingTestPath))
+        {
+            return empty;
+        }
+
+        if (MatchModifiedFile(failingTestPath, modifiedFiles) != null)
+        {
+            return empty;
+        }
+
+        var productionModified = modifiedFiles
+            .Where(path => !ProjectGraphHelper.IsTestFileCandidate(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (productionModified.Count == 0)
+        {
+            return empty;
+        }
+
+        var testSource = TryReadBoundedEvidenceText(failingTestPath, workspacePath, fileContents);
+        var combined = string.Join('\n', new[]
+        {
+            testSource,
+            evidence.ErrorSummary,
+            string.Join('\n', evidence.RelevantLines ?? Array.Empty<string>())
+        });
+
+        var scored = productionModified
+            .Select(path => (Path: path, Score: ScoreProductionImplication(path, combined, testSource)))
+            .Where(item => item.Score >= 2)
+            .OrderByDescending(item => item.Score)
+            .ThenBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (scored.Count == 0 || scored.Count > 2)
+        {
+            return empty;
+        }
+
+        return new TestRepairSelection(
+            scored.Select(item => item.Path).ToList(),
+            "TouchedProductionFromUntouchedTest",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+    }
+
+    private static TestRepairSelection TrySelectProductionViaTestHelper(
+        TestFailureEvidence evidence,
+        IReadOnlyList<string> modifiedFiles,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var empty = new TestRepairSelection(
+            Array.Empty<string>(),
+            "Uncorrelated",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+
+        var failingTestPath = evidence.Locations
+            .Select(location => location.FilePath)
+            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && ProjectGraphHelper.IsTestFileCandidate(path));
+        if (string.IsNullOrWhiteSpace(failingTestPath) ||
+            MatchModifiedFile(failingTestPath, modifiedFiles) != null)
+        {
+            return empty;
+        }
+
+        var productionModified = modifiedFiles
+            .Where(path => !ProjectGraphHelper.IsTestFileCandidate(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (productionModified.Count == 0)
+        {
+            return empty;
+        }
+
+        var testSource = TryReadBoundedEvidenceText(failingTestPath, workspacePath, fileContents);
+        if (string.IsNullOrWhiteSpace(testSource))
+        {
+            return empty;
+        }
+
+        var helperCandidates = ResolveHelperCandidates(failingTestPath, testSource, workspacePath, fileContents);
+        if (helperCandidates.Count == 0)
+        {
+            return empty;
+        }
+
+        var implicated = new List<string>();
+        foreach (var helper in helperCandidates)
+        {
+            var helperSource = TryReadBoundedEvidenceText(helper, workspacePath, fileContents);
+            if (string.IsNullOrWhiteSpace(helperSource))
+            {
+                continue;
+            }
+
+            var hits = new List<string>();
+            foreach (var production in productionModified)
+            {
+                if (HelperUniquelyReferencesProduction(
+                        helper,
+                        helperSource,
+                        production,
+                        productionModified,
+                        workspacePath,
+                        fileContents))
+                {
+                    hits.Add(production);
+                }
+            }
+
+            if (hits.Count == 1)
+            {
+                implicated.Add(hits[0]);
+            }
+        }
+
+        var unique = implicated.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (unique.Count == 0 || unique.Count > 2)
+        {
+            return empty;
+        }
+
+        return new TestRepairSelection(
+            unique,
+            "TouchedProductionViaTestHelper",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+    }
+
+    private static IReadOnlyList<string> ResolveHelperCandidates(
+        string failingTestPath,
+        string testSource,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var available = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (fileContents != null)
+        {
+            foreach (var (path, source) in fileContents)
+            {
+                if (!string.IsNullOrWhiteSpace(source))
+                {
+                    available[NormalizePath(path)] = source;
+                }
+            }
+        }
+
+        CollectSiblingHelperSources(failingTestPath, workspacePath, available);
+
+        var planned = available.Keys
+            .Where(path => !string.Equals(NormalizePath(path), NormalizePath(failingTestPath), StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var helpers = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var localRef in PlannedFileDependencyResolver.ResolveDirectLocalReferences(
+                     failingTestPath, testSource, planned))
+        {
+            if (IsHelperOrFixturePath(localRef) && seen.Add(localRef))
+            {
+                helpers.Add(localRef);
+            }
+        }
+
+        foreach (var owner in PlannedFileDependencyResolver.ResolveUniqueCsharpTypeOwners(
+                     failingTestPath, testSource, available))
+        {
+            if (IsHelperOrFixturePath(owner) && seen.Add(owner))
+            {
+                helpers.Add(owner);
+            }
+        }
+
+        return helpers
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Take(2)
+            .ToList();
+    }
+
+    private static void CollectSiblingHelperSources(
+        string failingTestPath,
+        string? workspacePath,
+        IDictionary<string, string> available)
+    {
+        if (string.IsNullOrWhiteSpace(workspacePath))
+        {
+            return;
+        }
+
+        var relativeTest = MakeRepositoryRelative(failingTestPath, workspacePath);
+        var directory = Path.GetDirectoryName(relativeTest)?.Replace('\\', '/') ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return;
+        }
+
+        string resolvedDir;
+        try
+        {
+            resolvedDir = WorktreeEditApplier.ValidateAndResolvePath(workspacePath, directory);
+        }
+        catch
+        {
+            return;
+        }
+
+        if (!Directory.Exists(resolvedDir))
+        {
+            return;
+        }
+
+        foreach (var fullPath in Directory.GetFiles(resolvedDir)
+                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                     .Take(16))
+        {
+            string relative;
+            try
+            {
+                relative = NormalizePath(Path.GetRelativePath(workspacePath, fullPath));
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (!IsHelperOrFixturePath(relative) || available.ContainsKey(relative))
+            {
+                continue;
+            }
+
+            try
+            {
+                var info = new FileInfo(fullPath);
+                if (!info.Exists || info.Length <= 0 || info.Length > 16_384)
+                {
+                    continue;
+                }
+
+                var bytes = File.ReadAllBytes(fullPath);
+                if (WorktreeEditApplier.IsBinaryContent(bytes))
+                {
+                    continue;
+                }
+
+                var content = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
+                if (!string.IsNullOrWhiteSpace(content))
+                {
+                    available[relative] = content;
+                }
+            }
+            catch
+            {
+                // Best-effort helper discovery only.
+            }
+        }
+    }
+
+    private static bool HelperUniquelyReferencesProduction(
+        string helperPath,
+        string helperSource,
+        string productionPath,
+        IReadOnlyList<string> productionModified,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        if (PlannedFileDependencyResolver.HasDirectLocalReference(
+                helperPath,
+                helperSource,
+                productionPath,
+                productionModified))
+        {
+            return true;
+        }
+
+        var productionSources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in productionModified)
+        {
+            var source = TryReadBoundedEvidenceText(path, workspacePath, fileContents);
+            if (!string.IsNullOrWhiteSpace(source))
+            {
+                productionSources[path] = source;
+            }
+        }
+
+        if (PlannedFileDependencyResolver.ResolveUniqueCsharpTypeOwners(
+                helperPath,
+                helperSource,
+                productionSources)
+            .Any(path => string.Equals(path, productionPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(productionPath);
+        return IsSignificantIdentifier(stem) &&
+               ContainsIdentifier(helperSource, stem) &&
+               productionModified.Count(path =>
+                   string.Equals(Path.GetFileNameWithoutExtension(path), stem, StringComparison.OrdinalIgnoreCase)) == 1;
+    }
+
+    private static bool IsHelperOrFixturePath(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        return fileName.Contains("Factory", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Contains("Fixture", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Contains("Helper", StringComparison.OrdinalIgnoreCase) ||
+               ProjectGraphHelper.IsTestFileCandidate(path);
+    }
+
+    private static int ScoreProductionImplication(string productionPath, string combinedEvidence, string? testSource)
+    {
+        var score = 0;
+        var fileName = Path.GetFileName(productionPath);
+        var stem = Path.GetFileNameWithoutExtension(productionPath);
+        var normalizedPath = NormalizePath(productionPath);
+
+        if (!string.IsNullOrWhiteSpace(fileName) &&
+            combinedEvidence.Contains(fileName, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 2;
+        }
+
+        if (!string.IsNullOrWhiteSpace(normalizedPath) &&
+            combinedEvidence.Contains(normalizedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 3;
+        }
+
+        if (IsSignificantIdentifier(stem) &&
+            !string.IsNullOrWhiteSpace(testSource) &&
+            ContainsIdentifier(testSource, stem))
+        {
+            score += 2;
+        }
+
+        return score;
+    }
+
+    private static bool IsSignificantIdentifier(string stem) =>
+        !string.IsNullOrWhiteSpace(stem) && stem.Length > 3;
+
+    private static bool ContainsIdentifier(string text, string identifier)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(identifier))
+        {
+            return false;
+        }
+
+        return Regex.IsMatch(
+            text,
+            $@"(?<![A-Za-z0-9_]){Regex.Escape(identifier)}(?![A-Za-z0-9_])",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    private static string? TryReadBoundedEvidenceText(
+        string diagnosticPath,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var relative = string.IsNullOrWhiteSpace(workspacePath)
+            ? NormalizePath(diagnosticPath)
+            : MakeRepositoryRelative(diagnosticPath, workspacePath);
+
+        if (!string.IsNullOrWhiteSpace(relative) &&
+            fileContents != null &&
+            fileContents.TryGetValue(relative, out var provided) &&
+            !string.IsNullOrWhiteSpace(provided))
+        {
+            return provided.Length > 16_384 ? provided[..16_384] : provided;
+        }
+
+        if (string.IsNullOrWhiteSpace(workspacePath) || string.IsNullOrWhiteSpace(relative))
+        {
+            return null;
+        }
+
+        try
+        {
+            var resolved = WorktreeEditApplier.ValidateAndResolvePath(workspacePath, relative);
+            if (!File.Exists(resolved))
+            {
+                return null;
+            }
+
+            var bytes = File.ReadAllBytes(resolved);
+            if (bytes.Length == 0 || bytes.Length > 16_384 || WorktreeEditApplier.IsBinaryContent(bytes))
+            {
+                return null;
+            }
+
+            var content = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
+            return string.IsNullOrWhiteSpace(content) ? null : content;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string BoundActivityLine(string line, int maxChars)
+    {
+        var trimmed = line.Trim();
+        return trimmed.Length <= maxChars ? trimmed : trimmed[..maxChars];
     }
 
     private static List<string> ExtractErrorLines(IReadOnlyList<string> relevant)

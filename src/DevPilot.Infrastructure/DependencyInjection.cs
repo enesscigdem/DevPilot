@@ -11,6 +11,7 @@ using DevPilot.Application.RepositoryWorkspaces.Commands.CreateRepositoryWorkspa
 using DevPilot.Application.RepositoryWorkspaces.Ports;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceAnalysis;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetRepositoryWorkspaceArchitecture;
+using DevPilot.Application.RepositoryWorkspaces.Queries.GetWorkspaceInsights;
 using DevPilot.Application.RepositoryWorkspaces.Queries.GetWorkspaceOverview;
 using DevPilot.Infrastructure.RepositoryInspection;
 using DevPilot.Infrastructure.RepositoryWorkspaces;
@@ -30,6 +31,7 @@ using DevPilot.Application.Executions.Commands.StartExecution;
 using DevPilot.Application.Executions.Commands.RetryExecution;
 using DevPilot.Application.Executions.Commands.MergeExecution;
 using DevPilot.Application.Executions.Options;
+using DevPilot.Application.Executions.Services;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.Executions.Queries.GetExecutionById;
 using DevPilot.Application.Executions.Queries.GetExecutionReview;
@@ -112,6 +114,12 @@ public static class DependencyInjection
         services.AddScoped<IExecutionRepository, EfExecutionRepository>();
         services.AddScoped<IExecutionListReader, EfExecutionListReader>();
         services.AddScoped<IExecutionWorkspaceManager, GitExecutionWorkspaceManager>();
+        // Single authoritative reliability configuration shared by the processor, DeveloperAgent and impact analysis.
+        services.AddSingleton(_ => ExecutionReliabilityOptionsFactory.Create(configuration));
+        services.AddSingleton(
+            configuration.GetSection(AiPricingOptions.SectionName).Get<AiPricingOptions>() ?? new AiPricingOptions());
+        services.AddScoped<IExecutionVerificationSnapshotStore, EfExecutionVerificationSnapshotStore>();
+        services.AddScoped<IExecutionVerificationSnapshotRecorder, ExecutionVerificationSnapshotRecorder>();
         services.AddScoped<IExecutionProcessor, GitWorkspaceExecutionProcessor>();
         services.AddScoped<IExecutionDispatcher, HangfireExecutionDispatcher>();
         services.AddScoped<IWorktreeEditApplier, WorktreeEditApplier>();
@@ -162,11 +170,14 @@ public static class DependencyInjection
             configuration.GetSection(RepositoryCloneOptions.SectionName));
 
         services.AddScoped<IRepositoryCloneService, RepositoryCloneService>();
+        services.AddScoped<IRepositoryFreshnessService, GitRepositoryFreshnessService>();
         services.AddScoped<ICreateRepositoryWorkspaceCommandHandler, CreateRepositoryWorkspaceCommandHandler>();
         services.AddScoped<IRepositoryStructureScanner, RepositoryStructureScanner>();
         services.AddScoped<IGetRepositoryWorkspaceAnalysisQueryHandler, GetRepositoryWorkspaceAnalysisQueryHandler>();
         services.AddScoped<IGetRepositoryWorkspaceArchitectureQueryHandler, GetRepositoryWorkspaceArchitectureQueryHandler>();
         services.AddScoped<IWorkspaceOverviewReader, EfWorkspaceOverviewReader>();
+        services.AddScoped<IWorkspaceInsightsReader, EfWorkspaceInsightsReader>();
+        services.AddScoped<IGetWorkspaceInsightsQueryHandler, GetWorkspaceInsightsQueryHandler>();
         services.AddScoped<IGetWorkspaceOverviewQueryHandler, GetWorkspaceOverviewQueryHandler>();
 
         return services;

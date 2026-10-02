@@ -1,3 +1,4 @@
+import i18n from "@/i18n"
 import type {
   CommitExecutionResult,
   CreateTaskRequest,
@@ -24,6 +25,7 @@ import type {
   BrainConversation,
   BrainConversationDetail,
   WorkspaceOverview,
+  WorkspaceInsights,
   GitHubConnectionStatus,
   GitHubDiscoveredRepository,
   GitHubBranch,
@@ -38,7 +40,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    let message = `Request failed: ${response.status} ${response.statusText}`;
+    let message = i18n.t("shared.errRequest", { status: response.status, text: response.statusText });
     try {
       const body = await response.json();
       if (body.error) {
@@ -311,6 +313,13 @@ export async function getWorkspaceOverview(
   init?: RequestInit,
 ): Promise<WorkspaceOverview> {
   return http<WorkspaceOverview>(`/repositoryworkspaces/${workspaceId}/overview`, init);
+}
+
+export async function getWorkspaceInsights(
+  workspaceId: string,
+  init?: RequestInit,
+): Promise<WorkspaceInsights> {
+  return http<WorkspaceInsights>(`/repositoryworkspaces/${workspaceId}/insights`, init);
 }
 
 export async function getGitHubStatus(): Promise<GitHubConnectionStatus> {

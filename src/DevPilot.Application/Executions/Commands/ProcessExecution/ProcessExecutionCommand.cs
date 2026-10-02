@@ -45,6 +45,7 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
     private readonly IExecutionHeartbeatService _heartbeatService;
     private readonly IExecutionCancellationRegistry _cancellationRegistry;
     private readonly ILogger<ProcessExecutionCommandHandler> _logger;
+    private readonly IExecutionVerificationSnapshotRecorder? _snapshotRecorder;
 
     public ProcessExecutionCommandHandler(
         IExecutionRepository executionRepository,
@@ -53,8 +54,10 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
         IExecutionActivityRecorder activityRecorder,
         IExecutionHeartbeatService heartbeatService,
         IExecutionCancellationRegistry cancellationRegistry,
-        ILogger<ProcessExecutionCommandHandler> logger)
+        ILogger<ProcessExecutionCommandHandler> logger,
+        IExecutionVerificationSnapshotRecorder? snapshotRecorder = null)
     {
+        _snapshotRecorder = snapshotRecorder;
         _executionRepository = executionRepository;
         _impactAnalysisRepository = impactAnalysisRepository;
         _processor = processor;
@@ -190,7 +193,10 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
                     AcceptanceCriteria: task.AcceptanceCriteria,
                     WorkspaceId: workspace.Id,
                     WorkspaceLocalPath: workspace.LocalPath,
-                    ImpactAnalysisSummary: analysis.Summary);
+                    ImpactAnalysisSummary: analysis.Summary,
+                    RepositoryOwner: workspace.Owner,
+                    RepositoryName: workspace.Repository,
+                    BaseBranch: workspace.Branch);
 
                 await _processor.ProcessAsync(context, executionToken).ConfigureAwait(false);
             }
@@ -235,6 +241,8 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
                 "Execution completed.",
                 cancellationToken: CancellationToken.None).ConfigureAwait(false);
 
+            await TryRecordSnapshotAsync(executionId).ConfigureAwait(false);
+
             _logger.LogInformation(
                 "ProcessExecution: execution {ExecutionId} completed successfully.",
                 executionId);
@@ -245,6 +253,16 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
         {
             _cancellationRegistry.Unregister(executionId);
         }
+    }
+
+    private async Task TryRecordSnapshotAsync(Guid executionId)
+    {
+        if (_snapshotRecorder == null)
+        {
+            return;
+        }
+
+        await _snapshotRecorder.RecordAsync(executionId, CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task<ProcessExecutionResult> HandleCancellationAsync(Guid executionId, Guid leaseToken)
@@ -299,6 +317,8 @@ public sealed class ProcessExecutionCommandHandler : IProcessExecutionCommandHan
             ExecutionActivityStatus.Failed,
             $"Execution failed: {sanitized}",
             cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        await TryRecordSnapshotAsync(executionId).ConfigureAwait(false);
     }
 
     private async Task SafeRecordActivityAsync(

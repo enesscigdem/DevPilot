@@ -96,14 +96,16 @@ public static class ExecutionStageEvaluator
         var verificationOutcome = ExecutionVerificationEvaluator.DetermineOutcome(execution, activities);
 
         ExecutionStageStepState buildTestState;
-        if (repositoryVerificationReady || (buildPassed && testPassed))
+        if (execution.Status == TaskExecutionStatus.Completed &&
+            verificationOutcome == ExecutionVerificationOutcome.NeedsReview)
+        {
+            // Intermediate Test/Build Completed activities (focused repair) must not
+            // make a failed verification look like a green Done stage.
+            buildTestState = ExecutionStageStepState.NeedsReview;
+        }
+        else if (repositoryVerificationReady || (buildPassed && testPassed))
         {
             buildTestState = ExecutionStageStepState.Done;
-        }
-        else if (execution.Status == TaskExecutionStatus.Completed &&
-                 verificationOutcome == ExecutionVerificationOutcome.NeedsReview)
-        {
-            buildTestState = ExecutionStageStepState.NeedsReview;
         }
         else if (buildFailed || testFailed)
         {

@@ -1,0 +1,56 @@
+import type { Resources } from "../../en"
+
+const executions: Resources["executions"] = {
+  eyebrow: "Çalıştırmalar",
+  title: "Çalıştırma kayıtları",
+  description:
+    "Onaylanmış planların otonom çalıştırmaları. Her çalıştırma ajanların etkinliğini, derleme ve test sonuçlarını canlı gösterir ve pull request açmadan önce inceleme için durur.",
+  running: "Çalışıyor",
+  totalRuns: "Toplam çalıştırma",
+  model: "Model",
+  notRecorded: "Kaydedilmedi",
+  spendToday: "Bugünkü harcama",
+  filterPlaceholder: "Çalıştırmaları filtrele",
+  loading: "Çalıştırmalar API'den yükleniyor…",
+  failedLoad: "Çalıştırmalar yüklenemedi",
+  errLoad: "Çalıştırmalar yüklenemedi.",
+  noMatch: "Seçili filtreyle eşleşen çalıştırma yok.",
+  none: "Çalıştırma bulunamadı.",
+  live: "canlı",
+  filters: {
+    all: "Tümü",
+    running: "Çalışıyor",
+    pending: "Bekliyor",
+    completed: "Tamamlandı",
+    failed: "Başarısız",
+    cancelled: "İptal edildi",
+  },
+  status: {
+    pending: "Bekliyor",
+    running: "Çalışıyor",
+    completed: "Tamamlandı",
+    failed: "Başarısız",
+    cancelled: "İptal edildi",
+    needsReview: "İnceleme gerekli",
+    other: "Durum {{status}}",
+  },
+  tabs: {
+    run: "Çalıştırma",
+    review: "İnceleme ve teslimat",
+    reviewLocked: "İnceleme, çalıştırma bittikten sonra açılır",
+    attempt: "deneme {{n}}",
+    compare: "{{n}}. deneme ile karşılaştır",
+  },
+  verdict: { next: "Sonraki adım: " },
+  usage: {
+    title: "YZ kullanımı ve gecikme",
+    providerCalls: "Sağlayıcı çağrıları",
+    failedCalls: "({{n}} başarısız)",
+    tokens: "Token (giriş / çıkış)",
+    noTokenData: "{{n}} çağrı token kullanımını bildirmedi.",
+    estCost: "Tah. maliyet",
+    notConfigured: "yapılandırılmadı",
+    providerTime: "Sağlayıcı süresi",
+  },
+}
+export default executions

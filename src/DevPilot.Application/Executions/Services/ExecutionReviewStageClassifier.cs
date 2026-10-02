@@ -30,6 +30,12 @@ public static class ExecutionReviewStageClassifier
             testDetailSummary ??= "Tests failed";
         }
 
+        if (!string.Equals(testStatus, "Failed", StringComparison.OrdinalIgnoreCase) &&
+            parsedActivities.Any(p => p.Metadata?.BaselineUnverified == true))
+        {
+            testDetailSummary = "Baseline comparison was inconclusive; verified from raw diagnostics only (baseline unverified).";
+        }
+
         return (
             new ExecutionReviewStageStatusDto(buildStatus),
             new ExecutionReviewStageStatusDto(testStatus, preExistingCount, newRegressionCount, testDetailSummary));

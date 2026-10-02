@@ -1,3 +1,4 @@
+import i18n from "@/i18n"
 import {
   createContext,
   useCallback,
@@ -135,7 +136,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       })
     } catch (err) {
       const msg =
-        err instanceof Error ? err.message : "Failed to load repository workspaces."
+        err instanceof Error ? err.message : i18n.t("shared.errWorkspaces")
       setError(msg)
     } finally {
       setIsLoading(false)
@@ -227,7 +228,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           const hasLkg = Boolean(cached.data || overviewRef.current)
           if (!hasLkg && !isBackground) {
             setOverviewError(
-              err instanceof Error ? err.message : "Failed to load workspace overview.",
+              err instanceof Error ? err.message : i18n.t("shared.errOverview"),
             )
           }
         }

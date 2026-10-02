@@ -1,0 +1,35 @@
+import type { Resources } from "../../en"
+
+const repo: Resources["repo"] = {
+  eyebrow: "Depo",
+  description:
+    "DevPilot'ın bu kod tabanı hakkında bildikleri: yapı, tespit edilen teknolojiler ve analizör durumu. Şu an ilgilenmeniz gerekenler için Genel Bakış'a bakın.",
+  reanalyze: "Yeniden analiz et",
+  repositoryFallback: "Depo",
+  errLoad: "Çalışma alanı analizi yüklenemedi.",
+  noWorkspace: "Çalışma alanı seçilmedi",
+  analyzing: "Çalışma alanı analiz ediliyor...",
+  analysisError: "Analiz hatası",
+  analysisReady: "Analiz hazır",
+  analysisPartial: "Analiz hazır (kısmi)",
+  analysisComplete: "Analiz tamamlandı",
+  engineFallback: "Roslyn çalışma alanı analizi",
+  symbols: "Semboller",
+  types: "Tipler",
+  references: "Referanslar",
+  lastRun: "Son çalışma",
+  structure: "Depo yapısı",
+  loadingFiles: "Depo dosyaları yükleniyor...",
+  failedFiles: "Dosyalar yüklenemedi",
+  noFiles: "Dosya yok",
+  solution: "Çözüm ve projeler",
+  noProjects: "Çözüm projesi bulunamadı",
+  technologies: "Tespit edilen teknolojiler",
+  noTechnologies: "Teknoloji tespit edilmedi",
+  endpoints: "Controller'lar ve uç noktalar",
+  noEndpoints: "Controller uç noktası bulunamadı",
+  recentTasks: "Bu depodaki son görevler",
+  allTasks: "Tüm görevler",
+  noRecentTasks: "Bu depoda yakın tarihli görev yok",
+}
+export default repo

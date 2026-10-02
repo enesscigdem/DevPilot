@@ -1,3 +1,4 @@
+import i18n from "@/i18n"
 import {
   TaskStatus,
   TaskExecutionStatus,
@@ -44,15 +45,17 @@ export interface TaskImpactActionState {
 }
 
 export function formatDurationSeconds(totalSeconds: number): string {
-  if (totalSeconds < 0 || isNaN(totalSeconds)) return "0s"
-  if (totalSeconds < 60) return `${totalSeconds}s`
+  const s = i18n.t("shared.units.s")
+  const m = i18n.t("shared.units.m")
+  if (totalSeconds < 0 || isNaN(totalSeconds)) return `0${s}`
+  if (totalSeconds < 60) return `${totalSeconds}${s}`
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
-  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
+  return seconds > 0 ? `${minutes}${m} ${seconds}${s}` : `${minutes}${m}`
 }
 
 export function sanitizeErrorMessage(rawError?: string | null): string {
-  if (!rawError || !rawError.trim()) return "Impact analysis failed."
+  if (!rawError || !rawError.trim()) return i18n.t("impact.analysisFailedShort")
   let sanitized = rawError.trim()
   sanitized = sanitized.replace(/bearer\s+[a-zA-Z0-9_\-\.]+/gi, "Bearer [REDACTED]")
   sanitized = sanitized.replace(/(api[_-]?key|secret|password)\s*[:=]\s*["']?[^"'\s]+["']?/gi, "$1=[REDACTED]")
@@ -73,43 +76,8 @@ export function deriveTaskImpactLifecycle(
   task: Pick<Task, "status" | "createdAt" | "updatedAt"> | null,
   analysis: Pick<ImpactAnalysis, "status" | "createdAt" | "completedAt" | "errorMessage" | "structuredResult"> | null,
   activeExecution: Pick<ExecutionListItem, "id" | "status"> | null = null,
-  isMockView: boolean = false,
-  mockStatus?: string,
   nowMs: number = Date.now(),
 ): TaskImpactLifecycleState {
-  if (isMockView) {
-    if (mockStatus === "analyzing") {
-      return {
-        lifecycle: "analyzing",
-        statusTone: "blue",
-        statusLabel: "Analyzing",
-        canRun: false,
-        canRetry: false,
-        canApprove: false,
-        isAnalyzing: true,
-        isSucceeded: false,
-        isFailed: false,
-        elapsedSeconds: 12,
-        durationFormatted: null,
-        sanitizedErrorMessage: null,
-      }
-    }
-    return {
-      lifecycle: "succeeded",
-      statusTone: mockStatus === "approved" ? "blue" : mockStatus === "rejected" ? "red" : "amber",
-      statusLabel: mockStatus === "approved" ? "Approved" : mockStatus === "rejected" ? "Rejected" : "Awaiting approval",
-      canRun: false,
-      canRetry: false,
-      canApprove: mockStatus !== "approved" && mockStatus !== "rejected",
-      isAnalyzing: false,
-      isSucceeded: true,
-      isFailed: false,
-      elapsedSeconds: 0,
-      durationFormatted: "24s",
-      sanitizedErrorMessage: null,
-    }
-  }
-
   // 1. Check if an analysis is actively in progress
   const isAnalysisInProgress =
     analysis?.status === ImpactAnalysisStatus.InProgress ||
@@ -128,7 +96,7 @@ export function deriveTaskImpactLifecycle(
     return {
       lifecycle: "analyzing",
       statusTone: "blue",
-      statusLabel: "Analyzing",
+      statusLabel: i18n.t("shared.taskStatus.analyzing"),
       canRun: false,
       canRetry: false,
       canApprove: false,
@@ -157,22 +125,22 @@ export function deriveTaskImpactLifecycle(
       }
     }
 
-    let statusLabel = "Awaiting approval"
+    let statusLabel = i18n.t("shared.taskStatus.awaitingApproval")
     let statusTone: Tone = "amber"
     if (task?.status === TaskStatus.Approved) {
-      statusLabel = "Approved"
+      statusLabel = i18n.t("shared.taskStatus.approved")
       statusTone = "blue"
     } else if (task?.status === TaskStatus.Executing) {
-      statusLabel = "Executing"
+      statusLabel = i18n.t("shared.taskStatus.executing")
       statusTone = "blue"
     } else if (task?.status === TaskStatus.Completed) {
-      statusLabel = "Merged"
+      statusLabel = i18n.t("shared.taskStatus.merged")
       statusTone = "green"
     } else if (task?.status === TaskStatus.Rejected) {
-      statusLabel = "Rejected"
+      statusLabel = i18n.t("shared.taskStatus.rejected")
       statusTone = "red"
     } else if (task?.status === TaskStatus.Failed) {
-      statusLabel = "Failed"
+      statusLabel = i18n.t("shared.taskStatus.failed")
       statusTone = "red"
     }
 
@@ -211,7 +179,7 @@ export function deriveTaskImpactLifecycle(
     return {
       lifecycle: "failed",
       statusTone: "red",
-      statusLabel: "Failed",
+      statusLabel: i18n.t("shared.taskStatus.failed"),
       canRun: false,
       canRetry: !hasActiveExec,
       canApprove: false,
@@ -225,10 +193,10 @@ export function deriveTaskImpactLifecycle(
   }
 
   // 4. Otherwise task is in Idle un-analyzed state
-  let initialLabel = "Draft"
+  let initialLabel = i18n.t("shared.taskStatus.draft")
   let initialTone: Tone = "gray"
   if (task?.status === TaskStatus.ReadyForAnalysis) {
-    initialLabel = "Ready for Analysis"
+    initialLabel = i18n.t("shared.taskStatus.readyForAnalysis")
     initialTone = "neutral"
   }
 
@@ -254,40 +222,7 @@ export function deriveTaskImpactLifecycle(
 export function deriveTaskImpactActionState(
   taskStatus: number | null | undefined,
   activeExecution: Pick<ExecutionListItem, "id" | "status"> | null,
-  isMockView: boolean = false,
-  mockStatus?: string,
 ): TaskImpactActionState {
-  if (isMockView) {
-    if (mockStatus === "approved") {
-      return {
-        kind: "approved",
-        canStart: true,
-        canRetry: false,
-        canApprove: false,
-        activeExecutionId: null,
-        message: null,
-      }
-    }
-    if (mockStatus === "rejected") {
-      return {
-        kind: "rejected",
-        canStart: false,
-        canRetry: false,
-        canApprove: false,
-        activeExecutionId: null,
-        message: null,
-      }
-    }
-    return {
-      kind: "awaiting-approval",
-      canStart: false,
-      canRetry: false,
-      canApprove: true,
-      activeExecutionId: null,
-      message: null,
-    }
-  }
-
   // A) Server reports an actual active execution (Pending or Running)
   if (activeExecution != null) {
     return {
@@ -298,8 +233,8 @@ export function deriveTaskImpactActionState(
       activeExecutionId: activeExecution.id,
       message:
         activeExecution.status === TaskExecutionStatus.Running
-          ? "Agent is currently executing the task."
-          : "Execution is queued and will begin processing shortly.",
+          ? i18n.t("impact.state.running")
+          : i18n.t("impact.state.queued"),
     }
   }
 
@@ -311,7 +246,7 @@ export function deriveTaskImpactActionState(
       canRetry: false,
       canApprove: false,
       activeExecutionId: null,
-      message: "Execution state is syncing with the server…",
+      message: i18n.t("impact.state.syncing"),
     }
   }
 

@@ -64,3 +64,13 @@ The solution follows Clean Architecture / Modular Monolith principles:
 - `DevPilot.Application` references `DevPilot.Domain`.
 - `DevPilot.Infrastructure` references `DevPilot.Application` and `DevPilot.Domain`.
 - `DevPilot.Api` references `DevPilot.Application` and `DevPilot.Infrastructure`.
+
+## Configuration notes
+
+- `RepositoryClone:WorkspaceRoot` is intentionally empty in the committed `appsettings.json`. When empty, DevPilot
+  uses a per-user app-data directory (`<ApplicationData>/DevPilot/Workspaces`). Override with
+  `RepositoryClone__WorkspaceRoot=/path/to/workspaces` (environment variable) or user secrets.
+- Execution and generation limits (repair rounds, flake confirmation, generation calls, concurrency, token budgets)
+  live in the single `ExecutionReliability` section. Legacy `DeveloperAgent:*` keys are still honored as fallbacks.
+- `Hangfire:WorkerCount` (default 2) caps parallel executions; each one runs builds, tests and AI calls.
+- `AiPricing:InputPerMillionTokensUsd` / `OutputPerMillionTokensUsd` are optional. Without both, token counts are shown but no cost estimate is.
