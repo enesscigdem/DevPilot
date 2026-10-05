@@ -273,6 +273,28 @@ public sealed class ReliabilityPass2Tests
     }
 
     [Fact]
+    public void Usage_ReportsConfirmationBaselineAndUnsuccessfulAgenticRepairTime()
+    {
+        var activities = new List<ExecutionActivity>
+        {
+            Act(ExecutionStage.Test, ExecutionActivityStatus.Started, "Confirmation finished in 9s.",
+                new ExecutionActivityMetadata(EventKind: "VerificationOverhead", ProgressResult: "Confirmation", RepositoryCheckId: "t", StageDurationMs: 9000)),
+            Act(ExecutionStage.Test, ExecutionActivityStatus.Started, "Baseline finished in 48s.",
+                new ExecutionActivityMetadata(EventKind: "VerificationOverhead", ProgressResult: "Baseline", RepositoryCheckId: "t", StageDurationMs: 48000)),
+            // An agentic repair that gave up closes as StoppedWithEvidence but must still count as repair time.
+            Act(ExecutionStage.Test, ExecutionActivityStatus.Failed, "Agentic test repair stopped.",
+                new ExecutionActivityMetadata(EventKind: "StoppedWithEvidence", ProgressResult: "AgenticRepair", RepairKind: "Test", RepositoryCheckId: "t", StageDurationMs: 200000)),
+        };
+
+        var usage = ExecutionVerdictBuilder.AggregateUsage(activities);
+
+        usage.StageTimings.Should().Contain(t => t.Stage == "Confirmation" && t.DurationMs == 9000);
+        usage.StageTimings.Should().Contain(t => t.Stage == "Baseline" && t.DurationMs == 48000);
+        usage.StageTimings.Should().Contain(t => t.Stage == "Repair" && t.DurationMs == 200000);
+        usage.StageTimings.Should().NotContain(t => t.Stage == "Test");
+    }
+
+    [Fact]
     public void Usage_WithoutPricingTable_ReportsNoCost_NeverAMadeUpNumber()
     {
         var usage = ExecutionVerdictBuilder.AggregateUsage(

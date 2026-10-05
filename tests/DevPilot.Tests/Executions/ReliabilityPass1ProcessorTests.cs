@@ -454,6 +454,49 @@ public sealed class ReliabilityPass1ProcessorTests
         runner.TestRequests.Should().NotBeEmpty();
     }
 
+    // ── Dependency preparation overlaps with generation ────────────────────────
+
+    private static GitWorkspaceExecutionProcessor CreateWarmupProcessor(IDeveloperAgent agent, IRepositoryCheckRunner runner, FakeRecorder recorder) =>
+        new(
+            new FakeWorkspaceManager(),
+            new InMemoryExecutionRepository(),
+            new FakeImpactRepo(),
+            agent,
+            runner,
+            recorder,
+            NullLogger<GitWorkspaceExecutionProcessor>.Instance,
+            reliabilityOptions: new ExecutionReliabilityOptions().Normalize());
+
+    [Fact]
+    public async Task DependencyPreparation_RunsWhileTheChangeIsGenerated_AndFinishesBeforeTheFirstCheck()
+    {
+        var runner = new WarmupRunner();
+        var recorder = new FakeRecorder();
+
+        await CreateWarmupProcessor(new OverlapAgent(runner), runner, recorder).ProcessAsync(NewContext());
+
+        var events = runner.Events.ToList();
+        events.IndexOf("prepare").Should().BeGreaterThanOrEqualTo(0);
+        events.IndexOf("prepare").Should().BeLessThan(events.IndexOf("generated"), "preparation starts before generation can finish");
+        events.IndexOf("prepared").Should().BeLessThan(events.IndexOf("execute:node:package.json:build"), "the build never starts on a half-installed tree");
+        events.IndexOf("generated").Should().BeLessThan(events.IndexOf("ensure:token-1"), "freshness is confirmed against the generated manifests");
+        events.IndexOf("ensure:token-1").Should().BeLessThan(events.IndexOf("execute:node:package.json:build"));
+        recorder.Activities.Should().Contain(a => a.Metadata != null && a.Metadata.EventKind == "DependencyWarmup");
+    }
+
+    [Fact]
+    public async Task DependencyPreparation_IsCancelled_WhenGenerationFails_AndNeverConfirmed()
+    {
+        var runner = new WarmupRunner { PrepareDuration = TimeSpan.FromSeconds(30) };
+        var recorder = new FakeRecorder();
+
+        var act = async () => await CreateWarmupProcessor(new OverlapAgent(runner, fail: true), runner, recorder).ProcessAsync(NewContext());
+        try { await act(); } catch (InvalidOperationException) { /* the failure itself is reported by the processor */ }
+
+        runner.PrepareWasCancelled.Should().BeTrue("a failed generation must not leave an install running in the workspace");
+        runner.Events.Should().NotContain(e => e.StartsWith("ensure:") || e.StartsWith("execute:"));
+    }
+
     // ── README-only repository that becomes a runnable project ─────────────────
 
     [Fact]
@@ -1028,6 +1071,88 @@ public sealed class ReliabilityPass1ProcessorTests
 
         public Task<ExecutionFingerprintResult> ComputeStagedTreeFingerprintAsync(string workspacePath, string treeSha, string baseHeadSha, CancellationToken cancellationToken = default) =>
             Task.FromResult(new ExecutionFingerprintResult(true, Fingerprint: treeSha, BaseHeadSha: baseHeadSha));
+    }
+
+    /// <summary>Records the order of dependency preparation, generation and check execution.</summary>
+    private sealed class WarmupRunner : IRepositoryCheckRunner
+    {
+        private readonly object _gate = new();
+        private readonly List<string> _events = new();
+
+        public TaskCompletionSource PrepareStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool PrepareWasCancelled { get; private set; }
+        public TimeSpan PrepareDuration { get; init; } = TimeSpan.FromMilliseconds(50);
+
+        public IReadOnlyList<string> Events
+        {
+            get { lock (_gate) { return _events.ToList(); } }
+        }
+
+        public void Log(string name)
+        {
+            lock (_gate) { _events.Add(name); }
+        }
+
+        public Task<RepositoryProfile> DiscoverAsync(RepositoryPreflightRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(ConfiguredNodeProfile());
+
+        public Task<RepositoryCheckResult> ExecuteAsync(RepositoryCheckExecutionRequest request, CancellationToken cancellationToken = default)
+        {
+            Log("execute:" + request.Check.Id);
+            return Task.FromResult(Pass());
+        }
+
+        public async Task<string?> PrepareEnvironmentAsync(RepositoryPreflightRequest request, RepositoryCheck check, CancellationToken cancellationToken = default)
+        {
+            Log("prepare");
+            PrepareStarted.TrySetResult();
+            try
+            {
+                await Task.Delay(PrepareDuration, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                PrepareWasCancelled = true;
+                throw;
+            }
+
+            Log("prepared");
+            return "token-1";
+        }
+
+        public Task EnsureEnvironmentFreshAsync(RepositoryPreflightRequest request, RepositoryCheck check, string? preparedToken, CancellationToken cancellationToken = default)
+        {
+            Log("ensure:" + preparedToken);
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>Generation that only finishes once dependency preparation has started, proving the two overlap.</summary>
+    private sealed class OverlapAgent : IDeveloperAgent
+    {
+        private readonly WarmupRunner _runner;
+        private readonly bool _fail;
+
+        public OverlapAgent(WarmupRunner runner, bool fail = false)
+        {
+            _runner = runner;
+            _fail = fail;
+        }
+
+        public async Task<DeveloperAgentResult> GenerateAndApplyEditsAsync(DeveloperAgentRequest request, CancellationToken cancellationToken = default)
+        {
+            await _runner.PrepareStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+            _runner.Log("generated");
+            if (_fail)
+            {
+                throw new InvalidOperationException("generation failed");
+            }
+
+            return DeveloperAgentResult.Ok(new List<string> { "src/App.tsx" }, model: "test-model");
+        }
+
+        public Task<DeveloperAgentResult> ExecuteFocusedRepairAsync(FocusedRepairRequest request, CancellationToken cancellationToken = default) =>
+            Task.FromResult(DeveloperAgentResult.Ok(request.RepairFiles.ToList(), model: "test-model"));
     }
 
     /// <summary>First discovery sees the README-only base; later discoveries see the generated project.</summary>

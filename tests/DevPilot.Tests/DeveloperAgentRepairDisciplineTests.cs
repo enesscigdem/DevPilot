@@ -381,7 +381,7 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
     }
 
     [Fact]
-    public void TokenLimitPolicy_ModifyRetryNeverUsesFullFileOrTestFileCeiling()
+    public void TokenLimitPolicy_ModifyRetryStaysUnderCompactPatchCeiling_NeverFullFileOrTestFileCeiling()
     {
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
@@ -398,7 +398,11 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
         var entry = new ManifestFileEntry("NetCaseStudy.Tests/Api/ProductsApiTests.cs", FileEditAction.Modify, "Add tests", null);
 
         var retryBudget = agent.DetermineCompactRetryBudget(6144, largeContent, entry, isRepair: false);
-        retryBudget.Should().Be(8192, "Modify retry is capped by expected compact patch size");
+        retryBudget.Should().Be(12288, "a Modify retry doubles the initial patch budget");
+        retryBudget.Should().BeLessThanOrEqualTo(16384, "a Modify retry stays under the compact patch ceiling");
+        retryBudget.Should().BeLessThan(24576, "a Modify retry never reaches the configured full-file ceiling");
+        agent.DetermineCompactRetryBudget(12288, largeContent, entry, isRepair: false)
+            .Should().Be(16384, "the doubling is clamped to the compact patch ceiling");
 
         var repairRetryBudget = agent.DetermineCompactRetryBudget(6144, largeContent, entry, isRepair: true);
         repairRetryBudget.Should().Be(6144, "applicability recovery cannot own another token escalation");

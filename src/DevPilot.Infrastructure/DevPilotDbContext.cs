@@ -53,6 +53,8 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<ModelComparisonRun> ModelComparisonRuns => Set<ModelComparisonRun>();
 
+    public DbSet<AutomationPolicy> AutomationPolicies => Set<AutomationPolicy>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -90,6 +92,18 @@ public class DevPilotDbContext : DbContext
                 .WithMany(e => e.Workspaces)
                 .HasForeignKey(e => e.GitHubInstallationConnectionId)
                 .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<AutomationPolicy>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.RepositoryWorkspaceId).IsUnique();
+            entity.Property(e => e.Level).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.ProtectedPaths).HasMaxLength(4000);
+            entity.HasOne(e => e.RepositoryWorkspace)
+                .WithMany()
+                .HasForeignKey(e => e.RepositoryWorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<CodeChunk>(entity =>

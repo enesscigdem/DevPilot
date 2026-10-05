@@ -36,6 +36,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IVisualCaptureService? _visualCaptureService;
     private readonly IAgenticRepairService? _agenticRepairService;
     private readonly bool _agenticRepairEnabled;
+    private readonly bool _visualCaptureEnabled;
     private readonly IReviewFeedbackAgent? _reviewFeedbackAgent;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
     private readonly int _maxCompileRepairRounds;
@@ -82,6 +83,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         _maxCompileRepairRounds = reliability.MaxCompileRepairRounds;
         _maxTestRepairRounds = reliability.MaxTestRepairRounds;
         _agenticRepairEnabled = reliability.AgenticRepairEnabled;
+        _visualCaptureEnabled = reliability.VisualCaptureEnabled;
         // Bare processors (no configuration and no options, e.g. unit tests) stay deterministic: no reruns.
         _maxFlakeReruns = reliabilityOptions == null && configuration == null ? 0 : reliability.MaxFlakeReruns;
     }
@@ -328,7 +330,31 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
             else
             {
-                var generation = await RunDeveloperAgentAsync(context, prepResult, analysis, fileSets, cancellationToken).ConfigureAwait(false);
+                // Dependency installation does not depend on the generated change, so it runs while the model works
+                // instead of after it. It is awaited (or cancelled) before anything else touches the workspace.
+                using var warmupCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var warmup = StartDependencyWarmupAsync(context, prepResult, requiredChecks, warmupCts.Token);
+
+                (bool ShouldContinue, string? Model) generation;
+                try
+                {
+                    generation = await RunDeveloperAgentAsync(context, prepResult, analysis, fileSets, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    warmupCts.Cancel();
+                    await warmup.ConfigureAwait(false);
+                    throw;
+                }
+
+                if (!generation.ShouldContinue)
+                {
+                    warmupCts.Cancel();
+                }
+
+                await FinishDependencyWarmupAsync(
+                    context, prepResult, requiredChecks, await warmup.ConfigureAwait(false), generation.ShouldContinue, cancellationToken).ConfigureAwait(false);
+
                 actualModel = generation.Model;
                 if (!generation.ShouldContinue)
                 {
@@ -1087,7 +1113,27 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             return false;
         }
 
+        if (!result.Success)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Started,
+                "Tests failed; confirming the failure is stable.",
+                CheckMetadata(check, "VerifyingRepository", result),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var confirmStopwatch = Stopwatch.StartNew();
+        var failedBeforeConfirmation = !result.Success;
         result = await ConfirmFailureIsStableAsync(context, check, fullRequest, result, flakeBudget, cancellationToken).ConfigureAwait(false);
+        confirmStopwatch.Stop();
+        if (failedBeforeConfirmation)
+        {
+            await RecordVerificationOverheadAsync(
+                context.ExecutionId, check, VerificationOverheadConfirmation, confirmStopwatch.ElapsedMilliseconds, cancellationToken).ConfigureAwait(false);
+        }
+
         if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
         {
             await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Test, check, result, cancellationToken).ConfigureAwait(false);
@@ -1098,6 +1144,15 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         var baselineUnverified = false;
         if (!result.Success && _baselineVerificationService != null && !string.IsNullOrWhiteSpace(prepResult.BaseCommitSha))
         {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Test,
+                ExecutionActivityStatus.Started,
+                "Checking whether this failure already exists on the base commit.",
+                CheckMetadata(check, "VerifyingRepository", result),
+                cancellationToken).ConfigureAwait(false);
+
+            var baselineStopwatch = Stopwatch.StartNew();
             baseComparison = await _baselineVerificationService.EvaluateTestFailureAsync(
                 prepResult.WorkspacePath,
                 context.WorkspaceLocalPath,
@@ -1105,6 +1160,9 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 check,
                 result,
                 cancellationToken).ConfigureAwait(false);
+            baselineStopwatch.Stop();
+            await RecordVerificationOverheadAsync(
+                context.ExecutionId, check, VerificationOverheadBaseline, baselineStopwatch.ElapsedMilliseconds, cancellationToken).ConfigureAwait(false);
 
             if (baseComparison.Classification == BaselineFailureClassification.PreExisting)
             {
@@ -1612,7 +1670,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         var lastTest = failing;
         var lastRunReachedTests = false;
 
-        async Task<(RepositoryCheckResult? BuildFailure, RepositoryCheckResult? Test)> RunAllAsync(CancellationToken ct)
+        // A check that does not consume the build output (npm/python tests) runs first: a failing test costs seconds,
+        // while the build can take much longer, so the build only runs once the tests pass. Checks that need the
+        // build (dotnet test --no-build) keep the build-first order.
+        var testsFirst = !check.SupportsSkipBuild;
+
+        async Task<RepositoryCheckResult?> RunPrerequisitesAsync(CancellationToken ct)
         {
             foreach (var prerequisite in prerequisiteChecks)
             {
@@ -1621,9 +1684,66 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     ct).ConfigureAwait(false);
                 if (!prerequisiteResult.Success)
                 {
-                    lastRunReachedTests = false;
-                    return (prerequisiteResult, null);
+                    return prerequisiteResult;
                 }
+            }
+
+            return null;
+        }
+
+        // Fast pre-check: only the test files this task touched, so most repair iterations cost seconds, not a full suite.
+        // It never decides success; a pass is always followed by the full run.
+        async Task<RepositoryCheckResult?> RunTargetedTestsAsync(CancellationToken ct)
+        {
+            if (!RepositoryNativeCheckRunner.SupportsTargetedTestFiles(check))
+            {
+                return null;
+            }
+
+            var touchedTests = fileSets.ActuallyModifiedFiles.Where(ProjectGraphHelper.IsTestFileCandidate).Take(20).ToList();
+            if (touchedTests.Count == 0)
+            {
+                return null;
+            }
+
+            var targeted = await _repositoryCheckRunner.ExecuteAsync(
+                fullRequest with { TestFiles = touchedTests },
+                ct).ConfigureAwait(false);
+            // A targeted run that could not be set up (e.g. a file was deleted) just falls back to the full run.
+            return targeted.FailureCategory == RepositoryCheckFailureCategory.VerificationFailure ? targeted : null;
+        }
+
+        async Task<(RepositoryCheckResult? BuildFailure, RepositoryCheckResult? Test)> RunAllAsync(CancellationToken ct, bool allowTargeted = false)
+        {
+            if (testsFirst)
+            {
+                if (allowTargeted)
+                {
+                    var targetedFailure = await RunTargetedTestsAsync(ct).ConfigureAwait(false);
+                    if (targetedFailure != null)
+                    {
+                        lastRunReachedTests = false;
+                        return (null, targetedFailure);
+                    }
+                }
+
+                lastTest = await _repositoryCheckRunner.ExecuteAsync(fullRequest, ct).ConfigureAwait(false);
+                if (!lastTest.Success)
+                {
+                    lastRunReachedTests = true;
+                    return (null, lastTest);
+                }
+
+                var lateBuildFailure = await RunPrerequisitesAsync(ct).ConfigureAwait(false);
+                lastRunReachedTests = lateBuildFailure == null;
+                return lateBuildFailure != null ? (lateBuildFailure, null) : (null, lastTest);
+            }
+
+            var buildFailure = await RunPrerequisitesAsync(ct).ConfigureAwait(false);
+            if (buildFailure != null)
+            {
+                lastRunReachedTests = false;
+                return (buildFailure, null);
             }
 
             lastTest = await _repositoryCheckRunner.ExecuteAsync(fullRequest, ct).ConfigureAwait(false);
@@ -1633,7 +1753,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
         async Task<AgenticCheckObservation> ObserveAsync(CancellationToken ct)
         {
-            var (buildFailure, test) = await RunAllAsync(ct).ConfigureAwait(false);
+            var (buildFailure, test) = await RunAllAsync(ct, allowTargeted: true).ConfigureAwait(false);
             if (buildFailure != null)
             {
                 return new AgenticCheckObservation(
@@ -1664,6 +1784,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             CheckMetadata(check, "FixingFailingTest", failing, repairKind: "Test"),
             cancellationToken).ConfigureAwait(false);
 
+        var repairStopwatch = Stopwatch.StartNew();
         var outcome = await _agenticRepairService!.RunAsync(
             new AgenticRepairRequest(
                 context.ExecutionId,
@@ -1675,6 +1796,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 actualModel,
                 ObserveAsync),
             cancellationToken).ConfigureAwait(false);
+        repairStopwatch.Stop();
 
         if (outcome.ChangedFiles.Count > 0)
         {
@@ -1693,7 +1815,14 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             outcome.Success
                 ? $"Agentic test repair passed after {outcome.CheckRuns} check run(s), {outcome.ChangedFiles.Count} file(s) changed."
                 : $"Agentic test repair stopped ({outcome.StopReason}) after {outcome.Turns} step(s), {outcome.ChangedFiles.Count} file(s) changed.",
-            CheckMetadata(check, outcome.Success ? "FixingFailingTest" : "StoppedWithEvidence", failing, repairKind: "Test", repairFiles: outcome.ChangedFiles),
+            CheckMetadata(
+                check,
+                outcome.Success ? "FixingFailingTest" : "StoppedWithEvidence",
+                failing,
+                repairKind: "Test",
+                repairFiles: outcome.ChangedFiles,
+                progressResult: AgenticRepairProgressResult,
+                stageDurationMs: repairStopwatch.ElapsedMilliseconds),
             cancellationToken).ConfigureAwait(false);
 
         if (outcome.Success && lastRunReachedTests && lastTest.Success)
@@ -1806,6 +1935,115 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
 
         return rerun;
     }
+
+    private sealed record DependencyWarmupResult(IReadOnlyList<(RepositoryCheck Check, string? Token)> Prepared, long ElapsedMs);
+
+    /// <summary>
+    /// Starts installing dependencies for the discovered checks in the background. Never throws: any failure just means the
+    /// check installs for itself later, exactly as it did before this overlap existed.
+    /// </summary>
+    private async Task<DependencyWarmupResult> StartDependencyWarmupAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        IReadOnlyList<RepositoryCheck> requiredChecks,
+        CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var prepared = new List<(RepositoryCheck, string?)>();
+        try
+        {
+            var request = new RepositoryPreflightRequest(prepResult.WorkspacePath, prepResult.BranchName);
+            var distinct = requiredChecks
+                .Where(check => check.Source == RepositoryCheckSource.PackageJsonScript)
+                .GroupBy(check => (check.Executable, check.WorkingDirectory))
+                .Select(group => group.First());
+
+            foreach (var check in distinct)
+            {
+                var task = _repositoryCheckRunner.PrepareEnvironmentAsync(request, check, cancellationToken);
+                var token = task == null ? null : await task.ConfigureAwait(false);
+                prepared.Add((check, token));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Generation failed or the execution was cancelled; the runner already removed any partial install.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Background dependency preparation failed for execution {ExecutionId}; the build will prepare dependencies itself.", context.ExecutionId);
+        }
+
+        return new DependencyWarmupResult(prepared, stopwatch.ElapsedMilliseconds);
+    }
+
+    private async Task FinishDependencyWarmupAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        IReadOnlyList<RepositoryCheck> requiredChecks,
+        DependencyWarmupResult warmup,
+        bool generationSucceeded,
+        CancellationToken cancellationToken)
+    {
+        if (warmup.Prepared.Count == 0 || !generationSucceeded)
+        {
+            return;
+        }
+
+        var request = new RepositoryPreflightRequest(prepResult.WorkspacePath, prepResult.BranchName);
+        foreach (var (check, token) in warmup.Prepared)
+        {
+            try
+            {
+                var task = _repositoryCheckRunner.EnsureEnvironmentFreshAsync(request, check, token, cancellationToken);
+                if (task != null)
+                {
+                    await task.ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Could not confirm the early dependency preparation for execution {ExecutionId}.", context.ExecutionId);
+            }
+        }
+
+        var ok = warmup.Prepared.Count(p => p.Token != null);
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Workspace,
+            ExecutionActivityStatus.Completed,
+            ok > 0
+                ? $"Dependencies were prepared in the background while the change was generated ({warmup.ElapsedMs / 1000.0:0.#}s)."
+                : "Background dependency preparation was not needed or did not complete; the build prepares them if required.",
+            new ExecutionActivityMetadata(EventKind: "DependencyWarmup", StageDurationMs: warmup.ElapsedMs),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Marks the closing activity of an agentic repair so its duration counts as repair time even when it stopped unsuccessfully.</summary>
+    internal const string AgenticRepairProgressResult = "AgenticRepair";
+
+    internal const string VerificationOverheadEventKind = "VerificationOverhead";
+    internal const string VerificationOverheadConfirmation = "Confirmation";
+    internal const string VerificationOverheadBaseline = "Baseline";
+
+    /// <summary>
+    /// Records how long a verification step that runs between a failed test and the repair took (failure confirmation,
+    /// base-commit comparison), so the stage timings show where the wait went. Non-terminal (Started) so it is never
+    /// read as a verdict by the stage evaluator.
+    /// </summary>
+    private Task RecordVerificationOverheadAsync(
+        Guid executionId,
+        RepositoryCheck check,
+        string label,
+        long durationMs,
+        CancellationToken cancellationToken) =>
+        SafeRecordActivityAsync(
+            executionId,
+            ExecutionStage.Test,
+            ExecutionActivityStatus.Started,
+            $"{label} finished in {durationMs / 1000.0:0.#}s.",
+            CheckMetadata(check, VerificationOverheadEventKind, progressResult: label, stageDurationMs: durationMs),
+            cancellationToken);
 
     /// <summary>
     /// Records that the baseline comparison was inconclusive and repair continues from raw diagnostics.
@@ -2231,7 +2469,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         ExecutionFileSets fileSets,
         CancellationToken cancellationToken)
     {
-        if (_visualCaptureService == null || fileSets.ActuallyModifiedFiles.Count == 0)
+        if (!_visualCaptureEnabled || _visualCaptureService == null || fileSets.ActuallyModifiedFiles.Count == 0)
         {
             return;
         }

@@ -218,6 +218,9 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
             // Prepare isolated clean baseline worktree at baseCommitSha
             await EnsureCleanBaselineWorktreeAsync(fullSource, baselineWorktreePath, baseCommitSha, cancellationToken).ConfigureAwait(false);
 
+            // Every base SHA gets its own worktree (and its own node_modules), so old ones are pruned in the background.
+            _ = Task.Run(() => PruneStaleBaselineWorktreesAsync(fullSource, Path.GetDirectoryName(baselineWorktreePath)!, repoHash, baselineWorktreePath));
+
             var checkRequest = new RepositoryCheckExecutionRequest(
                 baselineWorktreePath,
                 BranchName: "HEAD",
@@ -269,6 +272,69 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
         }
     }
 
+    /// <summary>How many baseline worktrees per repository stay on disk (the one just used plus the newest others).</summary>
+    internal const int RetainedBaselineWorktrees = 2;
+
+    /// <summary>
+    /// Removes baseline worktrees of this repository beyond the newest <see cref="RetainedBaselineWorktrees"/>. A worktree
+    /// that is in use (its lock is held) is skipped, and any failure only means it is retried on the next baseline run.
+    /// Other repositories' baselines are left alone: their worktrees are registered with their own source repository.
+    /// </summary>
+    private async Task PruneStaleBaselineWorktreesAsync(
+        string sourceRepositoryPath,
+        string baselinesRoot,
+        string repoHash,
+        string currentWorktreePath)
+    {
+        try
+        {
+            var current = Path.GetFullPath(currentWorktreePath);
+            var stale = new DirectoryInfo(baselinesRoot)
+                .EnumerateDirectories(repoHash + "_*")
+                .Where(dir => !string.Equals(Path.GetFullPath(dir.FullName), current, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(dir => dir.LastWriteTimeUtc)
+                .Skip(RetainedBaselineWorktrees - 1)
+                .ToList();
+
+            foreach (var dir in stale)
+            {
+                var worktreeLock = _coordinator.GetWorkspaceLock(Path.GetFullPath(dir.FullName));
+                if (!await worktreeLock.WaitAsync(0).ConfigureAwait(false))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await RunGitAsync(sourceRepositoryPath, new[] { "worktree", "remove", "--force", dir.FullName }, CancellationToken.None).ConfigureAwait(false);
+                    if (Directory.Exists(dir.FullName))
+                    {
+                        Directory.Delete(dir.FullName, recursive: true);
+                    }
+
+                    _logger.LogInformation("Removed stale baseline worktree {Path}.", dir.FullName);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    _logger.LogDebug(ex, "Could not remove stale baseline worktree {Path}; it will be retried.", dir.FullName);
+                }
+                finally
+                {
+                    worktreeLock.Release();
+                }
+            }
+
+            if (stale.Count > 0)
+            {
+                await RunGitAsync(sourceRepositoryPath, new[] { "worktree", "prune" }, CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Baseline worktree pruning failed; it will be retried on the next baseline run.");
+        }
+    }
+
     private async Task EnsureCleanBaselineWorktreeAsync(
         string sourceRepositoryPath,
         string baselineWorktreePath,
@@ -290,9 +356,10 @@ public sealed class BaselineVerificationService : IBaselineVerificationService
 
             if (isCorrectSha && isDetached)
             {
-                // Clean worktree state back to clean base
+                // Clean worktree state back to clean base. The worktree path is keyed by the base SHA, so its installed
+                // node_modules always match the base lockfile and are kept to avoid a full reinstall on every baseline run.
                 await RunGitAsync(baselineWorktreePath, new[] { "reset", "--hard", "HEAD" }, cancellationToken).ConfigureAwait(false);
-                await RunGitAsync(baselineWorktreePath, new[] { "clean", "-fdx" }, cancellationToken).ConfigureAwait(false);
+                await RunGitAsync(baselineWorktreePath, new[] { "clean", "-fdx", "-e", "node_modules" }, cancellationToken).ConfigureAwait(false);
                 return;
             }
 

@@ -4018,13 +4018,13 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
                         // For test targets: provide behavioral implementation details
                         // For ordinary files (<= 4000 chars), provide full resulting code
                         // For large files (> 4000 chars), provide public contract + bounded behavioral implementation excerpt
-                        if (generatedContent.Length <= 4000)
+                        if (generatedContent.Length <= TestContextFullFileLimit(path))
                         {
                             relevant[path] = generatedContent;
                         }
                         else
                         {
-                            relevant[path] = ExtractBehavioralTestContext(path, generatedContent, spec);
+                            relevant[path] = ExtractBehavioralTestContext(path, generatedContent, spec, TestContextExcerptLimit(path));
                         }
                     }
                     else if (generatedContent.Length <= 3000)
@@ -4044,13 +4044,13 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
                     {
                         if (isTestTarget)
                         {
-                            if (spec.NewContent.Length <= 4000)
+                            if (spec.NewContent.Length <= TestContextFullFileLimit(path))
                             {
                                 relevant[path] = spec.NewContent;
                             }
                             else
                             {
-                                relevant[path] = ExtractBehavioralTestContext(path, spec.NewContent, spec);
+                                relevant[path] = ExtractBehavioralTestContext(path, spec.NewContent, spec, TestContextExcerptLimit(path));
                             }
                         }
                         else if (spec.NewContent.Length > 2000)
@@ -4067,13 +4067,13 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
                     {
                         if (isTestTarget)
                         {
-                            if (spec.NewContent.Length <= 4000)
+                            if (spec.NewContent.Length <= TestContextFullFileLimit(path))
                             {
                                 relevant[path] = spec.NewContent;
                             }
                             else
                             {
-                                relevant[path] = ExtractBehavioralTestContext(path, spec.NewContent, spec);
+                                relevant[path] = ExtractBehavioralTestContext(path, spec.NewContent, spec, TestContextExcerptLimit(path));
                             }
                         }
                         else
@@ -4094,6 +4094,15 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         return relevant;
     }
 
+    private static bool IsCSharpFile(string path) =>
+        path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase);
+
+    // C# tests get a public contract plus method bodies, which stay small. For every other language (tsx, ts, py, ...) the
+    // test must see the real rendered markup / behaviour, and there is no contract extractor, so it gets a much larger window.
+    private static int TestContextFullFileLimit(string path) => IsCSharpFile(path) ? 4000 : 16000;
+
+    private static int TestContextExcerptLimit(string path) => IsCSharpFile(path) ? 3500 : 16000;
+
     public static string ExtractBehavioralTestContext(
         string filePath,
         string fullContent,
@@ -4102,6 +4111,27 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
     {
         if (string.IsNullOrWhiteSpace(fullContent)) return string.Empty;
         if (fullContent.Length <= maxTotalChars) return fullContent;
+
+        if (!IsCSharpFile(filePath))
+        {
+            // The Roslyn path below only understands C#; on other files it would emit an empty "behavior" section.
+            // Keep the start of the file (imports, types, component head) and every region the edit actually changed.
+            var other = new System.Text.StringBuilder();
+            other.AppendLine("=== File Excerpt (start) ===");
+            other.AppendLine(fullContent[..Math.Min(fullContent.Length, maxTotalChars * 2 / 3)]);
+            other.AppendLine("// ... [middle of file omitted for brevity]");
+            if (editSpec?.SearchReplaceEdits is { Count: > 0 })
+            {
+                other.AppendLine("=== Modified Regions ===");
+                foreach (var edit in editSpec.SearchReplaceEdits.Where(e => !string.IsNullOrWhiteSpace(e.Replace)))
+                {
+                    other.AppendLine(edit.Replace.Trim());
+                    other.AppendLine();
+                }
+            }
+
+            return other.ToString().Trim();
+        }
 
         var sb = new System.Text.StringBuilder();
         var contract = RoslynContractExtractor.ExtractPublicContracts(filePath, fullContent);

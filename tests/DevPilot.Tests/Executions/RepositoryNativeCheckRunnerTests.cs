@@ -639,6 +639,110 @@ public sealed class RepositoryNativeCheckRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task NpmTestCheck_WithTestFiles_RunsOnlyThoseFilesRelativeToWorkingDirectory()
+    {
+        WriteFile("web/package.json", """
+            { "scripts": { "test": "vitest run" } }
+            """);
+        WriteFile("web/package-lock.json", "{ \"lockfileVersion\": 3 }");
+        WriteFile("web/node_modules/dep/index.js", string.Empty);
+        WriteFile("web/src/App.test.tsx", string.Empty);
+        var runner = CreateUnixRunner();
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks.Single();
+
+        var result = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(
+            _workspace,
+            "test-branch",
+            check,
+            TestFiles: new[] { "web/src/App.test.tsx", "web/src/Missing.test.tsx", "../escape.test.ts", "--watch" }));
+
+        result.Success.Should().BeTrue();
+        _processRunner.Invocations.Single().Arguments.Should().Equal("run", "test", "--", "src/App.test.tsx");
+    }
+
+    [Fact]
+    public async Task TestFiles_OnCheckWithoutTargetedFileSupport_AreRejectedBeforeProcessExecution()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        WriteFile("src/App.test.tsx", string.Empty);
+        var runner = CreateUnixRunner();
+        var check = (await runner.DiscoverAsync(new RepositoryPreflightRequest(_workspace, "test-branch"))).Checks.Single();
+
+        var result = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(
+            _workspace, "test-branch", check, TestFiles: new[] { "src/App.test.tsx" }));
+
+        result.FailureCategory.Should().Be(RepositoryCheckFailureCategory.InfrastructureFailure);
+        _processRunner.Invocations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task PrepareEnvironment_InstallsEarly_AndTheCheckThenSkipsTheInstall()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        var runner = CreateUnixRunner();
+        var request = new RepositoryPreflightRequest(_workspace, "test-branch");
+        var check = (await runner.DiscoverAsync(request)).Checks.Single();
+
+        var token = await runner.PrepareEnvironmentAsync(request, check);
+        var result = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", check));
+
+        token.Should().NotBeNull();
+        result.Success.Should().BeTrue();
+        _processRunner.Invocations.Select(i => string.Join(' ', i.Arguments))
+            .Should().Equal("ci", "run build");
+    }
+
+    [Fact]
+    public async Task PrepareEnvironment_WhenInstallFails_ReturnsNull_AndTheCheckInstallsForItself()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        var runner = CreateUnixRunner();
+        var request = new RepositoryPreflightRequest(_workspace, "test-branch");
+        var check = (await runner.DiscoverAsync(request)).Checks.Single();
+        _processRunner.Results.Enqueue(Result(1));
+
+        var token = await runner.PrepareEnvironmentAsync(request, check);
+        var result = await runner.ExecuteAsync(new RepositoryCheckExecutionRequest(_workspace, "test-branch", check));
+
+        token.Should().BeNull();
+        result.Success.Should().BeTrue();
+        _processRunner.Invocations.Select(i => string.Join(' ', i.Arguments))
+            .Should().Equal("ci", "ci", "run build");
+    }
+
+    [Fact]
+    public async Task EnsureEnvironmentFresh_ReinstallsOnlyWhenManifestsChangedAfterPreparation()
+    {
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" } }
+            """);
+        WriteFile("package-lock.json", "{ \"lockfileVersion\": 3 }");
+        var runner = CreateUnixRunner();
+        var request = new RepositoryPreflightRequest(_workspace, "test-branch");
+        var check = (await runner.DiscoverAsync(request)).Checks.Single();
+        var token = await runner.PrepareEnvironmentAsync(request, check);
+
+        await runner.EnsureEnvironmentFreshAsync(request, check, token);
+        _processRunner.Invocations.Should().ContainSingle("an unchanged manifest must not trigger a second install");
+
+        WriteFile("package.json", """
+            { "scripts": { "build": "tsc" }, "dependencies": { "left-pad": "1.0.0" } }
+            """);
+        await runner.EnsureEnvironmentFreshAsync(request, check, token);
+
+        _processRunner.Invocations.Select(i => string.Join(' ', i.Arguments)).Should().Equal("ci", "ci");
+    }
+
+    [Fact]
     public async Task TraversalWorkingDirectory_IsRejectedBeforeProcessExecution()
     {
         WriteFile("App.sln", string.Empty);

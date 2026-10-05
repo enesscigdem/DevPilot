@@ -18,8 +18,11 @@ public sealed class ExecutionReliabilityOptions
 
     /// <summary>Repairs failing verification with a tool-using model loop (read/search/edit/run checks) instead of fixed focused rounds. Off by default.</summary>
     public bool AgenticRepairEnabled { get; set; }
-    public int MaxAgenticTurns { get; set; } = 30;
-    public int MaxAgenticCheckRuns { get; set; } = 6;
+    public int MaxAgenticTurns { get; set; } = 20;
+    public int MaxAgenticCheckRuns { get; set; } = 4;
+
+    /// <summary>Takes before/after screenshots of the app after verification passed (adds ~25s to every execution). On by default.</summary>
+    public bool VisualCaptureEnabled { get; set; } = true;
 
     /// <summary>Flake confirmation reruns allowed per execution (0 disables, capped at <see cref="MaxFlakeRerunsCeiling"/>).</summary>
     public int MaxFlakeReruns { get; set; } = MaxFlakeRerunsCeiling;

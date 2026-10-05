@@ -4,6 +4,7 @@ import {
   BarChart3,
   Boxes,
   Cpu,
+  Zap,
   FolderGit2,
   ListChecks,
   Sparkles,
@@ -62,7 +63,10 @@ const navGroups: { label: string; items: NavEntry[] }[] = [
   },
   {
     label: "nav.settings",
-    items: [{ to: "/models", label: "nav.aiModels", icon: Cpu }],
+    items: [
+      { to: "/models", label: "nav.aiModels", icon: Cpu },
+      { to: "/automation", label: "nav.automation", icon: Zap },
+    ],
   },
 ]
 
@@ -387,6 +391,7 @@ const routeTitles: Record<string, string> = {
   "/architecture": "nav.impactMap",
   "/insights": "nav.insights",
   "/models": "nav.aiModels",
+  "/automation": "nav.automation",
 }
 
 function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: string }) {
