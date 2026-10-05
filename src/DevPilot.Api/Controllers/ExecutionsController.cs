@@ -14,7 +14,7 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace DevPilot.Api.Controllers;
 
-public sealed record ApproveExecutionReviewRequest(string ExpectedChangeFingerprint);
+public sealed record ApproveExecutionReviewRequest(string ExpectedChangeFingerprint, bool VisualAcknowledged = false);
 public sealed record RejectExecutionReviewRequest(string? Reason);
 public sealed record RequestExecutionChangesRequest(string? Feedback);
 
@@ -134,7 +134,7 @@ public class ExecutionsController : ControllerBase
         CancellationToken cancellationToken)
     {
         var result = await _approveReviewHandler
-            .HandleAsync(new ApproveExecutionReviewCommand(id, request?.ExpectedChangeFingerprint ?? string.Empty, repositoryWorkspaceId), cancellationToken)
+            .HandleAsync(new ApproveExecutionReviewCommand(id, request?.ExpectedChangeFingerprint ?? string.Empty, repositoryWorkspaceId, request?.VisualAcknowledged ?? false), cancellationToken)
             .ConfigureAwait(false);
 
         return result.Status switch
@@ -144,6 +144,51 @@ public class ExecutionsController : ControllerBase
             ApproveExecutionReviewResultStatus.Success => Ok(result.Decision),
             _ => StatusCode(500, new { error = "An unexpected error occurred." })
         };
+    }
+
+    /// <summary>The before/after screenshots of the UI change, or { status: "None" } when there is nothing to show.</summary>
+    [HttpGet("{id:guid}/visual", Name = nameof(GetExecutionVisual))]
+    public async Task<IActionResult> GetExecutionVisual(
+        [FromRoute] Guid id,
+        [FromServices] DevPilot.Application.Executions.Ports.IExecutionRepository executionRepository,
+        [FromServices] DevPilot.Application.Executions.Ports.IVisualArtifactReader visualReader,
+        CancellationToken cancellationToken)
+    {
+        var execution = await executionRepository.GetByIdAsync(id, cancellationToken).ConfigureAwait(false);
+        if (execution is null)
+        {
+            return NotFound(new { error = "Execution not found." });
+        }
+
+        var manifest = string.IsNullOrWhiteSpace(execution.WorkspacePath)
+            ? null
+            : await visualReader.GetManifestAsync(execution.WorkspacePath, id, cancellationToken).ConfigureAwait(false);
+
+        return Ok(manifest ?? new DevPilot.Application.Executions.Models.VisualCaptureManifest { Status = "None" });
+    }
+
+    [HttpGet("{id:guid}/visual/{fileName}", Name = nameof(GetExecutionVisualImage))]
+    public async Task<IActionResult> GetExecutionVisualImage(
+        [FromRoute] Guid id,
+        [FromRoute] string fileName,
+        [FromServices] DevPilot.Application.Executions.Ports.IExecutionRepository executionRepository,
+        [FromServices] DevPilot.Application.Executions.Ports.IVisualArtifactReader visualReader,
+        CancellationToken cancellationToken)
+    {
+        var execution = await executionRepository.GetByIdAsync(id, cancellationToken).ConfigureAwait(false);
+        if (execution is null || string.IsNullOrWhiteSpace(execution.WorkspacePath))
+        {
+            return NotFound(new { error = "Screenshot not found." });
+        }
+
+        var path = visualReader.ResolveImagePath(execution.WorkspacePath, id, fileName);
+        if (path is null)
+        {
+            return NotFound(new { error = "Screenshot not found." });
+        }
+
+        Response.Headers.CacheControl = "private, max-age=60";
+        return PhysicalFile(path, "image/png");
     }
 
     [HttpPost("{id:guid}/review/reject", Name = nameof(RejectExecutionReview))]

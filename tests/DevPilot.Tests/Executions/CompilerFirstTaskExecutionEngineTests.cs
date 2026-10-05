@@ -450,8 +450,8 @@ public sealed class CompilerFirstTaskExecutionEngineTests
         var act = async () => await processor.ProcessAsync(context);
 
         await act.Should().NotThrowAsync();
-        agent.CallCount.Should().Be(2); // identical targeted failure stops before a second repair
-        runner.TestCallCount.Should().Be(2);
+        agent.CallCount.Should().Be(3); // identical failure gets one escalated retry, then stops
+        runner.TestCallCount.Should().Be(3);
         recorder.RecordedActivities.Should().Contain(a => a.metadata != null && a.metadata.VerificationOutcome == "NeedsReview");
     }
 

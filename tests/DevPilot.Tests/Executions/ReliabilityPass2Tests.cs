@@ -112,6 +112,47 @@ public sealed class ReliabilityPass2Tests
     }
 
     [Fact]
+    public void Verdict_FailingTests_ReportCountGroupsAndSuggestedFix()
+    {
+        var activities = new List<ExecutionActivity>
+        {
+            Act(ExecutionStage.Build, ExecutionActivityStatus.Completed, "Build passed.", new ExecutionActivityMetadata(EventKind: "VerifyingRepository", RepositoryCheckId: "b")),
+            Act(ExecutionStage.Test, ExecutionActivityStatus.Started, "Test repair started (round 1/3).", new ExecutionActivityMetadata(EventKind: "FixingFailingTest", RepairKind: "Test", RepairRound: 1, RepositoryCheckId: "t")),
+            Act(ExecutionStage.Test, ExecutionActivityStatus.Failed, "Test validation failed: npm test failed with exit code 1.",
+                new ExecutionActivityMetadata(
+                    EventKind: "StoppedWithEvidence",
+                    RepositoryCheckId: "t",
+                    VerificationOutcome: "NeedsReview",
+                    FailingTestCount: 8,
+                    FailingTestGroups: new[] { "7 × Unable to find an element with the text: Henüz görev yok.", "1 × Found multiple elements" },
+                    SuggestedFix: "Fix the failing tests so they match how the application behaves now.")),
+        };
+
+        var verdict = ExecutionVerdictBuilder.BuildVerdict(NewExecution(), activities, ExecutionVerificationOutcome.NeedsReview);
+
+        verdict.FailingTestCount.Should().Be(8);
+        verdict.Headline.Should().Be("Needs review: The build passed, but 8 tests still fail after 1 automatic repair round(s).");
+        verdict.FailingTestGroups.Should().HaveCount(2);
+        verdict.SuggestedFix.Should().StartWith("Fix the failing tests");
+        verdict.RecommendedAction.Should().Contain("Fix failing tests");
+    }
+
+    [Fact]
+    public void Verdict_NoFailingTestDetail_KeepsGenericNeedsReviewHeadline()
+    {
+        var activities = new List<ExecutionActivity>
+        {
+            Act(ExecutionStage.Test, ExecutionActivityStatus.Failed, "Test validation failed.",
+                new ExecutionActivityMetadata(EventKind: "StoppedWithEvidence", RepositoryCheckId: "t", VerificationOutcome: "NeedsReview")),
+        };
+
+        var verdict = ExecutionVerdictBuilder.BuildVerdict(NewExecution(), activities, ExecutionVerificationOutcome.NeedsReview);
+
+        verdict.FailingTestCount.Should().Be(0);
+        verdict.SuggestedFix.Should().BeNull();
+    }
+
+    [Fact]
     public void Verdict_SameFailureStop_ExplainsWhyAndWhatToDo()
     {
         var activities = new List<ExecutionActivity>

@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using DevPilot.Application.AiProviders;
@@ -593,7 +594,7 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
                 peerContext,
                 behavioralEvidence,
                 behavioralSignatures),
-            SystemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath),
+            SystemPrompt = BuildFocusedDiagnosticRepairSystemPrompt(filePath, multipleFailures: !string.IsNullOrWhiteSpace(request.FailureSummary)),
             MaxTokens = DetermineFocusedRepairBudget(),
             Model = request.Model ?? string.Empty,
             ReasoningEffort = _mechanicalReasoningEffort
@@ -654,7 +655,10 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         {
             editSpec = ParseSingleFileEditSpec(aiResponse.Content ?? string.Empty, manifestEntry);
             ValidateSingleFileEditSpec(editSpec, manifestEntry, currentContent, useFullFileReplacement);
-            ValidateFocusedRepairSearchAnchors(editSpec, filePath);
+            ValidateFocusedRepairSearchAnchors(
+                editSpec,
+                filePath,
+                string.IsNullOrWhiteSpace(request.FailureSummary) ? 6 : MultiFailureMaxEdits);
         }
         catch (Exception parseEx)
         {
@@ -1435,6 +1439,12 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         if (validationError == null && !salvagedCompletedEdit && !string.IsNullOrWhiteSpace(candidateCode))
         {
             validationError = FindCSharpSyntaxError(fileEntry.FilePath, candidateCode, fileEntry.Action == FileEditAction.Modify ? targetContent : null);
+            validationError ??= await FindScriptSyntaxErrorAsync(
+                request.WorkspacePath,
+                fileEntry.FilePath,
+                candidateCode,
+                fileEntry.Action == FileEditAction.Modify ? targetContent : null,
+                cancellationToken).ConfigureAwait(false);
         }
 
         if (validationError != null)
@@ -1739,6 +1749,119 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
             return $"line {line}: {d.Id} {d.GetMessage()}";
         });
         return $"Generated C# has {errors.Count} syntax error(s): {string.Join("; ", details)}";
+    }
+
+    private static readonly HashSet<string> ScriptExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"
+    };
+
+    // Reads the source from stdin and prints one "line:col message" per syntactic diagnostic.
+    private const string ScriptSyntaxCheckSource =
+        "const ts=require(process.argv[1]);let s='';process.stdin.setEncoding('utf8');" +
+        "process.stdin.on('data',d=>s+=d).on('end',()=>{const r=ts.transpileModule(s,{reportDiagnostics:true," +
+        "fileName:process.argv[2],compilerOptions:{jsx:ts.JsxEmit.Preserve,target:ts.ScriptTarget.ESNext}});" +
+        "for(const d of r.diagnostics||[]){const p=d.file?d.file.getLineAndCharacterOfPosition(d.start):{line:0,character:0};" +
+        "console.log((p.line+1)+':'+(p.character+1)+' TS'+d.code+' '+ts.flattenDiagnosticMessageText(d.messageText,' '))}});";
+
+    /// <summary>
+    /// Syntax-checks generated TS/JS/JSX with the repository's own TypeScript package, so an unbalanced JSX tag or
+    /// bracket is caught in milliseconds instead of at the full build. It never blocks a run: it returns null when
+    /// node or typescript is unavailable, when the checker fails, or when the file was already broken beforehand.
+    /// </summary>
+    internal static async Task<string?> FindScriptSyntaxErrorAsync(
+        string workspacePath,
+        string filePath,
+        string code,
+        string? originalContent,
+        CancellationToken cancellationToken)
+    {
+        if (!ScriptExtensions.Contains(Path.GetExtension(filePath)))
+        {
+            return null;
+        }
+
+        var tsEntry = Path.Combine(workspacePath, "node_modules", "typescript", "lib", "typescript.js");
+        if (!File.Exists(tsEntry))
+        {
+            return null;
+        }
+
+        var errors = await RunScriptSyntaxCheckAsync(tsEntry, filePath, code, cancellationToken).ConfigureAwait(false);
+        if (errors is not { Count: > 0 })
+        {
+            return null;
+        }
+
+        if (originalContent != null)
+        {
+            var originalErrors = await RunScriptSyntaxCheckAsync(tsEntry, filePath, originalContent, cancellationToken).ConfigureAwait(false);
+            if (originalErrors is not { Count: 0 })
+            {
+                return null;
+            }
+        }
+
+        return $"Generated {Path.GetExtension(filePath)} has {errors.Count} syntax error(s): " +
+               string.Join("; ", errors.Take(3).Select(e => $"line {e}"));
+    }
+
+    private static async Task<List<string>?> RunScriptSyntaxCheckAsync(
+        string tsEntry,
+        string filePath,
+        string code,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("node")
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-e");
+            psi.ArgumentList.Add(ScriptSyntaxCheckSource);
+            psi.ArgumentList.Add(tsEntry);
+            psi.ArgumentList.Add(Path.GetFileName(filePath));
+
+            using var process = Process.Start(psi);
+            if (process == null)
+            {
+                return null;
+            }
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+
+            try
+            {
+                await process.StandardInput.WriteAsync(code.AsMemory(), timeout.Token).ConfigureAwait(false);
+                process.StandardInput.Close();
+                var stdout = await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
+                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+
+                return process.ExitCode != 0
+                    ? null
+                    : stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            }
+            catch (OperationCanceledException)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { /* best effort */ }
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+
+                return null;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     private static async Task<(string Content, string Hash)> ReadCurrentTargetContentAsync(
@@ -2433,8 +2556,8 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
             : useFullFileReplacement
                 ? "This is a near-empty Modify. Return the complete resulting file once in 'newContent'; omit 'searchReplaceEdits'."
                 : isTest
-                    ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult."
-                    : "This is a Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult.";
+                    ? "This is an existing test-file Modify. Return ONLY compact 'searchReplaceEdits' inserting or updating specific test methods. DO NOT reproduce unchanged test methods or the entire test class. Use a short 2-5 line exact anchor that is unique in the target file (such as the attribute and signature of a neighboring test, or the tail of the preceding test plus its closing brace and surrounding lines; never use a bare closing brace alone) and include only the new/modified test code. Omit 'newContent'. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult, or because you cannot run, test or view the app manually: you are not expected to; implement the change from the task and file content."
+                    : "This is a Modify. Return only compact 'searchReplaceEdits'; each small exact search anchor must match once. Omit 'newContent'. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult, or because you cannot run, test or view the app manually: you are not expected to; implement the change from the task and file content.";
 
         var testGuidance = isTest
             ? fileEntry.Action == FileEditAction.Modify
@@ -2626,8 +2749,27 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
     public static string BuildSingleFileRepairUserPrompt(string parseError, string previousResponse, ManifestFileEntry fileEntry) =>
         BuildSingleFileRepairUserPrompt(parseError, previousResponse, fileEntry, currentTargetContent: null, relevantGeneratedDependencies: null, lockedContracts: null, applicabilityFailure: null);
 
-    public static string BuildFocusedDiagnosticRepairSystemPrompt(string filePath)
+    public static string BuildFocusedDiagnosticRepairSystemPrompt(string filePath, bool multipleFailures = false)
     {
+        if (multipleFailures)
+        {
+            return $$"""
+                You are repairing several failing tests that share one or more causes, in a single existing file: '{{filePath}}'.
+
+                CRITICAL RULES:
+                1. Respond ONLY with a valid JSON object. No markdown, prose, reasoning, or extra fields.
+                2. This is an existing-file Modify. NEVER return 'newContent' or reproduce the entire file.
+                3. Return 'searchReplaceEdits' covering EVERY failing test listed in the grouped failure summary: one edit per assertion or line that must change, up to {{MultiFailureMaxEdits}} edits. Do not stop after the first failure.
+                4. Each search anchor must be an exact existing 1-5 line unique excerpt from the current target. Never use a bare closing brace alone as the anchor.
+                5. The application source is the source of truth. When it was changed on purpose, update the test expectations (text, roles, labels, counts) to match what it renders now.
+                6. Never delete tests, skip tests, or replace assertions with trivial ones. Keep each test checking the same behavior.
+                7. Preserve all code not implicated by the failures.
+
+                Required JSON shape:
+                {"filePath":"{{filePath}}","action":"Modify","searchReplaceEdits":[{"search":"exact unique excerpt","replace":"replacement"}]}
+                """;
+        }
+
         return $$"""
             You are performing lightweight focused verification repair for a single existing file: '{{filePath}}'.
 
@@ -2715,6 +2857,23 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         sb.AppendLine("=== End Verification Diagnostic Evidence ===");
         sb.AppendLine();
 
+        if (!string.IsNullOrWhiteSpace(request.FailureSummary))
+        {
+            sb.AppendLine("=== All Failing Tests, Grouped By Cause ===");
+            sb.AppendLine(request.FailureSummary);
+            sb.AppendLine("=== End Grouped Failures ===");
+            sb.AppendLine("Fix every group in this one response. Tests that share a cause usually need the same kind of edit in several places.");
+            sb.AppendLine();
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.RepairHint))
+        {
+            sb.AppendLine("=== Repair Note ===");
+            sb.AppendLine(request.RepairHint);
+            sb.AppendLine("=== End Repair Note ===");
+            sb.AppendLine();
+        }
+
         BehavioralDependencyEvidence.AppendPromptSection(sb, behavioralEvidence ?? Array.Empty<VerificationContractExcerpt>(), behavioralSignatures);
 
         if (request.DiagnosticLocations != null && request.DiagnosticLocations.Count > 0)
@@ -2793,6 +2952,13 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
 
         candidates.AddRange(ExtractReferencedSourcePaths(currentContent, targetFilePath));
         candidates.AddRange(ExtractReferencedSourcePaths(request.DiagnosticEvidence ?? string.Empty, targetFilePath));
+
+        // Planned files of this task (including ones resolved as NoChange) are the application source the
+        // failing test exercises; the repair must see them even when the test never imports them directly.
+        if (request.ContextFiles != null)
+        {
+            candidates.AddRange(request.ContextFiles);
+        }
 
         foreach (var candidate in candidates)
         {
@@ -2890,7 +3056,9 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         return paths.ToList();
     }
 
-    public static void ValidateFocusedRepairSearchAnchors(FileEditSpec spec, string filePath)
+    private const int MultiFailureMaxEdits = 14;
+
+    public static void ValidateFocusedRepairSearchAnchors(FileEditSpec spec, string filePath, int maxEdits = 6)
     {
         if (spec.NewContent != null)
         {
@@ -2902,7 +3070,7 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
             throw new FormatException($"Focused repair for '{filePath}' requires compact searchReplaceEdits.");
         }
 
-        if (spec.SearchReplaceEdits.Count > 6)
+        if (spec.SearchReplaceEdits.Count > maxEdits)
         {
             throw new FormatException($"Focused repair for '{filePath}' emitted too many edit blocks ({spec.SearchReplaceEdits.Count}); keep edits to the diagnostic lines.");
         }
@@ -3292,7 +3460,7 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
                 ? "Edit Strategy: hash-guarded small-file replacement. Return complete resulting content in newContent."
                 : isTest
                     ? "Edit Strategy: surgical test patch. Add only the new or modified test method(s) using a concise 2-5 line unique search anchor from the target file (such as the tail of the preceding test method with surrounding structural lines, or the target test signature; never use a bare closing brace alone). NEVER repeat existing unchanged tests, fixtures, or the full test class. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch."
-                    : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult.";
+                    : "Edit Strategy: surgical patch. Return only minimal searchReplaceEdits. If the target already satisfies the requested file-specific change and no honest edit is required, return the explicit NoChange contract rather than inventing a patch. Do not use NoChange simply because the edit is difficult, or because you cannot run, test or view the app manually: you are not expected to; implement the change from the task and file content.";
 
             sb.AppendLine(editStrategy);
             sb.AppendLine("=== Current Content of Target File ===");
@@ -4193,6 +4361,46 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
             }
         }
 
+        // A test asserts the behaviour of the source files of the same task, so it is generated after them and
+        // sees their final content. Edges that would conflict with, or close a cycle on, an existing one are skipped.
+        foreach (var target in files)
+        {
+            if (!ProjectGraphHelper.IsTestFileCandidate(target.FilePath) || IsNonSourceDataConfigFile(target.FilePath))
+            {
+                continue;
+            }
+
+            foreach (var candidate in files)
+            {
+                if (string.Equals(target.FilePath, candidate.FilePath, StringComparison.OrdinalIgnoreCase) ||
+                    ProjectGraphHelper.IsTestFileCandidate(candidate.FilePath) ||
+                    IsNonSourceDataConfigFile(candidate.FilePath) ||
+                    seen.Contains(EdgeKey(candidate.FilePath, target.FilePath)))
+                {
+                    continue;
+                }
+
+                if (seen.Contains(EdgeKey(target.FilePath, candidate.FilePath)))
+                {
+                    suppressedConflict++;
+                    continue;
+                }
+
+                if (HasPrerequisitePath(accepted, target.FilePath, candidate.FilePath))
+                {
+                    suppressedCycle++;
+                    continue;
+                }
+
+                seen.Add(EdgeKey(candidate.FilePath, target.FilePath));
+                accepted.Add(new GenerationPrerequisite(
+                    candidate.FilePath,
+                    target.FilePath,
+                    GenerationPrerequisiteReason.TestAfterSource));
+                heuristicCount++;
+            }
+        }
+
         return new GenerationPrerequisiteGraph(
             accepted,
             manifestCount,
@@ -4382,6 +4590,17 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         }
 
         var candidates = ExtractJsonCandidates(rawContent);
+        // Models often emit code inside JSON strings with raw newlines or unescaped quotes. Try a local,
+        // deterministic repair of those candidates before the caller pays for a model repair call.
+        foreach (var candidate in candidates.ToList())
+        {
+            var repaired = RepairJsonStringLiterals(candidate);
+            if (!string.Equals(repaired, candidate, StringComparison.Ordinal) && !candidates.Contains(repaired))
+            {
+                candidates.Add(repaired);
+            }
+        }
+
         Exception? lastException = null;
 
         foreach (var candidate in candidates)
@@ -4434,6 +4653,212 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         throw lastException ?? new FormatException($"Failed to parse valid edit spec for '{expectedEntry.FilePath}'.");
     }
 
+    /// <summary>
+    /// Repairs the ways a model typically breaks JSON that carries source code: raw control characters, unescaped
+    /// quotes and invalid escapes (a regex such as \d) inside string literals. Valid JSON is returned unchanged.
+    /// A quote only closes a string when what follows is consistent with the JSON structure around it, so code such as
+    /// cn("a", "b") or style={{ color: "red" }} inside a string is not mistaken for the end of the string.
+    /// </summary>
+    internal static string RepairJsonStringLiterals(string json)
+    {
+        var sb = new StringBuilder(json.Length + 16);
+        var containers = new List<char>();
+        var inString = false;
+        var stringIsKey = false;
+        var expectKey = false;
+
+        for (var i = 0; i < json.Length; i++)
+        {
+            var c = json[i];
+
+            if (!inString)
+            {
+                sb.Append(c);
+                switch (c)
+                {
+                    case '"':
+                        inString = true;
+                        stringIsKey = containers.Count > 0 && containers[^1] == 'o' && expectKey;
+                        break;
+                    case '{':
+                        containers.Add('o');
+                        expectKey = true;
+                        break;
+                    case '[':
+                        containers.Add('a');
+                        expectKey = false;
+                        break;
+                    case '}':
+                    case ']':
+                        if (containers.Count > 0)
+                        {
+                            containers.RemoveAt(containers.Count - 1);
+                        }
+
+                        expectKey = false;
+                        break;
+                    case ',':
+                        expectKey = containers.Count > 0 && containers[^1] == 'o';
+                        break;
+                    case ':':
+                        expectKey = false;
+                        break;
+                }
+
+                continue;
+            }
+
+            if (c == '\\' && i + 1 < json.Length)
+            {
+                var next = json[i + 1];
+                var validEscape = next is '"' or '\\' or '/' or 'b' or 'f' or 'n' or 'r' or 't' ||
+                                  (next == 'u' && i + 5 < json.Length && IsHex4(json, i + 2));
+                if (validEscape)
+                {
+                    sb.Append(c).Append(next);
+                    i++;
+                }
+                else
+                {
+                    // An invalid escape such as \d or \. in a regex: keep the backslash as a literal one.
+                    sb.Append("\\\\");
+                }
+
+                continue;
+            }
+
+            if (c == '"')
+            {
+                if (JsonQuoteClosesString(json, i, containers, stringIsKey))
+                {
+                    inString = false;
+                    sb.Append(c);
+                }
+                else
+                {
+                    sb.Append("\\\"");
+                }
+
+                continue;
+            }
+
+            switch (c)
+            {
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                case < ' ': sb.Append("\\u").Append(((int)c).ToString("x4")); break;
+                default: sb.Append(c); break;
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private static bool IsHex4(string text, int start)
+    {
+        for (var k = start; k < start + 4; k++)
+        {
+            if (!Uri.IsHexDigit(text[k]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// True when the quote at <paramref name="quoteIndex"/> can end the current string: a key is followed by ':'; a value
+    /// by ',' then the next member, or by closers that match the open containers, ending at the document end or at a
+    /// further ',' / closer.
+    /// </summary>
+    private static bool JsonQuoteClosesString(string json, int quoteIndex, IReadOnlyList<char> containers, bool isKey)
+    {
+        var j = NextSignificant(json, quoteIndex + 1);
+        if (j >= json.Length)
+        {
+            return true;
+        }
+
+        if (isKey)
+        {
+            return json[j] == ':';
+        }
+
+        var depth = containers.Count;
+        while (j < json.Length)
+        {
+            var c = json[j];
+            if (c == ',')
+            {
+                var n = NextSignificant(json, j + 1);
+                if (n >= json.Length)
+                {
+                    return false;
+                }
+
+                if (depth > 0 && containers[depth - 1] == 'o')
+                {
+                    return json[n] == '"' && LooksLikeKeyAt(json, n);
+                }
+
+                return json[n] is '"' or '{' or '[' or '-' or 't' or 'f' or 'n' || char.IsDigit(json[n]);
+            }
+
+            if (c is '}' or ']')
+            {
+                var expected = c == '}' ? 'o' : 'a';
+                if (depth == 0 || containers[depth - 1] != expected)
+                {
+                    return false;
+                }
+
+                depth--;
+                j = NextSignificant(json, j + 1);
+                if (j >= json.Length)
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool LooksLikeKeyAt(string json, int quoteIndex)
+    {
+        var k = quoteIndex + 1;
+        var identifierStart = k;
+        while (k < json.Length && (char.IsLetterOrDigit(json[k]) || json[k] is '_' or '-' or '$'))
+        {
+            k++;
+        }
+
+        if (k == identifierStart || k >= json.Length || json[k] != '"')
+        {
+            return false;
+        }
+
+        var after = NextSignificant(json, k + 1);
+        return after < json.Length && json[after] == ':';
+    }
+
+    private static int NextSignificant(string json, int from)
+    {
+        var j = from;
+        while (j < json.Length && char.IsWhiteSpace(json[j]))
+        {
+            j++;
+        }
+
+        return j;
+    }
+
     private static bool HasExplicitNoChangeProperty(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object)
@@ -4471,6 +4896,16 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
             explicitNoChange ? spec.NoChangeReason : null);
     }
 
+    private static readonly string[] InabilityNoChangeMarkers =
+    {
+        "manual", "browser", "cannot perform", "can't perform", "unable to", "cannot run", "cannot test",
+        "tarayıcı", "manuel"
+    };
+
+    private static bool IsInabilityNoChangeReason(string? reason) =>
+        !string.IsNullOrWhiteSpace(reason) &&
+        InabilityNoChangeMarkers.Any(marker => reason.Contains(marker, StringComparison.OrdinalIgnoreCase));
+
     public static void ValidateExplicitNoChange(FileEditSpec spec, ManifestFileEntry expectedEntry)
     {
         if (!spec.NoChange)
@@ -4486,6 +4921,12 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         if (spec.Action != FileEditAction.Modify)
         {
             throw new FormatException($"NoChange is only valid for Modify action '{expectedEntry.FilePath}'.");
+        }
+
+        if (IsInabilityNoChangeReason(spec.NoChangeReason))
+        {
+            throw new FormatException(
+                $"NoChange for '{expectedEntry.FilePath}' was justified by an inability to test or run the app manually. That is not a reason to skip the edit: implement the change from the task description and the file content, and verify it through the automated tests.");
         }
 
         if (spec.NewContent != null)

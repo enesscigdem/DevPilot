@@ -32,7 +32,10 @@ public sealed record FocusedRepairRequest(
     string? LanguageContext = null,
     string? Model = null,
     IReadOnlyList<string>? TouchedFiles = null,
-    string? TestName = null);
+    string? TestName = null,
+    string? FailureSummary = null,
+    string? RepairHint = null,
+    IReadOnlyList<string>? ContextFiles = null);
 
 /// <summary>
 /// Reviewer feedback for an execution whose worktree already holds the change (and possibly an open pull request).
@@ -129,7 +132,8 @@ public enum GenerationPrerequisiteReason
 {
     ManifestDependency,
     DirectLocalReference,
-    ExistingHeuristic
+    ExistingHeuristic,
+    TestAfterSource
 }
 
 public sealed record GenerationPrerequisite(

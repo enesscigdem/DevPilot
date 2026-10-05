@@ -80,4 +80,7 @@ public sealed record ExecutionActivityMetadata(
     string? ModelSource = null,
     string? ModelFallbackReason = null,
     string? AttemptOutcome = null,
-    bool? WillRetry = null);
+    bool? WillRetry = null,
+    int? FailingTestCount = null,
+    IReadOnlyList<string>? FailingTestGroups = null,
+    string? SuggestedFix = null);

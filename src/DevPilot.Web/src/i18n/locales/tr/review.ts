@@ -107,5 +107,21 @@ const review: Resources["review"] = {
   mergeDesc: "Bu işlem, çalıştırmanın onaylanmış pull request'ini GitHub'da standart birleştirme yöntemiyle temel dala birleştirecek.",
   confirmMerge: "Birleştirmeyi onayla",
   requestChanges: "Düzeltme iste",
+  visual: {
+    title: "Görsel kontrol",
+    subtitle: "Bu değişiklikten önce ve sonra uygulamanın görünümü",
+    before: "Önce",
+    after: "Sonra",
+    desktop: "Masaüstü",
+    mobile: "Mobil",
+    noBaseline: "Öncesi görseli yok: yalnızca sonuç gösteriliyor.",
+    sideBySide: "Yan yana",
+    toggle: "Değiştir",
+    unavailable: "Ekran görüntüsü alınamadı",
+    unavailableHint: "Bu değişiklik arayüzü etkiliyor. Onaylamadan önce çalışan uygulamayı açıp kendiniz kontrol edin.",
+    acknowledge: "Sonucu gördüm, arayüz beklediğim gibi",
+    required: "Arayüz değişti: onaylamak için ekran görüntülerini incelediğinizi onaylayın",
+    openImage: "Tam boyutta aç",
+  },
 }
 export default review

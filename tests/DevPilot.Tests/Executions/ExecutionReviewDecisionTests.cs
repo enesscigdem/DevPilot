@@ -186,6 +186,63 @@ public class ExecutionReviewDecisionTests : IDisposable
         reloaded!.ReviewStatus.Should().Be(ExecutionReviewStatus.Pending);
     }
 
+    private sealed class StubVisualReader : DevPilot.Application.Executions.Ports.IVisualArtifactReader
+    {
+        private readonly DevPilot.Application.Executions.Models.VisualCaptureManifest? _manifest;
+
+        public StubVisualReader(DevPilot.Application.Executions.Models.VisualCaptureManifest? manifest) => _manifest = manifest;
+
+        public Task<DevPilot.Application.Executions.Models.VisualCaptureManifest?> GetManifestAsync(
+            string workspacePath, Guid executionId, CancellationToken cancellationToken = default) => Task.FromResult(_manifest);
+
+        public string? ResolveImagePath(string workspacePath, Guid executionId, string fileName) => null;
+    }
+
+    [Fact]
+    public async Task ApproveExecutionReview_UiChange_RequiresVisualAcknowledgement()
+    {
+        var execution = SeedCompletedExecution();
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new ApproveExecutionReviewCommandHandler(
+            _executionRepository,
+            _activityRepository,
+            _workspaceManager,
+            fingerprintCalculator,
+            _activityRecorder,
+            NullLogger<ApproveExecutionReviewCommandHandler>.Instance,
+            new StubVisualReader(new DevPilot.Application.Executions.Models.VisualCaptureManifest { Status = "Captured", RequiresReview = true }));
+
+        var blocked = await handler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id, fingerprintCalculator.SampleFingerprint));
+
+        blocked.Status.Should().Be(ApproveExecutionReviewResultStatus.Conflict);
+        blocked.ErrorMessage.Should().Contain("screenshots");
+        (await _executionRepository.GetByIdAsync(execution.Id))!.ReviewStatus.Should().Be(ExecutionReviewStatus.Pending);
+
+        var approved = await handler.HandleAsync(new ApproveExecutionReviewCommand(
+            execution.Id, fingerprintCalculator.SampleFingerprint, VisualAcknowledged: true));
+
+        approved.Status.Should().Be(ApproveExecutionReviewResultStatus.Success);
+    }
+
+    [Fact]
+    public async Task ApproveExecutionReview_NoUiChange_DoesNotAskForVisualAcknowledgement()
+    {
+        var execution = SeedCompletedExecution();
+        var fingerprintCalculator = new StubFingerprintCalculator();
+        var handler = new ApproveExecutionReviewCommandHandler(
+            _executionRepository,
+            _activityRepository,
+            _workspaceManager,
+            fingerprintCalculator,
+            _activityRecorder,
+            NullLogger<ApproveExecutionReviewCommandHandler>.Instance,
+            new StubVisualReader(new DevPilot.Application.Executions.Models.VisualCaptureManifest { Status = "Skipped", RequiresReview = false }));
+
+        var result = await handler.HandleAsync(new ApproveExecutionReviewCommand(execution.Id, fingerprintCalculator.SampleFingerprint));
+
+        result.Status.Should().Be(ApproveExecutionReviewResultStatus.Success);
+    }
+
     [Fact]
     public async Task ConcurrentApproveAndReject_OnlyOneDecisionWins()
     {

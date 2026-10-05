@@ -154,7 +154,23 @@ public static class ExecutionVerdictBuilder
             findings.Insert(0, new("FailureReason", "danger", stop));
         }
 
+        var failedTests = parsed.LastOrDefault(p =>
+            p.Activity.Stage == ExecutionStage.Test &&
+            p.Activity.Status == ExecutionActivityStatus.Failed &&
+            p.Metadata?.FailingTestCount is > 0).Metadata;
+        var failingTestCount = outcome == ExecutionVerificationOutcome.NeedsReview ? failedTests?.FailingTestCount ?? 0 : 0;
+        var buildPassed = parsed.Any(p => p.Activity.Stage == ExecutionStage.Build &&
+                                          p.Activity.Status == ExecutionActivityStatus.Completed &&
+                                          p.Activity.Message.StartsWith("Build passed", StringComparison.OrdinalIgnoreCase));
+
         var (severity, headline, action) = Describe(execution, outcome, baselineUnverified, weakening.Count > 0, preExisting, stop);
+        if (failingTestCount > 0 && weakening.Count == 0)
+        {
+            var passedNote = buildPassed ? "The build passed, but " : string.Empty;
+            var count = failingTestCount == 1 ? "1 test still fails" : $"{failingTestCount} tests still fail";
+            headline = $"Needs review: {passedNote}{count} after {testRounds} automatic repair round(s).";
+            action = "Use \"Fix failing tests\" to give the AI another attempt with the full list of failures, or describe the fix yourself with Request changes.";
+        }
 
         return new ExecutionVerdictDto(
             Outcome: outcome.ToString(),
@@ -173,7 +189,10 @@ public static class ExecutionVerdictBuilder
             ChecksNotRun: checksNotRun,
             BaseFreshness: freshness?.BaseFreshness,
             BaseBehindCount: freshness?.BaseBehindCount,
-            BaseCommitSha: freshness?.BaseCommitSha);
+            BaseCommitSha: freshness?.BaseCommitSha,
+            FailingTestCount: failingTestCount,
+            FailingTestGroups: failingTestCount > 0 ? failedTests?.FailingTestGroups : null,
+            SuggestedFix: failingTestCount > 0 ? failedTests?.SuggestedFix : null);
     }
 
     public static ExecutionUsageDto AggregateUsage(IReadOnlyList<ExecutionActivity> activities, AiPricingOptions? pricing = null)

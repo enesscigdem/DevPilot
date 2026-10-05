@@ -47,6 +47,7 @@ const server: Record<string, string> = {
   "Needs review: verification could not be completed automatically.": "İnceleme gerekli: doğrulama otomatik olarak tamamlanamadı.",
   "Needs review: verification ended with an unresolved failure.": "İnceleme gerekli: doğrulama çözülmemiş bir hatayla sona erdi.",
   "Inspect the failing evidence below; retry the execution or fix the failing files manually.": "Aşağıdaki hata kanıtını inceleyin; çalıştırmayı yeniden deneyin veya başarısız dosyaları elle düzeltin.",
+  "Use \"Fix failing tests\" to give the AI another attempt with the full list of failures, or describe the fix yourself with Request changes.": "Yapay zekâya başarısız testlerin tam listesiyle bir deneme daha hakkı vermek için \"Başarısız testleri düzelt\"i kullanın ya da Değişiklik iste ile düzeltmeyi kendiniz tarif edin.",
   "Failed before verification.": "Doğrulamadan önce başarısız oldu.",
   "Retry the execution. If it keeps failing, re-run impact analysis or narrow the plan.": "Çalıştırmayı yeniden deneyin. Başarısız olmaya devam ederse etki analizini yeniden çalıştırın veya planı daraltın.",
   "The execution was cancelled.": "Çalıştırma iptal edildi.",

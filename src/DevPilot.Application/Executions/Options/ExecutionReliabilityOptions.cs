@@ -14,7 +14,12 @@ public sealed class ExecutionReliabilityOptions
     public const int MaxFlakeRerunsCeiling = 1;
 
     public int MaxCompileRepairRounds { get; set; } = 3;
-    public int MaxTestRepairRounds { get; set; } = 2;
+    public int MaxTestRepairRounds { get; set; } = 3;
+
+    /// <summary>Repairs failing verification with a tool-using model loop (read/search/edit/run checks) instead of fixed focused rounds. Off by default.</summary>
+    public bool AgenticRepairEnabled { get; set; }
+    public int MaxAgenticTurns { get; set; } = 30;
+    public int MaxAgenticCheckRuns { get; set; } = 6;
 
     /// <summary>Flake confirmation reruns allowed per execution (0 disables, capped at <see cref="MaxFlakeRerunsCeiling"/>).</summary>
     public int MaxFlakeReruns { get; set; } = MaxFlakeRerunsCeiling;
@@ -40,6 +45,8 @@ public sealed class ExecutionReliabilityOptions
     {
         MaxCompileRepairRounds = Math.Max(0, MaxCompileRepairRounds);
         MaxTestRepairRounds = Math.Max(0, MaxTestRepairRounds);
+        MaxAgenticTurns = Math.Clamp(MaxAgenticTurns, 1, 60);
+        MaxAgenticCheckRuns = Math.Clamp(MaxAgenticCheckRuns, 1, 12);
         MaxFlakeReruns = Math.Clamp(MaxFlakeReruns, 0, MaxFlakeRerunsCeiling);
         MaxGenerationCalls = Math.Max(1, MaxGenerationCalls);
         MaxConcurrentFileGenerations = Math.Clamp(MaxConcurrentFileGenerations, 1, 4);

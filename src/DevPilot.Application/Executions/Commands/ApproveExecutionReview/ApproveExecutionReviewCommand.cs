@@ -5,7 +5,11 @@ using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Application.Executions.Commands.ApproveExecutionReview;
 
-public sealed record ApproveExecutionReviewCommand(Guid ExecutionId, string ExpectedChangeFingerprint, Guid? RepositoryWorkspaceId = null);
+public sealed record ApproveExecutionReviewCommand(
+    Guid ExecutionId,
+    string ExpectedChangeFingerprint,
+    Guid? RepositoryWorkspaceId = null,
+    bool VisualAcknowledged = false);
 
 public enum ApproveExecutionReviewResultStatus
 {
@@ -47,6 +51,7 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
     private readonly IExecutionChangeFingerprintCalculator _fingerprintCalculator;
     private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly ILogger<ApproveExecutionReviewCommandHandler> _logger;
+    private readonly IVisualArtifactReader? _visualArtifactReader;
 
     public ApproveExecutionReviewCommandHandler(
         IExecutionRepository executionRepository,
@@ -54,8 +59,10 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
         IExecutionWorkspaceManager workspaceManager,
         IExecutionChangeFingerprintCalculator fingerprintCalculator,
         IExecutionActivityRecorder activityRecorder,
-        ILogger<ApproveExecutionReviewCommandHandler> logger)
+        ILogger<ApproveExecutionReviewCommandHandler> logger,
+        IVisualArtifactReader? visualArtifactReader = null)
     {
+        _visualArtifactReader = visualArtifactReader;
         _executionRepository = executionRepository;
         _activityRepository = activityRepository;
         _workspaceManager = workspaceManager;
@@ -111,6 +118,20 @@ public sealed class ApproveExecutionReviewCommandHandler : IApproveExecutionRevi
         {
             return ApproveExecutionReviewResult.Conflict(
                 "Execution workspace path or branch name is not configured.");
+        }
+
+        // A change that alters the UI cannot be approved from the numbers alone: the reviewer has to confirm they
+        // looked at the before/after result (or, when no screenshots could be made, at the running app).
+        if (!command.VisualAcknowledged && _visualArtifactReader != null)
+        {
+            var visual = await _visualArtifactReader
+                .GetManifestAsync(execution.WorkspacePath, execution.Id, cancellationToken)
+                .ConfigureAwait(false);
+            if (visual is { RequiresReview: true })
+            {
+                return ApproveExecutionReviewResult.Conflict(
+                    "This change modifies the UI. Look at the before/after screenshots and confirm before approving.");
+            }
         }
 
         var verificationResult = await _workspaceManager

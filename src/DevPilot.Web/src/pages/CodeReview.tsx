@@ -25,18 +25,20 @@ import { PageContainer } from "@/components/shared"
 import { ExecutionTabs } from "@/components/ExecutionTabs"
 import { UsagePanel, VerdictCard } from "@/components/VerdictCard"
 import { Button, Badge, Panel } from "@/components/ui/primitives"
-import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getGitHubConnectUrl, retryExecution, requestExecutionChanges } from "@/api"
+import { approveExecutionReview, commitExecution, createPullRequest, pushExecution, getExecutionReview, rejectExecutionReview, syncPullRequest, mergeExecution, getExecutionActivity, getExecutionVisual, getGitHubConnectUrl, retryExecution, requestExecutionChanges } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
 import {
   getExecutionStatusMeta,
   type ExecutionReview,
   type ExecutionReviewFile,
   type ExecutionActivityItem,
+  type VisualCaptureManifest,
 } from "@/types"
 import { cn } from "@/lib/utils"
 import { DiffRow, parseGitDiff } from "@/components/DiffView"
 import { RevisionPanel } from "@/components/RevisionPanel"
 import { RequestChangesModal } from "@/components/RequestChangesModal"
+import { VisualReviewPanel } from "@/components/VisualReviewPanel"
 
 export function CodeReview() {
   const { t } = useTranslation()
@@ -59,6 +61,8 @@ export function CodeReview() {
   const [showChangesModal, setShowChangesModal] = useState(false)
   const [isRequestingChanges, setIsRequestingChanges] = useState(false)
   const [changesError, setChangesError] = useState<string | null>(null)
+  const [visual, setVisual] = useState<VisualCaptureManifest | null>(null)
+  const [visualAcknowledged, setVisualAcknowledged] = useState(false)
 
   const activeRequestIdRef = useRef(0)
   const hasSyncedSidebarWorkspaceRef = useRef<string | null>(null)
@@ -76,15 +80,19 @@ export function CodeReview() {
     setIsLoading(true)
     setError(null)
     setReview(null)
+    setVisual(null)
+    setVisualAcknowledged(false)
 
     Promise.all([
       getExecutionReview(id, undefined, { signal: controller.signal }),
       getExecutionActivity(id, undefined, { signal: controller.signal }).catch(() => []),
+      getExecutionVisual(id, { signal: controller.signal }).catch(() => null),
     ])
-      .then(([reviewData, actData]) => {
+      .then(([reviewData, actData, visualData]) => {
         if (!isCancelled && currentRequestId === activeRequestIdRef.current) {
           setReview(reviewData)
           setActivities(actData)
+          setVisual(visualData)
           setError(null)
           setIsLoading(false)
 
@@ -134,7 +142,7 @@ export function CodeReview() {
 
     try {
       const wsId = review.repositoryWorkspaceId ?? activeWorkspaceId
-      const decision = await approveExecutionReview(id, review.changeFingerprint, wsId)
+      const decision = await approveExecutionReview(id, review.changeFingerprint, wsId, undefined, visualAcknowledged)
       try {
         const fresh = await getExecutionReview(id, wsId)
         setReview(fresh)
@@ -426,6 +434,8 @@ export function CodeReview() {
 
   const isPendingDecision = review.reviewStatus === "Pending"
   const isApproved = review.reviewStatus === "Approved"
+  const showVisual = !!visual && visual.status !== "None" && (visual.requiresReview || (visual.shots?.length ?? 0) > 0)
+  const visualBlocksApproval = !!visual?.requiresReview && !visualAcknowledged
   const isRejected = review.reviewStatus === "Rejected"
 
   const handleSelectFile = (filePath: string) => {
@@ -493,7 +503,7 @@ export function CodeReview() {
               <Button
                 variant="primary"
                 size="sm"
-                disabled={isSubmittingDecision}
+                disabled={isSubmittingDecision || visualBlocksApproval}
                 onClick={handleApprove}
               >
                 {isSubmittingDecision ? (
@@ -673,6 +683,17 @@ export function CodeReview() {
 
         {/* CENTER — combined git diff */}
         <section className="min-w-0 border-b border-border lg:border-b-0">
+          {showVisual && visual && id && (
+            <div className="border-b border-border p-4">
+              <VisualReviewPanel
+                executionId={id}
+                manifest={visual}
+                acknowledged={visualAcknowledged}
+                onAcknowledgedChange={setVisualAcknowledged}
+                decided={review.reviewStatus !== "Pending"}
+              />
+            </div>
+          )}
           <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
             <span className="font-mono text-[12px] text-foreground truncate">
               {selectedFile ? selectedFile : t("review.combinedDiff")}
@@ -706,7 +727,11 @@ export function CodeReview() {
 
           {review.verdict && (
             <div className="mb-3">
-              <VerdictCard verdict={review.verdict} />
+              <VerdictCard
+                verdict={review.verdict}
+                onFixTests={review.canRequestChanges ? handleRequestChanges : undefined}
+                isFixingTests={isRequestingChanges}
+              />
             </div>
           )}
 
@@ -871,13 +896,16 @@ export function CodeReview() {
                     <Button
                       variant="primary"
                       size="md"
-                      disabled={isSubmittingDecision || !validationPassed}
+                      disabled={isSubmittingDecision || !validationPassed || visualBlocksApproval}
                       onClick={handleApprove}
                       className="w-full"
                     >
                       {isSubmittingDecision ? <Loader2 className="h-4 w-4 animate-spin" /> : t("review.approve")}
                     </Button>
                   </div>
+                  {visualBlocksApproval && (
+                    <div className="text-[12px] text-muted-foreground">{t("review.visual.required")}</div>
+                  )}
                   {review.canRequestChanges && (
                     <Button
                       variant="default"

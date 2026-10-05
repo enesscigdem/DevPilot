@@ -152,6 +152,16 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
                 .ConfigureAwait(false);
         }
 
+        // Earlier turns of a resumed conversation, read before this question is stored so it is not repeated.
+        IReadOnlyList<ProjectBrainMessage> priorMessages = Array.Empty<ProjectBrainMessage>();
+        if (command.ConversationId.HasValue && conversation.Id == command.ConversationId.Value)
+        {
+            var withMessages = await _conversationRepository
+                .GetByIdWithMessagesAsync(conversation.Id, cancellationToken)
+                .ConfigureAwait(false);
+            priorMessages = withMessages?.Messages ?? new List<ProjectBrainMessage>();
+        }
+
         // Persist user question message
         var userMsg = new ProjectBrainMessage
         {
@@ -170,7 +180,7 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
         {
             RepositoryWorkspaceId = workspace.Id,
             WorkspacePath = workspace.LocalPath,
-            QueryText = command.Question.Trim(),
+            QueryText = BrainPromptBuilder.BuildSearchQuery(command.Question, priorMessages),
             MaxResults = MaxRelevantChunks,
         };
 
@@ -232,8 +242,9 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
         }
 
         // 4. Construct grounded system prompt and user prompt
-        var systemPrompt = BuildSystemPrompt();
-        var userPrompt = $"Repository Code Context:\n\n{promptContextBuilder}\nUser Question: {command.Question.Trim()}";
+        var systemPrompt = BrainPromptBuilder.BuildSystemPrompt();
+        var historyBlock = BrainPromptBuilder.BuildHistoryBlock(priorMessages);
+        var userPrompt = $"{historyBlock}Repository Code Context:\n\n{promptContextBuilder}\nUser Question: {command.Question.Trim()}";
 
         var aiRequest = new AiRequest
         {
@@ -409,20 +420,6 @@ public sealed class AskBrainCommandHandler : IAskBrainCommandHandler
             RetrievalMode = searchResult.RetrievalMode,
             IsStale = isStale,
         };
-    }
-
-    private static string BuildSystemPrompt()
-    {
-        return @"You are Project Brain, an expert software architecture and code intelligence assistant.
-Your task is to answer the user's question accurately and truthfully based STRICTLY on the provided repository code excerpts.
-
-Rules:
-1. Base your answer ONLY on the provided code sources.
-2. Do NOT invent, assume, or hallucinate APIs, methods, file paths, or line numbers not shown in the excerpts.
-3. If the excerpts do not contain enough information to fully answer, state clearly what is known from the excerpts and what cannot be determined.
-4. At the very end of your response, on a new line, you MUST list the exact source IDs you directly used to answer, in the format:
-SOURCES: [Source 1], [Source 2]
-(If no sources were used, write SOURCES: None)";
     }
 
     private static (string CleanContent, List<int> SourceIds) ExtractCitedSources(string rawContent)
