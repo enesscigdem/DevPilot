@@ -36,6 +36,10 @@ public static class ExecutionReliabilityOptionsFactory
         {
             options.AgenticRepairEnabled = agentic;
         }
+        if (bool.TryParse(configuration[prefix + nameof(ExecutionReliabilityOptions.VisualCaptureEnabled)], out var visualCapture))
+        {
+            options.VisualCaptureEnabled = visualCapture;
+        }
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxGenerationCalls), 1, v => options.MaxGenerationCalls = v);
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxConcurrentFileGenerations), 1, v => options.MaxConcurrentFileGenerations = v);
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxOutputTokens), 1, v => options.MaxOutputTokens = v);

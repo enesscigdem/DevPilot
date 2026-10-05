@@ -205,6 +205,23 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
             arguments.Add($"FullyQualifiedName={request.TestFilter}");
         }
 
+        if (request.TestFiles is { Count: > 0 })
+        {
+            if (!SupportsTargetedTestFiles(check))
+            {
+                return InfrastructureFailure(check.Id, check.DisplayName, check.Kind, $"Repository check '{check.Id}' does not support targeted test files.");
+            }
+
+            var targetedFiles = ResolveTargetedTestFiles(workspace.CanonicalWorkspace, workingDirectory, request.TestFiles);
+            if (targetedFiles.Count == 0)
+            {
+                return InfrastructureFailure(check.Id, check.DisplayName, check.Kind, "None of the requested targeted test files exist inside the check's working directory.");
+            }
+
+            arguments.Add("--");
+            arguments.AddRange(targetedFiles);
+        }
+
         var preparationFailure = await TryPrepareNodeDependenciesAsync(
             check,
             workingDirectory,
@@ -1029,10 +1046,127 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
         return true;
     }
 
+    public async Task<string?> PrepareEnvironmentAsync(
+        RepositoryPreflightRequest request,
+        RepositoryCheck check,
+        CancellationToken cancellationToken = default)
+    {
+        if (check.Source != RepositoryCheckSource.PackageJsonScript)
+        {
+            return null;
+        }
+
+        var workspace = await ValidateWorkspaceAsync(request.WorkspacePath, request.BranchName, cancellationToken).ConfigureAwait(false);
+        if (!workspace.IsValid ||
+            !TryResolveWorkingDirectory(workspace.CanonicalWorkspace, check.WorkingDirectory, out var workingDirectory, out _))
+        {
+            return null;
+        }
+
+        var token = ComputeDependencyManifestToken(workingDirectory);
+        if (token == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var failure = await TryPrepareNodeDependenciesAsync(check, workingDirectory, cancellationToken).ConfigureAwait(false);
+            if (failure != null)
+            {
+                _logger.LogInformation("Early dependency preparation for check {CheckId} did not complete: {Error}", check.Id, failure.ErrorMessage);
+                RemoveNodeModulesBestEffort(workingDirectory);
+                return null;
+            }
+
+            return token;
+        }
+        catch (OperationCanceledException)
+        {
+            // An interrupted install leaves a partial node_modules that would later look usable.
+            RemoveNodeModulesBestEffort(workingDirectory);
+            throw;
+        }
+    }
+
+    public async Task EnsureEnvironmentFreshAsync(
+        RepositoryPreflightRequest request,
+        RepositoryCheck check,
+        string? preparedToken,
+        CancellationToken cancellationToken = default)
+    {
+        if (preparedToken == null || check.Source != RepositoryCheckSource.PackageJsonScript)
+        {
+            return;
+        }
+
+        var workspace = await ValidateWorkspaceAsync(request.WorkspacePath, request.BranchName, cancellationToken).ConfigureAwait(false);
+        if (!workspace.IsValid ||
+            !TryResolveWorkingDirectory(workspace.CanonicalWorkspace, check.WorkingDirectory, out var workingDirectory, out _))
+        {
+            return;
+        }
+
+        if (string.Equals(ComputeDependencyManifestToken(workingDirectory), preparedToken, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _logger.LogInformation("Dependency manifests changed after early preparation for check {CheckId}; reinstalling.", check.Id);
+        var failure = await TryPrepareNodeDependenciesAsync(check, workingDirectory, cancellationToken, forceInstall: true).ConfigureAwait(false);
+        if (failure != null)
+        {
+            // The check itself reports the install problem when it runs; a stale tree must not be mistaken for a usable one.
+            RemoveNodeModulesBestEffort(workingDirectory);
+        }
+    }
+
+    private static readonly string[] DependencyManifestFiles =
+    {
+        "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"
+    };
+
+    /// <summary>Identifies the dependency manifests an install is based on; null when they cannot be read.</summary>
+    private static string? ComputeDependencyManifestToken(string packageDirectory)
+    {
+        try
+        {
+            var sb = new StringBuilder();
+            foreach (var name in DependencyManifestFiles)
+            {
+                var path = Path.Combine(packageDirectory, name);
+                sb.Append(name).Append('=').Append(File.Exists(path) ? ComputeFileHash(path) : "-").Append(';');
+            }
+
+            return sb.ToString();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private void RemoveNodeModulesBestEffort(string packageDirectory)
+    {
+        try
+        {
+            var nodeModules = Path.Combine(packageDirectory, "node_modules");
+            if (Directory.Exists(nodeModules))
+            {
+                Directory.Delete(nodeModules, recursive: true);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Could not remove an incomplete node_modules in '{Directory}'.", packageDirectory);
+        }
+    }
+
     private async Task<RepositoryCheckResult?> TryPrepareNodeDependenciesAsync(
         RepositoryCheck check,
         string workingDirectory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool forceInstall = false)
     {
         if (check.Source != RepositoryCheckSource.PackageJsonScript)
         {
@@ -1044,7 +1178,7 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
             return null;
         }
 
-        if (HasUsableNodeModules(workingDirectory))
+        if (!forceInstall && HasUsableNodeModules(workingDirectory))
         {
             return null;
         }
@@ -1113,6 +1247,55 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Only an npm test script accepts trailing file arguments reliably (vitest and jest both treat them as file filters).
+    /// </summary>
+    public static bool SupportsTargetedTestFiles(RepositoryCheck check) =>
+        check.Kind == RepositoryCheckKind.Test &&
+        check.Source == RepositoryCheckSource.PackageJsonScript &&
+        string.Equals(check.Executable, "npm", StringComparison.Ordinal);
+
+    private static readonly Regex TargetedTestFilePattern =
+        new(@"^[A-Za-z0-9_@][A-Za-z0-9_./@+\-]*$", RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Converts workspace-relative test files into paths relative to the check's working directory. Anything that is not an
+    /// existing regular file inside that directory is dropped, so a file name can never become a command-line option.
+    /// </summary>
+    private static List<string> ResolveTargetedTestFiles(
+        string workspace,
+        string workingDirectory,
+        IReadOnlyList<string> files)
+    {
+        var resolved = new List<string>();
+        var root = Path.GetFullPath(workingDirectory);
+        foreach (var file in files.Take(20))
+        {
+            if (string.IsNullOrWhiteSpace(file) || Path.IsPathRooted(file))
+            {
+                continue;
+            }
+
+            var full = Path.GetFullPath(Path.Combine(workspace, file.Replace('/', Path.DirectorySeparatorChar)));
+            if (!File.Exists(full))
+            {
+                continue;
+            }
+
+            var relative = Path.GetRelativePath(root, full).Replace('\\', '/');
+            if (relative.StartsWith("..", StringComparison.Ordinal) ||
+                Path.IsPathRooted(relative) ||
+                !TargetedTestFilePattern.IsMatch(relative))
+            {
+                continue;
+            }
+
+            resolved.Add(relative);
+        }
+
+        return resolved;
     }
 
     private static bool HasUsableNodeModules(string packageDirectory)

@@ -243,11 +243,22 @@ public static class ExecutionVerdictBuilder
         AddTiming(timings, "Generation", summary?.TotalGenerationTimeMs);
         AddTiming(timings, "Build", SumCheckDurations(parsed, ExecutionStage.Build));
         AddTiming(timings, "Test", SumCheckDurations(parsed, ExecutionStage.Test));
+        // An agentic repair that gave up closes with another event kind, so it is recognised by its marker instead.
         AddTiming(timings, "Repair", parsed
-            .Where(p => p.Metadata?.EventKind is "FixingBuildIssue" or "FixingFailingTest" &&
+            .Where(p => (p.Metadata?.EventKind is "FixingBuildIssue" or "FixingFailingTest" ||
+                         p.Metadata?.ProgressResult == "AgenticRepair") &&
                         p.Activity.Status is ExecutionActivityStatus.Completed or ExecutionActivityStatus.Failed &&
-                        p.Metadata.StageDurationMs.HasValue)
+                        p.Metadata!.StageDurationMs.HasValue)
             .Sum(p => p.Metadata!.StageDurationMs!.Value));
+        // Verification work between a failed test and the repair: stable-failure confirmation and the base-commit comparison.
+        foreach (var label in new[] { "Confirmation", "Baseline" })
+        {
+            AddTiming(timings, label, parsed
+                .Where(p => p.Metadata?.EventKind == "VerificationOverhead" &&
+                            p.Metadata.ProgressResult == label &&
+                            p.Metadata.StageDurationMs.HasValue)
+                .Sum(p => p.Metadata!.StageDurationMs!.Value));
+        }
 
         return new ExecutionUsageDto(
             ProviderCalls: calls.Count,

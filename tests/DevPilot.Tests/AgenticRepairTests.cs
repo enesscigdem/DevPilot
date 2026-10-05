@@ -147,7 +147,7 @@ public sealed class AgenticRepairTests : IDisposable
 
         outcome.Success.Should().BeFalse();
         outcome.StopReason.Should().Be("NoProgress");
-        outcome.CheckRuns.Should().Be(4);
+        outcome.CheckRuns.Should().Be(3);
     }
 
     [Fact]

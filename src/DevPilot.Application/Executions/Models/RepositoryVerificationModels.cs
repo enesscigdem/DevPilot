@@ -74,7 +74,9 @@ public sealed record RepositoryCheckExecutionRequest(
     string BranchName,
     RepositoryCheck Check,
     bool SkipBuild = false,
-    string? TestFilter = null);
+    string? TestFilter = null,
+    // Workspace-relative test files for a package.json (npm) test script; runs only those files instead of the whole suite.
+    IReadOnlyList<string>? TestFiles = null);
 
 public enum VerificationOutcome
 {

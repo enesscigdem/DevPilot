@@ -16,7 +16,7 @@ public sealed class AgenticRepairService : IAgenticRepairService
     private const int RecentFullObservations = 4;
     private const int OldObservationChars = 400;
     private const int MaxConsecutiveUnparsableReplies = 3;
-    private const int MaxStalledCheckRuns = 3;
+    private const int MaxStalledCheckRuns = 2;
 
     private readonly IAiProvider _aiProvider;
     private readonly IExecutionActivityRecorder? _activityRecorder;

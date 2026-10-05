@@ -90,7 +90,7 @@ public sealed class ModifyAndTestVerificationTests : IDisposable
     }
 
     [Fact]
-    public void ModifyBudgets_StayOnPatchContract_WithOneRetryAndNo16K()
+    public void ModifyBudgets_StayOnPatchContract_WithOneRetryUnderTheCompactPatchCeiling()
     {
         var agent = CreateAgent();
         var small = "public class IssueService { public int Value => 1; }";
@@ -103,11 +103,12 @@ public sealed class ModifyAndTestVerificationTests : IDisposable
 
         var retry = agent.DetermineCompactRetryBudget(4096, small, entry);
         retry.Should().Be(8192);
-        retry.Should().BeLessThanOrEqualTo(8192);
         retry.Should().BeLessThan(16384);
 
+        // The retry doubles the initial budget but is clamped to the compact patch ceiling (16K), never a full-file budget.
         var capped = agent.DetermineCompactRetryBudget(8192, large, entry);
-        capped.Should().Be(8192);
+        capped.Should().Be(16384);
+        agent.DetermineCompactRetryBudget(16384, large, entry).Should().Be(16384);
 
         var inflated = CreateAgent(new Dictionary<string, string?>
         {
@@ -116,7 +117,8 @@ public sealed class ModifyAndTestVerificationTests : IDisposable
             ["DeveloperAgent:TokenBudgets:ModifyPatch"] = "15000"
         });
         inflated.DetermineInitialBudget("Program.cs", FileEditAction.Modify, small).Should().Be(8192);
-        inflated.DetermineCompactRetryBudget(8192, small, entry).Should().Be(8192);
+        inflated.DetermineCompactRetryBudget(8192, small, entry).Should().Be(16384)
+            .And.BeLessThan(24576, "an inflated configured ceiling must not widen the compact patch retry");
     }
 
     [Fact]

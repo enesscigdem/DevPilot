@@ -326,6 +326,13 @@ public class DeveloperAgentTests : IDisposable
             FinishReason = "length",
             ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result."
         });
+        // The one bounded compact retry hits the limit as well; only then is the file reported as exhausted.
+        customAiProvider.ResponsesToReturn.Enqueue(new AiResponse
+        {
+            IsSuccess = false,
+            FinishReason = "length",
+            ErrorMessage = "AI response exhausted the configured output token limit before producing a complete result."
+        });
 
         var agent = new DeveloperAgent(
             customAiProvider,

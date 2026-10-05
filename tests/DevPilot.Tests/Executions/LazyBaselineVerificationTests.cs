@@ -218,6 +218,81 @@ public class LazyBaselineVerificationTests
     }
 
     [Fact]
+    public async Task BaselineWorktrees_BeyondTheNewestOnes_AreRemoved_ButNeverInUseOrOtherRepositories()
+    {
+        var source = Path.Combine(Path.GetTempPath(), $"devpilot-baseline-prune-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(source, ".devpilot"));
+        try
+        {
+            var fullSource = Path.GetFullPath(source);
+            var repoHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(fullSource)))[..8].ToLowerInvariant();
+            var baselines = Path.Combine(fullSource, ".devpilot", "baselines");
+            var now = DateTime.UtcNow;
+            string Make(string name, int minutesOld)
+            {
+                var path = Path.Combine(baselines, name);
+                Directory.CreateDirectory(path);
+                Directory.SetLastWriteTimeUtc(path, now.AddMinutes(-minutesOld));
+                return path;
+            }
+
+            var oldest = Make($"{repoHash}_aaaa0001", 40);
+            var inUse = Make($"{repoHash}_aaaa0002", 30);
+            var older = Make($"{repoHash}_aaaa0003", 20);
+            var newest = Make($"{repoHash}_aaaa0004", 10);
+            var otherRepository = Make("ffffffff_bbbb0001", 90);
+
+            var coordinator = new BaselineVerificationCoordinator(NullLogger<BaselineVerificationCoordinator>.Instance);
+            var inUseLock = coordinator.GetWorkspaceLock(Path.GetFullPath(inUse));
+            await inUseLock.WaitAsync();
+            try
+            {
+                var service = new BaselineVerificationService(
+                    coordinator,
+                    new MockRepositoryCheckRunner(),
+                    new MockProcessRunner(),
+                    NullLogger<BaselineVerificationService>.Instance);
+
+                await service.EvaluateTestFailureAsync(
+                    workspacePath: "C:/workspaces/task-1",
+                    sourceRepositoryPath: fullSource,
+                    baseCommitSha: "deadbeef1234567890abcdef1234567890abcdef",
+                    check: _testCheck,
+                    taskCheckResult: new RepositoryCheckResult
+                    {
+                        Success = false,
+                        ExitCode = 1,
+                        StdOut = "Failed TestSuite.SpecificTests.FailingTestCase [12ms]\n  Error Message:\n   Assert.Equal() Failure",
+                        FailureCategory = RepositoryCheckFailureCategory.VerificationFailure
+                    });
+
+                // Pruning runs in the background so it never delays the baseline result.
+                for (var i = 0; i < 100 && (Directory.Exists(oldest) || Directory.Exists(older)); i++)
+                {
+                    await Task.Delay(50);
+                }
+            }
+            finally
+            {
+                inUseLock.Release();
+            }
+
+            Directory.Exists(oldest).Should().BeFalse("it is beyond the retained worktrees");
+            Directory.Exists(older).Should().BeFalse("it is beyond the retained worktrees");
+            Directory.Exists(newest).Should().BeTrue("the newest other worktree is retained");
+            Directory.Exists(inUse).Should().BeTrue("a worktree whose lock is held is in use");
+            Directory.Exists(otherRepository).Should().BeTrue("another repository's baselines are not ours to remove");
+        }
+        finally
+        {
+            if (Directory.Exists(source))
+            {
+                Directory.Delete(source, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void ParseAllTestFailures_ExtractsMultipleFailingTests()
     {
         var stdout = @"

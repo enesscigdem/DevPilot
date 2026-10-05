@@ -231,6 +231,29 @@ public class TodoService : ITodoService
     }
 
     [Fact]
+    public void TestFileGeneration_ForLargeTsxSource_SeesTheRealMarkup_NotOnlyThePatchHunk()
+    {
+        var testEntry = new ManifestFileEntry("src/App.test.tsx", FileEditAction.Modify, "Test the note list", null);
+        var filler = string.Concat(Enumerable.Range(0, 400).Select(i => $"  // filler line {i}\n"));
+        var appContent =
+            "export default function App() {\n" + filler +
+            "  return <ul aria-label=\"notes\"><li className=\"note-item\">hello</li></ul>;\n}\n";
+        appContent.Length.Should().BeGreaterThan(4000);
+
+        var path = "src/App.tsx";
+        var virtualWorkspace = new Dictionary<string, string> { [path] = appContent };
+        var completedEdits = new Dictionary<string, FileEditSpec>
+        {
+            [path] = new(path, FileEditAction.Modify, null, new[] { new SearchReplaceEdit("a", "className=\"note-item\"") })
+        };
+
+        var relevant = DeveloperAgent.GetRelevantGeneratedEdits(testEntry, completedEdits, virtualWorkspace);
+
+        relevant[path].Should().Contain("aria-label=\"notes\"");
+        relevant[path].Should().Contain("className=\"note-item\"");
+    }
+
+    [Fact]
     public void ExistingNonEmptyModifyTarget_DoesNotReceive_ReferenceArchitecturePattern()
     {
         // Arrange: Modify an existing non-empty file
