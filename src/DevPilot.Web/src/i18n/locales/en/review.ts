@@ -105,5 +105,21 @@ const review = {
   mergeDesc: "This will merge the execution's approved pull request into the base branch on GitHub using standard merge method.",
   confirmMerge: "Confirm merge",
   requestChanges: "Request changes",
+  visual: {
+    title: "Visual check",
+    subtitle: "How the app looks before and after this change",
+    before: "Before",
+    after: "After",
+    desktop: "Desktop",
+    mobile: "Mobile",
+    noBaseline: "No before image: only the result is shown.",
+    sideBySide: "Side by side",
+    toggle: "Flip",
+    unavailable: "Screenshots could not be made",
+    unavailableHint: "This change modifies the UI. Open the running app and check it yourself before approving.",
+    acknowledge: "I looked at the result and the UI is as I expect",
+    required: "UI changed: confirm you reviewed the screenshots to approve",
+    openImage: "Open full size",
+  },
 }
 export default review

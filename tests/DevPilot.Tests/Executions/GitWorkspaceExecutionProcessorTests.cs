@@ -387,7 +387,7 @@ public class GitWorkspaceExecutionProcessorTests
         agent.CallCount.Should().Be(2);
 
         var messages = recorder.RecordedActivities.Select(a => a.message).ToList();
-        messages.Should().Contain("Test repair started (round 1/2).");
+        messages.Should().Contain("Test repair started (round 1/3).");
         messages.Should().Contain("Test repair completed (round 1).");
         messages.Should().Contain("Test retry passed.");
         messages.Should().Contain("Tests passed.");
@@ -947,7 +947,7 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
-    public async Task TestRepair_SameAuthoritativeFailure_StopsWithoutBroadSecondRepair()
+    public async Task TestRepair_SameAuthoritativeFailure_RetriesOnceWithStallNoteThenStops()
     {
         var taskId = Guid.NewGuid();
         var failedTest = FailedTodoTest();
@@ -956,20 +956,22 @@ public class GitWorkspaceExecutionProcessorTests
             ResultToReturn = DeveloperAgentResult.Ok(new List<string> { "src/TodoService.cs", "src/Valid.cs" })
         };
         var runner = new ScriptedValidationRunner(
-            new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
-            new[] { failedTest, failedTest });
-        var fingerprint = new TestFingerprintCalculator("before", "after");
+            new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
+            new[] { failedTest, failedTest, failedTest });
+        var fingerprint = new TestFingerprintCalculator("before", "after", "before2", "after2");
         var recorder = new TestActivityRecorder();
         var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
 
         var act = () => processor.ProcessAsync(CreateContext(taskId));
 
         await act.Should().NotThrowAsync();
-        agent.CallCount.Should().Be(2);
+        agent.CallCount.Should().Be(3, "the first stall gets one more attempt that is told the last one changed nothing");
         agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("src/TodoService.cs");
         agent.FocusedRepairRequests[0].TouchedFiles.Should().Contain("src/TodoService.cs");
         agent.FocusedRepairRequests[0].TestName.Should().NotBeNullOrWhiteSpace();
-        runner.TestRequests.Should().HaveCount(2, "the same targeted failure stops before another repair");
+        agent.FocusedRepairRequests[0].RepairHint.Should().BeNull();
+        agent.FocusedRepairRequests[1].RepairHint.Should().Contain("did not change which tests fail");
+        runner.TestRequests.Should().HaveCountGreaterThanOrEqualTo(2);
         recorder.RecordedActivities.Should().Contain(a =>
             a.metadata != null &&
             a.metadata.ProgressResult == "SameFailure");
@@ -1075,7 +1077,7 @@ public class GitWorkspaceExecutionProcessorTests
     }
 
     [Fact]
-    public async Task NoChangeTestRepair_SameAuthoritativeFailure_StopsWithoutBroadSecondRepair()
+    public async Task NoChangeTestRepair_SameAuthoritativeFailure_RetriesOnceWithStallNoteThenStops()
     {
         var taskId = Guid.NewGuid();
         var failedTest = FailedFactoryHostTest();
@@ -1088,18 +1090,19 @@ public class GitWorkspaceExecutionProcessorTests
                 new[] { "tests/TestUtils/CustomWebApplicationFactory.cs" })
         };
         var runner = new ScriptedValidationRunner(
-            new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
-            new[] { failedTest, failedTest });
-        var fingerprint = new TestFingerprintCalculator("before", "after");
+            new[] { new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true }, new BuildValidationResult { Success = true } },
+            new[] { failedTest, failedTest, failedTest });
+        var fingerprint = new TestFingerprintCalculator("before", "after", "before2", "after2");
         var recorder = new TestActivityRecorder();
         var processor = CreateProcessor(taskId, agent, runner, fingerprint, recorder);
 
         await processor.ProcessAsync(CreateContext(taskId));
 
-        agent.FocusedRepairRequests.Should().ContainSingle();
+        agent.FocusedRepairRequests.Should().HaveCount(2);
         agent.FocusedRepairRequests[0].RepairFiles.Should().Equal("tests/TestUtils/CustomWebApplicationFactory.cs");
         agent.FocusedRepairRequests[0].TouchedFiles.Should().Contain("src/Program.cs");
-        runner.TestRequests.Should().HaveCount(2, "the same targeted failure stops before another repair");
+        agent.FocusedRepairRequests[1].RepairHint.Should().Contain("did not change which tests fail");
+        runner.TestRequests.Should().HaveCountGreaterThanOrEqualTo(2);
         recorder.RecordedActivities.Should().Contain(activity =>
             activity.metadata != null &&
             activity.metadata.ProgressResult == "SameFailure");

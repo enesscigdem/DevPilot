@@ -137,8 +137,11 @@ public static class DependencyInjection
         services.AddScoped<IExecutionRevisionDispatcher, HangfireExecutionDispatcher>();
         services.AddScoped<IWorktreeEditApplier, WorktreeEditApplier>();
         services.AddScoped<IDeveloperAgent, DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent>();
+        services.AddScoped<IAgenticRepairService, DevPilot.Infrastructure.DeveloperAgent.AgenticRepairService>();
         services.AddScoped<IReviewFeedbackAgent, DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent>();
         services.AddScoped<IProcessRunner, BoundedProcessRunner>();
+        services.AddScoped<IVisualCaptureService, DevPilot.Infrastructure.Executions.Visual.VisualCaptureService>();
+        services.AddScoped<IVisualArtifactReader, DevPilot.Infrastructure.Executions.Visual.VisualArtifactStore>();
         services.AddScoped<IRepositoryCheckRunner, RepositoryNativeCheckRunner>();
         services.AddScoped<IRepositoryRepairContextProvider, DotNetRepositoryRepairContextProvider>();
         services.AddScoped<IStartExecutionCommandHandler, StartExecutionCommandHandler>();

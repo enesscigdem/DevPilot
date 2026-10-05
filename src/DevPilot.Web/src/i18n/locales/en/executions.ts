@@ -39,7 +39,13 @@ const executions = {
     attempt: "attempt {{n}}",
     compare: "Compare with attempt {{n}}",
   },
-  verdict: { next: "Next: " },
+  verdict: {
+    next: "Next: ",
+    failingTitle: "Failing tests",
+    fixTests: "Fix failing tests",
+    fixingTests: "Starting fix…",
+    fixTestsHint: "The AI gets the full list below and updates the tests; the build and tests run again.",
+  },
   usage: {
     title: "AI usage & latency",
     providerCalls: "Provider calls",

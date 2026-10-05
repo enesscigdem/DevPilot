@@ -33,6 +33,9 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
     private readonly IBaselineVerificationService? _baselineVerificationService;
     private readonly IRepositoryFreshnessService? _freshnessService;
     private readonly IExecutionGitDiffReader? _gitDiffReader;
+    private readonly IVisualCaptureService? _visualCaptureService;
+    private readonly IAgenticRepairService? _agenticRepairService;
+    private readonly bool _agenticRepairEnabled;
     private readonly IReviewFeedbackAgent? _reviewFeedbackAgent;
     private readonly ILogger<GitWorkspaceExecutionProcessor> _logger;
     private readonly int _maxCompileRepairRounds;
@@ -54,8 +57,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         ExecutionReliabilityOptions? reliabilityOptions = null,
         IRepositoryFreshnessService? freshnessService = null,
         IExecutionGitDiffReader? gitDiffReader = null,
-        IReviewFeedbackAgent? reviewFeedbackAgent = null)
+        IReviewFeedbackAgent? reviewFeedbackAgent = null,
+        IVisualCaptureService? visualCaptureService = null,
+        IAgenticRepairService? agenticRepairService = null)
     {
+        _visualCaptureService = visualCaptureService;
+        _agenticRepairService = agenticRepairService;
         _reviewFeedbackAgent = reviewFeedbackAgent;
         _freshnessService = freshnessService;
         _gitDiffReader = gitDiffReader;
@@ -74,6 +81,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         var reliability = reliabilityOptions ?? ExecutionReliabilityOptionsFactory.Create(configuration);
         _maxCompileRepairRounds = reliability.MaxCompileRepairRounds;
         _maxTestRepairRounds = reliability.MaxTestRepairRounds;
+        _agenticRepairEnabled = reliability.AgenticRepairEnabled;
         // Bare processors (no configuration and no options, e.g. unit tests) stay deterministic: no reruns.
         _maxFlakeReruns = reliabilityOptions == null && configuration == null ? 0 : reliability.MaxFlakeReruns;
     }
@@ -465,6 +473,8 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         VerificationOutcome: hasBuild ? "PartiallyVerified" : "Verified"),
                     cancellationToken).ConfigureAwait(false);
             }
+
+            await TryCaptureVisualsAsync(context, prepResult, fileSets, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -1137,7 +1147,30 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         }
 
         var repairRound = 0;
+        if (!result.Success && _agenticRepairEnabled && _agenticRepairService != null)
+        {
+            var agentic = await RunAgenticTestRepairAsync(
+                context,
+                prepResult,
+                actualModel,
+                check,
+                prerequisiteChecks,
+                fullRequest,
+                result,
+                fileSets,
+                cancellationToken).ConfigureAwait(false);
+            if (agentic.Abort)
+            {
+                return false;
+            }
+
+            result = agentic.Result;
+            // The tool loop has already used its own progress-based budget; the fixed focused rounds are skipped.
+            repairRound = _maxTestRepairRounds;
+        }
+
         string? previousFailureFingerprint = null;
+        var repairStalled = false;
         while (!result.Success && repairRound < _maxTestRepairRounds)
         {
             repairRound++;
@@ -1149,24 +1182,51 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 ? ExecutionDiagnosticEvidence.CreateActionableTestEvidence(actionableFailures, result.StdOut, result.StdErr, result.ErrorMessage)
                 : ExecutionDiagnosticEvidence.ParseTestFailure(result.StdOut, result.StdErr, result.ErrorMessage);
 
-            if (string.Equals(previousFailureFingerprint, evidence.FailureFingerprint, StringComparison.Ordinal))
+            // Progress is judged on the whole failing set, not the first failure: fixing some tests changes the
+            // set even when the first failing test is still the same.
+            var failureSummary = actionableFailures == null
+                ? TestFailureSummarizer.Summarize(result.StdOut, result.StdErr, result.ErrorMessage)
+                : null;
+            var progressKey = failureSummary?.Fingerprint ?? evidence.FailureFingerprint;
+            string? escalationHint = null;
+
+            if (string.Equals(previousFailureFingerprint, progressKey, StringComparison.Ordinal))
             {
-                await SafeRecordActivityAsync(
-                    context.ExecutionId,
-                    ExecutionStage.Test,
-                    ExecutionActivityStatus.Failed,
-                    "Stopped with evidence: focused test repair made no diagnostic progress.",
-                    CheckMetadata(
-                        check,
-                        "StoppedWithEvidence",
-                        result,
-                        repairKind: "Test",
-                        repairRound: repairRound,
-                        failureFingerprint: evidence.FailureFingerprint,
-                        progressResult: "SameFailure"),
-                    cancellationToken).ConfigureAwait(false);
-                break;
+                if (repairStalled)
+                {
+                    await SafeRecordActivityAsync(
+                        context.ExecutionId,
+                        ExecutionStage.Test,
+                        ExecutionActivityStatus.Failed,
+                        "Stopped with evidence: focused test repair made no diagnostic progress.",
+                        CheckMetadata(
+                            check,
+                            "StoppedWithEvidence",
+                            result,
+                            repairKind: "Test",
+                            repairRound: repairRound,
+                            failureFingerprint: evidence.FailureFingerprint,
+                            progressResult: "SameFailure"),
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+
+                // First stall: do not give up, retry once with an explicit note that the last attempt changed nothing.
+                repairStalled = true;
+                escalationHint = "The previous repair round did not change which tests fail. Do not repeat it: re-read the grouped failures and the current application source, and change every assertion that still disagrees with what the application renders.";
             }
+            else
+            {
+                repairStalled = false;
+            }
+
+            previousFailureFingerprint = progressKey;
+            var sourceHints = failureSummary is { FailureCount: > 1 }
+                ? TestFailureSummarizer.FindSourceHints(prepResult.WorkspacePath, failureSummary)
+                : Array.Empty<string>();
+            var failureSummaryText = failureSummary is { FailureCount: > 1 }
+                ? failureSummary.ToPromptText(sourceHints)
+                : null;
 
             var selection = ExecutionDiagnosticEvidence.SelectTestRepairTarget(
                 evidence,
@@ -1186,6 +1246,24 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 if (repairFiles.Count > 0)
                 {
                     selection = selection with { Reason = "BaselineRegressionTouchedFilesFallback" };
+                }
+            }
+
+            // An environment limitation can be solved in the test setup or in the source, so the repair may edit
+            // one touched test file and one touched source file together.
+            if (repairFiles.Count > 0 && ExecutionDiagnosticEvidence.IsDomEnvironmentLimitationFailure(evidence))
+            {
+                var touchedFiles = fileSets.ActuallyModifiedFiles.ToList();
+                if (!repairFiles.Any(ProjectGraphHelper.IsTestFileCandidate))
+                {
+                    var touchedTest = touchedFiles.FirstOrDefault(ProjectGraphHelper.IsTestFileCandidate);
+                    if (touchedTest != null) repairFiles.Add(touchedTest);
+                }
+
+                if (repairFiles.All(ProjectGraphHelper.IsTestFileCandidate))
+                {
+                    var touchedSource = touchedFiles.FirstOrDefault(f => !ProjectGraphHelper.IsTestFileCandidate(f));
+                    if (touchedSource != null) repairFiles.Add(touchedSource);
                 }
             }
 
@@ -1243,7 +1321,12 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 LanguageContext: null,
                 Model: actualModel,
                 TouchedFiles: fileSets.ActuallyModifiedFiles.ToList(),
-                TestName: evidence.TestName);
+                TestName: evidence.TestName,
+                FailureSummary: failureSummaryText,
+                RepairHint: ExecutionDiagnosticEvidence.BuildTestFailureRepairHint(evidence, failureSummaryText, escalationHint),
+                ContextFiles: fileSets.VerificationEligiblePlannedFiles
+                    .Where(f => !repairFiles.Contains(f, StringComparer.OrdinalIgnoreCase))
+                    .ToList());
 
             var beforeFingerprint = await GetChangeFingerprintAsync(prepResult.WorkspacePath, cancellationToken).ConfigureAwait(false);
             var testFilesBeforeRepair = SnapshotTestFiles(prepResult.WorkspacePath, repairFiles);
@@ -1448,7 +1531,6 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             }
 
             result = await ConfirmFailureIsStableAsync(context, check, fullRequest, result, flakeBudget, cancellationToken).ConfigureAwait(false);
-            previousFailureFingerprint = evidence.FailureFingerprint;
             if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
             {
                 await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Test, check, result, cancellationToken).ConfigureAwait(false);
@@ -1459,7 +1541,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 context.ExecutionId,
                 ExecutionStage.Test,
                 result.Success ? ExecutionActivityStatus.Completed : ExecutionActivityStatus.Failed,
-                result.Success ? "Test retry passed." : $"Test retry failed (round {repairRound}).",
+                result.Success ? "Test retry passed.": $"Test retry failed (round {repairRound}).",
                 CheckMetadata(check, "VerifyingRepository", result, repairKind: "Test", repairRound: repairRound),
                 cancellationToken).ConfigureAwait(false);
         }
@@ -1467,6 +1549,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         if (!result.Success)
         {
             var error = $"Test validation failed: {result.ErrorMessage ?? "Repository test check failed."}";
+            var finalFailures = TestFailureSummarizer.Summarize(result.StdOut, result.StdErr, result.ErrorMessage);
+            var finalHints = finalFailures != null
+                ? TestFailureSummarizer.FindSourceHints(prepResult.WorkspacePath, finalFailures)
+                : Array.Empty<string>();
             await SafeRecordActivityAsync(
                 context.ExecutionId,
                 ExecutionStage.Test,
@@ -1480,7 +1566,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     verificationOutcome: "NeedsReview",
                     newRegressionCount: baseComparison?.NewRegressionCount ?? 0,
                     preExistingFailureCount: baseComparison?.PreExistingCount ?? 0,
-                    baselineUnverified: baselineUnverified ? true : null),
+                    baselineUnverified: baselineUnverified ? true : null,
+                    failingTestCount: finalFailures?.FailureCount,
+                    failingTestGroups: finalFailures?.ToDisplayLines(),
+                    suggestedFix: finalFailures?.ToSuggestedFix(finalHints)),
                 cancellationToken).ConfigureAwait(false);
             return false;
         }
@@ -1500,6 +1589,158 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                 baselineUnverified: baselineUnverified ? true : null),
             cancellationToken).ConfigureAwait(false);
         return true;
+    }
+
+    private const int AgenticBuildFailureCount = 1000;
+
+    /// <summary>
+    /// Repairs a failing test run with the tool-using model loop. The loop re-runs the repository's own build and
+    /// test checks itself; afterwards the authoritative result is re-established here so the normal verdict path
+    /// (success activity, NeedsReview details) applies unchanged. Abort is true only when verification can no longer run.
+    /// </summary>
+    private async Task<(RepositoryCheckResult Result, bool Abort)> RunAgenticTestRepairAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        string? actualModel,
+        RepositoryCheck check,
+        IReadOnlyList<RepositoryCheck> prerequisiteChecks,
+        RepositoryCheckExecutionRequest fullRequest,
+        RepositoryCheckResult failing,
+        ExecutionFileSets fileSets,
+        CancellationToken cancellationToken)
+    {
+        var lastTest = failing;
+        var lastRunReachedTests = false;
+
+        async Task<(RepositoryCheckResult? BuildFailure, RepositoryCheckResult? Test)> RunAllAsync(CancellationToken ct)
+        {
+            foreach (var prerequisite in prerequisiteChecks)
+            {
+                var prerequisiteResult = await _repositoryCheckRunner.ExecuteAsync(
+                    new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, prerequisite),
+                    ct).ConfigureAwait(false);
+                if (!prerequisiteResult.Success)
+                {
+                    lastRunReachedTests = false;
+                    return (prerequisiteResult, null);
+                }
+            }
+
+            lastTest = await _repositoryCheckRunner.ExecuteAsync(fullRequest, ct).ConfigureAwait(false);
+            lastRunReachedTests = true;
+            return (null, lastTest);
+        }
+
+        async Task<AgenticCheckObservation> ObserveAsync(CancellationToken ct)
+        {
+            var (buildFailure, test) = await RunAllAsync(ct).ConfigureAwait(false);
+            if (buildFailure != null)
+            {
+                return new AgenticCheckObservation(
+                    false,
+                    $"The build step '{buildFailure.CheckDisplayName}' failed:\n{DescribeFailureForAgent(buildFailure, prepResult.WorkspacePath)}",
+                    AgenticBuildFailureCount,
+                    null);
+            }
+
+            if (test!.Success)
+            {
+                return new AgenticCheckObservation(true, "All checks passed.", 0, null);
+            }
+
+            var summary = TestFailureSummarizer.Summarize(test.StdOut, test.StdErr, test.ErrorMessage);
+            return new AgenticCheckObservation(
+                false,
+                DescribeFailureForAgent(test, prepResult.WorkspacePath),
+                summary?.FailureCount is > 0 ? summary.FailureCount : 1,
+                summary?.Fingerprint);
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Test,
+            ExecutionActivityStatus.Started,
+            "Agentic test repair started.",
+            CheckMetadata(check, "FixingFailingTest", failing, repairKind: "Test"),
+            cancellationToken).ConfigureAwait(false);
+
+        var outcome = await _agenticRepairService!.RunAsync(
+            new AgenticRepairRequest(
+                context.ExecutionId,
+                context.TaskTitle,
+                "Make the failing verification pass without weakening existing tests.",
+                prepResult.WorkspacePath,
+                DescribeFailureForAgent(failing, prepResult.WorkspacePath),
+                fileSets.ActuallyModifiedFiles.ToList(),
+                actualModel,
+                ObserveAsync),
+            cancellationToken).ConfigureAwait(false);
+
+        if (outcome.ChangedFiles.Count > 0)
+        {
+            fileSets.PromoteRepairedFiles(outcome.ChangedFiles);
+        }
+
+        var testsBefore = outcome.OriginalContents
+            .Where(pair => ProjectGraphHelper.IsTestFileCandidate(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        await FlagTestWeakeningAsync(context, check, prepResult.WorkspacePath, testsBefore, 0, cancellationToken).ConfigureAwait(false);
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Test,
+            outcome.Success ? ExecutionActivityStatus.Completed : ExecutionActivityStatus.Failed,
+            outcome.Success
+                ? $"Agentic test repair passed after {outcome.CheckRuns} check run(s), {outcome.ChangedFiles.Count} file(s) changed."
+                : $"Agentic test repair stopped ({outcome.StopReason}) after {outcome.Turns} step(s), {outcome.ChangedFiles.Count} file(s) changed.",
+            CheckMetadata(check, outcome.Success ? "FixingFailingTest" : "StoppedWithEvidence", failing, repairKind: "Test", repairFiles: outcome.ChangedFiles),
+            cancellationToken).ConfigureAwait(false);
+
+        if (outcome.Success && lastRunReachedTests && lastTest.Success)
+        {
+            return (lastTest, false);
+        }
+
+        // Re-establish the authoritative state after an unsuccessful loop (the last run may predate the last edit).
+        var (finalBuildFailure, finalTest) = await RunAllAsync(cancellationToken).ConfigureAwait(false);
+        if (finalBuildFailure != null)
+        {
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Build,
+                ExecutionActivityStatus.Failed,
+                $"Build failed after agentic test repair: {finalBuildFailure.ErrorMessage ?? finalBuildFailure.CheckDisplayName}",
+                CheckMetadata(check, "StoppedWithEvidence", finalBuildFailure, repairKind: "Test"),
+                cancellationToken).ConfigureAwait(false);
+            return (failing, true);
+        }
+
+        return (finalTest!, false);
+    }
+
+    private static string DescribeFailureForAgent(RepositoryCheckResult result, string workspacePath)
+    {
+        var sb = new StringBuilder();
+        var summary = TestFailureSummarizer.Summarize(result.StdOut, result.StdErr, result.ErrorMessage);
+        if (summary is { FailureCount: > 0 })
+        {
+            sb.AppendLine(summary.ToPromptText(TestFailureSummarizer.FindSourceHints(workspacePath, summary)));
+        }
+
+        var evidence = ExecutionDiagnosticEvidence.ParseTestFailure(result.StdOut, result.StdErr, result.ErrorMessage);
+        var lines = string.Join("\n", evidence.RelevantLines ?? Array.Empty<string>());
+        if (lines.Length > 0)
+        {
+            sb.AppendLine(lines.Length > 3000 ? lines[..3000] + "\n[…]" : lines);
+        }
+
+        if (sb.Length == 0)
+        {
+            var raw = string.Join("\n", new[] { result.ErrorMessage, result.StdErr, result.StdOut }.Where(s => !string.IsNullOrWhiteSpace(s)));
+            sb.AppendLine(raw.Length > 4000 ? raw[^4000..] : raw);
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>
@@ -1866,7 +2107,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         IReadOnlyList<string>? diagnosticLines = null,
         string? repairSelectionReason = null,
         string? testName = null,
-        bool? baselineUnverified = null) => new(
+        bool? baselineUnverified = null,
+        int? failingTestCount = null,
+        IReadOnlyList<string>? failingTestGroups = null,
+        string? suggestedFix = null) => new(
             BuildPassed: buildPassed,
             TestPassed: testPassed,
             EventKind: eventKind,
@@ -1894,7 +2138,10 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             DiagnosticLines: diagnosticLines,
             RepairSelectionReason: repairSelectionReason,
             TestName: testName,
-            BaselineUnverified: baselineUnverified);
+            BaselineUnverified: baselineUnverified,
+            FailingTestCount: failingTestCount,
+            FailingTestGroups: failingTestGroups,
+            SuggestedFix: suggestedFix);
 
     /// <summary>Longest a local step before a repair may take; the model call has its own limits.</summary>
     private static readonly TimeSpan RepairPreparationStepTimeout = TimeSpan.FromSeconds(120);
@@ -1972,6 +2219,61 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         }
 
         return !string.IsNullOrWhiteSpace(analysis.Summary) ? analysis.Summary : "No detailed proposed plan provided.";
+    }
+
+    /// <summary>
+    /// Screenshots the app before and after the change so the reviewer sees what the UI looks like. It runs only
+    /// after verification passed, is evidence only, and can never fail or block the execution.
+    /// </summary>
+    private async Task TryCaptureVisualsAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        ExecutionFileSets fileSets,
+        CancellationToken cancellationToken)
+    {
+        if (_visualCaptureService == null || fileSets.ActuallyModifiedFiles.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var manifest = await _visualCaptureService.CaptureAsync(
+                new VisualCaptureRequest(
+                    context.ExecutionId,
+                    prepResult.WorkspacePath,
+                    prepResult.BaseCommitSha,
+                    fileSets.ActuallyModifiedFiles.ToList()),
+                cancellationToken).ConfigureAwait(false);
+
+            if (manifest.Status == "Skipped" && !manifest.RequiresReview)
+            {
+                return;
+            }
+
+            var message = manifest.Status switch
+            {
+                "Captured" => $"Visual check: {manifest.Shots.Count} before/after screenshot pair(s) ready for review.",
+                "Partial" => $"Visual check: screenshots captured without a full before/after comparison. {manifest.Reason}".TrimEnd(),
+                _ => $"Visual check {manifest.Status.ToLowerInvariant()}: {manifest.Reason}".TrimEnd()
+            };
+
+            await SafeRecordActivityAsync(
+                context.ExecutionId,
+                ExecutionStage.Review,
+                ExecutionActivityStatus.Completed,
+                message,
+                new ExecutionActivityMetadata(EventKind: "VisualCapture"),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Visual check failed for execution {ExecutionId}; continuing without it.", context.ExecutionId);
+        }
     }
 
     private async Task SafeRecordActivityAsync(

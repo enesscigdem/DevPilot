@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next"
 import { srv } from "@/i18n"
-import { AlertTriangle, CheckCircle2, Info, ShieldAlert, XCircle } from "lucide-react"
-import { Panel } from "@/components/ui/primitives"
+import { AlertTriangle, CheckCircle2, Info, Loader2, ShieldAlert, Wrench, XCircle } from "lucide-react"
+import { Button, Panel } from "@/components/ui/primitives"
 import { cn } from "@/lib/utils"
 import type { ExecutionUsage, ExecutionVerdict, VerdictFinding } from "@/types"
 
@@ -31,7 +31,16 @@ function FindingRow({ finding }: { finding: VerdictFinding }) {
 }
 
 /** Explains the verification outcome: what happened, why, and what to do next. */
-export function VerdictCard({ verdict }: { verdict: ExecutionVerdict }) {
+export function VerdictCard({
+  verdict,
+  onFixTests,
+  isFixingTests = false,
+}: {
+  verdict: ExecutionVerdict
+  /** When set and the verdict carries a suggested fix, offers a one-click automatic fix of the failing tests. */
+  onFixTests?: (feedback: string) => void
+  isFixingTests?: boolean
+}) {
   const { t } = useTranslation()
   const style = severityStyles[verdict.severity] ?? severityStyles.neutral
   const Icon = style.icon
@@ -50,6 +59,25 @@ export function VerdictCard({ verdict }: { verdict: ExecutionVerdict }) {
           )}
         </div>
       </div>
+      {verdict.failingTestGroups && verdict.failingTestGroups.length > 0 && (
+        <div className="space-y-1.5 border-t border-border/60 pt-2">
+          <div className="tech-label">{t("executions.verdict.failingTitle")}</div>
+          <ul className="space-y-1">
+            {verdict.failingTestGroups.map((line, i) => (
+              <li key={i} className="break-words font-mono text-[11px] leading-relaxed text-muted-foreground">{line}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {onFixTests && verdict.suggestedFix && (
+        <div className="space-y-1.5 border-t border-border/60 pt-2">
+          <Button variant="default" size="sm" disabled={isFixingTests} onClick={() => onFixTests(verdict.suggestedFix as string)}>
+            {isFixingTests ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
+            {isFixingTests ? t("executions.verdict.fixingTests") : t("executions.verdict.fixTests")}
+          </Button>
+          <div className="text-[10.5px] leading-relaxed text-subtle-foreground">{t("executions.verdict.fixTestsHint")}</div>
+        </div>
+      )}
       {verdict.findings.length > 0 && (
         <ul className="space-y-1 border-t border-border/60 pt-2">
           {verdict.findings.map((finding, i) => (

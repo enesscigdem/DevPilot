@@ -253,7 +253,10 @@ public sealed class RepositoryNativeCheckRunner : IRepositoryCheckRunner
             ExitCode = processResult.ExitCode,
             ErrorMessage = success
                 ? null
-                : processResult.ErrorMessage ?? $"{check.DisplayName} failed with exit code {processResult.ExitCode}.",
+                : processResult.ErrorMessage ?? $"{check.DisplayName} failed with exit code {processResult.ExitCode}." +
+                    (IsMissingRuntimeDependency(processResult) && check.Source == RepositoryCheckSource.PackageJsonScript && !HasUsableNodeModules(workingDirectory)
+                        ? " A required tool was not found and node_modules is not installed: the repository has no lockfile, so dependencies were not installed. Add a lockfile (for example package-lock.json) or re-run verification."
+                        : string.Empty),
             StartTime = processResult.StartTime,
             CompletionTime = processResult.CompletionTime,
             Duration = processResult.Duration,

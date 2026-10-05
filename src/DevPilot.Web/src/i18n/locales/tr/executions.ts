@@ -41,7 +41,13 @@ const executions: Resources["executions"] = {
     attempt: "deneme {{n}}",
     compare: "{{n}}. deneme ile karşılaştır",
   },
-  verdict: { next: "Sonraki adım: " },
+  verdict: {
+    next: "Sonraki adım: ",
+    failingTitle: "Başarısız testler",
+    fixTests: "Başarısız testleri düzelt",
+    fixingTests: "Düzeltme başlatılıyor…",
+    fixTestsHint: "Yapay zekâ aşağıdaki listenin tamamını alıp testleri günceller; derleme ve testler yeniden çalışır.",
+  },
   usage: {
     title: "YZ kullanımı ve gecikme",
     providerCalls: "Sağlayıcı çağrıları",

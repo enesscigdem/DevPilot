@@ -30,6 +30,12 @@ public static class ExecutionReliabilityOptionsFactory
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxCompileRepairRounds), 0, v => options.MaxCompileRepairRounds = v);
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxTestRepairRounds), 0, v => options.MaxTestRepairRounds = v);
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxFlakeReruns), 0, v => options.MaxFlakeReruns = v);
+        ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxAgenticTurns), 1, v => options.MaxAgenticTurns = v);
+        ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxAgenticCheckRuns), 1, v => options.MaxAgenticCheckRuns = v);
+        if (bool.TryParse(configuration[prefix + nameof(ExecutionReliabilityOptions.AgenticRepairEnabled)], out var agentic))
+        {
+            options.AgenticRepairEnabled = agentic;
+        }
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxGenerationCalls), 1, v => options.MaxGenerationCalls = v);
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxConcurrentFileGenerations), 1, v => options.MaxConcurrentFileGenerations = v);
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxOutputTokens), 1, v => options.MaxOutputTokens = v);

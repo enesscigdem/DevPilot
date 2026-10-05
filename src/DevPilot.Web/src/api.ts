@@ -37,6 +37,7 @@ import type {
   AiAdapterType,
   AiStageAssignment,
   ModelComparison,
+  VisualCaptureManifest,
 } from './types';
 
 const BASE_URL = '/api';
@@ -200,12 +201,13 @@ export async function approveExecutionReview(
   id: string,
   expectedChangeFingerprint: string,
   workspaceId?: string | null,
-  init?: RequestInit
+  init?: RequestInit,
+  visualAcknowledged = false
 ): Promise<ExecutionReviewDecision> {
   return http<ExecutionReviewDecision>(appendWorkspaceQuery(`/executions/${id}/review/approve`, workspaceId), {
     ...init,
     method: 'POST',
-    body: JSON.stringify({ expectedChangeFingerprint }),
+    body: JSON.stringify({ expectedChangeFingerprint, visualAcknowledged }),
   });
 }
 
@@ -438,4 +440,13 @@ export async function getModelComparisonsForTask(taskId: string, init?: RequestI
 
 export async function cancelModelComparison(id: string): Promise<ModelComparison> {
   return http<ModelComparison>(`/model-comparisons/${id}/cancel`, { method: 'POST' });
+}
+
+export async function getExecutionVisual(id: string, init?: RequestInit): Promise<VisualCaptureManifest> {
+  return http<VisualCaptureManifest>(`/executions/${id}/visual`, init);
+}
+
+export function executionVisualImageUrl(id: string, fileName: string, cacheKey?: string): string {
+  const suffix = cacheKey ? `?v=${encodeURIComponent(cacheKey)}` : '';
+  return `${BASE_URL}/executions/${id}/visual/${fileName}${suffix}`;
 }

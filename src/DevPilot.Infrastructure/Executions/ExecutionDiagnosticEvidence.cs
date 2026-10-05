@@ -71,6 +71,11 @@ public static class ExecutionDiagnosticEvidence
         @"^\s*(?:x\s+)?(?:Failed|Başarısız|Fehlgeschlagen|Échec|Fallido)\s+(?<name>[A-Za-z_][A-Za-z0-9_.+`]+)(?:\s+\[[^\]]+\])?\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Vitest/Jest failure header: "FAIL  src/App.test.tsx > Suite > test name" (Jest has no "> name" part).
+    private static readonly Regex JsFailedTestRegex = new(
+        @"^\s*FAIL\s+(?<file>[^\s>]+\.(?:test|spec)\.[cm]?[jt]sx?)(?:\s*>\s*(?<name>.*?))?\s*$",
+        RegexOptions.Compiled);
+
     private static readonly Regex XUnitTestRegex = new(
         @"\[xUnit\.net\s+[^\]]+\]\s+(?<name>[A-Za-z_][A-Za-z0-9_.+`]+)\s+\[FAIL\]",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -163,6 +168,7 @@ public static class ExecutionDiagnosticEvidence
 
         var failureStart = -1;
         string? testName = null;
+        string? jsFailingTestFile = null;
 
         for (var i = 0; i < allLines.Length; i++)
         {
@@ -186,6 +192,17 @@ public static class ExecutionDiagnosticEvidence
             {
                 failureStart = i;
                 testName = match.Groups["name"].Value.Trim();
+                break;
+            }
+
+            var jsMatch = JsFailedTestRegex.Match(trimmed);
+            if (jsMatch.Success)
+            {
+                failureStart = i;
+                jsFailingTestFile = NormalizePath(jsMatch.Groups["file"].Value);
+                testName = jsMatch.Groups["name"].Success && jsMatch.Groups["name"].Value.Trim().Length > 0
+                    ? jsMatch.Groups["name"].Value.Trim()
+                    : jsFailingTestFile;
                 break;
             }
         }
@@ -241,10 +258,18 @@ public static class ExecutionDiagnosticEvidence
                 StackLocationRegex.Matches(line).Cast<Match>()
                     .Concat(PythonStackLocationRegex.Matches(line).Cast<Match>()))
             .Select(match => new DiagnosticSourceLocation(
-                NormalizePath(match.Groups["path"].Value),
+                CleanStackFramePath(NormalizePath(match.Groups["path"].Value)),
                 int.TryParse(match.Groups["line"].Value, out var parsedLine) ? parsedLine : (int?)null))
+            .Where(location => !location.FilePath.Contains("node_modules/", StringComparison.OrdinalIgnoreCase))
             .DistinctBy(location => $"{location.FilePath}:{location.Line}", StringComparer.OrdinalIgnoreCase)
             .ToList();
+
+        // The JS runner names the failing test file on its FAIL line even when no stack frame carries a line number.
+        if (jsFailingTestFile != null &&
+            !locations.Any(location => string.Equals(location.FilePath, jsFailingTestFile, StringComparison.OrdinalIgnoreCase)))
+        {
+            locations.Add(new DiagnosticSourceLocation(jsFailingTestFile, null));
+        }
 
         var errorLines = ExtractErrorLines(relevant);
         var errorSummary = errorLines.Count > 0
@@ -263,6 +288,19 @@ public static class ExecutionDiagnosticEvidence
             errorSummary,
             relevant,
             locations);
+    }
+
+    // A JS stack frame such as "❯ Object.getElementError src/x.ts" leaks its marker and function name into the path.
+    private static string CleanStackFramePath(string path)
+    {
+        var trimmed = path.TrimStart();
+        if (trimmed.StartsWith('❯') || trimmed.StartsWith('›'))
+        {
+            var lastSpace = trimmed.LastIndexOf(' ');
+            return lastSpace >= 0 ? trimmed[(lastSpace + 1)..] : trimmed.TrimStart('❯', '›');
+        }
+
+        return path;
     }
 
     public static IReadOnlyList<string> SelectCompilerRepairFiles(
@@ -637,6 +675,53 @@ public static class ExecutionDiagnosticEvidence
         return eligible;
     }
 
+    /// <summary>
+    /// Combines the stall escalation note with a cause-specific hint for well-known failure classes that
+    /// repair models repeatedly mis-fix (testing-library queries that match several elements).
+    /// </summary>
+    private static readonly Regex JsdomLimitationRegex = new(
+        @"(execCommand|queryCommandState|queryCommandSupported|scrollIntoView|scrollTo|matchMedia|ResizeObserver|IntersectionObserver|createObjectURL|getContext)\b[^\n]*(is not a function|is not defined|not implemented)|Not implemented:",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// True when the failure is the test runner's DOM emulation (jsdom/happy-dom) lacking a browser API, so the
+    /// fix may belong to the test setup or to how the source uses that API, not to either file alone.
+    /// </summary>
+    public static bool IsDomEnvironmentLimitationFailure(TestFailureEvidence evidence) =>
+        JsdomLimitationRegex.IsMatch(string.Join("\n", new[] { evidence.ErrorSummary }.Concat(evidence.RelevantLines ?? Array.Empty<string>())));
+
+    public static string? BuildTestFailureRepairHint(
+        TestFailureEvidence evidence,
+        string? failureSummaryText,
+        string? escalationHint)
+    {
+        var haystack = string.Join("\n", new[] { evidence.ErrorSummary, failureSummaryText }.Where(s => !string.IsNullOrWhiteSpace(s)));
+        string? causeHint = null;
+        if (IsDomEnvironmentLimitationFailure(evidence))
+        {
+            causeHint = "The test runner's DOM emulation (jsdom) does not implement the browser API named in the error " +
+                        "(for example document.execCommand, scrollIntoView, matchMedia, ResizeObserver). Do not keep retrying the same call. " +
+                        "Choose one: (a) in the source, implement the behaviour with APIs jsdom supports (Selection/Range and DOM nodes) " +
+                        "or guard the call so it cannot throw; (b) in the test file or its setup, define the missing API as a stub before use " +
+                        "and assert only what that stub can really produce (for example that the stub was called with the expected arguments). " +
+                        "Never assert real browser rendering that jsdom cannot produce, and do not delete or weaken tests.";
+        }
+        else if (haystack.Contains("Found multiple elements", StringComparison.OrdinalIgnoreCase))
+        {
+            causeHint = "A testing-library query matches several elements. This usually happens because the test data or the new test " +
+                        "adds an item whose text already appears elsewhere (title, list entry, heading). Fix it by making the added data " +
+                        "unique, or by narrowing the query (getByRole with name, within(container), data-testid, or getAllBy* with an index). " +
+                        "Apply the same fix to every failing query listed; do not delete or weaken assertions.";
+        }
+
+        if (causeHint == null)
+        {
+            return escalationHint;
+        }
+
+        return string.IsNullOrWhiteSpace(escalationHint) ? causeHint : $"{escalationHint}\n{causeHint}";
+    }
+
     public static IReadOnlyList<string> SelectTestRepairFiles(
         TestFailureEvidence evidence,
         IEnumerable<string> modifiedFiles,
@@ -726,6 +811,16 @@ public static class ExecutionDiagnosticEvidence
         if (productionViaHelper.FilePaths.Count > 0)
         {
             return productionViaHelper;
+        }
+
+        var productionImportedByTest = TrySelectProductionImportedByUntouchedTest(
+            evidence,
+            modified,
+            workspacePath,
+            fileContents);
+        if (productionImportedByTest.FilePaths.Count > 0)
+        {
+            return productionImportedByTest;
         }
 
         var mentionedFile = modified.FirstOrDefault(path =>
@@ -921,6 +1016,60 @@ public static class ExecutionDiagnosticEvidence
         return new TestRepairSelection(
             scored.Select(item => item.Path).ToList(),
             "TouchedProductionFromUntouchedTest",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+    }
+
+    /// <summary>
+    /// A test that this task did not edit fails after the task changed the code it exercises (a UI test that still
+    /// expects the old markup, for example). The suspects are the touched production files the failing test imports
+    /// directly. Anything more than two candidates is too ambiguous to repair safely and stays uncorrelated.
+    /// </summary>
+    private static TestRepairSelection TrySelectProductionImportedByUntouchedTest(
+        TestFailureEvidence evidence,
+        IReadOnlyList<string> modifiedFiles,
+        string? workspacePath,
+        IReadOnlyDictionary<string, string>? fileContents)
+    {
+        var empty = new TestRepairSelection(
+            Array.Empty<string>(),
+            "Uncorrelated",
+            evidence.TestName,
+            evidence.ErrorSummary,
+            SanitizeTestEvidenceForActivity(evidence));
+
+        var failingTestPath = evidence.Locations
+            .Select(location => location.FilePath)
+            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && ProjectGraphHelper.IsTestFileCandidate(path));
+        if (string.IsNullOrWhiteSpace(failingTestPath) ||
+            MatchModifiedFile(failingTestPath, modifiedFiles) != null)
+        {
+            return empty;
+        }
+
+        var productionModified = modifiedFiles
+            .Where(path => !ProjectGraphHelper.IsTestFileCandidate(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var testSource = TryReadBoundedEvidenceText(failingTestPath, workspacePath, fileContents);
+        if (productionModified.Count == 0 || string.IsNullOrWhiteSpace(testSource))
+        {
+            return empty;
+        }
+
+        var imported = productionModified
+            .Where(path => PlannedFileDependencyResolver.HasDirectLocalReference(
+                failingTestPath, testSource, path, productionModified))
+            .ToList();
+        if (imported.Count == 0 || imported.Count > 2)
+        {
+            return empty;
+        }
+
+        return new TestRepairSelection(
+            imported,
+            "TouchedProductionImportedByUntouchedTest",
             evidence.TestName,
             evidence.ErrorSummary,
             SanitizeTestEvidenceForActivity(evidence));

@@ -95,7 +95,7 @@ public sealed class ReliabilityPass1ProcessorTests
         var options = ExecutionReliabilityOptionsFactory.Create(null);
 
         options.MaxCompileRepairRounds.Should().Be(3);
-        options.MaxTestRepairRounds.Should().Be(2);
+        options.MaxTestRepairRounds.Should().Be(3);
         options.MaxGenerationCalls.Should().Be(40);
         options.MaxConcurrentFileGenerations.Should().Be(1);
         options.MaxOutputTokens.Should().Be(32768);

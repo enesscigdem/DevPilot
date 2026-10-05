@@ -580,6 +580,12 @@ export interface ExecutionVerdict {
   baseFreshness?: string | null;
   baseBehindCount?: number | null;
   baseCommitSha?: string | null;
+  /** Number of tests that still fail when verification ended; 0 when unknown or none. */
+  failingTestCount?: number;
+  /** One line per cause group, e.g. "7 × Unable to find an element with the text: …". */
+  failingTestGroups?: string[] | null;
+  /** Ready-made feedback for "request changes" that targets exactly these failures. */
+  suggestedFix?: string | null;
 }
 
 export interface ExecutionStageTiming {
@@ -1346,4 +1352,23 @@ export interface ExecutionRevisionDiff {
   files: ExecutionReviewFile[];
   diff: string;
   truncated: boolean;
+}
+
+export interface VisualShot {
+  page: string;
+  viewport: 'desktop' | 'mobile' | string;
+  width: number;
+  height: number;
+  beforeFile?: string | null;
+  afterFile?: string | null;
+}
+
+/** Result of the before/after screenshot check. status "None" means no visual check exists for the execution. */
+export interface VisualCaptureManifest {
+  status: 'None' | 'Captured' | 'Partial' | 'Skipped' | 'Failed' | string;
+  reason?: string | null;
+  requiresReview: boolean;
+  capturedAtUtc?: string;
+  baseCommitSha?: string | null;
+  shots: VisualShot[];
 }

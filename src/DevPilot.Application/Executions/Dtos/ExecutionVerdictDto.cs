@@ -24,7 +24,10 @@ public sealed record ExecutionVerdictDto(
     IReadOnlyList<string> ChecksNotRun,
     string? BaseFreshness = null,
     int? BaseBehindCount = null,
-    string? BaseCommitSha = null);
+    string? BaseCommitSha = null,
+    int FailingTestCount = 0,
+    IReadOnlyList<string>? FailingTestGroups = null,
+    string? SuggestedFix = null);
 
 public sealed record ExecutionStageTimingDto(string Stage, long DurationMs);
 

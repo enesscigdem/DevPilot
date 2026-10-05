@@ -16,6 +16,8 @@ const patterns: [RegExp, string][] = [
   [/^The focused repair of the tests failure produced no change to the working tree.$/, "Test hatasına yönelik odaklı onarım çalışma ağacında hiçbir değişiklik üretmedi."],
   // --- verdict headlines ---
   [/^No new regressions: (\d+) pre-existing failure\(s\) on the base commit remain, none were introduced\.$/, "Yeni regresyon yok: temel commit'teki $1 önceden var olan hata duruyor, yenisi eklenmedi."],
+  [/^Needs review: The build passed, but (\d+) tests? still fails? after (\d+) automatic repair round\(s\)\.$/, "İnceleme gerekli: derleme geçti ancak $1 test, $2 otomatik onarım turundan sonra hâlâ başarısız."],
+  [/^Needs review: (\d+) tests? still fails? after (\d+) automatic repair round\(s\)\.$/, "İnceleme gerekli: $1 test, $2 otomatik onarım turundan sonra hâlâ başarısız."],
   [/^Failed before verification: (.*)$/, "Doğrulamadan önce başarısız oldu: $1"],
 ]
 export default patterns
