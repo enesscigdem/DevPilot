@@ -1372,3 +1372,21 @@ export interface VisualCaptureManifest {
   baseCommitSha?: string | null;
   shots: VisualShot[];
 }
+
+export type AutomationLevel = "Manual" | "SemiAuto" | "AutoPr" | "FullAuto";
+
+export const AUTOMATION_LEVELS: AutomationLevel[] = ["Manual", "SemiAuto", "AutoPr", "FullAuto"];
+
+export interface AutomationPolicy {
+  repositoryWorkspaceId: string;
+  level: AutomationLevel;
+  paused: boolean;
+  activeSince: string | null;
+  maxFilesChanged: number;
+  maxLinesChanged: number;
+  maxParallelExecutions: number;
+  protectedPaths: string[];
+  requireGreenCiForMerge: boolean;
+}
+
+export type UpdateAutomationPolicyRequest = Omit<AutomationPolicy, "repositoryWorkspaceId" | "activeSince">;

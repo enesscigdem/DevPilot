@@ -170,6 +170,11 @@ public static class DependencyInjection
         services.AddSingleton<IExecutionCancellationRegistry, ExecutionCancellationRegistry>();
         services.AddSingleton<IExecutionHeartbeatService, ExecutionHeartbeatService>();
         services.AddHostedService<ExecutionStartupReconciler>();
+        services.AddSingleton<DevPilot.Application.Automation.AutomationDecisionLedger>();
+        services.AddScoped<DevPilot.Application.Automation.IAutomationPolicyStore, DevPilot.Infrastructure.Automation.EfAutomationPolicyStore>();
+        services.AddScoped<DevPilot.Application.Automation.IAutomationWorkReader, DevPilot.Infrastructure.Automation.EfAutomationWorkReader>();
+        services.AddScoped<DevPilot.Application.Automation.IAutomationOrchestrator, DevPilot.Application.Automation.AutomationOrchestrator>();
+        services.AddHostedService<DevPilot.Infrastructure.Automation.AutomationWorker>();
         services.AddScoped<DevPilot.Application.Executions.Commands.CancelExecution.ICancelExecutionCommandHandler, DevPilot.Application.Executions.Commands.CancelExecution.CancelExecutionCommandHandler>();
         services.AddScoped<DevPilot.Application.Executions.Commands.VerifyExecution.IVerifyExecutionCommandHandler, DevPilot.Application.Executions.Commands.VerifyExecution.VerifyExecutionCommandHandler>();
         services.AddScoped<DevPilot.Application.Executions.Commands.RequestExecutionChanges.IRequestExecutionChangesCommandHandler, DevPilot.Application.Executions.Commands.RequestExecutionChanges.RequestExecutionChangesCommandHandler>();

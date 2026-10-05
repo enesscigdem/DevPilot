@@ -38,6 +38,8 @@ import type {
   AiStageAssignment,
   ModelComparison,
   VisualCaptureManifest,
+  AutomationPolicy,
+  UpdateAutomationPolicyRequest,
 } from './types';
 
 const BASE_URL = '/api';
@@ -449,4 +451,18 @@ export async function getExecutionVisual(id: string, init?: RequestInit): Promis
 export function executionVisualImageUrl(id: string, fileName: string, cacheKey?: string): string {
   const suffix = cacheKey ? `?v=${encodeURIComponent(cacheKey)}` : '';
   return `${BASE_URL}/executions/${id}/visual/${fileName}${suffix}`;
+}
+
+export async function getAutomationPolicy(workspaceId: string): Promise<AutomationPolicy> {
+  return http<AutomationPolicy>(`/repositoryworkspaces/${workspaceId}/automation`);
+}
+
+export async function updateAutomationPolicy(
+  workspaceId: string,
+  request: UpdateAutomationPolicyRequest,
+): Promise<AutomationPolicy> {
+  return http<AutomationPolicy>(`/repositoryworkspaces/${workspaceId}/automation`, {
+    method: 'PUT',
+    body: JSON.stringify(request),
+  });
 }

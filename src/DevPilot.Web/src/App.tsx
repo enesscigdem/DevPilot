@@ -12,6 +12,7 @@ import { Architecture } from "./pages/Architecture"
 import { Insights } from "./pages/Insights"
 import { ExecutionCompare } from "./pages/ExecutionCompare"
 import { Models } from "./pages/Models"
+import { Automation } from "./pages/Automation"
 import { ModelComparisonPage } from "./pages/ModelComparison"
 
 export default function App() {
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="/architecture" element={<Architecture />} />
         <Route path="/insights" element={<Insights />} />
         <Route path="/models" element={<Models />} />
+        <Route path="/automation" element={<Automation />} />
         <Route path="/comparisons/:id" element={<ModelComparisonPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
