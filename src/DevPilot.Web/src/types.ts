@@ -6,6 +6,8 @@ export interface TaskListItem {
   status: number;
   priority: number;
   updatedAt: string;
+  externalKey?: string | null;
+  externalUrl?: string | null;
 }
 
 export interface Task {
@@ -19,6 +21,9 @@ export interface Task {
   acceptanceCriteria: string | null;
   priority: number;
   status: number;
+  externalSource?: string | null;
+  externalKey?: string | null;
+  externalUrl?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -49,6 +54,8 @@ export interface RepositoryWorkspace {
   owner: string;
   repository: string;
   branch: string;
+  provider?: "GitHub" | "GitLab" | "AzureDevOps" | "Bitbucket" | "Generic";
+  host?: string;
   status: number;
   displayName?: string;
   commitSha?: string;
@@ -59,9 +66,31 @@ export interface RepositoryWorkspace {
 export type Workspace = RepositoryWorkspace;
 
 export interface CreateRepositoryWorkspaceRequest {
-  owner: string;
-  repository: string;
+  owner?: string;
+  repository?: string;
   branch: string;
+  /** Any https or ssh git remote. GitHub repositories use the GitHub App picker instead. */
+  remoteUrl?: string;
+  gitConnectionId?: string;
+}
+
+export type GitConnectionProvider = "GitLab" | "AzureDevOps" | "Bitbucket" | "Generic";
+
+export interface GitConnection {
+  id: string;
+  provider: GitConnectionProvider;
+  host: string;
+  displayName: string;
+  username?: string | null;
+  createdAt: string;
+}
+
+export interface CreateGitConnectionRequest {
+  provider: GitConnectionProvider;
+  host: string;
+  displayName?: string;
+  username?: string;
+  token: string;
 }
 
 export const TaskStatus = {
@@ -1387,6 +1416,209 @@ export interface AutomationPolicy {
   maxParallelExecutions: number;
   protectedPaths: string[];
   requireGreenCiForMerge: boolean;
+  conflictMode: ConflictMode;
 }
 
+export type ConflictMode = "Careful" | "Balanced" | "Fast";
+
+export const CONFLICT_MODES: ConflictMode[] = ["Careful", "Balanced", "Fast"];
+
 export type UpdateAutomationPolicyRequest = Omit<AutomationPolicy, "repositoryWorkspaceId" | "activeSince">;
+
+export interface TaskBatchDraft {
+  title: string;
+  description: string;
+  acceptanceCriteria: string | null;
+  priority: number;
+}
+
+export interface TaskBatchWarning {
+  code: string;
+  draftIndex: number | null;
+}
+
+export interface TaskBatchParseResult {
+  drafts: TaskBatchDraft[];
+  warnings: TaskBatchWarning[];
+}
+
+export interface TaskBatchItemResult {
+  index: number;
+  success: boolean;
+  task: { id: string; title: string } | null;
+  errorMessage: string | null;
+}
+
+export interface TaskBatchCreateResult {
+  success: boolean;
+  errorMessage: string | null;
+  items: TaskBatchItemResult[];
+}
+
+/* ---------------------------------- Goals ---------------------------------- */
+
+export interface GoalTaskPlan {
+  key: string;
+  title: string;
+  description: string;
+  areas: string[];
+  dependsOn: string[];
+  size: "small" | "medium" | "large";
+  /** True when the areas came from a code search, not from the planner; shown as a guess and never delays a task. */
+  areasGuessed: boolean;
+}
+
+export interface GoalWave {
+  number: number;
+  taskKeys: string[];
+}
+
+export interface GoalConflict {
+  firstKey: string;
+  secondKey: string;
+  shared: string[];
+}
+
+export interface GoalCostEstimate {
+  inputTokens: number;
+  outputTokens: number;
+  usd: number | null;
+  basis: "history" | "default";
+  samples: number;
+  inputPerMillionUsd: number | null;
+  outputPerMillionUsd: number | null;
+}
+
+export interface GoalPlanWarning {
+  code: string;
+  taskKey: string | null;
+}
+
+export interface GoalPlan {
+  tasks: GoalTaskPlan[];
+  waves: GoalWave[];
+  conflicts: GoalConflict[];
+  estimate: GoalCostEstimate;
+  warnings: GoalPlanWarning[];
+  source: "ai" | "parser";
+  planningTokens: number;
+}
+
+export type GoalPhase =
+  | "Waiting"
+  | "Analyzing"
+  | "PlanReady"
+  | "Queued"
+  | "Running"
+  | "InReview"
+  | "Delivering"
+  | "PullRequest"
+  | "Merged"
+  | "Failed"
+  | "Stopped";
+
+export type GoalStatus = "Active" | "Completed" | "Cancelled";
+
+export interface GoalProgress {
+  total: number;
+  merged: number;
+  pullRequests: number;
+  running: number;
+  failed: number;
+  stopped: number;
+}
+
+export interface GoalTaskView {
+  key: string;
+  taskId: string;
+  title: string;
+  description: string;
+  wave: number;
+  size: string;
+  phase: GoalPhase;
+  areas: string[];
+  waitingFor: string[];
+  note: string | null;
+  executionId: string | null;
+  pullRequestNumber: number | null;
+  pullRequestUrl: string | null;
+  errorMessage: string | null;
+  impactedFileCount: number;
+  /** True only when the task cannot move on without a person; automation neither will nor may do the next step. */
+  needsPerson: boolean;
+}
+
+export interface GoalSummary {
+  id: string;
+  title: string;
+  status: GoalStatus;
+  planSource: string;
+  createdAt: string;
+  completedAt: string | null;
+  progress: GoalProgress;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedUsd: number | null;
+}
+
+export interface GoalDetail extends GoalSummary {
+  text: string;
+  waveCount: number;
+  /** True when DevPilot approves ready plans by itself, so a ready plan is not waiting for a person. */
+  automationActive: boolean;
+  tasks: GoalTaskView[];
+}
+
+export interface StartGoalRequest {
+  text: string;
+  planSource: string;
+  tasks: Pick<GoalTaskPlan, "key" | "title" | "description" | "areas" | "dependsOn" | "size" | "areasGuessed">[];
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  estimatedUsd: number | null;
+}
+
+export interface TrackerConnection {
+  id: string;
+  provider: 'Jira';
+  baseUrl: string;
+  displayName: string;
+  email?: string | null;
+  createdAt: string;
+}
+
+export interface CreateTrackerConnectionRequest {
+  provider: 'Jira';
+  baseUrl: string;
+  displayName?: string;
+  email?: string;
+  token: string;
+}
+
+export interface TrackerIssue {
+  key: string;
+  summary: string;
+  description?: string | null;
+  status?: string | null;
+  issueType?: string | null;
+  priority?: string | null;
+  labels: string[];
+  url: string;
+  alreadyImported: boolean;
+}
+
+export type ImportOutcome = 'Imported' | 'AlreadyImported' | 'Failed';
+
+export interface ImportIssueResult {
+  key: string;
+  outcome: ImportOutcome;
+  task?: Task | null;
+  message?: string | null;
+}
+
+export interface ImportIssuesResponse {
+  items: ImportIssueResult[];
+  imported: number;
+  alreadyImported: number;
+  failed: number;
+}

@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 import { useWorkspace } from "@/lib/workspace"
 import { PageContainer, PageHeading, SectionHead } from "@/components/shared"
 import { Badge, Button, Panel } from "@/components/ui/primitives"
-import { AUTOMATION_LEVELS, type AutomationLevel, type AutomationPolicy } from "@/types"
+import { AUTOMATION_LEVELS, CONFLICT_MODES, type AutomationLevel, type AutomationPolicy, type ConflictMode } from "@/types"
 
 const fieldClass =
   "h-9 w-full rounded-[var(--radius-md)] border border-border-strong bg-surface px-3 text-[13px] text-foreground outline-none placeholder:text-subtle-foreground focus:border-primary focus:ring-2 focus:ring-ring/30"
@@ -19,6 +19,7 @@ interface Draft {
   maxParallelExecutions: string
   protectedPaths: string
   requireGreenCiForMerge: boolean
+  conflictMode: ConflictMode
 }
 
 function toDraft(p: AutomationPolicy): Draft {
@@ -30,6 +31,7 @@ function toDraft(p: AutomationPolicy): Draft {
     maxParallelExecutions: String(p.maxParallelExecutions),
     protectedPaths: p.protectedPaths.join("\n"),
     requireGreenCiForMerge: p.requireGreenCiForMerge,
+    conflictMode: p.conflictMode,
   }
 }
 
@@ -53,7 +55,8 @@ function sameDraft(a: Draft, b: Draft): boolean {
     a.maxLinesChanged === b.maxLinesChanged &&
     a.maxParallelExecutions === b.maxParallelExecutions &&
     patternsOf(a.protectedPaths).join("\n") === patternsOf(b.protectedPaths).join("\n") &&
-    a.requireGreenCiForMerge === b.requireGreenCiForMerge
+    a.requireGreenCiForMerge === b.requireGreenCiForMerge &&
+    a.conflictMode === b.conflictMode
   )
 }
 
@@ -132,6 +135,7 @@ export function Automation() {
         maxParallelExecutions: limits.parallel!,
         protectedPaths: patternsOf(draft.protectedPaths),
         requireGreenCiForMerge: draft.requireGreenCiForMerge,
+        conflictMode: draft.conflictMode,
       })
       setPolicy(result)
       setDraft(toDraft(result))
@@ -282,6 +286,44 @@ export function Automation() {
                     </label>
                   )}
                 </Panel>
+              </section>
+
+              <section>
+                <SectionHead title={t("automation.conflict.heading")} />
+                <p className="-mt-1 mb-3 max-w-[760px] text-[12.5px] leading-relaxed text-muted-foreground">{t("automation.conflict.intro")}</p>
+                <div className="grid gap-3 md:grid-cols-3" role="radiogroup" aria-label={t("automation.conflict.heading")}>
+                  {CONFLICT_MODES.map((mode) => {
+                    const selected = draft.conflictMode === mode
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => set("conflictMode", mode)}
+                        className={cn(
+                          "cursor-pointer rounded-[var(--radius-lg)] border p-4 text-left transition-colors",
+                          selected ? "border-primary bg-primary-soft" : "border-border-strong bg-surface hover:bg-surface-3",
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[13.5px] font-semibold text-foreground">{t(`automation.conflict.modes.${mode}.name`)}</span>
+                          <span className="flex items-center gap-1.5">
+                            {mode === "Balanced" && <Badge tone="blue">{t("automation.conflict.recommended")}</Badge>}
+                            {selected && <Check className="h-4 w-4 text-primary" />}
+                          </span>
+                        </div>
+                        <div className="mt-1 text-[12.5px] text-muted-foreground">{t(`automation.conflict.modes.${mode}.summary`)}</div>
+                        <div className="mt-2.5 text-[11.5px] leading-relaxed text-subtle-foreground">
+                          {t(`automation.conflict.modes.${mode}.does`)}
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+                {draft.conflictMode !== "Careful" && (
+                  <p className="mt-3 max-w-[760px] text-[12px] leading-relaxed text-subtle-foreground">{t("automation.conflict.note")}</p>
+                )}
               </section>
 
               <section>

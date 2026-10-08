@@ -27,6 +27,7 @@ const review = {
   rejectChanges: "Reject changes",
   approveChanges: "Approve changes",
   prNumber: "PR #{{n}}",
+  noPrHost: "This git host has no pull request API. The branch is pushed; open the merge request on the host.",
   openingPr: "Opening pull request...",
   openPr: "Open pull request",
   connectGitHub: "Connect GitHub",

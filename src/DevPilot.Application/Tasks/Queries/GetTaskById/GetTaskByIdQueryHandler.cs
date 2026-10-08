@@ -64,6 +64,9 @@ public sealed class GetTaskByIdQueryHandler : IGetTaskByIdQueryHandler
             AcceptanceCriteria = task.AcceptanceCriteria,
             Priority = task.Priority,
             Status = task.Status,
+                ExternalSource = task.ExternalSource,
+                ExternalKey = task.ExternalKey,
+                ExternalUrl = task.ExternalUrl,
             CreatedAt = task.CreatedAt,
             UpdatedAt = task.UpdatedAt,
         };

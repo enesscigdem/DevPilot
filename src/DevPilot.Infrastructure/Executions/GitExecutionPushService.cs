@@ -15,15 +15,18 @@ public sealed class GitExecutionPushService : IExecutionGitPushService
 
     private readonly IExecutionRepository _executionRepository;
     private readonly IGitHubAppTokenService _tokenService;
+    private readonly IGitCredentialResolver? _credentialResolver;
     private readonly ILogger<GitExecutionPushService> _logger;
 
     public GitExecutionPushService(
         IExecutionRepository executionRepository,
         IGitHubAppTokenService tokenService,
-        ILogger<GitExecutionPushService> logger)
+        ILogger<GitExecutionPushService> logger,
+        IGitCredentialResolver? credentialResolver = null)
     {
         _executionRepository = executionRepository;
         _tokenService = tokenService;
+        _credentialResolver = credentialResolver;
         _logger = logger;
     }
 
@@ -119,16 +122,40 @@ public sealed class GitExecutionPushService : IExecutionGitPushService
         }
 
         // 6. Resolve transient installation token for remote operations
-        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(repoOwner, repoName, cancellationToken).ConfigureAwait(false);
-        if (!tokenResult.IsSuccess || string.IsNullOrWhiteSpace(tokenResult.Token))
+        var workspaceEntity = execution.DevelopmentTask?.RepositoryWorkspace;
+        var isGitHub = workspaceEntity is null || workspaceEntity.Provider == GitProviderKind.GitHub;
+        var providerLabel = isGitHub ? "GitHub" : workspaceEntity!.Provider.ToString();
+
+        GitCredential? credential = null;
+        GitHubTokenFailureKind failureKind;
+        string? failureMessage;
+
+        if (_credentialResolver is not null && workspaceEntity is not null)
+        {
+            var resolved = await _credentialResolver.ResolveForWorkspaceAsync(workspaceEntity, cancellationToken).ConfigureAwait(false);
+            credential = resolved.Credential;
+            failureKind = resolved.FailureKind;
+            failureMessage = resolved.ErrorMessage;
+        }
+        else
+        {
+            var tokenResult = await _tokenService.GetTokenForRepositoryAsync(repoOwner, repoName, cancellationToken).ConfigureAwait(false);
+            credential = tokenResult.IsSuccess && !string.IsNullOrWhiteSpace(tokenResult.Token)
+                ? new GitCredential(tokenResult.Token, GitCredentialResolver.GitHubUsername)
+                : null;
+            failureKind = tokenResult.FailureKind;
+            failureMessage = tokenResult.ErrorMessage;
+        }
+
+        if (credential is null)
         {
             await _executionRepository.SetPushFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);
-            var errMsg = tokenResult.FailureKind switch
+            var errMsg = failureKind switch
             {
-                GitHubTokenFailureKind.Disconnected => "Connect GitHub to push execution branch.",
+                GitHubTokenFailureKind.Disconnected => $"Connect {providerLabel} to push execution branch.",
                 GitHubTokenFailureKind.RepositoryUnauthorized => $"DevPilot does not have access to repository '{repoOwner}/{repoName}'. Please update repository permissions.",
-                GitHubTokenFailureKind.InstallationInvalidOrRevoked => "GitHub connection has expired or been revoked. Please reconnect GitHub.",
-                _ => tokenResult.ErrorMessage ?? "Repository authorization failed for remote push."
+                GitHubTokenFailureKind.InstallationInvalidOrRevoked => $"{providerLabel} connection has expired or been revoked. Please reconnect {providerLabel}.",
+                _ => failureMessage ?? "Repository authorization failed for remote push."
             };
             return new ExecutionPushResult(false, ErrorMessage: errMsg);
         }
@@ -138,7 +165,7 @@ public sealed class GitExecutionPushService : IExecutionGitPushService
 
         try
         {
-            tempHome = GitAuthenticationHelper.CreateTransientHomeDirectory(tokenResult.Token);
+            tempHome = GitAuthenticationHelper.CreateTransientHomeDirectory(credential.Token, credential.Username);
             env = new Dictionary<string, string>
             {
                 ["HOME"] = tempHome,

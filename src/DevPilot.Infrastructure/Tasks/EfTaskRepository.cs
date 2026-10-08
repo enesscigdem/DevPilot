@@ -32,6 +32,25 @@ public sealed class EfTaskRepository : ITaskRepository
         await _dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlySet<string>> FindByExternalKeysAsync(
+        Guid repositoryWorkspaceId,
+        string externalSource,
+        IReadOnlyCollection<string> externalKeys,
+        CancellationToken cancellationToken = default)
+    {
+        var found = await _dbContext.DevelopmentTasks
+            .AsNoTracking()
+            .Where(t => t.RepositoryWorkspaceId == repositoryWorkspaceId
+                && t.ExternalSource == externalSource
+                && t.ExternalKey != null
+                && externalKeys.Contains(t.ExternalKey))
+            .Select(t => t.ExternalKey!)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return found.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
     public async Task<DevelopmentTask?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
         return await _dbContext.DevelopmentTasks

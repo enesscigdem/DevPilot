@@ -1,3 +1,4 @@
+using DevPilot.Application.GitProviders;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
@@ -19,6 +20,7 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
     private readonly IOptions<RepositoryCloneOptions> _options;
     private readonly DevPilotDbContext _dbContext;
     private readonly IGitHubAppTokenService _tokenService;
+    private readonly IGitCredentialResolver? _credentialResolver;
     private readonly IConfiguration _configuration;
     private readonly ILogger<RepositoryCloneService> _logger;
 
@@ -27,11 +29,13 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         DevPilotDbContext dbContext,
         IGitHubAppTokenService tokenService,
         IConfiguration configuration,
-        ILogger<RepositoryCloneService> logger)
+        ILogger<RepositoryCloneService> logger,
+        IGitCredentialResolver? credentialResolver = null)
     {
         _options = options;
         _dbContext = dbContext;
         _tokenService = tokenService;
+        _credentialResolver = credentialResolver;
         _configuration = configuration;
         _logger = logger;
     }
@@ -46,6 +50,9 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         var owner = request.Owner?.Trim() ?? string.Empty;
         var repository = request.Repository?.Trim() ?? string.Empty;
         var branch = request.Branch?.Trim() ?? string.Empty;
+        var provider = request.Provider;
+        var host = string.IsNullOrWhiteSpace(request.Host) ? "github.com" : request.Host.Trim().ToLowerInvariant();
+        var isGitHub = provider == GitProviderKind.GitHub;
 
         if (string.IsNullOrWhiteSpace(owner))
         {
@@ -70,7 +77,7 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
 
         try
         {
-            sanitizedOwner = SanitizePathSegment(owner);
+            sanitizedOwner = SanitizeOwnerPath(owner);
             sanitizedRepository = SanitizePathSegment(repository);
             sanitizedBranchPath = SanitizeBranchPath(branch);
         }
@@ -80,7 +87,9 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         }
 
         var targetPath = Path.GetFullPath(
-            Path.Combine(workspaceRoot, sanitizedOwner, sanitizedRepository, sanitizedBranchPath));
+            isGitHub
+                ? Path.Combine(workspaceRoot, sanitizedOwner, sanitizedRepository, sanitizedBranchPath)
+                : Path.Combine(workspaceRoot, SanitizePathSegment(host), sanitizedOwner, sanitizedRepository, sanitizedBranchPath));
 
         if (!IsWithinWorkspaceRoot(targetPath, workspaceRoot))
         {
@@ -94,7 +103,7 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
 
         var existingWorkspace = await _dbContext.RepositoryWorkspaces
             .FirstOrDefaultAsync(
-                w => w.Owner == owner && w.Repository == repository && w.Branch == branch,
+                w => w.Host == host && w.Owner == owner && w.Repository == repository && w.Branch == branch,
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -106,6 +115,9 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
                 repository,
                 branch,
                 existingWorkspace,
+                provider,
+                host,
+                request.GitConnectionId,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -122,6 +134,9 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
             existingWorkspace = new RepositoryWorkspace
             {
                 Id = Guid.NewGuid(),
+                Provider = provider,
+                Host = host,
+                GitConnectionId = request.GitConnectionId,
                 Owner = owner,
                 Repository = repository,
                 Branch = branch,
@@ -153,27 +168,53 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
             return ConflictResult($"Repository workspace '{owner}/{repository}' ({branch}) already exists or is being created.");
         }
 
-        var cloneUrl = $"https://github.com/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}.git";
+        var cloneUrl = GitRemoteUrl.BuildCloneUrl(provider, host, owner, repository);
         string? token = null;
+        var tokenUsername = GitCredentialResolver.GitHubUsername;
 
-        var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
-        if (tokenResult.IsSuccess && !string.IsNullOrWhiteSpace(tokenResult.Token))
+        if (!isGitHub)
         {
-            token = tokenResult.Token;
-            if (tokenResult.ExternalInstallationId.HasValue)
-            {
-                var conn = await _dbContext.GitHubInstallationConnections
-                    .FirstOrDefaultAsync(c => c.ExternalInstallationId == tokenResult.ExternalInstallationId.Value, cancellationToken)
+            var resolved = _credentialResolver is null
+                ? GitCredentialResult.Failure("Git credential resolver is not available.")
+                : await _credentialResolver
+                    .ResolveAsync(provider, host, owner, repository, request.GitConnectionId, cancellationToken)
                     .ConfigureAwait(false);
-                if (conn != null)
-                {
-                    existingWorkspace.GitHubInstallationConnectionId = conn.Id;
-                }
+
+            if (!resolved.IsSuccess || resolved.Credential is null)
+            {
+                existingWorkspace.Status = RepositoryWorkspaceStatus.Failed;
+                existingWorkspace.ErrorMessage = resolved.ErrorMessage;
+                existingWorkspace.UpdatedAt = DateTime.UtcNow;
+                _dbContext.RepositoryWorkspaces.Update(existingWorkspace);
+                await _dbContext.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
+                TryDeleteDirectory(targetPath);
+                return ValidationErrorResult(resolved.ErrorMessage ?? "No access token is available for this repository.");
             }
+
+            token = resolved.Credential.Token;
+            tokenUsername = resolved.Credential.Username;
         }
         else
         {
-            token = GetToken();
+            var tokenResult = await _tokenService.GetTokenForRepositoryAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+            if (tokenResult.IsSuccess && !string.IsNullOrWhiteSpace(tokenResult.Token))
+            {
+                token = tokenResult.Token;
+                if (tokenResult.ExternalInstallationId.HasValue)
+                {
+                    var conn = await _dbContext.GitHubInstallationConnections
+                        .FirstOrDefaultAsync(c => c.ExternalInstallationId == tokenResult.ExternalInstallationId.Value, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (conn != null)
+                    {
+                        existingWorkspace.GitHubInstallationConnectionId = conn.Id;
+                    }
+                }
+            }
+            else
+            {
+                token = GetToken();
+            }
         }
 
         existingWorkspace.RemoteUrl = cloneUrl;
@@ -183,7 +224,7 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         {
             if (!string.IsNullOrWhiteSpace(token))
             {
-                tempHomeDirectory = GitAuthenticationHelper.CreateTransientHomeDirectory(token);
+                tempHomeDirectory = GitAuthenticationHelper.CreateTransientHomeDirectory(token, tokenUsername);
             }
 
             using var timeoutCts = new CancellationTokenSource(_options.Value.Timeout);
@@ -264,6 +305,9 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         string repository,
         string branch,
         RepositoryWorkspace? existingWorkspace,
+        GitProviderKind provider,
+        string host,
+        Guid? gitConnectionId,
         CancellationToken cancellationToken)
     {
         _logger.LogInformation(
@@ -328,6 +372,9 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
             existingWorkspace = new RepositoryWorkspace
             {
                 Id = Guid.NewGuid(),
+                Provider = provider,
+                Host = host,
+                GitConnectionId = gitConnectionId,
                 Owner = owner,
                 Repository = repository,
                 Branch = branch,
@@ -432,6 +479,18 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
         return Path.GetFullPath(fallback);
     }
 
+    private static string SanitizeOwnerPath(string owner)
+    {
+        // GitLab namespaces can be nested (group/subgroup), so each segment is sanitized on its own.
+        var segments = owner.Split(new[] { '/', '\\' },StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0)
+        {
+            throw new ArgumentException("Owner cannot be empty.", nameof(owner));
+        }
+
+        return Path.Combine(segments.Select(SanitizePathSegment).ToArray());
+    }
+
     private static string SanitizeBranchPath(string branch)
     {
         if (string.IsNullOrWhiteSpace(branch))
@@ -503,6 +562,15 @@ internal sealed class RepositoryCloneService : IRepositoryCloneService
             string.IsNullOrWhiteSpace(repository))
         {
             return false;
+        }
+
+        // Hosts with their own address shape (Azure DevOps) are compared by identity, not by path suffix.
+        var parsed = GitRemoteUrl.Parse(remoteUrl);
+        if (parsed is not null &&
+            string.Equals(parsed.Owner, owner.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(parsed.Repository, repository.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
         }
 
         var normalizedUrl = remoteUrl.Trim().Replace('\\', '/');

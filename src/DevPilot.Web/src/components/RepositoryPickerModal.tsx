@@ -28,6 +28,7 @@ import type {
   RepositoryWorkspace,
 } from "@/types"
 import { Kbd } from "@/components/ui/primitives"
+import { RemoteRepositoryForm } from "@/components/RemoteRepositoryForm"
 import { cn } from "@/lib/utils"
 
 interface RepositoryPickerModalProps {
@@ -40,7 +41,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
   const { t } = useTranslation()
   const { workspaces, activeWorkspaceId, selectWorkspace, connectWorkspace, refreshWorkspaces } = useWorkspace()
 
-  const [step, setStep] = useState<"list" | "branch">("list")
+  const [step, setStep] = useState<"list" | "branch" | "url">("list")
   const [query, setQuery] = useState("")
   const [activeIdx, setActiveIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -190,7 +191,7 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (step === "branch") {
+    if (step === "branch" || step === "url") {
       if (e.key === "Escape") {
         setStep("list")
       }
@@ -233,7 +234,9 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
-        {step === "list" ? (
+        {step === "url" ? (
+          <RemoteRepositoryForm onBack={() => setStep("list")} onConnected={onClose} />
+        ) : step === "list" ? (
           <>
             {/* Search Header */}
             <div className="flex items-center gap-2.5 border-b border-border px-3.5">
@@ -313,6 +316,11 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                           <div className="min-w-0 truncate">
                             <div className="flex items-center gap-1.5">
                               <span className="font-medium text-foreground">{w.owner}/{w.repository}</span>
+                              {w.provider && w.provider !== "GitHub" && (
+                                <span className="rounded border border-border bg-surface px-1.5 py-0.2 text-[10px] text-subtle-foreground">
+                                  {w.host}
+                                </span>
+                              )}
                               {isCurrent && (
                                 <span className="rounded bg-emerald-500/10 px-1.5 py-0.2 text-[10px] font-medium text-emerald-500">
                                   {t("picker.active")}
@@ -449,6 +457,14 @@ export function RepositoryPickerModal({ open, onClose, returnUrl }: RepositoryPi
                     </button>
                   </>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setStep("url")}
+                  className="inline-flex items-center gap-1 font-medium text-foreground hover:underline"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  {t("picker.addByUrl")}
+                </button>
                 <button
                   type="button"
                   onClick={loadGitHubData}

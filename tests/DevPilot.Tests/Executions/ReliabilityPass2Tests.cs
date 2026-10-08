@@ -95,6 +95,56 @@ public sealed class ReliabilityPass2Tests
         ExecutionVerificationEvaluator.IsDeliveryEligible(outcome).Should().BeFalse();
     }
 
+    // ── Build-only (repository without a test suite) ──────────────────────────
+
+    private static List<ExecutionActivity> BuildOnlyRun(bool unresolved = false, bool baselineUnverified = false, bool withTestStage = false)
+    {
+        var list = new List<ExecutionActivity>
+        {
+            Act(ExecutionStage.Build, ExecutionActivityStatus.Completed, "Build passed.", new ExecutionActivityMetadata(EventKind: "VerifyingRepository", RepositoryCheckId: "b")),
+            Act(ExecutionStage.Build, ExecutionActivityStatus.Completed, ExecutionVerdictBuilder.BuildOnlyNoTestSuiteMessagePrefix + ".",
+                new ExecutionActivityMetadata(BuildPassed: true, EventKind: "ReadyForReview", VerificationOutcome: "PartiallyVerified", VerificationUnresolved: unresolved ? true : null, BaselineUnverified: baselineUnverified ? true : null)),
+        };
+
+        if (withTestStage)
+        {
+            list.Add(Act(ExecutionStage.Test, ExecutionActivityStatus.Failed, "Tests failed.", new ExecutionActivityMetadata(RepositoryCheckId: "t")));
+        }
+
+        return list;
+    }
+
+    [Fact]
+    public void Verdict_BuildPassedWithNoTestSuite_IsFlaggedBuildOnly()
+    {
+        var verdict = ExecutionVerdictBuilder.BuildVerdict(NewExecution(), BuildOnlyRun(), ExecutionVerificationOutcome.PartiallyVerified);
+
+        verdict.BuildOnlyNoTestSuite.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    public void Verdict_BuildOnlyIsNotClaimed_WhenAnotherGapExists(bool unresolved, bool baselineUnverified, bool withTestStage)
+    {
+        var verdict = ExecutionVerdictBuilder.BuildVerdict(
+            NewExecution(),
+            BuildOnlyRun(unresolved, baselineUnverified, withTestStage),
+            ExecutionVerificationOutcome.PartiallyVerified);
+
+        verdict.BuildOnlyNoTestSuite.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(ExecutionVerificationOutcome.Verified)]
+    [InlineData(ExecutionVerificationOutcome.NeedsReview)]
+    [InlineData(ExecutionVerificationOutcome.VerificationUnavailable)]
+    public void Verdict_BuildOnlyIsNeverClaimed_ForOtherOutcomes(ExecutionVerificationOutcome outcome)
+    {
+        ExecutionVerdictBuilder.BuildVerdict(NewExecution(), BuildOnlyRun(), outcome).BuildOnlyNoTestSuite.Should().BeFalse();
+    }
+
     // ── Verdict builder ────────────────────────────────────────────────────────
 
     [Fact]

@@ -69,6 +69,9 @@ public static class ExecutionVerdictBuilder
         }
     }
 
+    /// <summary>Written by the execution processor when the build passed and the repository has no test suite at all.</summary>
+    public const string BuildOnlyNoTestSuiteMessagePrefix = "Repository build passed (partially verified: no test suite discovered)";
+
     public static ExecutionVerdictDto BuildVerdict(
         TaskExecution execution,
         IReadOnlyList<ExecutionActivity> activities,
@@ -163,6 +166,15 @@ public static class ExecutionVerdictBuilder
                                           p.Activity.Status == ExecutionActivityStatus.Completed &&
                                           p.Activity.Message.StartsWith("Build passed", StringComparison.OrdinalIgnoreCase));
 
+        // The only thing missing is a test suite the repository never had: build passed, nothing unresolved or unproven.
+        var buildOnlyNoTestSuite =
+            outcome == ExecutionVerificationOutcome.PartiallyVerified &&
+            !baselineUnverified &&
+            weakening.Count == 0 &&
+            buildPassed &&
+            !parsed.Any(p => p.Metadata?.VerificationUnresolved == true) &&
+            !parsed.Any(p => p.Activity.Stage == ExecutionStage.Test && p.Activity.Status == ExecutionActivityStatus.Failed);
+
         var (severity, headline, action) = Describe(execution, outcome, baselineUnverified, weakening.Count > 0, preExisting, stop);
         if (failingTestCount > 0 && weakening.Count == 0)
         {
@@ -192,7 +204,8 @@ public static class ExecutionVerdictBuilder
             BaseCommitSha: freshness?.BaseCommitSha,
             FailingTestCount: failingTestCount,
             FailingTestGroups: failingTestCount > 0 ? failedTests?.FailingTestGroups : null,
-            SuggestedFix: failingTestCount > 0 ? failedTests?.SuggestedFix : null);
+            SuggestedFix: failingTestCount > 0 ? failedTests?.SuggestedFix : null,
+            BuildOnlyNoTestSuite: buildOnlyNoTestSuite);
     }
 
     public static ExecutionUsageDto AggregateUsage(IReadOnlyList<ExecutionActivity> activities, AiPricingOptions? pricing = null)

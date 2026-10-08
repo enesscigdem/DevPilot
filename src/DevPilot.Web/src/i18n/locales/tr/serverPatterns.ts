@@ -1,6 +1,9 @@
 // English API sentences with parameters -> Turkish. `$1`, `$2` refer to regex capture groups.
 // Applied by srv() after the exact-match table in server.ts.
 const patterns: [RegExp, string][] = [
+  // --- goal board notes ---
+  [/^Waits for “(.*)”: both change (.*)\.$/, "“$1” bitince başlayacak: ikisi de $2 dosyasını değiştiriyor."],
+  [/^DevPilot could not start the analysis of this task\. Open it to retry\.$/, "DevPilot bu görevin analizini başlatamadı. Yeniden denemek için görevi açın."],
   // --- verdict findings ---
   [/^The base was (\d+) commit\(s\) behind origin when this ran; the change may need a rebase before merging\.$/, "Çalıştırma sırasında taban, origin'in $1 commit gerisindeydi; değişikliğin birleştirmeden önce rebase edilmesi gerekebilir."],
   [/^Generation needed (\d+) applicability repair\(s\) and (\d+) compact retr(?:y|ies)\.$/, "Üretim için $1 uygulanabilirlik onarımı ve $2 kompakt yeniden deneme gerekti."],

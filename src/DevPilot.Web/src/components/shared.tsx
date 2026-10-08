@@ -139,6 +139,11 @@ export function TaskRow({ task }: { task: TaskListItem | ApiTask }) {
         <div className="flex items-center gap-2">
           <span className="font-mono text-[11px] text-subtle-foreground">{displayId}</span>
           <span className="truncate text-[13px] font-medium text-foreground">{title}</span>
+          {task.externalKey && (
+            <Badge tone="blue" mono className="shrink-0">
+              {task.externalKey}
+            </Badge>
+          )}
         </div>
         <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-subtle-foreground">
           <span className="truncate">{metaLeft}</span>

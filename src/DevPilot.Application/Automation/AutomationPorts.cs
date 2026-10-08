@@ -27,6 +27,18 @@ public interface IAutomationWorkReader
 
     Task<int> CountActiveExecutionsAsync(Guid repositoryWorkspaceId, CancellationToken cancellationToken = default);
 
+    /// <summary>How many runs the task has had, whatever their outcome. Caps automatic restarts.</summary>
+    Task<int> CountExecutionsForTaskAsync(Guid taskId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Latest failed execution of every task whose newest run failed and which has not used up its automatic retries.
+    /// Goal tasks are included: a goal starts its tasks, but a task that died while its code was written is retried here.
+    /// </summary>
+    Task<IReadOnlyList<Guid>> GetRetryableFailedExecutionIdsAsync(
+        Guid repositoryWorkspaceId,
+        DateTime since,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Finished executions whose pull request has not been opened yet and whose review was not rejected.</summary>
     Task<IReadOnlyList<Guid>> GetDeliverableExecutionIdsAsync(
         Guid repositoryWorkspaceId,

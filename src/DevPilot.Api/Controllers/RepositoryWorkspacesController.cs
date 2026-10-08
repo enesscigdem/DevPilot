@@ -49,6 +49,8 @@ public class RepositoryWorkspacesController : ControllerBase
             .Select(w => new RepositoryWorkspaceListDto
             {
                 Id = w.Id,
+                Provider = w.Provider.ToString(),
+                Host = w.Host,
                 Owner = w.Owner,
                 Repository = w.Repository,
                 Branch = w.Branch,
@@ -78,6 +80,8 @@ public class RepositoryWorkspacesController : ControllerBase
         return Ok(new RepositoryWorkspaceDto
         {
             Id = workspace.Id,
+            Provider = workspace.Provider.ToString(),
+            Host = workspace.Host,
             Owner = workspace.Owner,
             Repository = workspace.Repository,
             Branch = workspace.Branch,
@@ -235,6 +239,10 @@ public class RepositoryWorkspacesController : ControllerBase
     public sealed class RepositoryWorkspaceListDto
     {
         public Guid Id { get; set; }
+
+        public string Provider { get; set; } = "GitHub";
+
+        public string Host { get; set; } = "github.com";
 
         public string Owner { get; set; } = string.Empty;
 

@@ -1,3 +1,4 @@
+using DevPilot.Application.GitProviders;
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -23,14 +24,17 @@ public sealed class GitRepositoryFreshnessService : IRepositoryFreshnessService
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> Locks = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly IGitHubAppTokenService? _tokenService;
+    private readonly IGitCredentialResolver? _credentialResolver;
     private readonly ILogger<GitRepositoryFreshnessService> _logger;
 
     public GitRepositoryFreshnessService(
         ILogger<GitRepositoryFreshnessService> logger,
-        IGitHubAppTokenService? tokenService = null)
+        IGitHubAppTokenService? tokenService = null,
+        IGitCredentialResolver? credentialResolver = null)
     {
         _logger = logger;
         _tokenService = tokenService;
+        _credentialResolver = credentialResolver;
     }
 
     public async Task<RepositoryFreshnessResult> RefreshAsync(
@@ -94,10 +98,10 @@ public sealed class GitRepositoryFreshnessService : IRepositoryFreshnessService
                 RepositoryFreshnessStatus.NotApplicable, branch, localSha, null, 0, 0, null, "No origin remote is configured.");
         }
 
-        var parsed = GitRemoteUrlNormalizer.ParseGitHubUrl(originUrl.StdOut.Trim());
+        var parsed = GitRemoteUrl.Parse(originUrl.StdOut.Trim());
         if (parsed is { } remote &&
             (!string.Equals(remote.Owner, request.Owner, StringComparison.OrdinalIgnoreCase) ||
-             !string.Equals(remote.Repo, request.Repository, StringComparison.OrdinalIgnoreCase)))
+             !string.Equals(remote.Repository, request.Repository, StringComparison.OrdinalIgnoreCase)))
         {
             return new RepositoryFreshnessResult(
                 RepositoryFreshnessStatus.NotApplicable, branch, localSha, null, 0, 0, null,
@@ -110,16 +114,32 @@ public sealed class GitRepositoryFreshnessService : IRepositoryFreshnessService
         Dictionary<string, string>? env = null;
         try
         {
-            if (_tokenService != null)
+            if (_credentialResolver != null || _tokenService != null)
             {
                 try
                 {
-                    var token = await _tokenService
-                        .GetTokenForRepositoryAsync(request.Owner, request.Repository, cancellationToken)
-                        .ConfigureAwait(false);
-                    if (token.IsSuccess && !string.IsNullOrWhiteSpace(token.Token))
+                    GitCredential? credential = null;
+                    if (_credentialResolver != null)
                     {
-                        tempHome = GitAuthenticationHelper.CreateTransientHomeDirectory(token.Token);
+                        var resolved = await _credentialResolver
+                            .ResolveForRepositoryAsync(request.Owner, request.Repository, cancellationToken)
+                            .ConfigureAwait(false);
+                        credential = resolved.Credential;
+                    }
+                    else
+                    {
+                        var token = await _tokenService!
+                            .GetTokenForRepositoryAsync(request.Owner, request.Repository, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (token.IsSuccess && !string.IsNullOrWhiteSpace(token.Token))
+                        {
+                            credential = new GitCredential(token.Token, GitCredentialResolver.GitHubUsername);
+                        }
+                    }
+
+                    if (credential is not null)
+                    {
+                        tempHome = GitAuthenticationHelper.CreateTransientHomeDirectory(credential.Token, credential.Username);
                         env = new Dictionary<string, string>
                         {
                             ["HOME"] = tempHome,
@@ -129,7 +149,7 @@ public sealed class GitRepositoryFreshnessService : IRepositoryFreshnessService
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    _logger.LogDebug(ex, "No GitHub token available for freshness fetch; trying unauthenticated fetch.");
+                    _logger.LogDebug(ex, "No git credential available for freshness fetch; trying unauthenticated fetch.");
                 }
             }
 

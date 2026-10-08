@@ -9,9 +9,14 @@ using Microsoft.Extensions.Logging;
 
 namespace DevPilot.Application.Executions.Commands.RetryExecution;
 
+/// <summary>
+/// <paramref name="ConflictedExecutionId"/> restarts a task whose pull request conflicts with the base branch. The handler
+/// checks that claim itself (latest run, pull request still open, merge refused) before it lets a completed task run again.
+/// </summary>
 public sealed record RetryExecutionCommand(
     Guid TaskId,
-    Guid? RepositoryWorkspaceId = null);
+    Guid? RepositoryWorkspaceId = null,
+    Guid? ConflictedExecutionId = null);
 
 public sealed class RetryExecutionResult
 {
@@ -131,7 +136,11 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
         var hasCancelledLatest = await LatestExecutionIsCancelledAsync(command.TaskId, cancellationToken)
             .ConfigureAwait(false);
 
-        if (task.Status == DevelopmentTaskStatus.Completed && !hasNeedsReviewCompletion)
+        var restartAfterConflict = command.ConflictedExecutionId.HasValue &&
+            await IsLatestRunWithRefusedMergeAsync(command.TaskId, command.ConflictedExecutionId.Value, cancellationToken)
+                .ConfigureAwait(false);
+
+        if (task.Status == DevelopmentTaskStatus.Completed && !hasNeedsReviewCompletion && !restartAfterConflict)
         {
             return RetryExecutionResult.ConflictResult(
                 "Cannot retry execution for a completed task.");
@@ -139,13 +148,13 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
 
         if (task.Status != DevelopmentTaskStatus.Failed &&
             task.Status != DevelopmentTaskStatus.Approved &&
-            !(task.Status == DevelopmentTaskStatus.Completed && hasNeedsReviewCompletion))
+            !(task.Status == DevelopmentTaskStatus.Completed && (hasNeedsReviewCompletion || restartAfterConflict)))
         {
             return RetryExecutionResult.ConflictResult(
                 $"Cannot retry execution for a task in '{task.Status}' status.");
         }
 
-        if (!hasFailed && !hasNeedsReviewCompletion && !hasCancelledLatest)
+        if (!hasFailed && !hasNeedsReviewCompletion && !hasCancelledLatest && !restartAfterConflict)
         {
             return RetryExecutionResult.ConflictResult(
                 "No failed or cancelled execution exists for this task to retry.");
@@ -225,6 +234,25 @@ public sealed class RetryExecutionCommandHandler : IRetryExecutionCommandHandler
             .OrderByDescending(e => e.CreatedAt)
             .ThenByDescending(e => e.Id)
             .FirstOrDefault()?.Id == execution.Id;
+
+    /// <summary>
+    /// True only when <paramref name="executionId"/> is the task's newest run, finished, with its pull request still open
+    /// and the merge refused. Anything else means the caller's claim of a conflict does not hold.
+    /// </summary>
+    private async Task<bool> IsLatestRunWithRefusedMergeAsync(Guid taskId, Guid executionId, CancellationToken cancellationToken)
+    {
+        var latest = (await _executionRepository.GetAllAsync(cancellationToken).ConfigureAwait(false))
+            .Where(e => e.DevelopmentTaskId == taskId)
+            .OrderByDescending(e => e.CreatedAt)
+            .ThenByDescending(e => e.Id)
+            .FirstOrDefault();
+
+        return latest is not null &&
+               latest.Id == executionId &&
+               latest.Status == TaskExecutionStatus.Completed &&
+               latest.PullRequestStatus == ExecutionPullRequestStatus.Open &&
+               latest.MergeStatus == ExecutionMergeStatus.Failed;
+    }
 
     private async Task<bool> LatestExecutionIsCancelledAsync(Guid taskId, CancellationToken cancellationToken)
     {

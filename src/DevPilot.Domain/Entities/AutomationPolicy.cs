@@ -38,6 +38,9 @@ public class AutomationPolicy
     /// <summary>Newline-separated glob patterns; a change touching a match is never handled automatically.</summary>
     public string ProtectedPaths { get; set; } = DefaultProtectedPaths;
 
+    /// <summary>How careful goals are when two tasks would change the same file.</summary>
+    public ConflictMode ConflictMode { get; set; } = ConflictMode.Balanced;
+
     /// <summary>When true the merge waits for passing CI checks; a repository without checks is never auto-merged.</summary>
     public bool RequireGreenCiForMerge { get; set; } = true;
 

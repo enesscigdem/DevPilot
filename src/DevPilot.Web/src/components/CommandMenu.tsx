@@ -39,6 +39,7 @@ export function CommandMenu({ open, onClose }: { open: boolean; onClose: () => v
     () => [
       { label: t("command.goOverview"), hint: repoHint, href: "/", group: t("command.groupNavigate") },
       { label: t("command.openRepository"), hint: t("command.repositoryHint"), href: "/projects", group: t("command.groupNavigate") },
+      { label: t("nav.goals"), hint: t("command.goalsHint"), href: "/goals", group: t("command.groupNavigate") },
       { label: t("command.viewTasks"), hint: t("command.tasksHint"), href: "/tasks", group: t("command.groupNavigate") },
       { label: t("command.openBrain"), hint: t("command.brainHint"), href: "/brain", group: t("command.groupNavigate") },
       { label: t("command.viewExecutions"), hint: t("command.executionsHint"), href: "/executions", group: t("command.groupNavigate") },

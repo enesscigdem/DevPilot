@@ -29,6 +29,7 @@ const review: Resources["review"] = {
   rejectChanges: "Değişiklikleri reddet",
   approveChanges: "Değişiklikleri onayla",
   prNumber: "PR #{{n}}",
+  noPrHost: "Bu git sunucusunun pull request API'si yok. Dal push edildi; merge request'i sunucuda açın.",
   openingPr: "Pull request açılıyor...",
   openPr: "Pull request aç",
   connectGitHub: "GitHub'ı Bağla",

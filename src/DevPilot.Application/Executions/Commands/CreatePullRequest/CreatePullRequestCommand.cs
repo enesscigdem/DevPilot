@@ -66,19 +66,22 @@ public sealed class CreatePullRequestCommandHandler : ICreatePullRequestCommandH
     private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly IExecutionActivityRepository? _activityRepository;
     private readonly ILogger<CreatePullRequestCommandHandler> _logger;
+    private readonly Trackers.ITaskExternalNotifier? _externalNotifier;
 
     public CreatePullRequestCommandHandler(
         IExecutionRepository executionRepository,
         IExecutionGitHubPullRequestService githubPrService,
         IExecutionActivityRecorder activityRecorder,
         ILogger<CreatePullRequestCommandHandler> logger,
-        IExecutionActivityRepository? activityRepository = null)
+        IExecutionActivityRepository? activityRepository = null,
+        Trackers.ITaskExternalNotifier? externalNotifier = null)
     {
         _executionRepository = executionRepository;
         _githubPrService = githubPrService;
         _activityRecorder = activityRecorder;
         _activityRepository = activityRepository;
         _logger = logger;
+        _externalNotifier = externalNotifier;
     }
 
     public static bool CalculateCanRequestPullRequest(TaskExecution execution) =>
@@ -291,6 +294,14 @@ public sealed class CreatePullRequestCommandHandler : ICreatePullRequestCommandH
             createdAt,
             cancellationToken)
             .ConfigureAwait(false);
+
+        if (_externalNotifier is not null)
+        {
+            await _externalNotifier.NotifyAsync(
+                execution.DevelopmentTaskId,
+                $"DevPilot opened a pull request for this issue: #{prNumber} {prUrl}",
+                cancellationToken).ConfigureAwait(false);
+        }
 
         try
         {

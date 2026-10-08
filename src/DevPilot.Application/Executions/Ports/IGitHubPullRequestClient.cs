@@ -66,6 +66,12 @@ public sealed class GitHubPullRequestClientResult<T>
 
     public bool IsRateLimit { get; set; }
 
+    /// <summary>The host refused to merge (HTTP 405/406): conflicts, a required check, or a branch rule. See <see cref="GitHubPullRequestDto.MergeableState"/> to tell which.</summary>
+    public bool IsNotMergeable { get; set; }
+
+    /// <summary>The host itself said the branch conflicts with its base, so no second look at the pull request is needed.</summary>
+    public bool IsBaseConflict { get; set; }
+
     public bool IsExceededLimit { get; set; }
 
     public string? ErrorMessage { get; set; }
@@ -80,7 +86,9 @@ public sealed class GitHubPullRequestClientResult<T>
         bool isConfigurationError = false,
         bool isConflict = false,
         bool isRateLimit = false,
-        bool isExceededLimit = false) =>
+        bool isExceededLimit = false,
+        bool isNotMergeable = false,
+        bool isBaseConflict = false) =>
         new()
         {
             IsSuccess = false,
@@ -88,7 +96,9 @@ public sealed class GitHubPullRequestClientResult<T>
             IsConfigurationError = isConfigurationError,
             IsConflict = isConflict,
             IsRateLimit = isRateLimit,
-            IsExceededLimit = isExceededLimit
+            IsExceededLimit = isExceededLimit,
+            IsNotMergeable = isNotMergeable,
+            IsBaseConflict = isBaseConflict
         };
 }
 
@@ -106,7 +116,9 @@ public sealed record GitHubPullRequestDto(
     string BaseRef,
     string BaseRepoOwner,
     string BaseRepoName,
-    string Body);
+    string Body,
+    /// <summary>GitHub mergeable_state; "dirty" means the branch conflicts with its base. GitLab conflicts are mapped to the same word.</summary>
+    string? MergeableState = null);
 
 public sealed record GitHubCheckRunDto(
     long Id,

@@ -513,6 +513,127 @@ public sealed class RetryExecutionCommandTests
         public Task<int> ReconcileStaleAnalysesAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
     }
 
+    // ── Restart after the pull request conflicted with the base ────────────────
+
+    private TaskExecution SeedConflictedRun(Action<TaskExecution>? tweak = null)
+    {
+        _executionRepository.Executions.Remove(_historicalFailedExecution.Id);
+        _task.Status = DevelopmentTaskStatus.Completed;
+        var run = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = _task.Id,
+            DevelopmentTask = _task,
+            Status = TaskExecutionStatus.Completed,
+            ReviewStatus = ExecutionReviewStatus.Approved,
+            CommitStatus = ExecutionCommitStatus.Committed,
+            PushStatus = ExecutionPushStatus.Pushed,
+            PullRequestStatus = ExecutionPullRequestStatus.Open,
+            PullRequestNumber = 22,
+            MergeStatus = ExecutionMergeStatus.Failed,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-20),
+        };
+        tweak?.Invoke(run);
+        _executionRepository.Executions[run.Id] = run;
+        return run;
+    }
+
+    [Fact]
+    public async Task HandleAsync_AConflictedPullRequest_RestartsAnOtherwiseCompletedTask()
+    {
+        var run = SeedConflictedRun();
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, null, run.Id));
+
+        result.Success.Should().BeTrue(result.ErrorMessage);
+        result.Execution!.Id.Should().NotBe(run.Id);
+        _task.Status.Should().Be(DevelopmentTaskStatus.Executing);
+        _dispatcher.DispatchedExecutionIds.Should().ContainSingle().Which.Should().Be(result.Execution.Id);
+        _executionRepository.Executions[run.Id].PullRequestStatus.Should().Be(ExecutionPullRequestStatus.Open, "the old pull request is left untouched");
+    }
+
+    [Fact]
+    public async Task HandleAsync_ACompletedTaskIsStillNotRetryable_WithoutTheConflictClaim()
+    {
+        SeedConflictedRun();
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id));
+
+        result.Success.Should().BeFalse();
+        result.Conflict.Should().BeTrue();
+        _dispatcher.DispatchedExecutionIds.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task HandleAsync_TheConflictClaimIsRefused_WhenARunNewerThanTheClaimedOneExists()
+    {
+        var older = SeedConflictedRun();
+        var newer = new TaskExecution
+        {
+            Id = Guid.NewGuid(),
+            DevelopmentTaskId = _task.Id,
+            DevelopmentTask = _task,
+            Status = TaskExecutionStatus.Completed,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-5),
+        };
+        _executionRepository.Executions[newer.Id] = newer;
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, null, older.Id));
+
+        result.Success.Should().BeFalse();
+        _dispatcher.DispatchedExecutionIds.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(ExecutionMergeStatus.None)]
+    [InlineData(ExecutionMergeStatus.InProgress)]
+    [InlineData(ExecutionMergeStatus.Merged)]
+    public async Task HandleAsync_TheConflictClaimIsRefused_UnlessTheMergeWasRefused(ExecutionMergeStatus mergeStatus)
+    {
+        var run = SeedConflictedRun(e => e.MergeStatus = mergeStatus);
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, null, run.Id));
+
+        result.Success.Should().BeFalse();
+        _dispatcher.DispatchedExecutionIds.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(ExecutionPullRequestStatus.None)]
+    [InlineData(ExecutionPullRequestStatus.Failed)]
+    public async Task HandleAsync_TheConflictClaimIsRefused_WithoutAnOpenPullRequest(ExecutionPullRequestStatus prStatus)
+    {
+        var run = SeedConflictedRun(e => e.PullRequestStatus = prStatus);
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, null, run.Id));
+
+        result.Success.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task HandleAsync_TheConflictClaimIsRefused_ForARunOfAnotherTask()
+    {
+        var run = SeedConflictedRun();
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, null, Guid.NewGuid()));
+
+        result.Success.Should().BeFalse();
+        _executionRepository.Executions.Should().ContainKey(run.Id);
+        _dispatcher.DispatchedExecutionIds.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task HandleAsync_TheConflictClaimNeverOverridesAnActiveRun()
+    {
+        var run = SeedConflictedRun();
+        _executionRepository.ActiveExecutionExists = true;
+
+        var result = await _sut.HandleAsync(new RetryExecutionCommand(_task.Id, null, run.Id));
+
+        result.Success.Should().BeFalse();
+        result.Conflict.Should().BeTrue();
+    }
+
     private sealed class FakeExecutionRepository : IExecutionRepository
     {
         public Dictionary<Guid, TaskExecution> Executions { get; } = new();

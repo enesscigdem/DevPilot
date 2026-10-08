@@ -27,7 +27,8 @@ public sealed record ExecutionVerdictDto(
     string? BaseCommitSha = null,
     int FailingTestCount = 0,
     IReadOnlyList<string>? FailingTestGroups = null,
-    string? SuggestedFix = null);
+    string? SuggestedFix = null,
+    bool BuildOnlyNoTestSuite = false);
 
 public sealed record ExecutionStageTimingDto(string Stage, long DurationMs);
 

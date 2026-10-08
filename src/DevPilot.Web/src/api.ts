@@ -18,6 +18,12 @@ import type {
   UpdateTaskStatusRequest,
   RepositoryWorkspace,
   CreateRepositoryWorkspaceRequest,
+  CreateGitConnectionRequest,
+  GitConnection,
+  CreateTrackerConnectionRequest,
+  ImportIssuesResponse,
+  TrackerConnection,
+  TrackerIssue,
   WorkspaceAnalysis,
   WorkspaceArchitecture,
   BrainStatus,
@@ -40,6 +46,15 @@ import type {
   VisualCaptureManifest,
   AutomationPolicy,
   UpdateAutomationPolicyRequest,
+  TaskBatchDraft,
+  TaskBatchParseResult,
+  TaskBatchCreateResult,
+  GoalPlan,
+  GoalTaskPlan,
+  GoalCostEstimate,
+  GoalDetail,
+  GoalSummary,
+  StartGoalRequest,
 } from './types';
 
 const BASE_URL = '/api';
@@ -464,5 +479,113 @@ export async function updateAutomationPolicy(
   return http<AutomationPolicy>(`/repositoryworkspaces/${workspaceId}/automation`, {
     method: 'PUT',
     body: JSON.stringify(request),
+  });
+}
+
+export async function parseTaskBatch(text: string): Promise<TaskBatchParseResult> {
+  return http<TaskBatchParseResult>('/tasks/batch/parse', { method: 'POST', body: JSON.stringify({ text }) });
+}
+
+export async function createTaskBatch(
+  repositoryWorkspaceId: string,
+  tasks: TaskBatchDraft[],
+): Promise<TaskBatchCreateResult> {
+  return http<TaskBatchCreateResult>('/tasks/batch', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryWorkspaceId, tasks }),
+  });
+}
+
+export async function planGoal(workspaceId: string, text: string): Promise<GoalPlan> {
+  return http<GoalPlan>(`/repositoryworkspaces/${workspaceId}/goals/plan`, {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  });
+}
+
+export async function arrangeGoal(
+  workspaceId: string,
+  tasks: GoalTaskPlan[],
+  estimate: GoalCostEstimate,
+): Promise<GoalPlan> {
+  return http<GoalPlan>(`/repositoryworkspaces/${workspaceId}/goals/arrange`, {
+    method: 'POST',
+    body: JSON.stringify({
+      tasks,
+      inputPerMillionUsd: estimate.inputPerMillionUsd,
+      outputPerMillionUsd: estimate.outputPerMillionUsd,
+    }),
+  });
+}
+
+export async function startGoal(workspaceId: string, request: StartGoalRequest): Promise<GoalDetail> {
+  return http<GoalDetail>(`/repositoryworkspaces/${workspaceId}/goals`, {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function getGoals(workspaceId: string): Promise<GoalSummary[]> {
+  return http<GoalSummary[]>(`/repositoryworkspaces/${workspaceId}/goals`);
+}
+
+export async function getGoal(workspaceId: string, goalId: string): Promise<GoalDetail> {
+  return http<GoalDetail>(`/repositoryworkspaces/${workspaceId}/goals/${goalId}`);
+}
+
+export async function cancelGoal(workspaceId: string, goalId: string): Promise<GoalDetail> {
+  return http<GoalDetail>(`/repositoryworkspaces/${workspaceId}/goals/${goalId}/cancel`, { method: 'POST' });
+}
+
+export async function getGitConnections(): Promise<GitConnection[]> {
+  return http<GitConnection[]>('/git-connections');
+}
+
+export async function createGitConnection(request: CreateGitConnectionRequest): Promise<GitConnection> {
+  return http<GitConnection>('/git-connections', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function deleteGitConnection(id: string): Promise<void> {
+  await http<void>(`/git-connections/${id}`, { method: 'DELETE' });
+}
+
+export async function getTrackerConnections(): Promise<TrackerConnection[]> {
+  return http<TrackerConnection[]>('/tracker-connections');
+}
+
+export async function createTrackerConnection(request: CreateTrackerConnectionRequest): Promise<TrackerConnection> {
+  return http<TrackerConnection>('/tracker-connections', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function deleteTrackerConnection(id: string): Promise<void> {
+  await http<void>(`/tracker-connections/${id}`, { method: 'DELETE' });
+}
+
+export async function searchTrackerIssues(
+  connectionId: string,
+  query: string,
+  workspaceId: string | null,
+): Promise<TrackerIssue[]> {
+  const params = new URLSearchParams();
+  if (query.trim()) params.set('q', query.trim());
+  if (workspaceId) params.set('workspaceId', workspaceId);
+  const qs = params.toString();
+  return http<TrackerIssue[]>(`/tracker-connections/${connectionId}/issues${qs ? `?${qs}` : ''}`);
+}
+
+export async function importTrackerIssues(
+  connectionId: string,
+  repositoryWorkspaceId: string,
+  issueKeys: string[],
+): Promise<ImportIssuesResponse> {
+  return http<ImportIssuesResponse>(`/tracker-connections/${connectionId}/import`, {
+    method: 'POST',
+    body: JSON.stringify({ repositoryWorkspaceId, issueKeys }),
   });
 }

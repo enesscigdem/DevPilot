@@ -13,6 +13,8 @@ import { Insights } from "./pages/Insights"
 import { ExecutionCompare } from "./pages/ExecutionCompare"
 import { Models } from "./pages/Models"
 import { Automation } from "./pages/Automation"
+import { Goals } from "./pages/Goals"
+import { GoalBoard } from "./pages/GoalBoard"
 import { ModelComparisonPage } from "./pages/ModelComparison"
 
 export default function App() {
@@ -21,6 +23,8 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Workspace />} />
         <Route path="/projects" element={<ProjectWorkspace />} />
+        <Route path="/goals" element={<Goals />} />
+        <Route path="/goals/:id" element={<GoalBoard />} />
         <Route path="/tasks" element={<Tasks />} />
         <Route path="/tasks/:id" element={<TaskImpact />} />
         <Route path="/executions" element={<Executions />} />

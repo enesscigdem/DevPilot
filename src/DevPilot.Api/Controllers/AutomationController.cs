@@ -14,7 +14,8 @@ public sealed record AutomationPolicyDto(
     int MaxLinesChanged,
     int MaxParallelExecutions,
     IReadOnlyList<string> ProtectedPaths,
-    bool RequireGreenCiForMerge);
+    bool RequireGreenCiForMerge,
+    string ConflictMode);
 
 public sealed record UpdateAutomationPolicyRequest(
     AutomationLevel Level,
@@ -23,7 +24,8 @@ public sealed record UpdateAutomationPolicyRequest(
     int MaxLinesChanged,
     int MaxParallelExecutions,
     IReadOnlyList<string>? ProtectedPaths,
-    bool RequireGreenCiForMerge);
+    bool RequireGreenCiForMerge,
+    ConflictMode? ConflictMode = null);
 
 [ApiController]
 [Route("api/repositoryworkspaces/{workspaceId:guid}/automation")]
@@ -60,6 +62,11 @@ public class AutomationController : ControllerBase
             return BadRequest(new { error = "Unknown automation level." });
         }
 
+        if (request.ConflictMode is { } mode && !Enum.IsDefined(mode))
+        {
+            return BadRequest(new { error = "Unknown conflict mode." });
+        }
+
         if (request.MaxFilesChanged is < 1 or > 200 ||
             request.MaxLinesChanged is < 1 or > 20000 ||
             request.MaxParallelExecutions is < 1 or > 5)
@@ -87,7 +94,9 @@ public class AutomationController : ControllerBase
                 MaxLinesChanged = request.MaxLinesChanged,
                 MaxParallelExecutions = request.MaxParallelExecutions,
                 ProtectedPaths = string.Join('\n', patterns),
-                RequireGreenCiForMerge = request.RequireGreenCiForMerge
+                RequireGreenCiForMerge = request.RequireGreenCiForMerge,
+                // A client that does not send it must not silently switch a repository to the careful mode.
+                ConflictMode = request.ConflictMode ?? ConflictMode.Balanced
             },
             cancellationToken).ConfigureAwait(false);
 
@@ -104,5 +113,6 @@ public class AutomationController : ControllerBase
             policy.MaxLinesChanged,
             policy.MaxParallelExecutions,
             policy.ProtectedPaths.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
-            policy.RequireGreenCiForMerge);
+            policy.RequireGreenCiForMerge,
+            policy.ConflictMode.ToString());
 }

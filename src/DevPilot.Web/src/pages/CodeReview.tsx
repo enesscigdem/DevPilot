@@ -46,9 +46,11 @@ export function CodeReview() {
   const ciText = (s?: string | null) => t(`review.ci.${String(s).toLowerCase()}`, { defaultValue: String(s ?? "") })
   const { id } = useReactParams<{ id: string }>()
   const navigate = useNavigate()
-  const { selectWorkspace, activeWorkspaceId } = useWorkspace()
+  const { selectWorkspace, activeWorkspaceId, workspaces } = useWorkspace()
 
   const [review, setReview] = useState<ExecutionReview | null>(null)
+  const noPrSupport =
+    workspaces.find((w) => w.id === (review?.repositoryWorkspaceId ?? activeWorkspaceId))?.provider === "Generic"
   const [activities, setActivities] = useState<ExecutionActivityItem[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -529,7 +531,8 @@ export function CodeReview() {
             <Button
               variant="default"
               size="sm"
-              disabled={!review.canRequestPullRequest || isSubmittingPr}
+              disabled={!review.canRequestPullRequest || isSubmittingPr || noPrSupport}
+              title={noPrSupport ? t("review.noPrHost") : undefined}
               onClick={handleCreatePullRequest}
               className={cn(!review.canRequestPullRequest && "opacity-50 cursor-not-allowed text-muted-foreground")}
             >
@@ -1127,7 +1130,8 @@ export function CodeReview() {
                           <Button
                             variant="primary"
                             size="md"
-                            disabled={!review.canRequestPullRequest || isSubmittingPr}
+                            disabled={!review.canRequestPullRequest || isSubmittingPr || noPrSupport}
+              title={noPrSupport ? t("review.noPrHost") : undefined}
                             onClick={handleCreatePullRequest}
                             className="w-full"
                           >

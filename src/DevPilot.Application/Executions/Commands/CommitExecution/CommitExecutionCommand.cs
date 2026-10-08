@@ -48,7 +48,7 @@ public interface ICommitExecutionCommandHandler
 
 public sealed class CommitExecutionCommandHandler : ICommitExecutionCommandHandler
 {
-    private static readonly TimeSpan LeaseTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan LeaseTimeout = DevPilot.Application.Automation.AutomationDeliveryRules.StaleLeaseAfter;
 
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionWorkspaceManager _workspaceManager;

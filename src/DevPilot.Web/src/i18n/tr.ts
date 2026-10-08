@@ -16,6 +16,7 @@ import shared from "./locales/tr/shared"
 import models from "./locales/tr/models"
 import modelCompare from "./locales/tr/modelCompare"
 import automation from "./locales/tr/automation"
+import goals from "./locales/tr/goals"
 
 const tr: Resources = {
   common: {
@@ -47,6 +48,7 @@ const tr: Resources = {
     settings: "Ayarlar",
     aiModels: "Yapay zeka modelleri",
     automation: "Otomasyon",
+    goals: "Hedefler",
     modelComparison: "Model karşılaştırma",
     tasks: "Görevler",
     executions: "Çalıştırmalar",
@@ -74,6 +76,7 @@ const tr: Resources = {
     compareHint: "Orijinal ve yeniden deneme",
     modelsHint: "Kendi modellerinizi ekleyin ve adımlara atayın",
     automationHint: "DevPilot task'ları pull request'e kadar götürsün",
+    goalsHint: "Ne istediğinizi yazın, DevPilot planlayıp çalıştırsın",
     switchToTurkish: "Dili Türkçe yap",
     switchToEnglish: "Dili İngilizce yap",
     languageHint: "Arayüz dili",
@@ -104,6 +107,7 @@ const tr: Resources = {
   models,
   modelCompare,
   automation,
+  goals,
 }
 
 export default tr

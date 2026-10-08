@@ -24,6 +24,12 @@ public sealed class TaskDto
 
     public DevelopmentTaskStatus Status { get; set; }
 
+    public string? ExternalSource { get; set; }
+
+    public string? ExternalKey { get; set; }
+
+    public string? ExternalUrl { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime UpdatedAt { get; set; }
@@ -40,6 +46,15 @@ public sealed class CreateTaskDto
     public string? AcceptanceCriteria { get; set; }
 
     public DevelopmentTaskPriority Priority { get; set; } = DevelopmentTaskPriority.Medium;
+
+    /// <summary>Set when the task is imported from a tracker; see DevelopmentTask.</summary>
+    public string? ExternalSource { get; set; }
+
+    public string? ExternalKey { get; set; }
+
+    public string? ExternalUrl { get; set; }
+
+    public Guid? ExternalConnectionId { get; set; }
 }
 
 public sealed class UpdateTaskDto
@@ -71,6 +86,10 @@ public sealed class TaskListItemDto
     public DevelopmentTaskPriority Priority { get; set; }
 
     public DateTime UpdatedAt { get; set; }
+
+    public string? ExternalKey { get; set; }
+
+    public string? ExternalUrl { get; set; }
 }
 
 public sealed class TaskQueryFilterDto
