@@ -747,8 +747,14 @@ public class DeveloperAgentTests : IDisposable
         result.Success.Should().BeFalse();
         result.ErrorMessage.Should().Contain("Missing search match in 'src/Dtos/F1Dto.cs'");
 
-        // F2 was NEVER generated because F1 failed early!
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2, "F1 initial + F1 repair; F2 must not be generated");
+        // F1 gets exactly its bounded attempts: initial, one repair, and one whole-file fallback. Nothing further.
+        var f1Calls = _fakeAiProvider.ReceivedRequests.Count(r => r.UserPrompt.Contains("Target File: src/Dtos/F1Dto.cs"));
+        f1Calls.Should().Be(3, "F1 initial + F1 repair + the single whole-file fallback");
+
+        // F2 may already have been started in parallel while F1 retried, but it never gets a repair of its own,
+        // and (below) nothing is written to disk.
+        var f2Requests = _fakeAiProvider.ReceivedRequests.Where(r => r.UserPrompt.Contains("Target File: src/Controllers/F2Controller.cs")).ToList();
+        f2Requests.Count.Should().BeLessThanOrEqualTo(1, "F2 must not be repaired after F1 failed");
 
         // Disk must remain untouched
         (await File.ReadAllTextAsync(f1)).Should().Be("public class F1Dto { public int A = 1; }");
@@ -795,7 +801,8 @@ public class DeveloperAgentTests : IDisposable
 
         result.Success.Should().BeFalse();
         result.ErrorMessage.Should().Contain("Ambiguous multiple search matches (2)");
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+        // initial + repair + the single whole-file fallback (which the empty fake queue cannot answer)
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(3);
     }
 
     [Fact]

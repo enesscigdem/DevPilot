@@ -59,6 +59,30 @@ const automation = {
     hint: "A repository without any CI checks is never merged automatically while this is on.",
   },
   errRange: "Limits are out of range.",
+  conflict: {
+    heading: "When two tasks change the same file",
+    intro:
+      "Goals run several tasks at once. This decides what happens when two of them would change the same file. DevPilot can tell which files a task changes, but not which lines, so the modes differ in how much risk of a merge conflict you accept for speed.",
+    recommended: "Recommended",
+    modes: {
+      Careful: {
+        name: "Careful",
+        summary: "The later task waits until the earlier one is merged.",
+        does: "Never any merge conflict between tasks of a goal, but tasks that share a file run one after the other.",
+      },
+      Balanced: {
+        name: "Balanced",
+        summary: "Share ordinary files, wait where a merge would fail anyway.",
+        does: "Tasks run together on ordinary files, because git merges changes to different parts of a file by itself. They still wait for dependency and project files, lock files, migrations, generated files, and files one of them creates or deletes.",
+      },
+      Fast: {
+        name: "Fast",
+        summary: "Tasks never wait because of shared files.",
+        does: "Maximum speed. If two pull requests collide, you resolve the conflict in GitHub.",
+      },
+    },
+    note: "If two pull requests do collide, DevPilot cannot merge the second one by itself. It stays open and you resolve the conflict in GitHub.",
+  },
 }
 
 export default automation

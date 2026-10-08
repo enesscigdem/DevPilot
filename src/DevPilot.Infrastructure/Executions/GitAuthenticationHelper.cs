@@ -5,12 +5,12 @@ namespace DevPilot.Infrastructure.Executions;
 
 public static class GitAuthenticationHelper
 {
-    public static string CreateTransientHomeDirectory(string token)
+    public static string CreateTransientHomeDirectory(string token, string username = "x-access-token")
     {
         var tempHome = Path.Combine(Path.GetTempPath(), $"devpilot-git-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempHome);
 
-        var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"x-access-token:{token}"));
+        var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{token}"));
         var configContent = $"[http]{Environment.NewLine}    extraHeader = \"Authorization: Basic {credentials}\"{Environment.NewLine}";
 
         File.WriteAllText(Path.Combine(tempHome, ".gitconfig"), configContent);

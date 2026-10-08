@@ -1,9 +1,11 @@
+using DevPilot.Application.GitProviders;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 using DevPilot.Application.Executions.Ports;
 using DevPilot.Domain.Entities;
+using DevPilot.Domain.Enums;
 using DevPilot.Infrastructure.GitProviders;
 using Microsoft.Extensions.Logging;
 
@@ -39,6 +41,13 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
 
         var headBranch = execution.RemoteBranchName ?? execution.BranchName ?? string.Empty;
         var headSha = execution.RemoteCommitSha ?? execution.CommitSha ?? string.Empty;
+
+        if (execution.DevelopmentTask?.RepositoryWorkspace?.Provider == GitProviderKind.Generic)
+        {
+            return Failure(
+                $"This git host has no pull request API. Branch '{execution.RemoteBranchName ?? execution.BranchName}' was pushed; open the merge request on the host.",
+                isConflict: true);
+        }
 
         if (string.IsNullOrWhiteSpace(repoOwner) || string.IsNullOrWhiteSpace(repoName))
         {
@@ -130,7 +139,7 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
             var existingPr = matchingPrs[0];
             if (string.Equals(existingPr.State, "open", StringComparison.OrdinalIgnoreCase))
             {
-                var trustedUrl = BuildTrustedPrUrl(repoOwner, repoName, existingPr.Number);
+                var trustedUrl = BuildTrustedPrUrl(execution.DevelopmentTask?.RepositoryWorkspace, repoOwner, repoName, existingPr.Number);
                 return Success(existingPr.Number, trustedUrl, baseBranch, DateTime.UtcNow);
             }
             else
@@ -158,7 +167,7 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
             var pr = createResult.Data;
             if (ValidatePullRequestInfo(pr, repoOwner, repoName, headBranch, headSha, baseBranch, expectedMarker))
             {
-                var trustedUrl = BuildTrustedPrUrl(repoOwner, repoName, pr.Number);
+                var trustedUrl = BuildTrustedPrUrl(execution.DevelopmentTask?.RepositoryWorkspace, repoOwner, repoName, pr.Number);
                 return Success(pr.Number, trustedUrl, baseBranch, DateTime.UtcNow, wasPostSent: true);
             }
             else
@@ -182,7 +191,7 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
                 {
                     if (string.Equals(retryMatch.State, "open", StringComparison.OrdinalIgnoreCase))
                     {
-                        var trustedUrl = BuildTrustedPrUrl(repoOwner, repoName, retryMatch.Number);
+                        var trustedUrl = BuildTrustedPrUrl(execution.DevelopmentTask?.RepositoryWorkspace, repoOwner, repoName, retryMatch.Number);
                         return Success(retryMatch.Number, trustedUrl, baseBranch, DateTime.UtcNow, wasPostSent: true);
                     }
                     else
@@ -270,6 +279,17 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
 
         return true;
     }
+
+    public static string BuildTrustedPrUrl(RepositoryWorkspace? workspace, string owner, string repo, int number) =>
+        workspace?.Provider switch
+        {
+            GitProviderKind.GitLab => $"https://{workspace.Host}/{owner}/{repo}/-/merge_requests/{number}",
+            // Owner is organization/project, each part escaped on its own.
+            GitProviderKind.AzureDevOps =>
+                $"https://{GitRemoteUrl.AzureHost}/{string.Join('/', owner.Split('/').Select(Uri.EscapeDataString))}/_git/{Uri.EscapeDataString(repo)}/pullrequest/{number}",
+            GitProviderKind.Bitbucket => $"https://{GitRemoteUrl.BitbucketHost}/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/pull-requests/{number}",
+            _ => BuildTrustedPrUrl(owner, repo, number),
+        };
 
     public static string BuildTrustedPrUrl(string owner, string repo, int number) =>
         $"https://github.com/{owner}/{repo}/pull/{number}";

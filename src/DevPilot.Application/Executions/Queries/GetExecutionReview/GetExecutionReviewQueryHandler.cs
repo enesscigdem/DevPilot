@@ -108,7 +108,13 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
                        outcome == ExecutionVerificationOutcome.NeedsReview &&
                        execution.ReviewStatus == ExecutionReviewStatus.Pending;
 
-        if (execution.CommitStatus == ExecutionCommitStatus.Committed)
+        // A commit that is already in git but whose record still says InProgress (its SHA is stored) is shown as
+        // committed: the worktree is clean by then, so diffing it would present an empty change.
+        var commitRecorded = execution.CommitStatus == ExecutionCommitStatus.Committed ||
+                             (execution.CommitStatus == ExecutionCommitStatus.InProgress &&
+                              !string.IsNullOrWhiteSpace(execution.CommitSha) &&
+                              !string.IsNullOrWhiteSpace(execution.BaseCommitSha));
+        if (commitRecorded)
         {
             var validation = await ValidateCommittedGitIntegrityAsync(
                 execution.WorkspacePath,
@@ -251,11 +257,24 @@ public sealed class GetExecutionReviewQueryHandler : IGetExecutionReviewQueryHan
 
         var isApproved = execution.ReviewStatus == ExecutionReviewStatus.Approved;
         var isCommitted = execution.CommitStatus == ExecutionCommitStatus.Committed;
+
+        // A commit whose lease was claimed and never released may already be in git while the record still says
+        // InProgress. The worktree is then clean, so the approved snapshot can no longer match and there is nothing
+        // left to diff, yet committing again is exactly what finishes the record (the commit step recognises its own
+        // commit by the DevPilot-Execution trailer). Do not present that as a changed snapshot.
+        var commitNeedsRecovery = isApproved
+                                  && execution.CommitStatus == ExecutionCommitStatus.InProgress
+                                  && Automation.AutomationDeliveryRules.IsLeaseStale(execution.CommitClaimedAt, DateTime.UtcNow);
+        if (commitNeedsRecovery)
+        {
+            approvedMatchesCurrent = true;
+        }
+
         var commitEligible = isApproved
                              && approvedMatchesCurrent
                              && !isCommitted
                              && !fingerprintResult.HasSensitiveFiles
-                             && (diffResult.ChangedFiles?.Count ?? 0) > 0
+                             && ((diffResult.ChangedFiles?.Count ?? 0) > 0 || commitNeedsRecovery)
                              && isDeliveryEligible;
 
         PredictedVsActualComparisonDto? predictedVsActual = null;

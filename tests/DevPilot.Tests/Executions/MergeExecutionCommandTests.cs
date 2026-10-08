@@ -810,6 +810,126 @@ public sealed class MergeExecutionCommandTests
         return new GitHubPullRequestClient(clientFactory, tokenService, options, NullLogger<GitHubPullRequestClient>.Instance);
     }
 
+    // ── Merge refused by the host (HTTP 405) ───────────────────────────────────
+
+    private static HttpMessageHandler RefusingMergeHandler(string mergeableState, string approvedSha)
+    {
+        var prJson = CreatePrJson(42, "open", false, "devpilot/task-1", approvedSha, "master")
+            .Replace("\"merged\": false,", $"\"merged\": false,\n  \"mergeable_state\": \"{mergeableState}\",");
+
+        return new CustomTestHttpMessageHandler(req =>
+        {
+            if (req.Method == HttpMethod.Put && req.RequestUri!.AbsolutePath.EndsWith("/merge"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.MethodNotAllowed)
+                {
+                    Content = new StringContent("{\"message\":\"Pull Request is not mergeable\"}"),
+                };
+            }
+
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.Contains("/pulls/"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(prJson) };
+            }
+
+            if (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.Contains("/check-runs"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(CreateCheckRunsJson(new[] { (1L, "CI", "completed", "success", "Actions") })),
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]") };
+        });
+    }
+
+    [Fact]
+    public async Task Merge_Refused405WhileThePullRequestIsDirty_IsReportedAsABaseConflictAndNotLeftInProgress()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var sha = "161ec91ce5edffc1770ec7617818e2b9d57f2341";
+        var handler = CreateHandler(repository, RefusingMergeHandler("dirty", sha));
+        var execution = SeedExecution(repository, approvedSha: sha);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
+        result.IsBaseConflict.Should().BeTrue();
+        result.ErrorMessage.Should().Contain("not mergeable");
+        (await repository.GetByIdAsync(execution.Id))!.MergeStatus.Should().Be(ExecutionMergeStatus.Failed);
+    }
+
+    [Theory]
+    [InlineData("blocked")]
+    [InlineData("behind")]
+    [InlineData("unstable")]
+    [InlineData("unknown")]
+    public async Task Merge_Refused405ForAnotherReason_IsAConflictButNotABaseConflict(string mergeableState)
+    {
+        var repository = new InMemoryExecutionRepository();
+        var sha = "161ec91ce5edffc1770ec7617818e2b9d57f2341";
+        var handler = CreateHandler(repository, RefusingMergeHandler(mergeableState, sha));
+        var execution = SeedExecution(repository, approvedSha: sha);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.Conflict);
+        result.IsBaseConflict.Should().BeFalse();
+        (await repository.GetByIdAsync(execution.Id))!.MergeStatus.Should().Be(ExecutionMergeStatus.Failed);
+    }
+
+    [Fact]
+    public async Task Merge_Refused405_RecordsWhyInTheActivityLogWhenTheCauseIsAConflict()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var sha = "161ec91ce5edffc1770ec7617818e2b9d57f2341";
+        var recorder = new TestActivityRecorder();
+        var handler = CreateHandler(repository, RefusingMergeHandler("dirty", sha), recorder: recorder);
+        var execution = SeedExecution(repository, approvedSha: sha);
+
+        await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        recorder.Recorded.Should().Contain(a => a.Message.Contains("conflicts with 'master'"));
+    }
+
+    [Fact]
+    public async Task Merge_ATransientServerError_StillStaysInProgressForARetry()
+    {
+        var repository = new InMemoryExecutionRepository();
+        var sha = "161ec91ce5edffc1770ec7617818e2b9d57f2341";
+        var prJson = CreatePrJson(42, "open", false, "devpilot/task-1", sha, "master");
+        var handler = CreateHandler(repository, new CustomTestHttpMessageHandler(req =>
+        {
+            if (req.Method == HttpMethod.Put && req.RequestUri!.AbsolutePath.EndsWith("/merge"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.BadGateway) { Content = new StringContent("{}") };
+            }
+
+            if (req.RequestUri!.AbsolutePath.Contains("/pulls/"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(prJson) };
+            }
+
+            if (req.RequestUri.AbsolutePath.Contains("/check-runs"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(CreateCheckRunsJson(new[] { (1L, "CI", "completed", "success", "Actions") })),
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]") };
+        }));
+        var execution = SeedExecution(repository, approvedSha: sha);
+
+        var result = await handler.HandleAsync(new MergeExecutionCommand(execution.Id));
+
+        result.Status.Should().Be(MergeExecutionResultStatus.ExternalFailure);
+        result.IsBaseConflict.Should().BeFalse();
+        (await repository.GetByIdAsync(execution.Id))!.MergeStatus.Should().Be(ExecutionMergeStatus.InProgress);
+    }
+
     private static MergeExecutionCommandHandler CreateHandler(
         IExecutionRepository repository,
         HttpMessageHandler httpHandler,

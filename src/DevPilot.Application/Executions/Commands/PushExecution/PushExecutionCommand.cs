@@ -47,7 +47,7 @@ public interface IPushExecutionCommandHandler
 
 public sealed class PushExecutionCommandHandler : IPushExecutionCommandHandler
 {
-    private static readonly TimeSpan LeaseTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan LeaseTimeout = DevPilot.Application.Automation.AutomationDeliveryRules.StaleLeaseAfter;
 
     private readonly IExecutionRepository _executionRepository;
     private readonly IExecutionGitPushService _gitPushService;

@@ -333,6 +333,18 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
         using var content = new StringContent(jsonPayload, System.Text.Encoding.UTF8, "application/json");
 
         using var response = await SendAsync(HttpMethod.Put, relativeUri, content, tokenResult.Token, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == System.Net.HttpStatusCode.MethodNotAllowed)
+        {
+            // GitHub answers 405 when the pull request cannot be merged right now: conflicts with the base, a missing
+            // required check, or a branch rule. It is a definite refusal, not a transport problem.
+            var refusal = GitRemoteUrlNormalizer.SanitizeOutput(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+            _logger.LogWarning("GitHub refused to merge pull request #{Number} (HTTP 405): {Error}", pullNumber, refusal);
+            return GitHubPullRequestClientResult<GitHubMergeResultDto>.Failure(
+                $"GitHub refused the merge: {refusal}",
+                isConflict: true,
+                isNotMergeable: true);
+        }
+
 
         if (!response.IsSuccessStatusCode)
         {
@@ -473,6 +485,9 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
 
         public GitHubApiRefDto Base { get; set; } = new();
 
+        [JsonPropertyName("mergeable_state")]
+        public string? MergeableState { get; set; }
+
         public string Body { get; set; } = string.Empty;
 
         public GitHubPullRequestDto ToDto() =>
@@ -490,7 +505,8 @@ internal sealed class GitHubPullRequestClient : IGitHubPullRequestClient
                 BaseRef: Base.Ref,
                 BaseRepoOwner: Base.Repo?.Owner?.Login ?? string.Empty,
                 BaseRepoName: Base.Repo?.Name ?? string.Empty,
-                Body: Body ?? string.Empty);
+                Body: Body ?? string.Empty,
+                MergeableState: MergeableState);
     }
 
     private sealed class GitHubApiCheckRunsListDto

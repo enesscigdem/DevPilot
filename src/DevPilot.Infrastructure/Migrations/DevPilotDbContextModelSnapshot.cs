@@ -151,6 +151,11 @@ namespace DevPilot.Infrastructure.Migrations
                     b.Property<DateTime?>("ActiveSince")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("ConflictMode")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
                     b.Property<string>("Level")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -208,6 +213,21 @@ namespace DevPilot.Infrastructure.Migrations
                         .HasMaxLength(10000)
                         .HasColumnType("character varying(10000)");
 
+                    b.Property<Guid?>("ExternalConnectionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ExternalKey")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("ExternalSource")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("ExternalUrl")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
                     b.Property<string>("Priority")
                         .IsRequired()
                         .HasMaxLength(50)
@@ -236,6 +256,10 @@ namespace DevPilot.Infrastructure.Migrations
                     b.HasIndex("RepositoryWorkspaceId", "Priority");
 
                     b.HasIndex("RepositoryWorkspaceId", "Status");
+
+                    b.HasIndex("RepositoryWorkspaceId", "ExternalSource", "ExternalKey")
+                        .IsUnique()
+                        .HasFilter("\"ExternalKey\" IS NOT NULL");
 
                     b.ToTable("DevelopmentTasks");
                 });
@@ -374,6 +398,49 @@ namespace DevPilot.Infrastructure.Migrations
                     b.ToTable("ExecutionRevisions");
                 });
 
+            modelBuilder.Entity("DevPilot.Domain.Entities.GitConnection", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("EncryptedToken")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Username")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Provider", "Host");
+
+                    b.ToTable("GitConnections");
+                });
+
             modelBuilder.Entity("DevPilot.Domain.Entities.GitHubInstallationConnection", b =>
                 {
                     b.Property<Guid>("Id")
@@ -422,6 +489,126 @@ namespace DevPilot.Infrastructure.Migrations
                         .IsUnique();
 
                     b.ToTable("GitHubInstallationConnections");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.Entities.Goal", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("EstimatedInputTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<long>("EstimatedOutputTokens")
+                        .HasColumnType("bigint");
+
+                    b.Property<decimal?>("EstimatedUsd")
+                        .HasColumnType("numeric");
+
+                    b.Property<string>("PlanSource")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid>("RepositoryWorkspaceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("Text")
+                        .IsRequired()
+                        .HasMaxLength(20000)
+                        .HasColumnType("character varying(20000)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Status");
+
+                    b.HasIndex("RepositoryWorkspaceId", "CreatedAt");
+
+                    b.ToTable("Goals");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.Entities.GoalTask", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AnalysisAttempts")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("AnalysisRequestedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Areas")
+                        .IsRequired()
+                        .HasMaxLength(8000)
+                        .HasColumnType("character varying(8000)");
+
+                    b.Property<string>("BlockedBy")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<string>("DependsOn")
+                        .IsRequired()
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)");
+
+                    b.Property<Guid>("DevelopmentTaskId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("GoalId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<int>("Position")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Size")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int>("Wave")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DevelopmentTaskId")
+                        .IsUnique();
+
+                    b.HasIndex("GoalId", "Key")
+                        .IsUnique();
+
+                    b.ToTable("GoalTasks");
                 });
 
             modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparison", b =>
@@ -497,8 +684,18 @@ namespace DevPilot.Infrastructure.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)");
 
+                    b.Property<Guid?>("GitConnectionId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid?>("GitHubInstallationConnectionId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasDefaultValue("github.com");
 
                     b.Property<bool>("IsPrivate")
                         .HasColumnType("boolean");
@@ -512,6 +709,13 @@ namespace DevPilot.Infrastructure.Migrations
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasDefaultValue("GitHub");
 
                     b.Property<string>("RemoteUrl")
                         .HasMaxLength(500)
@@ -532,9 +736,11 @@ namespace DevPilot.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("GitConnectionId");
+
                     b.HasIndex("GitHubInstallationConnectionId");
 
-                    b.HasIndex("Owner", "Repository", "Branch")
+                    b.HasIndex("Host", "Owner", "Repository", "Branch")
                         .IsUnique();
 
                     b.ToTable("RepositoryWorkspaces");
@@ -887,6 +1093,47 @@ namespace DevPilot.Infrastructure.Migrations
                     b.ToTable("TaskImpactAnalyses");
                 });
 
+            modelBuilder.Entity("DevPilot.Domain.Entities.TrackerConnection", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BaseUrl")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Email")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
+                    b.Property<string>("EncryptedToken")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("TrackerConnections");
+                });
+
             modelBuilder.Entity("DevPilot.Domain.ProjectBrain.Entities.CodeChunk", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1204,6 +1451,36 @@ namespace DevPilot.Infrastructure.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("DevPilot.Domain.Entities.Goal", b =>
+                {
+                    b.HasOne("DevPilot.Domain.Entities.RepositoryWorkspace", "RepositoryWorkspace")
+                        .WithMany()
+                        .HasForeignKey("RepositoryWorkspaceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("RepositoryWorkspace");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.Entities.GoalTask", b =>
+                {
+                    b.HasOne("DevPilot.Domain.Entities.DevelopmentTask", "DevelopmentTask")
+                        .WithMany()
+                        .HasForeignKey("DevelopmentTaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("DevPilot.Domain.Entities.Goal", "Goal")
+                        .WithMany("Tasks")
+                        .HasForeignKey("GoalId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("DevelopmentTask");
+
+                    b.Navigation("Goal");
+                });
+
             modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparison", b =>
                 {
                     b.HasOne("DevPilot.Domain.Entities.DevelopmentTask", "DevelopmentTask")
@@ -1228,10 +1505,17 @@ namespace DevPilot.Infrastructure.Migrations
 
             modelBuilder.Entity("DevPilot.Domain.Entities.RepositoryWorkspace", b =>
                 {
+                    b.HasOne("DevPilot.Domain.Entities.GitConnection", "GitConnection")
+                        .WithMany("Workspaces")
+                        .HasForeignKey("GitConnectionId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("DevPilot.Domain.Entities.GitHubInstallationConnection", "GitHubInstallationConnection")
                         .WithMany("Workspaces")
                         .HasForeignKey("GitHubInstallationConnectionId")
                         .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("GitConnection");
 
                     b.Navigation("GitHubInstallationConnection");
                 });
@@ -1298,9 +1582,19 @@ namespace DevPilot.Infrastructure.Migrations
                     b.Navigation("Conversation");
                 });
 
+            modelBuilder.Entity("DevPilot.Domain.Entities.GitConnection", b =>
+                {
+                    b.Navigation("Workspaces");
+                });
+
             modelBuilder.Entity("DevPilot.Domain.Entities.GitHubInstallationConnection", b =>
                 {
                     b.Navigation("Workspaces");
+                });
+
+            modelBuilder.Entity("DevPilot.Domain.Entities.Goal", b =>
+                {
+                    b.Navigation("Tasks");
                 });
 
             modelBuilder.Entity("DevPilot.Domain.Entities.ModelComparison", b =>

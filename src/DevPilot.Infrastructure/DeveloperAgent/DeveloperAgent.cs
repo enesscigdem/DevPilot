@@ -1596,6 +1596,7 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
                 throw new InvalidOperationException($"AI provider returned empty edit response for file '{fileEntry.FilePath}' during repair.");
             }
 
+            var repairAnchorMismatch = false;
             try
             {
                 var repEditSpec = ParseSingleFileEditSpec(repairResponse.Content, fileEntry);
@@ -1621,6 +1622,7 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
 
                         if (!repAppResult.Success)
                         {
+                            repairAnchorMismatch = true;
                             throw new InvalidOperationException(repAppResult.ErrorMessage);
                         }
 
@@ -1638,7 +1640,29 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
             catch (Exception ex)
             {
                 var singleLineReason = SanitizeForDiagnostics(ex.Message);
-                throw new InvalidOperationException($"File edit validation failed for '{fileEntry.FilePath}' after repair: {singleLineReason}", ex);
+
+                // The patch still does not apply: one last attempt that does not depend on matching any anchor.
+                var wholeFile = repairAnchorMismatch && fileEntry.Action == FileEditAction.Modify && targetContent is not null
+                    ? await TryFullFileFallbackAsync(
+                        request,
+                        fileEntry,
+                        targetContent,
+                        singleLineReason,
+                        repairResponse.Content,
+                        relevantGenerated,
+                        filteredLockedContracts,
+                        callCounter,
+                        capturedModels,
+                        cancellationToken).ConfigureAwait(false)
+                    : null;
+
+                if (wholeFile is null)
+                {
+                    throw new InvalidOperationException($"File edit validation failed for '{fileEntry.FilePath}' after repair: {singleLineReason}", ex);
+                }
+
+                editSpec = wholeFile.Value.Spec;
+                candidateCode = wholeFile.Value.Code;
             }
         }
 
@@ -1883,6 +1907,132 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
 
         var content = WorktreeEditApplier.DecodeUtf8Text(bytes, out _);
         return (content, WorktreeEditApplier.ComputeContentHash(content));
+    }
+
+    /// <summary>
+    /// Final attempt for a Modify edit whose SEARCH anchors still do not match after the bounded repair: ask for the
+    /// whole file instead of a patch. Returns null when the file is too large, the budget is spent, or the answer
+    /// fails <see cref="FullFileFallbackGuard"/>, in which case the caller reports the original failure.
+    /// </summary>
+    private async Task<(FileEditSpec Spec, string Code)?> TryFullFileFallbackAsync(
+        DeveloperAgentRequest request,
+        ManifestFileEntry fileEntry,
+        string targetContent,
+        string failureReason,
+        string previousResponse,
+        IReadOnlyDictionary<string, string>? relevantGenerated,
+        IReadOnlyDictionary<string, string>? lockedContracts,
+        ConcurrencyCallCounter callCounter,
+        ConcurrentBag<string> capturedModels,
+        CancellationToken cancellationToken)
+    {
+        if (!FullFileFallbackGuard.IsEligible(targetContent) || !callCounter.TryIncrement(out var callNumber))
+        {
+            return null;
+        }
+
+        callCounter.RecordApplicabilityRepair();
+        var budget = Math.Min(_maxOutputTokens, Math.Max(4096, (targetContent.Length / 3) + 2048));
+        var fileName = Path.GetFileName(fileEntry.FilePath);
+        var fallbackRequest = new AiRequest
+        {
+            Stage = AiStage.CodeGeneration,
+            Model = request.Model ?? string.Empty,
+            SystemPrompt = BuildSingleFileRepairSystemPrompt(fileEntry, useFullFileReplacement: true),
+            UserPrompt = BuildSingleFileRepairUserPrompt(
+                $"{failureReason} Patch anchors could not be matched, so return the COMPLETE updated file in 'newContent'. Keep every unrelated line exactly as it is; do not abbreviate or use placeholders.",
+                previousResponse,
+                fileEntry,
+                targetContent,
+                relevantGenerated,
+                lockedContracts,
+                applicabilityFailure: null,
+                useFullFileReplacement: true),
+            MaxTokens = budget,
+            ReasoningEffort = _mechanicalReasoningEffort
+        };
+
+        await SafeRecordActivityAsync(
+            request.ExecutionId,
+            $"FullFileFallback for {fileName}: patch anchors did not match, rewriting the whole file.",
+            cancellationToken,
+            ExecutionActivityStatus.Started,
+            new ExecutionActivityMetadata(
+                EventKind: "FullFileFallback",
+                TargetFile: fileEntry.FilePath,
+                RepairKind: "FullFileFallback",
+                RequestedOutputTokens: budget,
+                ReasoningEffort: _mechanicalReasoningEffort,
+                FailureFingerprint: failureReason)).ConfigureAwait(false);
+
+        var stopwatch = Stopwatch.StartNew();
+        AiResponse response;
+        try
+        {
+            response = await _aiProvider.SendAsync(fallbackRequest, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "DeveloperAgent: full-file fallback call failed for '{FilePath}'.", fileEntry.FilePath);
+            return null;
+        }
+
+        stopwatch.Stop();
+        if (!string.IsNullOrWhiteSpace(response.Model))
+        {
+            capturedModels.Add(response.Model);
+        }
+
+        LogGenerationAudit(fileEntry.FilePath, "FullFileFallback", callNumber, fallbackRequest, response, stopwatch.Elapsed);
+        await RecordProviderCallActivityAsync(
+            request.ExecutionId,
+            fileEntry.FilePath,
+            "FullFileFallback",
+            fallbackRequest,
+            response,
+            stopwatch.Elapsed,
+            cancellationToken,
+            outputContract: "ModifyFullFile").ConfigureAwait(false);
+
+        // A truncated whole-file answer would silently drop the end of the file, so it is never accepted.
+        if (!response.IsSuccess || IsTokenLimitResponse(response) || string.IsNullOrWhiteSpace(response.Content))
+        {
+            return null;
+        }
+
+        try
+        {
+            var spec = ParseSingleFileEditSpec(response.Content, fileEntry);
+            ValidateSingleFileEditSpec(spec, fileEntry, targetContent, useFullFileReplacement: true);
+            if (spec.NoChange || spec.NewContent is null)
+            {
+                return null;
+            }
+
+            var rejection = FullFileFallbackGuard.Reject(targetContent, spec.NewContent);
+            if (rejection is not null)
+            {
+                _logger.LogWarning("DeveloperAgent: full-file fallback for '{FilePath}' rejected: {Reason}", fileEntry.FilePath, rejection);
+                await SafeRecordActivityAsync(
+                    request.ExecutionId,
+                    $"FullFileFallback for {fileName} rejected: {rejection}",
+                    cancellationToken,
+                    ExecutionActivityStatus.Failed,
+                    new ExecutionActivityMetadata(EventKind: "FullFileFallback", TargetFile: fileEntry.FilePath, RepairKind: "FullFileFallback")).ConfigureAwait(false);
+                return null;
+            }
+
+            return (spec with { WholeFileFallback = true }, spec.NewContent);
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidOperationException or JsonException)
+        {
+            _logger.LogWarning(ex, "DeveloperAgent: full-file fallback for '{FilePath}' was not a valid edit.", fileEntry.FilePath);
+            return null;
+        }
     }
 
     private async Task<AiResponse> ExecuteMicroApplicabilityRepairAsync(
@@ -2444,6 +2594,9 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
         return SanitizeForDiagnostics(firstLine);
     }
 
+    public const int MaxFullSourceLines = 2500;
+    public const int MaxFullSourceChars = 100_000;
+
     public static string BuildBoundedTargetSourceWindow(
         string targetContent,
         EditApplicabilityResult? applicabilityFailure = null,
@@ -2520,14 +2673,16 @@ public sealed class DeveloperAgent : IDeveloperAgent, IReviewFeedbackAgent
             return sb.ToString();
         }
 
-        // 3. For production source files up to 600 lines / 25,000 chars,
+        // 3. For production source files up to MaxFullSourceLines / MaxFullSourceChars,
         // provide complete content so the model can inspect all methods and produce exact verbatim search anchors.
-        if (lines.Length <= 600 && targetContent.Length <= 25000)
+        // A head+tail window makes the model invent anchors for code it never saw (typical 800-line App.tsx),
+        // so this limit is generous: ~100K chars is roughly 25K tokens.
+        if (lines.Length <= MaxFullSourceLines && targetContent.Length <= MaxFullSourceChars)
         {
             return targetContent;
         }
 
-        // 4. Extremely large files (> 600 lines / 25,000 chars)
+        // 4. Extremely large files (> MaxFullSourceLines / MaxFullSourceChars)
         var sbLarge = new System.Text.StringBuilder();
         int hCount = Math.Min(30, lines.Length);
         for (int i = 0; i < hCount; i++)

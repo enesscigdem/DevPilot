@@ -55,10 +55,10 @@ public class AutomationGateTests
     }
 
     [Fact]
-    public void Sensitive_files_and_ui_changes_are_left_for_a_person()
+    public void Sensitive_files_are_left_for_a_person_but_verified_ui_changes_are_not()
     {
         Delivery(Policy(), sensitive: true).Allowed.Should().BeFalse();
-        Delivery(Policy(), visual: true).Allowed.Should().BeFalse();
+        Delivery(Policy(), visual: true).Allowed.Should().BeTrue();
     }
 
     [Fact]
@@ -193,11 +193,54 @@ public class AutomationGateTests
         ledger.ShouldRecord(Guid.NewGuid(), "Review:too big").Should().BeTrue();
     }
 
+    [Fact]
+    public void Build_only_change_in_a_repository_without_tests_is_delivered()
+    {
+        var result = AutomationGate.EvaluateDelivery(
+            Policy(), ExecutionVerificationOutcome.PartiallyVerified, Verdict(buildOnly: true),
+            new[] { File("src/App.tsx") }, hasSensitiveFiles: false, visualReviewRequired: false);
+
+        result.Allowed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Partial_verification_for_any_other_reason_still_waits_for_a_person()
+    {
+        var result = AutomationGate.EvaluateDelivery(
+            Policy(), ExecutionVerificationOutcome.PartiallyVerified, Verdict(buildOnly: false),
+            new[] { File("src/App.tsx") }, hasSensitiveFiles: false, visualReviewRequired: false);
+
+        result.Allowed.Should().BeFalse();
+        result.Summary.Should().Contain("PartiallyVerified");
+    }
+
+    [Fact]
+    public void The_build_only_exception_never_lets_a_needs_review_outcome_through()
+    {
+        var result = AutomationGate.EvaluateDelivery(
+            Policy(), ExecutionVerificationOutcome.NeedsReview, Verdict(buildOnly: true),
+            new[] { File("src/App.tsx") }, hasSensitiveFiles: false, visualReviewRequired: false);
+
+        result.Allowed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_build_only_change_still_obeys_every_other_safety_gate()
+    {
+        var result = AutomationGate.EvaluateDelivery(
+            Policy(), ExecutionVerificationOutcome.PartiallyVerified, Verdict(buildOnly: true, staleBase: true),
+            new[] { File(".github/workflows/ci.yml"), File("src/App.tsx") },
+            hasSensitiveFiles: true, visualReviewRequired: true);
+
+        result.Allowed.Should().BeFalse();
+        result.Reasons.Should().HaveCountGreaterThanOrEqualTo(3);
+    }
+
     private static AutomationMergeDecision Merge(AutomationPolicy policy, ExecutionCiStatus ci) =>
         AutomationGate.EvaluateMerge(
             policy, ExecutionPullRequestRemoteState.Open, ExecutionPullRequestIntegrityStatus.Valid, ci);
 
-    private static ExecutionVerdictDto Verdict(bool testWeakening = false, bool staleBase = false) =>
+    private static ExecutionVerdictDto Verdict(bool testWeakening = false, bool staleBase = false, bool buildOnly = false) =>
         new(
             Outcome: "Verified",
             Severity: "success",
@@ -212,5 +255,6 @@ public class AutomationGateTests
             TestRepairRounds: 0,
             CompactRetries: 0,
             ApplicabilityRepairs: 0,
-            ChecksNotRun: Array.Empty<string>());
+            ChecksNotRun: Array.Empty<string>(),
+            BuildOnlyNoTestSuite: buildOnly);
 }

@@ -121,7 +121,7 @@ internal class OpenAiCompatibleProvider : IAiProvider
         var payloadLength = payloadJson.Length;
         var inputTokenEstimate = EstimateTokenCount(request.SystemPrompt, request.UserPrompt);
 
-        int maxAttempts = _maxAttempts;
+        int maxAttempts = request.MaxAttempts is > 0 ? Math.Min(request.MaxAttempts.Value, _maxAttempts) : _maxAttempts;
         int baseDelayMs = _baseDelayMs;
 
         int attempt = 0;

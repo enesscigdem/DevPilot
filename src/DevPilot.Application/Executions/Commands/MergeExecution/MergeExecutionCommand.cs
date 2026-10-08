@@ -39,6 +39,9 @@ public sealed class MergeExecutionResult
 
     public MergeExecutionResponseDto? Response { get; private set; }
 
+    /// <summary>The pull request conflicts with its base branch, so the change has to be redone on the current base.</summary>
+    public bool IsBaseConflict { get; private set; }
+
     public static MergeExecutionResult Ok(MergeExecutionResponseDto response) =>
         new() { Status = MergeExecutionResultStatus.Success, Response = response };
 
@@ -50,6 +53,9 @@ public sealed class MergeExecutionResult
 
     public static MergeExecutionResult Conflict(string message) =>
         new() { Status = MergeExecutionResultStatus.Conflict, ErrorMessage = message };
+
+    public static MergeExecutionResult BaseConflict(string message) =>
+        new() { Status = MergeExecutionResultStatus.Conflict, ErrorMessage = message, IsBaseConflict = true };
 
     public static MergeExecutionResult ExternalFailure(string message) =>
         new() { Status = MergeExecutionResultStatus.ExternalFailure, ErrorMessage = message };
@@ -73,6 +79,7 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
     private readonly IExecutionActivityRecorder _activityRecorder;
     private readonly IExecutionActivityRepository _activityRepository;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
+    private readonly Trackers.ITaskExternalNotifier? _externalNotifier;
     private readonly ILogger<MergeExecutionCommandHandler> _logger;
 
     public MergeExecutionCommandHandler(
@@ -82,7 +89,8 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
         IExecutionActivityRecorder activityRecorder,
         IExecutionActivityRepository activityRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions,
-        ILogger<MergeExecutionCommandHandler> logger)
+        ILogger<MergeExecutionCommandHandler> logger,
+        Trackers.ITaskExternalNotifier? externalNotifier = null)
     {
         _executionRepository = executionRepository;
         _githubClient = githubClient;
@@ -91,6 +99,7 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
         _activityRepository = activityRepository;
         _mergePolicyOptions = mergePolicyOptions;
         _logger = logger;
+        _externalNotifier = externalNotifier;
     }
 
     public async Task<MergeExecutionResult> HandleAsync(
@@ -252,7 +261,30 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
             if (mergeResult.IsConflict)
             {
                 await _executionRepository.SetMergeFailedAsync(execution.Id, attemptId, cancellationToken).ConfigureAwait(false);
-                return MergeExecutionResult.Conflict(mergeResult.ErrorMessage ?? "GitHub rejected merge due to SHA mismatch or branch protection rules.");
+
+                // A refusal can also mean a missing required check or a branch rule. Only a pull request the host
+                // itself reports as conflicting ("dirty") needs the change redone on the current base.
+                var baseConflict = mergeResult.IsBaseConflict;
+                if (!baseConflict && mergeResult.IsNotMergeable)
+                {
+                    var live = await _githubClient.GetPullRequestAsync(repoOwner, repoName, prNumber, cancellationToken).ConfigureAwait(false);
+                    baseConflict = live.IsSuccess &&
+                                   string.Equals(live.Data?.MergeableState, "dirty", StringComparison.OrdinalIgnoreCase);
+                }
+
+                var refusal = mergeResult.ErrorMessage ?? "GitHub rejected merge due to SHA mismatch or branch protection rules.";
+                if (baseConflict)
+                {
+                    await SafeRecordActivityAsync(
+                        execution.Id,
+                        ExecutionStage.Merge,
+                        ExecutionActivityStatus.Completed,
+                        $"Merge refused: pull request #{prNumber} conflicts with '{execution.PullRequestBaseBranch}'. The change has to be redone on the current base.",
+                        cancellationToken).ConfigureAwait(false);
+                    return MergeExecutionResult.BaseConflict(refusal);
+                }
+
+                return MergeExecutionResult.Conflict(refusal);
             }
 
             // Transport/Network uncertainty: DO NOT mark Failed! Keep attempt InProgress so retry can query GitHub truth
@@ -283,6 +315,14 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
             cancellationToken).ConfigureAwait(false);
 
         await SafeRecordActivityAsync(execution.Id, ExecutionStage.Merge, ExecutionActivityStatus.Completed, "Merge confirmed.", cancellationToken).ConfigureAwait(false);
+        if (_externalNotifier is not null)
+        {
+            await _externalNotifier.NotifyAsync(
+                execution.DevelopmentTaskId,
+                $"DevPilot merged the change for this issue: pull request #{execution.PullRequestNumber} {execution.PullRequestUrl}",
+                cancellationToken).ConfigureAwait(false);
+        }
+
 
         var finalExecution = await _executionRepository.GetByIdAsync(execution.Id, cancellationToken).ConfigureAwait(false) ?? execution;
 

@@ -32,6 +32,8 @@ public static class ExecutionReliabilityOptionsFactory
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxFlakeReruns), 0, v => options.MaxFlakeReruns = v);
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxAgenticTurns), 1, v => options.MaxAgenticTurns = v);
         ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.MaxAgenticCheckRuns), 1, v => options.MaxAgenticCheckRuns = v);
+        ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.AgenticRepairMaxMinutes), 1, v => options.AgenticRepairMaxMinutes = v);
+        ApplyInt(configuration, prefix + nameof(ExecutionReliabilityOptions.AgenticRepairCallTimeoutSeconds), 15, v => options.AgenticRepairCallTimeoutSeconds = v);
         if (bool.TryParse(configuration[prefix + nameof(ExecutionReliabilityOptions.AgenticRepairEnabled)], out var agentic))
         {
             options.AgenticRepairEnabled = agentic;

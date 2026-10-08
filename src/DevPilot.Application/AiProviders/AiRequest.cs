@@ -20,6 +20,12 @@ public sealed class AiRequest
 
     public string? ReasoningEffort { get; set; }
 
+    /// <summary>
+    /// Caps the provider's own retries for this call (never raises them). The router lowers it when another model can
+    /// take over, so a rate-limited model is not retried for minutes before the fallback gets its turn.
+    /// </summary>
+    public int? MaxAttempts { get; set; }
+
     /// <summary>Called as attempts time out, fail or are retried, so the caller can show it. Never throws into the provider.</summary>
     public Func<AiAttemptEvent, Task>? OnAttempt { get; set; }
 }

@@ -5,6 +5,7 @@ import {
   Boxes,
   Cpu,
   Zap,
+  Target,
   FolderGit2,
   ListChecks,
   Sparkles,
@@ -45,6 +46,7 @@ const navGroups: { label: string; items: NavEntry[] }[] = [
   {
     label: "nav.planRun",
     items: [
+      { to: "/goals", label: "nav.goals", icon: Target },
       { to: "/tasks", label: "nav.tasks", icon: ListChecks },
       { to: "/executions", label: "nav.executions", icon: Activity },
     ],
@@ -384,6 +386,7 @@ function formatElapsed(elapsedSeconds?: number | null, startedAt?: string | null
 const routeTitles: Record<string, string> = {
   "/": "nav.overview",
   "/projects": "nav.repository",
+  "/goals": "nav.goals",
   "/tasks": "nav.tasks",
   "/brain": "nav.projectBrain",
   "/executions": "nav.executions",
@@ -398,7 +401,9 @@ function TopBar({ onOpenCommand, path }: { onOpenCommand: () => void; path: stri
   const { t } = useTranslation()
   const titleKey =
     routeTitles[path] ??
-    (path.startsWith("/tasks/")
+    (path.startsWith("/goals/")
+      ? "nav.goals"
+      : path.startsWith("/tasks/")
       ? "nav.taskImpact"
       : path.startsWith("/comparisons/")
         ? "nav.modelComparison"

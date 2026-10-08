@@ -61,6 +61,30 @@ const automation: Resources["automation"] = {
     hint: "Bu açıkken hiç CI kontrolü olmayan bir repo otomatik merge edilmez.",
   },
   errRange: "Limitler izin verilen aralığın dışında.",
+  conflict: {
+    heading: "İki görev aynı dosyayı değiştirecekse",
+    intro:
+      "Hedefler birkaç görevi aynı anda çalıştırır. Bu ayar, ikisi aynı dosyayı değiştirecekse ne olacağını belirler. DevPilot bir görevin hangi dosyaları değiştireceğini bilir ama hangi satırları değiştireceğini bilmez. Bu yüzden modeller, hız karşılığında ne kadar merge çakışması riski kabul ettiğinizde ayrışır.",
+    recommended: "Önerilen",
+    modes: {
+      Careful: {
+        name: "Temkinli",
+        summary: "Sonraki görev, öncekinin merge edilmesini bekler.",
+        does: "Bir hedefin görevleri arasında hiç merge çakışması olmaz, ama aynı dosyayı paylaşan görevler art arda çalışır.",
+      },
+      Balanced: {
+        name: "Dengeli",
+        summary: "Sıradan dosyaları paylaşır, merge'ün zaten bozulacağı yerde bekler.",
+        does: "Görevler sıradan dosyalarda birlikte çalışır, çünkü git aynı dosyanın farklı bölümlerindeki değişiklikleri kendisi birleştirir. Bağımlılık ve proje dosyaları, kilit dosyaları, migration'lar, üretilmiş dosyalar ve görevlerden birinin oluşturduğu ya da sildiği dosyalar için yine de beklerler.",
+      },
+      Fast: {
+        name: "Hızlı",
+        summary: "Görevler paylaşılan dosyalar yüzünden hiç beklemez.",
+        does: "En yüksek hız. İki pull request çakışırsa çakışmayı GitHub'da siz çözersiniz.",
+      },
+    },
+    note: "İki pull request gerçekten çakışırsa DevPilot ikincisini kendi başına merge edemez. Açık kalır ve çakışmayı GitHub'da siz çözersiniz.",
+  },
 }
 
 export default automation

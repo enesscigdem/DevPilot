@@ -920,6 +920,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                 cancellationToken)
             .ConfigureAwait(false);
 
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
+
         return affected > 0;
     }
 
@@ -946,6 +948,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                 cancellationToken)
             .ConfigureAwait(false);
 
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
+
         return affected > 0;
     }
 
@@ -967,6 +971,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.CommittedAt, committedAt),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -982,6 +988,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.CommitStatus, ExecutionCommitStatus.Failed),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -1004,6 +1012,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.PushClaimedAt, claimedAt),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
 
         return affected > 0;
     }
@@ -1032,6 +1042,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                 cancellationToken)
             .ConfigureAwait(false);
 
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
+
         return affected > 0;
     }
 
@@ -1055,6 +1067,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.PushedAt, pushedAt),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -1070,6 +1084,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.PushStatus, ExecutionPushStatus.Failed),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -1093,6 +1109,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.PullRequestClaimedAt, claimedAt),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
 
         return affected > 0;
     }
@@ -1122,6 +1140,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                 cancellationToken)
             .ConfigureAwait(false);
 
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
+
         return affected > 0;
     }
 
@@ -1147,6 +1167,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.PullRequestCreatedAt, createdAt),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -1162,6 +1184,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                     .SetProperty(e => e.PullRequestStatus, ExecutionPullRequestStatus.Failed),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        await RefreshTrackedAsync(executionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -1493,6 +1517,23 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
                 tracked.Entity.MergeAttemptId = null;
                 tracked.Entity.MergeClaimedAt = null;
             }
+        }
+    }
+
+    /// <summary>
+    /// A claim or completion is written with <c>ExecuteUpdateAsync</c>, which leaves an entity this context already
+    /// tracks showing the old state (and the handler's own in-memory edits as unsaved changes). A later
+    /// <c>SaveChanges</c> in the same scope, for example a pull request sync, would then write that stale state back
+    /// over the new one, which is how a finished commit could end up recorded as still in progress. Reloading the
+    /// tracked row makes the context agree with the database again.
+    /// </summary>
+    private async Task RefreshTrackedAsync(Guid executionId, CancellationToken cancellationToken)
+    {
+        var tracked = _dbContext.ChangeTracker.Entries<TaskExecution>()
+            .FirstOrDefault(e => e.Entity.Id == executionId);
+        if (tracked != null)
+        {
+            await tracked.ReloadAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 }

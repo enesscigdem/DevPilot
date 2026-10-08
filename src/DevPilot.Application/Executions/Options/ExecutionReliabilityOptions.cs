@@ -21,6 +21,12 @@ public sealed class ExecutionReliabilityOptions
     public int MaxAgenticTurns { get; set; } = 20;
     public int MaxAgenticCheckRuns { get; set; } = 4;
 
+    /// <summary>Wall-clock ceiling for one agentic repair run. Slow reasoning models otherwise spend minutes on read-only turns.</summary>
+    public int AgenticRepairMaxMinutes { get; set; } = 4;
+
+    /// <summary>Ceiling for a single model call inside the agentic repair loop.</summary>
+    public int AgenticRepairCallTimeoutSeconds { get; set; } = 90;
+
     /// <summary>Takes before/after screenshots of the app after verification passed (adds ~25s to every execution). On by default.</summary>
     public bool VisualCaptureEnabled { get; set; } = true;
 
@@ -50,6 +56,8 @@ public sealed class ExecutionReliabilityOptions
         MaxTestRepairRounds = Math.Max(0, MaxTestRepairRounds);
         MaxAgenticTurns = Math.Clamp(MaxAgenticTurns, 1, 60);
         MaxAgenticCheckRuns = Math.Clamp(MaxAgenticCheckRuns, 1, 12);
+        AgenticRepairMaxMinutes = Math.Clamp(AgenticRepairMaxMinutes, 1, 30);
+        AgenticRepairCallTimeoutSeconds = Math.Clamp(AgenticRepairCallTimeoutSeconds, 15, 600);
         MaxFlakeReruns = Math.Clamp(MaxFlakeReruns, 0, MaxFlakeRerunsCeiling);
         MaxGenerationCalls = Math.Max(1, MaxGenerationCalls);
         MaxConcurrentFileGenerations = Math.Clamp(MaxConcurrentFileGenerations, 1, 4);

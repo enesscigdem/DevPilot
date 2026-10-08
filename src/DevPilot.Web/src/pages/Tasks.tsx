@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { Plus, Search, Sparkles, CornerDownLeft, Loader2, AlertCircle } from "lucide-react"
 import { PageContainer, PageHeading, TaskRow } from "@/components/shared"
+import { BatchTaskPanel } from "@/components/BatchTaskPanel"
+import { JiraImportModal } from "@/components/JiraImportModal"
 import { Button, Panel, Badge, Kbd } from "@/components/ui/primitives"
 import { getTasks, createTask } from "@/api"
 import { useWorkspace } from "@/lib/workspace"
@@ -59,6 +61,8 @@ export function Tasks() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  const [showBatch, setShowBatch] = useState(false)
+  const [showJira, setShowJira] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
 
@@ -134,7 +138,31 @@ export function Tasks() {
         eyebrow={tr("tasks.eyebrow")}
         title={tr("tasks.title")}
         description={tr("tasks.description")}
+        actions={
+          !showBatch ? (
+            <Button size="sm" onClick={() => setShowBatch(true)}>
+              <Plus className="h-3.5 w-3.5" />
+              {tr("tasks.batch.open")}
+            </Button>
+          ) : undefined
+        }
       />
+
+      {showJira && (
+        <JiraImportModal
+          workspaceId={activeWorkspaceId}
+          onClose={() => setShowJira(false)}
+          onImported={fetchTasks}
+        />
+      )}
+
+      {showBatch && (
+        <BatchTaskPanel
+          workspaceId={activeWorkspaceId}
+          onClose={() => setShowBatch(false)}
+          onCreated={fetchTasks}
+        />
+      )}
 
       <Panel className="mb-6 overflow-hidden">
         <div className="flex items-start gap-3 p-3.5">

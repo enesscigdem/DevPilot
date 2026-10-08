@@ -140,6 +140,18 @@ public class DeveloperAgentRepairDisciplineTests : IDisposable
     }
 
     [Fact]
+    public void TargetWindow_ForAnEightHundredLineSourceFile_ContainsTheWholeFileSoAnchorsCanBeCopied()
+    {
+        var content = string.Join('\n', Enumerable.Range(0, 828).Select(i => $"  const value{i} = <button className=\"btn-{i}\" onClick={{handle{i}}} />;"));
+        content.Length.Should().BeGreaterThan(32_000);
+
+        var window = DeveloperAgent.BuildBoundedTargetSourceWindow(content);
+
+        window.Should().Be(content);
+        window.Should().Contain("btn-400");
+    }
+
+    [Fact]
     public void RepairPrompt_ContainsExactFailedAnchorAndSanitizedValidationReason()
     {
         var largeContent = CreateLargeProductsApiTestsContent();

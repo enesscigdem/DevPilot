@@ -50,6 +50,8 @@ public sealed class GetTasksQueryHandler : IGetTasksQueryHandler
             Status = task.Status,
             Priority = task.Priority,
             UpdatedAt = task.UpdatedAt,
+            ExternalKey = task.ExternalKey,
+            ExternalUrl = task.ExternalUrl,
         };
     }
 }

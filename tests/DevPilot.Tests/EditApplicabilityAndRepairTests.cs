@@ -367,8 +367,8 @@ public class EditApplicabilityAndRepairTests : IDisposable
         result.ErrorMessage.Should().Contain("Edit block: 1/1");
         result.ErrorMessage.Should().Contain("Reason: search matched 0 times (zero matches)");
 
-        // Exactly 2 AI calls (1 initial + 1 repair), no further retries
-        _fakeAiProvider.SendAsyncCallCount.Should().Be(2);
+        // Exactly 3 AI calls: 1 initial + 1 repair + 1 bounded whole-file fallback, no further retries
+        _fakeAiProvider.SendAsyncCallCount.Should().Be(3);
 
         // Disk untouched
         (await File.ReadAllTextAsync(targetFile)).Should().Be(initialContent);

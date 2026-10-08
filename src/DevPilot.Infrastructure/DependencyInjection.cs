@@ -1,6 +1,8 @@
 using DevPilot.Application.AiProviders;
 using DevPilot.Application.CodeAnalysis;
 using DevPilot.Application.GitProviders;
+using DevPilot.Application.Trackers;
+using DevPilot.Infrastructure.Trackers;
 using DevPilot.Application.ModelComparisons;
 using DevPilot.Application.ProjectBrain.Commands.AskBrain;
 using DevPilot.Application.ProjectBrain.Commands.IndexWorkspace;
@@ -107,6 +109,7 @@ public static class DependencyInjection
         services.AddScoped<IRepositoryWorkspaceQuery, RepositoryWorkspaceQuery>();
         services.AddScoped<IImpactAnalysisRepository, EfImpactAnalysisRepository>();
         services.AddScoped<ICreateTaskCommandHandler, CreateTaskCommandHandler>();
+        services.AddScoped<DevPilot.Application.Tasks.Batch.ICreateTaskBatchCommandHandler, DevPilot.Application.Tasks.Batch.CreateTaskBatchCommandHandler>();
         services.AddScoped<IUpdateTaskCommandHandler, UpdateTaskCommandHandler>();
         services.AddScoped<IUpdateTaskStatusCommandHandler, UpdateTaskStatusCommandHandler>();
         services.AddScoped<IDeleteTaskCommandHandler, DeleteTaskCommandHandler>();
@@ -171,6 +174,14 @@ public static class DependencyInjection
         services.AddSingleton<IExecutionHeartbeatService, ExecutionHeartbeatService>();
         services.AddHostedService<ExecutionStartupReconciler>();
         services.AddSingleton<DevPilot.Application.Automation.AutomationDecisionLedger>();
+        services.AddScoped<DevPilot.Application.Goals.IGoalHistoryReader, DevPilot.Infrastructure.Goals.EfGoalHistoryReader>();
+        services.AddScoped<DevPilot.Application.Goals.IGoalPlanner, DevPilot.Application.Goals.GoalPlanner>();
+        services.AddScoped<DevPilot.Application.Goals.IGoalStore, DevPilot.Infrastructure.Goals.EfGoalStore>();
+        services.AddScoped<DevPilot.Application.Goals.IGoalAnalysisDispatcher, DevPilot.Infrastructure.Goals.HangfireGoalAnalysisDispatcher>();
+        services.AddScoped<DevPilot.Infrastructure.Goals.GoalAnalysisJob>();
+        services.AddScoped<DevPilot.Application.Goals.IStartGoalCommandHandler, DevPilot.Application.Goals.StartGoalCommandHandler>();
+        services.AddScoped<DevPilot.Application.Goals.IGoalOrchestrator, DevPilot.Application.Goals.GoalOrchestrator>();
+        services.AddHostedService<DevPilot.Infrastructure.Goals.GoalWorker>();
         services.AddScoped<DevPilot.Application.Automation.IAutomationPolicyStore, DevPilot.Infrastructure.Automation.EfAutomationPolicyStore>();
         services.AddScoped<DevPilot.Application.Automation.IAutomationWorkReader, DevPilot.Infrastructure.Automation.EfAutomationWorkReader>();
         services.AddScoped<DevPilot.Application.Automation.IAutomationOrchestrator, DevPilot.Application.Automation.AutomationOrchestrator>();
@@ -271,6 +282,18 @@ public static class DependencyInjection
         services.Configure<GitHubAppOptions>(configuration.GetSection(GitHubAppOptions.SectionName));
         services.AddSingleton<IGitHubOAuthStateService, GitHubOAuthStateService>();
         services.AddScoped<IGitHubAppTokenService, GitHubAppTokenService>();
+        services.AddSingleton<IGitSecretProtector, GitSecretProtector>();
+        services.AddScoped<IGitCredentialResolver, GitCredentialResolver>();
+        services.AddScoped<IGitConnectionStore, EfGitConnectionStore>();
+        services.AddScoped<IGitTokenValidator, GitTokenValidator>();
+
+        services.AddSingleton<ITrackerSecretProtector, TrackerSecretProtector>();
+        services.AddScoped<ITrackerConnectionStore, EfTrackerConnectionStore>();
+        services.AddScoped<ITrackerClient, JiraTrackerClient>();
+        services.AddScoped<ITaskExternalNotifier, TaskExternalNotifier>();
+        services.AddScoped<IImportTrackerIssuesCommandHandler, ImportTrackerIssuesCommandHandler>();
+        services.AddHttpClient(JiraTrackerClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30));
+        services.AddHttpClient(GitTokenValidator.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30));
 
         switch (providerName)
         {
@@ -284,7 +307,17 @@ public static class DependencyInjection
                     client.Timeout = TimeSpan.FromSeconds(30);
                 });
                 services.AddScoped<IGitProvider, GitHubGitProvider>();
-                services.AddScoped<IGitHubPullRequestClient, GitHubPullRequestClient>();
+                services.AddHttpClient(GitLabPullRequestClient.HttpClientName, client =>
+                {
+                    client.Timeout = TimeSpan.FromSeconds(30);
+                });
+                services.AddHttpClient(AzureDevOpsPullRequestClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30));
+                services.AddHttpClient(BitbucketPullRequestClient.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30));
+                services.AddScoped<AzureDevOpsPullRequestClient>();
+                services.AddScoped<BitbucketPullRequestClient>();
+                services.AddScoped<GitHubPullRequestClient>();
+                services.AddScoped<GitLabPullRequestClient>();
+                services.AddScoped<IGitHubPullRequestClient, RoutingPullRequestClient>();
                 break;
             default:
                 throw new InvalidOperationException(

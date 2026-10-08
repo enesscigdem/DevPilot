@@ -23,6 +23,8 @@ public sealed class AgenticRepairService : IAgenticRepairService
     private readonly ILogger<AgenticRepairService> _logger;
     private readonly int _maxTurns;
     private readonly int _maxCheckRuns;
+    private readonly TimeSpan _maxDuration;
+    private readonly TimeSpan _callTimeout;
 
     public AgenticRepairService(
         IAiProvider aiProvider,
@@ -36,6 +38,8 @@ public sealed class AgenticRepairService : IAgenticRepairService
         var effective = options ?? new ExecutionReliabilityOptions();
         _maxTurns = Math.Max(1, effective.MaxAgenticTurns);
         _maxCheckRuns = Math.Max(1, effective.MaxAgenticCheckRuns);
+        _maxDuration = TimeSpan.FromMinutes(Math.Max(1, effective.AgenticRepairMaxMinutes));
+        _callTimeout = TimeSpan.FromSeconds(Math.Max(1, effective.AgenticRepairCallTimeoutSeconds));
     }
 
     public async Task<AgenticRepairOutcome> RunAsync(AgenticRepairRequest request, CancellationToken cancellationToken = default)
@@ -53,21 +57,46 @@ public sealed class AgenticRepairService : IAgenticRepairService
         AgenticRepairOutcome Finish(bool success, string reason) =>
             new(success, reason, turns, checkRuns, tools.ChangedFiles, tools.OriginalContents, model);
 
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
         while (turns < _maxTurns)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (clock.Elapsed >= _maxDuration)
+            {
+                await RecordAsync(request, $"Agentic repair · stopped after {(int)clock.Elapsed.TotalSeconds}s time budget", cancellationToken).ConfigureAwait(false);
+                return Finish(false, "TimeBudgetExhausted");
+            }
+
             turns++;
 
-            var response = await _aiProvider.SendAsync(
-                new AiRequest
-                {
-                    Model = request.Model ?? string.Empty,
-                    Stage = AiStage.Repair,
-                    SystemPrompt = SystemPrompt,
-                    UserPrompt = BuildUserPrompt(request, history),
-                    MaxTokens = 4096
-                },
-                cancellationToken).ConfigureAwait(false);
+            // One slow model call must not eat the whole budget: it is cut at the call timeout or the remaining budget.
+            var callLimit = TimeSpan.FromTicks(Math.Min(_callTimeout.Ticks, (_maxDuration - clock.Elapsed).Ticks));
+            using var callCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            callCts.CancelAfter(callLimit);
+
+            AiResponse response;
+            try
+            {
+                response = await _aiProvider.SendAsync(
+                    new AiRequest
+                    {
+                        Model = request.Model ?? string.Empty,
+                        Stage = AiStage.Repair,
+                        SystemPrompt = SystemPrompt,
+                        UserPrompt = BuildUserPrompt(request, history),
+                        MaxTokens = 4096
+                    },
+                    callCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Agentic repair model call timed out after {Seconds}s on turn {Turn}.", (int)callLimit.TotalSeconds, turns);
+                await RecordAsync(request, $"Agentic repair · model call timed out after {(int)callLimit.TotalSeconds}s (turn {turns}/{_maxTurns})", cancellationToken).ConfigureAwait(false);
+                return Finish(false, "ProviderTimeout");
+            }
+
             model = string.IsNullOrWhiteSpace(response.Model) ? model : response.Model;
 
             if (!response.IsSuccess)
@@ -137,6 +166,11 @@ public sealed class AgenticRepairService : IAgenticRepairService
             {
                 editedSinceLastRun |= result.StartsWith("OK", StringComparison.Ordinal);
                 await RecordAsync(request, $"Agentic repair · {tool} {action.Path}", cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // Read-only turns used to leave no trace, so a long loop looked like a hang.
+                await RecordAsync(request, $"Agentic repair · turn {turns}/{_maxTurns} · {Describe(action)}", cancellationToken).ConfigureAwait(false);
             }
 
             history.Add((Describe(action), result));

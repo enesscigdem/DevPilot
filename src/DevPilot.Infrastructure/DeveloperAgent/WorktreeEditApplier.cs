@@ -301,7 +301,8 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
                             $"Strict Modify action failed: provide exactly one edit representation for '{spec.FilePath}'.");
                     }
 
-                    if (usesFullFileReplacement && !IsSmallTextFile(originalContent))
+                    if (usesFullFileReplacement && !IsSmallTextFile(originalContent) &&
+                        !(spec.WholeFileFallback && FullFileFallbackGuard.IsEligible(originalContent)))
                     {
                         return DeveloperAgentResult.Fail(
                             $"Strict Modify action failed: full-file replacement is limited to small text files for '{spec.FilePath}'.");

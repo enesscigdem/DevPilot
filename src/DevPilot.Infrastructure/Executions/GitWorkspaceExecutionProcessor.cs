@@ -491,7 +491,7 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                     ExecutionStage.Build,
                     ExecutionActivityStatus.Completed,
                     hasBuild
-                        ? "Repository build passed (partially verified: no test suite discovered)."
+                        ? ExecutionVerdictBuilder.BuildOnlyNoTestSuiteMessagePrefix + "."
                         : "Repository checks passed.",
                     new ExecutionActivityMetadata(
                         BuildPassed: hasBuild ? true : null,
@@ -507,7 +507,19 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
             // GUARANTEED CLEANUP: Purge verification side-effects (bin/obj/cache/test outputs)
             // before ANY terminal result (success, build failure, test failure, repair failure, no-progress, cancellation)
             // while strictly preserving authoritative files (initial edits + repair edits).
-            if (prepResult != null && !string.IsNullOrWhiteSpace(prepResult.WorkspacePath))
+            // A revision or re-verification runs on a worktree that already holds the generated change. If it stopped
+            // before the changed files were loaded, the authoritative set is empty and purging would treat the whole
+            // generated change as a side effect and delete it. Without a known set, leave the worktree untouched.
+            var authoritativeSetUnknown = (context.IsRevision || context.IsVerifyOnly) &&
+                                          fileSets.ActuallyModifiedFiles.Count == 0;
+            if (authoritativeSetUnknown)
+            {
+                _logger.LogWarning(
+                    "Skipping side-effect purge for execution {ExecutionId}: the existing worktree's changed files were never loaded.",
+                    context.ExecutionId);
+            }
+
+            if (!authoritativeSetUnknown && prepResult != null && !string.IsNullOrWhiteSpace(prepResult.WorkspacePath))
             {
                 try
                 {
@@ -1035,6 +1047,19 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
                         : $"{check.DisplayName} retry failed (round {repairRound}).",
                 CheckMetadata(check, "VerifyingRepository", result, repairKind: "Compile", repairRound: repairRound),
                 cancellationToken).ConfigureAwait(false);
+        }
+
+        // The focused single-file rounds could not fix it (multi-file, config or dependency errors): hand the whole
+        // failure to the tool-using repair agent, which can read, search and edit freely and re-run the build itself.
+        if (!result.Success && _agenticRepairEnabled && _agenticRepairService != null)
+        {
+            result = await RunAgenticBuildRepairAsync(
+                context, prepResult, actualModel, check, result, fileSets, cancellationToken).ConfigureAwait(false);
+            if (result.FailureCategory == RepositoryCheckFailureCategory.InfrastructureFailure)
+            {
+                await RecordInfrastructureFailureAsync(context.ExecutionId, ExecutionStage.Build, check, result, cancellationToken).ConfigureAwait(false);
+                return false;
+            }
         }
 
         if (!result.Success)
@@ -1845,6 +1870,106 @@ public sealed class GitWorkspaceExecutionProcessor : IExecutionProcessor
         }
 
         return (finalTest!, false);
+    }
+
+    /// <summary>Repairs a failing build/prerequisite check with the tool-using agent. Returns the authoritative result of the check afterwards.</summary>
+    private async Task<RepositoryCheckResult> RunAgenticBuildRepairAsync(
+        ExecutionProcessingContext context,
+        ExecutionWorkspaceResult prepResult,
+        string? actualModel,
+        RepositoryCheck check,
+        RepositoryCheckResult failing,
+        ExecutionFileSets fileSets,
+        CancellationToken cancellationToken)
+    {
+        var request = new RepositoryCheckExecutionRequest(prepResult.WorkspacePath, prepResult.BranchName, check);
+        var last = failing;
+
+        async Task<AgenticCheckObservation> ObserveAsync(CancellationToken ct)
+        {
+            last = await _repositoryCheckRunner.ExecuteAsync(request, ct).ConfigureAwait(false);
+            if (last.Success)
+            {
+                return new AgenticCheckObservation(true, "All checks passed.", 0, null);
+            }
+
+            var evidence = ExecutionDiagnosticEvidence.ParseVerificationFailure(last.StdOut, last.StdErr, last.ErrorMessage);
+            return new AgenticCheckObservation(
+                false,
+                DescribeBuildFailureForAgent(last, evidence),
+                Math.Max(1, evidence.DiagnosticLines.Count),
+                evidence.FailureFingerprint);
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Build,
+            ExecutionActivityStatus.Started,
+            "Agentic build repair started.",
+            CheckMetadata(check, "FixingBuildIssue", failing, repairKind: "Compile"),
+            cancellationToken).ConfigureAwait(false);
+
+        var stopwatch = Stopwatch.StartNew();
+        var initial = ExecutionDiagnosticEvidence.ParseVerificationFailure(failing.StdOut, failing.StdErr, failing.ErrorMessage);
+        var outcome = await _agenticRepairService!.RunAsync(
+            new AgenticRepairRequest(
+                context.ExecutionId,
+                context.TaskTitle,
+                $"Make the '{check.DisplayName}' check pass again without removing the feature or weakening tests.",
+                prepResult.WorkspacePath,
+                DescribeBuildFailureForAgent(failing, initial),
+                fileSets.ActuallyModifiedFiles.ToList(),
+                actualModel,
+                ObserveAsync),
+            cancellationToken).ConfigureAwait(false);
+        stopwatch.Stop();
+
+        if (outcome.ChangedFiles.Count > 0)
+        {
+            fileSets.PromoteRepairedFiles(outcome.ChangedFiles);
+        }
+
+        await SafeRecordActivityAsync(
+            context.ExecutionId,
+            ExecutionStage.Build,
+            outcome.Success ? ExecutionActivityStatus.Completed : ExecutionActivityStatus.Failed,
+            outcome.Success
+                ? $"Agentic build repair passed after {outcome.CheckRuns} check run(s), {outcome.ChangedFiles.Count} file(s) changed."
+                : $"Agentic build repair stopped ({outcome.StopReason}) after {outcome.Turns} step(s), {outcome.ChangedFiles.Count} file(s) changed.",
+            CheckMetadata(
+                check,
+                outcome.Success ? "FixingBuildIssue" : "StoppedWithEvidence",
+                last,
+                repairKind: "Compile",
+                repairFiles: outcome.ChangedFiles,
+                progressResult: AgenticRepairProgressResult,
+                stageDurationMs: stopwatch.ElapsedMilliseconds),
+            cancellationToken).ConfigureAwait(false);
+
+        if (outcome.Success && last.Success)
+        {
+            return last;
+        }
+
+        // The last observed run may predate the agent's final edit: re-establish the authoritative state.
+        return await _repositoryCheckRunner.ExecuteAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string DescribeBuildFailureForAgent(RepositoryCheckResult result, CompilerFailureEvidence evidence)
+    {
+        var sb = new StringBuilder();
+        foreach (var line in evidence.DiagnosticLines.Take(30))
+        {
+            sb.AppendLine(line);
+        }
+
+        if (sb.Length == 0)
+        {
+            var raw = string.Join("\n", new[] { result.ErrorMessage, result.StdErr, result.StdOut }.Where(s => !string.IsNullOrWhiteSpace(s)));
+            sb.AppendLine(raw.Length > 4000 ? raw[^4000..] : raw);
+        }
+
+        return sb.ToString();
     }
 
     private static string DescribeFailureForAgent(RepositoryCheckResult result, string workspacePath)

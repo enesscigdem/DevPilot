@@ -1,11 +1,13 @@
+using DevPilot.Application.GitProviders;
 using System.Text.RegularExpressions;
+using DevPilot.Infrastructure.GitProviders;
 
 namespace DevPilot.Infrastructure.Executions;
 
 public static class GitRemoteUrlNormalizer
 {
     private static readonly Regex UrlCredentialSanitizer = new(
-        @"https?://([^@/]+)@github\.com",
+        @"(https?)://[^@/\s]+@([A-Za-z0-9.-]+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static (string Owner, string Repo)? ParseGitHubUrl(string? remoteUrl)
@@ -85,13 +87,21 @@ public static class GitRemoteUrlNormalizer
         }
 
         var parsed = ParseGitHubUrl(trimmed);
-        if (parsed is null)
+        if (parsed is not null)
+        {
+            return string.Equals(parsed.Value.Owner, expectedOwner, StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(parsed.Value.Repo, expectedRepo, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Non-GitHub hosts (GitLab, generic git): compare the full namespace path.
+        var generic = GitRemoteUrl.Parse(trimmed);
+        if (generic is null || string.Equals(generic.Host, "github.com", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
-        return string.Equals(parsed.Value.Owner, expectedOwner, StringComparison.OrdinalIgnoreCase) &&
-               string.Equals(parsed.Value.Repo, expectedRepo, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(generic.Owner, expectedOwner, StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(generic.Repository, expectedRepo, StringComparison.OrdinalIgnoreCase);
     }
 
     public static string SanitizeOutput(string? input)
@@ -101,6 +111,6 @@ public static class GitRemoteUrlNormalizer
             return string.Empty;
         }
 
-        return UrlCredentialSanitizer.Replace(input, "https://***@github.com");
+        return UrlCredentialSanitizer.Replace(input, "$1://***@$2");
     }
 }

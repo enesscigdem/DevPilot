@@ -2,6 +2,7 @@ using DevPilot.Application.Executions.Commands.StartExecution;
 using DevPilot.Application.Executions.Commands.RetryExecution;
 using DevPilot.Application.TaskImpactAnalysis.Commands.AnalyzeTaskImpact;
 using DevPilot.Application.TaskImpactAnalysis.Queries.GetTaskImpactAnalysis;
+using DevPilot.Application.Tasks.Batch;
 using DevPilot.Application.Tasks.Commands.ApproveTask;
 using DevPilot.Application.Tasks.Commands.CreateTask;
 using DevPilot.Application.Tasks.Commands.DeleteTask;
@@ -15,6 +16,15 @@ using DevPilot.Domain.Enums;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DevPilot.Api.Controllers;
+
+public sealed record ParseTaskBatchRequest(string? Text);
+
+public sealed class CreateTaskBatchRequest
+{
+    public Guid RepositoryWorkspaceId { get; set; }
+
+    public List<BatchTaskItem>? Tasks { get; set; }
+}
 
 [ApiController]
 [Route("api/tasks")]
@@ -33,6 +43,7 @@ public class TasksController : ControllerBase
     private readonly IRejectTaskCommandHandler _rejectHandler;
     private readonly IStartExecutionCommandHandler _startExecutionHandler;
     private readonly IRetryExecutionCommandHandler _retryExecutionHandler;
+    private readonly ICreateTaskBatchCommandHandler _createBatchHandler;
 
     public TasksController(
         ICreateTaskCommandHandler createHandler,
@@ -46,7 +57,8 @@ public class TasksController : ControllerBase
         IApproveTaskCommandHandler approveHandler,
         IRejectTaskCommandHandler rejectHandler,
         IStartExecutionCommandHandler startExecutionHandler,
-        IRetryExecutionCommandHandler retryExecutionHandler)
+        IRetryExecutionCommandHandler retryExecutionHandler,
+        ICreateTaskBatchCommandHandler createBatchHandler)
     {
         _createHandler = createHandler;
         _updateHandler = updateHandler;
@@ -60,6 +72,7 @@ public class TasksController : ControllerBase
         _rejectHandler = rejectHandler;
         _startExecutionHandler = startExecutionHandler;
         _retryExecutionHandler = retryExecutionHandler;
+        _createBatchHandler = createBatchHandler;
     }
 
     [HttpGet]
@@ -118,6 +131,43 @@ public class TasksController : ControllerBase
             nameof(GetTaskById),
             new { id = result.Task!.Id },
             result.Task);
+    }
+
+    /// <summary>Turns pasted text into task drafts. Creates nothing; the person reviews the drafts first.</summary>
+    [HttpPost("batch/parse")]
+    public IActionResult ParseTaskBatch([FromBody] ParseTaskBatchRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Text))
+        {
+            return BadRequest(new { error = "Paste the tasks to add." });
+        }
+
+        if (request.Text.Length > 200_000)
+        {
+            return BadRequest(new { error = "The pasted text is too long." });
+        }
+
+        return Ok(TaskBatchParser.Parse(request.Text));
+    }
+
+    [HttpPost("batch")]
+    public async Task<IActionResult> CreateTaskBatch(
+        [FromBody] CreateTaskBatchRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = await _createBatchHandler
+            .HandleAsync(
+                new CreateTaskBatchCommand(request.RepositoryWorkspaceId, request.Tasks ?? new List<BatchTaskItem>()),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        // Per-task failures still return 200 with one result per task, so the person can fix just those.
+        if (result.Items.Count == 0 || (!result.Success && result.ErrorMessage is not null && result.Items.All(i => !i.Success)))
+        {
+            return BadRequest(new { error = result.ErrorMessage, items = result.Items });
+        }
+
+        return Ok(result);
     }
 
     [HttpPut("{id:guid}")]

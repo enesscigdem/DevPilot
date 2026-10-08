@@ -12,6 +12,14 @@ public interface ITaskRepository
 
     Task<DevelopmentTask?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default);
 
+    /// <summary>The keys, among the given ones, that already exist as imported tasks in the workspace.</summary>
+    Task<IReadOnlySet<string>> FindByExternalKeysAsync(
+        Guid repositoryWorkspaceId,
+        string externalSource,
+        IReadOnlyCollection<string> externalKeys,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlySet<string>>(new HashSet<string>());
+
     Task<IReadOnlyList<DevelopmentTask>> GetAllAsync(
         DevelopmentTaskQueryFilter filter,
         CancellationToken cancellationToken = default);

@@ -15,6 +15,7 @@ import shared from "./locales/en/shared"
 import models from "./locales/en/models"
 import modelCompare from "./locales/en/modelCompare"
 import automation from "./locales/en/automation"
+import goals from "./locales/en/goals"
 
 const en = {
   common: {
@@ -46,6 +47,7 @@ const en = {
     settings: "Settings",
     aiModels: "AI models",
     automation: "Automation",
+    goals: "Goals",
     modelComparison: "Model comparison",
     tasks: "Tasks",
     executions: "Executions",
@@ -73,6 +75,7 @@ const en = {
     compareHint: "Original vs retry",
     modelsHint: "Add your own models and assign them to steps",
     automationHint: "Let DevPilot carry tasks through to a pull request",
+    goalsHint: "Describe what you want and let DevPilot plan and run it",
     switchToTurkish: "Switch language to Türkçe",
     switchToEnglish: "Switch language to English",
     languageHint: "Interface language",
@@ -103,6 +106,7 @@ const en = {
   models,
   modelCompare,
   automation,
+  goals,
 }
 
 export type Resources = typeof en

@@ -121,7 +121,9 @@ public sealed record FileEditSpec(
     [property: JsonPropertyName("searchReplaceEdits")] IReadOnlyList<SearchReplaceEdit>? SearchReplaceEdits = null,
     [property: JsonPropertyName("targetContentHash")] string? TargetContentHash = null,
     [property: JsonPropertyName("noChange")] bool NoChange = false,
-    [property: JsonPropertyName("reason")] string? NoChangeReason = null);
+    [property: JsonPropertyName("reason")] string? NoChangeReason = null,
+    // Set by the agent itself, never read from model output: the whole file was rewritten because no patch anchor matched.
+    [property: JsonIgnore] bool WholeFileFallback = false);
 
 public sealed record SearchReplaceEdit(
     [property: JsonPropertyName("search")] string Search,

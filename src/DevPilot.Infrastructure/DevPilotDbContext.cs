@@ -24,6 +24,10 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<GitHubInstallationConnection> GitHubInstallationConnections => Set<GitHubInstallationConnection>();
 
+    public DbSet<GitConnection> GitConnections => Set<GitConnection>();
+
+    public DbSet<TrackerConnection> TrackerConnections => Set<TrackerConnection>();
+
     public DbSet<RepositoryWorkspace> RepositoryWorkspaces => Set<RepositoryWorkspace>();
 
     public DbSet<CodeChunk> CodeChunks => Set<CodeChunk>();
@@ -55,6 +59,10 @@ public class DevPilotDbContext : DbContext
 
     public DbSet<AutomationPolicy> AutomationPolicies => Set<AutomationPolicy>();
 
+    public DbSet<Goal> Goals => Set<Goal>();
+
+    public DbSet<GoalTask> GoalTasks => Set<GoalTask>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -75,10 +83,42 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.LastVerifiedAt).HasColumnType("timestamp with time zone");
         });
 
+        modelBuilder.Entity<TrackerConnection>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Provider).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.BaseUrl).HasMaxLength(500);
+            entity.Property(e => e.Email).HasMaxLength(320);
+            entity.Property(e => e.DisplayName).HasMaxLength(200);
+            entity.Property(e => e.EncryptedToken).HasMaxLength(4000);
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+        });
+
+        modelBuilder.Entity<GitConnection>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.Provider, e.Host });
+            entity.Property(e => e.Provider).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.Host).HasMaxLength(255);
+            entity.Property(e => e.DisplayName).HasMaxLength(200);
+            entity.Property(e => e.Username).HasMaxLength(200);
+            entity.Property(e => e.EncryptedToken).HasMaxLength(4000);
+            entity.Property(e => e.CreatedAt).HasColumnType("timestamp with time zone");
+            entity.Property(e => e.UpdatedAt).HasColumnType("timestamp with time zone");
+        });
+
         modelBuilder.Entity<RepositoryWorkspace>(entity =>
         {
             entity.HasKey(e => e.Id);
-            entity.HasIndex(e => new { e.Owner, e.Repository, e.Branch }).IsUnique();
+            entity.HasIndex(e => new { e.Host, e.Owner, e.Repository, e.Branch }).IsUnique();
+            entity.HasIndex(e => e.GitConnectionId);
+            entity.Property(e => e.Provider).HasConversion<string>().HasMaxLength(50).HasDefaultValue(GitProviderKind.GitHub);
+            entity.Property(e => e.Host).HasMaxLength(255).HasDefaultValue("github.com");
+            entity.HasOne(e => e.GitConnection)
+                .WithMany(e => e.Workspaces)
+                .HasForeignKey(e => e.GitConnectionId)
+                .OnDelete(DeleteBehavior.SetNull);
             entity.HasIndex(e => e.GitHubInstallationConnectionId);
             entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.Owner).HasMaxLength(200);
@@ -94,12 +134,49 @@ public class DevPilotDbContext : DbContext
                 .OnDelete(DeleteBehavior.SetNull);
         });
 
+        modelBuilder.Entity<Goal>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.CreatedAt });
+            entity.HasIndex(e => e.Status);
+            entity.Property(e => e.Status).HasConversion<string>().HasMaxLength(50);
+            entity.Property(e => e.Title).HasMaxLength(200);
+            entity.Property(e => e.Text).HasMaxLength(20000);
+            entity.Property(e => e.PlanSource).HasMaxLength(20);
+            entity.HasOne(e => e.RepositoryWorkspace)
+                .WithMany()
+                .HasForeignKey(e => e.RepositoryWorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<GoalTask>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.GoalId, e.Key }).IsUnique();
+            entity.HasIndex(e => e.DevelopmentTaskId).IsUnique();
+            entity.Property(e => e.Key).HasMaxLength(20);
+            entity.Property(e => e.Size).HasMaxLength(20);
+            entity.Property(e => e.Areas).HasMaxLength(8000);
+            entity.Property(e => e.DependsOn).HasMaxLength(400);
+            entity.Property(e => e.BlockedBy).HasMaxLength(400);
+            entity.Property(e => e.Note).HasMaxLength(1000);
+            entity.HasOne(e => e.Goal)
+                .WithMany(g => g.Tasks)
+                .HasForeignKey(e => e.GoalId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(e => e.DevelopmentTask)
+                .WithMany()
+                .HasForeignKey(e => e.DevelopmentTaskId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         modelBuilder.Entity<AutomationPolicy>(entity =>
         {
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => e.RepositoryWorkspaceId).IsUnique();
             entity.Property(e => e.Level).HasConversion<string>().HasMaxLength(50);
             entity.Property(e => e.ProtectedPaths).HasMaxLength(4000);
+            entity.Property(e => e.ConflictMode).HasConversion<string>().HasMaxLength(20);
             entity.HasOne(e => e.RepositoryWorkspace)
                 .WithMany()
                 .HasForeignKey(e => e.RepositoryWorkspaceId)
@@ -169,6 +246,12 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.Title).HasMaxLength(200);
             entity.Property(e => e.Description).HasMaxLength(10000);
             entity.Property(e => e.AcceptanceCriteria).HasMaxLength(4000);
+            entity.Property(e => e.ExternalSource).HasMaxLength(50);
+            entity.Property(e => e.ExternalKey).HasMaxLength(100);
+            entity.Property(e => e.ExternalUrl).HasMaxLength(500);
+            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.ExternalSource, e.ExternalKey })
+                .IsUnique()
+                .HasFilter("\"ExternalKey\" IS NOT NULL");
             entity.HasOne(e => e.RepositoryWorkspace)
                 .WithMany()
                 .HasForeignKey(e => e.RepositoryWorkspaceId)

@@ -89,6 +89,9 @@ internal sealed class RoutingAiProvider : IAiProvider
 
         await AnnounceAsync(request, config, source, fallbackReason).ConfigureAwait(false);
 
+        // A pinned model is never replaced: a comparison run must be attributable to exactly one model.
+        var alternate = pinnedId is null ? FindAlternate(snapshot, config) : null;
+
         var routed = new AiRequest
         {
             // The assigned model always wins over whatever name the caller put in the request.
@@ -99,6 +102,8 @@ internal sealed class RoutingAiProvider : IAiProvider
             MaxTokens = CapTokens(request.MaxTokens, config.MaxOutputTokens),
             ReasoningEffort = request.ReasoningEffort,
             OnAttempt = request.OnAttempt,
+            // With a model ready to take over, do not sit through every retry of one that is being rate limited.
+            MaxAttempts = alternate is null ? request.MaxAttempts : PrimaryAttemptsWhenAnAlternateExists,
         };
 
         var response = await provider.SendAsync(routed, cancellationToken).ConfigureAwait(false);
@@ -106,8 +111,109 @@ internal sealed class RoutingAiProvider : IAiProvider
         response.ModelConfigName = config.Name;
         response.RoutingSource = source;
         response.FallbackReason = fallbackReason;
+
+        if (alternate is not null && IsWorthFallingBack(response))
+        {
+            var answered = await TryAlternateAsync(request, config, response, alternate, snapshot, cancellationToken).ConfigureAwait(false);
+            if (answered is not null)
+            {
+                return answered;
+            }
+        }
+
         return response;
     }
+
+    /// <summary>Attempts the assigned model gets when another model can take over; the alternate gets the provider's full retries.</summary>
+    internal const int PrimaryAttemptsWhenAnAlternateExists = 2;
+
+    private static bool IsWorthFallingBack(AiResponse response) =>
+        !response.IsSuccess &&
+        response.FailureKind is AiFailureKind.RateLimited
+            or AiFailureKind.TransientServiceUnavailable
+            or AiFailureKind.TimeoutOrConnection;
+
+    /// <summary>
+    /// The model that takes over when the assigned one is rate limited or unavailable: the default model, otherwise the
+    /// first other enabled model with a usable key. Null when there is none, and the assigned model is then retried as before.
+    /// </summary>
+    private AiModelConfig? FindAlternate(Snapshot snapshot, AiModelConfig primary)
+    {
+        foreach (var candidate in snapshot.AlternatesFor(primary.Id))
+        {
+            if (_factory.RequiresApiKey(candidate) && string.IsNullOrEmpty(snapshot.GetApiKey(candidate.Id)))
+            {
+                continue;
+            }
+
+            return candidate;
+        }
+
+        return null;
+    }
+
+    private async Task<AiResponse?> TryAlternateAsync(
+        AiRequest request,
+        AiModelConfig failed,
+        AiResponse failure,
+        AiModelConfig alternate,
+        Snapshot snapshot,
+        CancellationToken cancellationToken)
+    {
+        var provider = _factory.Create(alternate, snapshot.GetApiKey(alternate.Id));
+        if (provider is null)
+        {
+            return null;
+        }
+
+        var reason = $"{failed.Name} was {DescribeFailure(failure.FailureKind)}; {alternate.Name} answered instead.";
+        if (request.OnAttempt is { } observer)
+        {
+            try
+            {
+                await observer(new AiAttemptEvent(
+                    1, 1, "ModelFallback", 0, false,
+                    Detail: reason,
+                    Model: $"{alternate.Name} ({alternate.ModelName})")).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Telemetry only.
+            }
+        }
+
+        var routed = new AiRequest
+        {
+            Model = alternate.ModelName,
+            Stage = request.Stage,
+            SystemPrompt = request.SystemPrompt,
+            UserPrompt = request.UserPrompt,
+            MaxTokens = CapTokens(request.MaxTokens, alternate.MaxOutputTokens),
+            ReasoningEffort = request.ReasoningEffort,
+            OnAttempt = request.OnAttempt,
+        };
+
+        var response = await provider.SendAsync(routed, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccess)
+        {
+            // Both models failed: report the assigned model's own failure, which is the meaningful one.
+            failure.FallbackReason = $"{reason.Replace("answered instead", "also failed")}";
+            return failure;
+        }
+
+        response.ModelConfigId = alternate.Id;
+        response.ModelConfigName = alternate.Name;
+        response.RoutingSource = "RuntimeFallback";
+        response.FallbackReason = reason;
+        return response;
+    }
+
+    private static string DescribeFailure(AiFailureKind kind) => kind switch
+    {
+        AiFailureKind.RateLimited => "rate limited",
+        AiFailureKind.TimeoutOrConnection => "not answering",
+        _ => "unavailable",
+    };
 
     /// <summary>
     /// Makes the choice visible once per stage and model: which model the execution really uses and, when it is not the
@@ -280,6 +386,20 @@ internal sealed class RoutingAiProvider : IAiProvider
             return _models.Count == 1
                 ? (_models.Values.First(), "OnlyModel", reason)
                 : (null, "Legacy", reason);
+        }
+
+        /// <summary>
+        /// Other enabled models in the order they take over: the default model, then the model the user assigned to code
+        /// generation (their workhorse, so a sensible and affordable choice), then the rest by name.
+        /// </summary>
+        public IEnumerable<AiModelConfig> AlternatesFor(Guid modelId)
+        {
+            var workhorseId = _assignments.GetValueOrDefault(AiStage.CodeGeneration);
+            return _models.Values
+                .Where(m => m.Id != modelId)
+                .OrderByDescending(m => m.IsDefault)
+                .ThenByDescending(m => m.Id == workhorseId)
+                .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase);
         }
 
         public AiModelConfig? GetEnabled(Guid modelId) => _models.GetValueOrDefault(modelId);

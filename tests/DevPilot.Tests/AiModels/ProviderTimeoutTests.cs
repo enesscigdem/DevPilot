@@ -223,6 +223,50 @@ public class ProviderTimeoutTests
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
     }
 
+    private static HttpResponseMessage RateLimited() =>
+        new(System.Net.HttpStatusCode.TooManyRequests) { Content = new StringContent("{\"error\":{\"message\":\"slow down\"}}") };
+
+    [Fact]
+    public async Task ACallCanLowerTheRetriesButNeverRaiseThem()
+    {
+        var (provider, handler, _, request) = Setup(
+            (_, _) => Task.FromResult(RateLimited()),
+            total: TimeSpan.FromSeconds(30),
+            idle: TimeSpan.FromSeconds(30),
+            maxAttempts: 4);
+
+        request.MaxAttempts = 2;
+        var lowered = await provider.SendAsync(request);
+
+        lowered.FailureKind.Should().Be(AiFailureKind.RateLimited);
+        handler.Calls.Should().Be(2, "the call asked for two attempts, not the provider's four");
+
+        var (provider2, handler2, _, request2) = Setup(
+            (_, _) => Task.FromResult(RateLimited()),
+            total: TimeSpan.FromSeconds(30),
+            idle: TimeSpan.FromSeconds(30),
+            maxAttempts: 3);
+
+        request2.MaxAttempts = 50;
+        await provider2.SendAsync(request2);
+
+        handler2.Calls.Should().Be(3, "a call can only lower the provider's limit");
+    }
+
+    [Fact]
+    public async Task WithoutACallLimit_TheProviderUsesItsOwnRetries()
+    {
+        var (provider, handler, _, request) = Setup(
+            (_, _) => Task.FromResult(RateLimited()),
+            total: TimeSpan.FromSeconds(30),
+            idle: TimeSpan.FromSeconds(30),
+            maxAttempts: 3);
+
+        await provider.SendAsync(request);
+
+        handler.Calls.Should().Be(3);
+    }
+
     private sealed class ScriptedHandler : HttpMessageHandler
     {
         private readonly Func<int, CancellationToken, Task<HttpResponseMessage>> _script;

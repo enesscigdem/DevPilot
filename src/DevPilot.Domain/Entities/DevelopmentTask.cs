@@ -20,6 +20,17 @@ public class DevelopmentTask
 
     public DevelopmentTaskStatus Status { get; set; }
 
+    /// <summary>Tracker the task was imported from (for example "Jira"); null for tasks created in DevPilot.</summary>
+    public string? ExternalSource { get; set; }
+
+    /// <summary>Issue key in that tracker, for example ARF-123. Unique per workspace so an issue is never imported twice.</summary>
+    public string? ExternalKey { get; set; }
+
+    public string? ExternalUrl { get; set; }
+
+    /// <summary>Connection used to report progress back to the issue. Null when the connection was removed.</summary>
+    public Guid? ExternalConnectionId { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime UpdatedAt { get; set; }

@@ -49,6 +49,7 @@ public sealed class EfAutomationPolicyStore : IAutomationPolicyStore
         existing.MaxParallelExecutions = policy.MaxParallelExecutions;
         existing.ProtectedPaths = policy.ProtectedPaths;
         existing.RequireGreenCiForMerge = policy.RequireGreenCiForMerge;
+        existing.ConflictMode = policy.ConflictMode;
         existing.UpdatedAt = now;
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -79,6 +80,8 @@ public sealed class EfAutomationWorkReader : IAutomationWorkReader
         await _db.DevelopmentTasks
             .AsNoTracking()
             .Where(t => t.RepositoryWorkspaceId == repositoryWorkspaceId && t.CreatedAt >= since)
+            // A goal decides when its own tasks start (see GoalOrchestrator), so they are never started here.
+            .Where(t => !_db.GoalTasks.Any(g => g.DevelopmentTaskId == t.Id))
             .Where(t => t.Status == DevelopmentTaskStatus.AwaitingApproval
                 || (t.Status == DevelopmentTaskStatus.Approved
                     && !_db.TaskExecutions.Any(e => e.DevelopmentTaskId == t.Id)))
@@ -93,7 +96,10 @@ public sealed class EfAutomationWorkReader : IAutomationWorkReader
                 && (e.Status == TaskExecutionStatus.Pending || e.Status == TaskExecutionStatus.Running),
             cancellationToken);
 
-    public async Task<IReadOnlyList<Guid>> GetDeliverableExecutionIdsAsync(
+    public Task<int> CountExecutionsForTaskAsync(Guid taskId, CancellationToken cancellationToken = default) =>
+        _db.TaskExecutions.CountAsync(e => e.DevelopmentTaskId == taskId, cancellationToken);
+
+    public async Task<IReadOnlyList<Guid>> GetRetryableFailedExecutionIdsAsync(
         Guid repositoryWorkspaceId,
         DateTime since,
         CancellationToken cancellationToken = default) =>
@@ -101,30 +107,65 @@ public sealed class EfAutomationWorkReader : IAutomationWorkReader
             .AsNoTracking()
             .Where(e => e.DevelopmentTask.RepositoryWorkspaceId == repositoryWorkspaceId
                 && e.CreatedAt >= since
-                && e.Status == TaskExecutionStatus.Completed
-                && e.ReviewStatus != ExecutionReviewStatus.Rejected
-                && e.PullRequestStatus == ExecutionPullRequestStatus.None
-                && e.CommitStatus != ExecutionCommitStatus.Failed
-                && e.PushStatus != ExecutionPushStatus.Failed
-                && e.CommitStatus != ExecutionCommitStatus.InProgress
-                && e.PushStatus != ExecutionPushStatus.InProgress)
+                && e.Status == TaskExecutionStatus.Failed
+                && e.DevelopmentTask.Status == DevelopmentTaskStatus.Failed
+                // Only the newest run of the task, and only while it still has an automatic retry left.
+                && !_db.TaskExecutions.Any(newer => newer.DevelopmentTaskId == e.DevelopmentTaskId
+                    && newer.CreatedAt > e.CreatedAt)
+                && _db.TaskExecutions.Count(any => any.DevelopmentTaskId == e.DevelopmentTaskId) < AutomationRetryRules.MaxExecutionsPerTask)
             .OrderBy(e => e.CreatedAt)
             .Select(e => e.Id)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-    public async Task<IReadOnlyList<Guid>> GetOpenPullRequestExecutionIdsAsync(
+    public async Task<IReadOnlyList<Guid>> GetDeliverableExecutionIdsAsync(
         Guid repositoryWorkspaceId,
         DateTime since,
-        CancellationToken cancellationToken = default) =>
-        await _db.TaskExecutions
+        CancellationToken cancellationToken = default)
+    {
+        // A commit or push that claimed its lease and never released it (the process died in between) is picked up
+        // again once the lease is stale; the step's own crash recovery then finishes the bookkeeping.
+        var staleBefore = DateTime.UtcNow - AutomationDeliveryRules.StaleLeaseAfter;
+
+        return await _db.TaskExecutions
             .AsNoTracking()
             .Where(e => e.DevelopmentTask.RepositoryWorkspaceId == repositoryWorkspaceId
                 && e.CreatedAt >= since
-                && e.PullRequestStatus == ExecutionPullRequestStatus.Open
-                && e.MergeStatus == ExecutionMergeStatus.None)
+                && e.Status == TaskExecutionStatus.Completed
+                && e.ReviewStatus != ExecutionReviewStatus.Rejected
+                && (e.PullRequestStatus == ExecutionPullRequestStatus.None
+                    || (e.PullRequestStatus == ExecutionPullRequestStatus.InProgress && e.PullRequestClaimedAt < staleBefore))
+                && e.CommitStatus != ExecutionCommitStatus.Failed
+                && e.PushStatus != ExecutionPushStatus.Failed
+                && (e.CommitStatus != ExecutionCommitStatus.InProgress
+                    || e.CommitClaimedAt < staleBefore)
+                && (e.PushStatus != ExecutionPushStatus.InProgress
+                    || e.PushClaimedAt < staleBefore))
             .OrderBy(e => e.CreatedAt)
             .Select(e => e.Id)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<Guid>> GetOpenPullRequestExecutionIdsAsync(
+        Guid repositoryWorkspaceId,
+        DateTime since,
+        CancellationToken cancellationToken = default)
+    {
+        // A merge that claimed its lease and never finished (a refusal the old client read as a transport problem, or a
+        // process that died) is retried once the lease is stale; the merge command first checks what the host says.
+        var staleBefore = DateTime.UtcNow - AutomationDeliveryRules.StaleLeaseAfter;
+
+        return await _db.TaskExecutions
+            .AsNoTracking()
+            .Where(e => e.DevelopmentTask.RepositoryWorkspaceId == repositoryWorkspaceId
+                && e.CreatedAt >= since
+                && e.PullRequestStatus == ExecutionPullRequestStatus.Open
+                && (e.MergeStatus == ExecutionMergeStatus.None
+                    || (e.MergeStatus == ExecutionMergeStatus.InProgress && e.MergeClaimedAt < staleBefore)))
+            .OrderBy(e => e.CreatedAt)
+            .Select(e => e.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
 }

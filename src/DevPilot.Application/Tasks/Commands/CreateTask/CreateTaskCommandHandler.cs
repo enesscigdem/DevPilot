@@ -68,6 +68,10 @@ public sealed class CreateTaskCommandHandler : ICreateTaskCommandHandler
             AcceptanceCriteria = dto.AcceptanceCriteria?.Trim(),
             Priority = dto.Priority,
             Status = DevelopmentTaskStatus.Draft,
+            ExternalSource = string.IsNullOrWhiteSpace(dto.ExternalKey) ? null : dto.ExternalSource?.Trim(),
+            ExternalKey = string.IsNullOrWhiteSpace(dto.ExternalKey) ? null : dto.ExternalKey.Trim(),
+            ExternalUrl = string.IsNullOrWhiteSpace(dto.ExternalKey) ? null : dto.ExternalUrl?.Trim(),
+            ExternalConnectionId = string.IsNullOrWhiteSpace(dto.ExternalKey) ? null : dto.ExternalConnectionId,
             CreatedAt = now,
             UpdatedAt = now,
         };
@@ -130,6 +134,9 @@ public sealed class CreateTaskCommandHandler : ICreateTaskCommandHandler
             AcceptanceCriteria = task.AcceptanceCriteria,
             Priority = task.Priority,
             Status = task.Status,
+            ExternalSource = task.ExternalSource,
+            ExternalKey = task.ExternalKey,
+            ExternalUrl = task.ExternalUrl,
             CreatedAt = task.CreatedAt,
             UpdatedAt = task.UpdatedAt,
         };
