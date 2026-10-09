@@ -765,7 +765,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
             if (hadDelivery && exec.LastChangeRequestAt != null && !string.IsNullOrWhiteSpace(exec.WorkspacePath))
             {
                 var restored = await _dbContext.TaskExecutions
-                    .Where(e => e.Id == exec.Id && e.Status == TaskExecutionStatus.Running)
+                    .Where(e => e.Id == exec.Id && e.Status == TaskExecutionStatus.Running &&
+                                e.LeaseToken == exec.LeaseToken && e.LeaseExpiresAt == exec.LeaseExpiresAt)
                     .ExecuteUpdateAsync(
                         setters => setters
                             .SetProperty(e => e.Status, TaskExecutionStatus.Completed)
@@ -788,7 +789,8 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
             }
 
             var affected = await _dbContext.TaskExecutions
-                .Where(e => e.Id == exec.Id && e.Status == TaskExecutionStatus.Running)
+                .Where(e => e.Id == exec.Id && e.Status == TaskExecutionStatus.Running &&
+                            e.LeaseToken == exec.LeaseToken && e.LeaseExpiresAt == exec.LeaseExpiresAt)
                 .ExecuteUpdateAsync(
                     setters => setters
                         .SetProperty(e => e.Status, TaskExecutionStatus.Failed)
@@ -800,8 +802,10 @@ public sealed class EfExecutionRepository : IExecutionRepository, IExecutionVeri
 
             if (affected > 0)
             {
+                // Only when no newer attempt exists: a retry started meanwhile owns the task's status now.
                 await _dbContext.DevelopmentTasks
-                    .Where(t => t.Id == exec.DevelopmentTaskId)
+                    .Where(t => t.Id == exec.DevelopmentTaskId &&
+                                !_dbContext.TaskExecutions.Any(x => x.DevelopmentTaskId == t.Id && x.CreatedAt > exec.CreatedAt))
                     .ExecuteUpdateAsync(
                         setters => setters
                             .SetProperty(t => t.Status, DevelopmentTaskStatus.Failed)
