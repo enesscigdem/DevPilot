@@ -80,6 +80,7 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
     private readonly IExecutionActivityRepository _activityRepository;
     private readonly IOptions<MergePolicyOptions> _mergePolicyOptions;
     private readonly Trackers.ITaskExternalNotifier? _externalNotifier;
+    private readonly IRepositoryTargetContext? _targetContext;
     private readonly ILogger<MergeExecutionCommandHandler> _logger;
 
     public MergeExecutionCommandHandler(
@@ -90,7 +91,8 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
         IExecutionActivityRepository activityRepository,
         IOptions<MergePolicyOptions> mergePolicyOptions,
         ILogger<MergeExecutionCommandHandler> logger,
-        Trackers.ITaskExternalNotifier? externalNotifier = null)
+        Trackers.ITaskExternalNotifier? externalNotifier = null,
+        IRepositoryTargetContext? targetContext = null)
     {
         _executionRepository = executionRepository;
         _githubClient = githubClient;
@@ -100,6 +102,7 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
         _mergePolicyOptions = mergePolicyOptions;
         _logger = logger;
         _externalNotifier = externalNotifier;
+        _targetContext = targetContext;
     }
 
     public async Task<MergeExecutionResult> HandleAsync(
@@ -163,6 +166,10 @@ public sealed class MergeExecutionCommandHandler : IMergeExecutionCommandHandler
 
         var repoOwner = execution.DevelopmentTask?.RepositoryWorkspace?.Owner ?? string.Empty;
         var repoName = execution.DevelopmentTask?.RepositoryWorkspace?.Repository ?? string.Empty;
+        if (execution.DevelopmentTask?.RepositoryWorkspace is { } targetWorkspace)
+        {
+            _targetContext?.Use(targetWorkspace.Id);
+        }
         var prNumber = execution.PullRequestNumber!.Value;
 
         // 5. Authoritative Live Preflight (Bypass freshness cache)

@@ -137,6 +137,7 @@ public static class DependencyInjection
         services.AddScoped<IExecutionVerificationSnapshotRecorder, ExecutionVerificationSnapshotRecorder>();
         services.AddScoped<IExecutionProcessor, GitWorkspaceExecutionProcessor>();
         services.AddScoped<IExecutionDispatcher, HangfireExecutionDispatcher>();
+        services.AddScoped<IRepositoryTargetContext, RepositoryTargetContext>();
         services.AddScoped<IExecutionRevisionDispatcher, HangfireExecutionDispatcher>();
         services.AddScoped<IWorktreeEditApplier, WorktreeEditApplier>();
         services.AddScoped<IDeveloperAgent, DevPilot.Infrastructure.DeveloperAgent.DeveloperAgent>();

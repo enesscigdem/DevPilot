@@ -15,19 +15,22 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
     private readonly GitLabPullRequestClient _gitlab;
     private readonly AzureDevOpsPullRequestClient _azure;
     private readonly BitbucketPullRequestClient _bitbucket;
+    private readonly IRepositoryTargetContext? _targetContext;
 
     public RoutingPullRequestClient(
         DevPilotDbContext dbContext,
         GitHubPullRequestClient github,
         GitLabPullRequestClient gitlab,
         AzureDevOpsPullRequestClient azure,
-        BitbucketPullRequestClient bitbucket)
+        BitbucketPullRequestClient bitbucket,
+        IRepositoryTargetContext? targetContext = null)
     {
         _dbContext = dbContext;
         _github = github;
         _gitlab = gitlab;
         _azure = azure;
         _bitbucket = bitbucket;
+        _targetContext = targetContext;
     }
 
     public async Task<GitHubPullRequestClientResult<GitHubPullRequestDto>> CreatePullRequestAsync(
@@ -107,6 +110,21 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
     /// </summary>
     private async Task<(IGitHubPullRequestClient? Client, string Error)> PickAsync(string owner, string repository, CancellationToken cancellationToken)
     {
+        // The caller said which workspace this is for: that workspace, if it really is this repository, decides the host.
+        if (_targetContext?.WorkspaceId is { } workspaceId)
+        {
+            var chosen = await _dbContext.RepositoryWorkspaces
+                .AsNoTracking()
+                .Where(w => w.Id == workspaceId && w.Owner == owner && w.Repository == repository)
+                .Select(w => (GitProviderKind?)w.Provider)
+                .FirstOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (chosen is { } provider)
+            {
+                return (ClientFor(provider), NoPullRequestApi);
+            }
+        }
+
         var targets = await _dbContext.RepositoryWorkspaces
             .AsNoTracking()
             .Where(w => w.Owner == owner && w.Repository == repository)
@@ -120,16 +138,16 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
             return (null, $"{owner}/{repository} is connected on more than one git host, so the pull request target is ambiguous.");
         }
 
-        var provider = targets.Count == 1 ? targets[0].Provider : GitProviderKind.GitHub;
-        IGitHubPullRequestClient? client = provider switch
-        {
-            GitProviderKind.GitLab => _gitlab,
-            GitProviderKind.AzureDevOps => _azure,
-            GitProviderKind.Bitbucket => _bitbucket,
-            GitProviderKind.Generic => null,
-            _ => _github,
-        };
-
-        return (client, NoPullRequestApi);
+        var onlyProvider = targets.Count == 1 ? targets[0].Provider : GitProviderKind.GitHub;
+        return (ClientFor(onlyProvider), NoPullRequestApi);
     }
+
+    private IGitHubPullRequestClient? ClientFor(GitProviderKind provider) => provider switch
+    {
+        GitProviderKind.GitLab => _gitlab,
+        GitProviderKind.AzureDevOps => _azure,
+        GitProviderKind.Bitbucket => _bitbucket,
+        GitProviderKind.Generic => null,
+        _ => _github,
+    };
 }
