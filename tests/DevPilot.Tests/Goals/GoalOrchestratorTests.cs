@@ -563,6 +563,32 @@ public class StartGoalCommandHandlerTests
     private static StartGoalCommand Command(params GoalTaskInput[] tasks) =>
         new(Workspace, "make the notes better", "ai", tasks, 100, 20, 0.5m);
 
+
+    [Fact]
+    public async Task Goal_and_tasks_are_saved_in_one_transaction_that_commits_only_on_success()
+    {
+        var store = new CapturingStore();
+        var handler = new StartGoalCommandHandler(new CountingCreate(), store, new StubPolicyStore(), NullLogger<StartGoalCommandHandler>.Instance);
+
+        var result = await handler.HandleAsync(Command(Input("t1"), Input("t2")));
+
+        result.Success.Should().BeTrue();
+        store.Committed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_task_that_cannot_be_created_rolls_everything_back_and_saves_no_goal()
+    {
+        var store = new CapturingStore();
+        var create = new CountingCreate { Error = "boom" };
+        var handler = new StartGoalCommandHandler(create, store, new StubPolicyStore(), NullLogger<StartGoalCommandHandler>.Instance);
+
+        var result = await handler.HandleAsync(Command(Input("t1"), Input("t2")));
+
+        result.Success.Should().BeFalse();
+        store.Committed.Should().BeFalse();
+        store.Added.Should().BeEmpty();
+    }
     [Fact]
     public async Task Creates_the_tasks_and_records_what_each_one_waits_for()
     {
@@ -637,6 +663,16 @@ public class StartGoalCommandHandlerTests
     private sealed class CapturingStore : IGoalStore
     {
         public List<Goal> Added { get; } = new();
+
+        /// <summary>What the last transaction decided: true committed, false rolled back, null never opened.</summary>
+        public bool? Committed { get; private set; }
+
+        public async Task<T> InTransactionAsync<T>(Func<Task<T>> work, Func<T, bool> shouldCommit, CancellationToken cancellationToken = default)
+        {
+            var result = await work();
+            Committed = shouldCommit(result);
+            return result;
+        }
 
         public Task AddAsync(Goal goal, CancellationToken cancellationToken = default)
         {

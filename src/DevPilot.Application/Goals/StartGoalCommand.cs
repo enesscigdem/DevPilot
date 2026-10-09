@@ -114,54 +114,61 @@ public sealed class StartGoalCommandHandler : IStartGoalCommandHandler
             UpdatedAt = now
         };
 
-        for (var i = 0; i < plan.Count; i++)
-        {
-            var task = plan[i];
-            var created = await _createTask
-                .HandleAsync(
-                    new CreateTaskCommand(new CreateTaskDto
-                    {
-                        RepositoryWorkspaceId = command.RepositoryWorkspaceId,
-                        Title = task.Title,
-                        Description = task.Description,
-                        Priority = DevelopmentTaskPriority.Medium
-                    }),
-                    cancellationToken)
-                .ConfigureAwait(false);
-
-            if (!created.Success || created.Task is null)
+        // Tasks and goal are saved together: a failure part-way must not leave tasks behind that belong to no goal.
+        return await _store.InTransactionAsync(
+            async () =>
             {
-                return new StartGoalResult
+                for (var i = 0; i < plan.Count; i++)
                 {
-                    NotFound = created.ErrorMessage == "Repository workspace not found.",
-                    ErrorMessage = created.ErrorMessage ?? "A task could not be created."
-                };
-            }
+                    var task = plan[i];
+                    var created = await _createTask
+                        .HandleAsync(
+                            new CreateTaskCommand(new CreateTaskDto
+                            {
+                                RepositoryWorkspaceId = command.RepositoryWorkspaceId,
+                                Title = task.Title,
+                                Description = task.Description,
+                                Priority = DevelopmentTaskPriority.Medium
+                            }),
+                            cancellationToken)
+                        .ConfigureAwait(false);
 
-            // A task waits for what it depends on and for every earlier task expected to change the same code.
-            var blockers = task.DependsOn
-                .Concat(conflicts.Where(c => c.SecondKey == task.Key).Select(c => c.FirstKey))
-                .Distinct()
-                .ToList();
+                    if (!created.Success || created.Task is null)
+                    {
+                        return new StartGoalResult
+                        {
+                            NotFound = created.ErrorMessage == "Repository workspace not found.",
+                            ErrorMessage = created.ErrorMessage ?? "A task could not be created."
+                        };
+                    }
 
-            goal.Tasks.Add(new GoalTask
-            {
-                Id = Guid.NewGuid(),
-                GoalId = goal.Id,
-                DevelopmentTaskId = created.Task.Id,
-                Key = task.Key,
-                Position = i,
-                Wave = waveOf[task.Key],
-                Size = task.Size,
-                Areas = string.Join('\n', task.Areas),
-                DependsOn = string.Join(',', task.DependsOn),
-                BlockedBy = string.Join(',', blockers)
-            });
-        }
+                    // A task waits for what it depends on and for every earlier task expected to change the same code.
+                    var blockers = task.DependsOn
+                        .Concat(conflicts.Where(c => c.SecondKey == task.Key).Select(c => c.FirstKey))
+                        .Distinct()
+                        .ToList();
 
-        await _store.AddAsync(goal, cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation("Started goal {GoalId} with {Count} task(s) in workspace {WorkspaceId}.", goal.Id, plan.Count, goal.RepositoryWorkspaceId);
-        return new StartGoalResult { Success = true, GoalId = goal.Id };
+                    goal.Tasks.Add(new GoalTask
+                    {
+                        Id = Guid.NewGuid(),
+                        GoalId = goal.Id,
+                        DevelopmentTaskId = created.Task.Id,
+                        Key = task.Key,
+                        Position = i,
+                        Wave = waveOf[task.Key],
+                        Size = task.Size,
+                        Areas = string.Join('\n', task.Areas),
+                        DependsOn = string.Join(',', task.DependsOn),
+                        BlockedBy = string.Join(',', blockers)
+                    });
+                }
+
+                await _store.AddAsync(goal, cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation("Started goal {GoalId} with {Count} task(s) in workspace {WorkspaceId}.", goal.Id, plan.Count, goal.RepositoryWorkspaceId);
+                return new StartGoalResult { Success = true, GoalId = goal.Id };
+            },
+            result => result.Success,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private static string? Validate(StartGoalCommand command)
