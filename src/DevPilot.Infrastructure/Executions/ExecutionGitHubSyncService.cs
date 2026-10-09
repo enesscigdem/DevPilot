@@ -9,14 +9,17 @@ namespace DevPilot.Infrastructure.Executions;
 public sealed class ExecutionGitHubSyncService : IExecutionGitHubSyncService
 {
     private readonly IGitHubPullRequestClient _githubClient;
+    private readonly IRepositoryTargetContext? _targetContext;
     private readonly ILogger<ExecutionGitHubSyncService> _logger;
 
     public ExecutionGitHubSyncService(
         IGitHubPullRequestClient githubClient,
-        ILogger<ExecutionGitHubSyncService> logger)
+        ILogger<ExecutionGitHubSyncService> logger,
+        IRepositoryTargetContext? targetContext = null)
     {
         _githubClient = githubClient;
         _logger = logger;
+        _targetContext = targetContext;
     }
 
     public async Task<GitHubSyncResultDto> SyncPullRequestAndCiAsync(
@@ -26,6 +29,10 @@ public sealed class ExecutionGitHubSyncService : IExecutionGitHubSyncService
     {
         var repoOwner = execution.DevelopmentTask?.RepositoryWorkspace?.Owner ?? string.Empty;
         var repoName = execution.DevelopmentTask?.RepositoryWorkspace?.Repository ?? string.Empty;
+        if (execution.DevelopmentTask?.RepositoryWorkspace is { } targetWorkspace)
+        {
+            _targetContext?.Use(targetWorkspace.Id);
+        }
         var expectedBaseBranch = execution.PullRequestBaseBranch ?? execution.DevelopmentTask?.RepositoryWorkspace?.Branch ?? string.Empty;
         var expectedHeadBranch = execution.RemoteBranchName ?? execution.BranchName ?? string.Empty;
         var expectedHeadSha = execution.RemoteCommitSha ?? execution.CommitSha ?? string.Empty;

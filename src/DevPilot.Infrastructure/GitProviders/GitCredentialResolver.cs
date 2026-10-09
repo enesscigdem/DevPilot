@@ -1,3 +1,4 @@
+using DevPilot.Application.Executions.Ports;
 using DevPilot.Application.GitProviders;
 using DevPilot.Domain.Entities;
 using DevPilot.Domain.Enums;
@@ -48,15 +49,18 @@ public sealed class GitCredentialResolver : IGitCredentialResolver
     private readonly IGitHubAppTokenService _githubTokens;
     private readonly IGitSecretProtector _protector;
     private readonly DevPilotDbContext _dbContext;
+    private readonly IRepositoryTargetContext? _targetContext;
 
     public GitCredentialResolver(
         IGitHubAppTokenService githubTokens,
         IGitSecretProtector protector,
-        DevPilotDbContext dbContext)
+        DevPilotDbContext dbContext,
+        IRepositoryTargetContext? targetContext = null)
     {
         _githubTokens = githubTokens;
         _protector = protector;
         _dbContext = dbContext;
+        _targetContext = targetContext;
     }
 
     public async Task<GitCredentialResult> ResolveAsync(
@@ -124,6 +128,19 @@ public sealed class GitCredentialResolver : IGitCredentialResolver
         string repository,
         CancellationToken cancellationToken = default)
     {
+        // The caller said which workspace this is for: that workspace, if it really is this repository, decides the host.
+        if (_targetContext?.WorkspaceId is { } workspaceId)
+        {
+            var chosen = await _dbContext.RepositoryWorkspaces
+                .AsNoTracking()
+                .FirstOrDefaultAsync(w => w.Id == workspaceId && w.Owner == owner && w.Repository == repository, cancellationToken)
+                .ConfigureAwait(false);
+            if (chosen is not null)
+            {
+                return await ResolveForWorkspaceAsync(chosen, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         // Only owner and repository are known here. The same pair on two hosts must not borrow the other host's token.
         var matches = await _dbContext.RepositoryWorkspaces
             .AsNoTracking()

@@ -20,14 +20,17 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly IGitHubPullRequestClient _githubClient;
+    private readonly IRepositoryTargetContext? _targetContext;
     private readonly ILogger<GitHubExecutionPullRequestService> _logger;
 
     public GitHubExecutionPullRequestService(
         IGitHubPullRequestClient githubClient,
-        ILogger<GitHubExecutionPullRequestService> logger)
+        ILogger<GitHubExecutionPullRequestService> logger,
+        IRepositoryTargetContext? targetContext = null)
     {
         _githubClient = githubClient;
         _logger = logger;
+        _targetContext = targetContext;
     }
 
     public async Task<ExecutionPullRequestServiceResult> CreateOrAdoptPullRequestAsync(
@@ -37,6 +40,10 @@ public sealed class GitHubExecutionPullRequestService : IExecutionGitHubPullRequ
     {
         var repoOwner = execution.DevelopmentTask?.RepositoryWorkspace?.Owner ?? string.Empty;
         var repoName = execution.DevelopmentTask?.RepositoryWorkspace?.Repository ?? string.Empty;
+        if (execution.DevelopmentTask?.RepositoryWorkspace is { } targetWorkspace)
+        {
+            _targetContext?.Use(targetWorkspace.Id);
+        }
         var baseBranch = execution.DevelopmentTask?.RepositoryWorkspace?.Branch ?? string.Empty;
 
         var headBranch = execution.RemoteBranchName ?? execution.BranchName ?? string.Empty;
