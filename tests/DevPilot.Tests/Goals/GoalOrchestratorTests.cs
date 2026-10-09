@@ -220,6 +220,35 @@ public class GoalOrchestratorTests
         _store.Notes.Should().ContainKey(stuck.GoalTaskId);
     }
 
+
+    [Fact]
+    public async Task An_approved_task_without_a_run_is_started_again_without_a_second_approval()
+    {
+        var stuck = GoalFixtures.Task("t1", DevelopmentTaskStatus.Approved);
+        _policies.Policy = Policy(AutomationLevel.SemiAuto);
+
+        await Run(stuck);
+
+        _approve.Approved.Should().BeEmpty();
+        _start.Started.Should().Equal(stuck.TaskId);
+    }
+
+    [Fact]
+    public async Task A_start_that_throws_is_retried_next_pass_and_does_not_block_other_tasks()
+    {
+        var broken = GoalFixtures.Task("t1", DevelopmentTaskStatus.AwaitingApproval, impacted: new[] { "src/a.ts" });
+        var fine = GoalFixtures.Task("t2", DevelopmentTaskStatus.AwaitingApproval, impacted: new[] { "src/b.ts" });
+        _policies.Policy = Policy(AutomationLevel.SemiAuto, parallel: 2);
+        _start.Throw.Add(broken.TaskId);
+
+        await Run(broken, fine);
+        _start.Throw.Clear();
+        await Run(broken with { TaskStatus = DevelopmentTaskStatus.Approved }, fine);
+
+        _start.Started.Should().Contain(new[] { fine.TaskId });
+        _approve.Approved.Count(id => id == broken.TaskId).Should().Be(1, "the second pass starts it without approving again");
+        _start.Started.Should().Contain(broken.TaskId);
+    }
     [Fact]
     public async Task With_automation_on_a_ready_plan_is_approved_and_started()
     {
@@ -481,9 +510,15 @@ public class GoalOrchestratorTests
     private sealed class FakeStart : IStartExecutionCommandHandler
     {
         public List<Guid> Started { get; } = new();
+public HashSet<Guid> Throw { get; } = new();
 
         public Task<StartExecutionResult> HandleAsync(StartExecutionCommand command, CancellationToken cancellationToken = default)
         {
+            if (Throw.Contains(command.TaskId))
+            {
+                throw new InvalidOperationException("transient");
+            }
+
             Started.Add(command.TaskId);
             return Task.FromResult(new StartExecutionResult { Success = true });
         }
