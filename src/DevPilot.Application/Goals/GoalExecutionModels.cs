@@ -165,6 +165,12 @@ public interface IGoalStore
     Task SetNoteAsync(Guid goalTaskId, string? note, CancellationToken cancellationToken = default);
 
     Task SetStatusAsync(Guid goalId, GoalStatus status, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Runs <paramref name="work"/> so that everything it saves is kept only if <paramref name="shouldCommit"/> accepts the
+    /// result, and is undone otherwise. The default has no transaction to offer and just runs the work.
+    /// </summary>
+    Task<T> InTransactionAsync<T>(Func<Task<T>> work, Func<T, bool> shouldCommit, CancellationToken cancellationToken = default) => work();
 }
 
 /// <summary>Runs a task's impact analysis in the background so the goal loop never waits for a model.</summary>

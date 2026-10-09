@@ -114,54 +114,61 @@ public sealed class StartGoalCommandHandler : IStartGoalCommandHandler
             UpdatedAt = now
         };
 
-        for (var i = 0; i < plan.Count; i++)
-        {
-            var task = plan[i];
-            var created = await _createTask
-                .HandleAsync(
-                    new CreateTaskCommand(new CreateTaskDto
-                    {
-                        RepositoryWorkspaceId = command.RepositoryWorkspaceId,
-                        Title = task.Title,
-                        Description = task.Description,
-                        Priority = DevelopmentTaskPriority.Medium
-                    }),
-                    cancellationToken)
-                .ConfigureAwait(false);
-
-            if (!created.Success || created.Task is null)
+        // Tasks and goal are saved together: a failure part-way must not leave tasks behind that belong to no goal.
+        return await _store.InTransactionAsync(
+            async () =>
             {
-                return new StartGoalResult
+                for (var i = 0; i < plan.Count; i++)
                 {
-                    NotFound = created.ErrorMessage == "Repository workspace not found.",
-                    ErrorMessage = created.ErrorMessage ?? "A task could not be created."
-                };
-            }
+                    var task = plan[i];
+                    var created = await _createTask
+                        .HandleAsync(
+                            new CreateTaskCommand(new CreateTaskDto
+                            {
+                                RepositoryWorkspaceId = command.RepositoryWorkspaceId,
+                                Title = task.Title,
+                                Description = task.Description,
+                                Priority = DevelopmentTaskPriority.Medium
+                            }),
+                            cancellationToken)
+                        .ConfigureAwait(false);
 
-            // A task waits for what it depends on and for every earlier task expected to change the same code.
-            var blockers = task.DependsOn
-                .Concat(conflicts.Where(c => c.SecondKey == task.Key).Select(c => c.FirstKey))
-                .Distinct()
-                .ToList();
+                    if (!created.Success || created.Task is null)
+                    {
+                        return new StartGoalResult
+                        {
+                            NotFound = created.ErrorMessage == "Repository workspace not found.",
+                            ErrorMessage = created.ErrorMessage ?? "A task could not be created."
+                        };
+                    }
 
-            goal.Tasks.Add(new GoalTask
-            {
-                Id = Guid.NewGuid(),
-                GoalId = goal.Id,
-                DevelopmentTaskId = created.Task.Id,
-                Key = task.Key,
-                Position = i,
-                Wave = waveOf[task.Key],
-                Size = task.Size,
-                Areas = string.Join('\n', task.Areas),
-                DependsOn = string.Join(',', task.DependsOn),
-                BlockedBy = string.Join(',', blockers)
-            });
-        }
+                    // A task waits for what it depends on and for every earlier task expected to change the same code.
+                    var blockers = task.DependsOn
+                        .Concat(conflicts.Where(c => c.SecondKey == task.Key).Select(c => c.FirstKey))
+                        .Distinct()
+                        .ToList();
 
-        await _store.AddAsync(goal, cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation("Started goal {GoalId} with {Count} task(s) in workspace {WorkspaceId}.", goal.Id, plan.Count, goal.RepositoryWorkspaceId);
-        return new StartGoalResult { Success = true, GoalId = goal.Id };
+                    goal.Tasks.Add(new GoalTask
+                    {
+                        Id = Guid.NewGuid(),
+                        GoalId = goal.Id,
+                        DevelopmentTaskId = created.Task.Id,
+                        Key = task.Key,
+                        Position = i,
+                        Wave = waveOf[task.Key],
+                        Size = task.Size,
+                        Areas = string.Join('\n', task.Areas),
+                        DependsOn = string.Join(',', task.DependsOn),
+                        BlockedBy = string.Join(',', blockers)
+                    });
+                }
+
+                await _store.AddAsync(goal, cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation("Started goal {GoalId} with {Count} task(s) in workspace {WorkspaceId}.", goal.Id, plan.Count, goal.RepositoryWorkspaceId);
+                return new StartGoalResult { Success = true, GoalId = goal.Id };
+            },
+            result => result.Success,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private static string? Validate(StartGoalCommand command)
@@ -198,6 +205,54 @@ public sealed class StartGoalCommandHandler : IStartGoalCommandHandler
             if ((task.Description ?? string.Empty).Length > TaskBatchParser.MaxDescriptionLength)
             {
                 return "A task description is too long.";
+            }
+        }
+
+        return ValidateDependencies(command);
+    }
+
+    /// <summary>A dependency must name another task of the same goal, and the dependencies must not wait on each other in a circle.</summary>
+    private static string? ValidateDependencies(StartGoalCommand command)
+    {
+        var dependsOn = command.Tasks.ToDictionary(
+            t => t.Key.Trim(),
+            t => (t.DependsOn ?? new List<string>()).Select(d => d.Trim()).Where(d => d.Length > 0).Distinct().ToList(),
+            StringComparer.Ordinal);
+
+        foreach (var (key, deps) in dependsOn)
+        {
+            foreach (var dep in deps)
+            {
+                if (dep == key)
+                {
+                    return $"Task '{key}' cannot depend on itself.";
+                }
+
+                if (!dependsOn.ContainsKey(dep))
+                {
+                    return $"Task '{key}' depends on '{dep}', which is not a task of this goal.";
+                }
+            }
+        }
+
+        // Repeatedly remove tasks whose dependencies are all gone; anything left waits on a circle.
+        var remaining = dependsOn.ToDictionary(kv => kv.Key, kv => kv.Value.ToHashSet(StringComparer.Ordinal), StringComparer.Ordinal);
+        while (remaining.Count > 0)
+        {
+            var ready = remaining.Where(kv => kv.Value.Count == 0).Select(kv => kv.Key).ToList();
+            if (ready.Count == 0)
+            {
+                return $"Tasks {string.Join(", ", remaining.Keys.Select(k => $"'{k}'"))} wait on each other in a circle.";
+            }
+
+            foreach (var key in ready)
+            {
+                remaining.Remove(key);
+            }
+
+            foreach (var deps in remaining.Values)
+            {
+                deps.ExceptWith(ready);
             }
         }
 

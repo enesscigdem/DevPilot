@@ -22,6 +22,7 @@ const shared = {
     approved: "Approved",
     executing: "Executing",
     merged: "Merged",
+    completed: "Run completed",
     failed: "Failed",
     rejected: "Rejected",
     unknown: "Unknown",

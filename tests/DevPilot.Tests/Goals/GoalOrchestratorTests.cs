@@ -47,10 +47,11 @@ internal static class GoalFixtures
         GoalExecutionState? run = null,
         int attempts = 0,
         DateTime? requestedAt = null,
-        string? note = null) =>
+        string? note = null,
+        string[]? dependsOn = null) =>
         new(
             Guid.NewGuid(), key, int.Parse(key[1..]), 1, "medium",
-            areas ?? Array.Empty<string>(), Array.Empty<string>(), blockedBy ?? Array.Empty<string>(),
+            areas ?? Array.Empty<string>(), dependsOn ?? Array.Empty<string>(), blockedBy ?? Array.Empty<string>(),
             attempts, requestedAt, note, Guid.NewGuid(), $"Task {key}", "desc", status, run, impacted ?? Array.Empty<string>());
 
     public static GoalState Goal(Guid workspaceId, params GoalTaskState[] tasks) =>
@@ -182,6 +183,33 @@ public class GoalOrchestratorTests
         _dispatcher.Analyzed.Should().Equal(t2.TaskId);
     }
 
+
+    [Theory]
+    [InlineData(TaskExecutionStatus.Failed)]
+    [InlineData(TaskExecutionStatus.Cancelled)]
+    public async Task A_task_that_needs_a_failed_prerequisite_waits_and_says_why(TaskExecutionStatus end)
+    {
+        var t1 = GoalFixtures.Task("t1", run: GoalFixtures.Run(end));
+        var t2 = GoalFixtures.Task("t2", blockedBy: new[] { "t1" }, dependsOn: new[] { "t1" });
+        var independent = GoalFixtures.Task("t3");
+
+        await Run(t1, t2, independent);
+
+        _dispatcher.Analyzed.Should().Equal(independent.TaskId);
+        _store.Notes[t2.GoalTaskId].Should().Contain("Task t1");
+    }
+
+    [Fact]
+    public async Task A_retried_prerequisite_that_is_merged_releases_the_task_that_needs_it()
+    {
+        var t1 = GoalFixtures.Task("t1", run: GoalFixtures.Run(TaskExecutionStatus.Completed, merge: ExecutionMergeStatus.Merged));
+        var t2 = GoalFixtures.Task("t2", blockedBy: new[] { "t1" }, dependsOn: new[] { "t1" }, note: "old");
+
+        await Run(t1, t2);
+
+        _dispatcher.Analyzed.Should().Equal(t2.TaskId);
+        _store.Notes[t2.GoalTaskId].Should().BeNull();
+    }
     [Fact]
     public async Task A_merged_task_releases_the_one_behind_it_but_an_open_pull_request_does_not()
     {
@@ -220,6 +248,35 @@ public class GoalOrchestratorTests
         _store.Notes.Should().ContainKey(stuck.GoalTaskId);
     }
 
+
+    [Fact]
+    public async Task An_approved_task_without_a_run_is_started_again_without_a_second_approval()
+    {
+        var stuck = GoalFixtures.Task("t1", DevelopmentTaskStatus.Approved);
+        _policies.Policy = Policy(AutomationLevel.SemiAuto);
+
+        await Run(stuck);
+
+        _approve.Approved.Should().BeEmpty();
+        _start.Started.Should().Equal(stuck.TaskId);
+    }
+
+    [Fact]
+    public async Task A_start_that_throws_is_retried_next_pass_and_does_not_block_other_tasks()
+    {
+        var broken = GoalFixtures.Task("t1", DevelopmentTaskStatus.AwaitingApproval, impacted: new[] { "src/a.ts" });
+        var fine = GoalFixtures.Task("t2", DevelopmentTaskStatus.AwaitingApproval, impacted: new[] { "src/b.ts" });
+        _policies.Policy = Policy(AutomationLevel.SemiAuto, parallel: 2);
+        _start.Throw.Add(broken.TaskId);
+
+        await Run(broken, fine);
+        _start.Throw.Clear();
+        await Run(broken with { TaskStatus = DevelopmentTaskStatus.Approved }, fine);
+
+        _start.Started.Should().Contain(new[] { fine.TaskId });
+        _approve.Approved.Count(id => id == broken.TaskId).Should().Be(1, "the second pass starts it without approving again");
+        _start.Started.Should().Contain(broken.TaskId);
+    }
     [Fact]
     public async Task With_automation_on_a_ready_plan_is_approved_and_started()
     {
@@ -336,14 +393,25 @@ public class GoalOrchestratorTests
     }
 
     [Fact]
-    public async Task When_every_task_has_ended_the_goal_is_completed()
+    public async Task When_every_task_is_merged_or_stopped_the_goal_is_completed()
+    {
+        await Run(
+            GoalFixtures.Task("t1", run: GoalFixtures.Run(TaskExecutionStatus.Completed, merge: ExecutionMergeStatus.Merged)),
+            GoalFixtures.Task("t2", run: GoalFixtures.Run(TaskExecutionStatus.Cancelled)));
+
+        _store.Statuses.Should().Equal(GoalStatus.Completed);
+    }
+
+    [Fact]
+    public async Task A_failed_task_keeps_the_goal_active_so_a_retry_is_still_followed()
     {
         await Run(
             GoalFixtures.Task("t1", run: GoalFixtures.Run(TaskExecutionStatus.Completed, merge: ExecutionMergeStatus.Merged)),
             GoalFixtures.Task("t2", run: GoalFixtures.Run(TaskExecutionStatus.Failed)));
 
-        _store.Statuses.Should().Equal(GoalStatus.Completed);
+        _store.Statuses.Should().BeEmpty();
     }
+
 
     [Fact]
     public async Task A_cancelled_goal_is_left_alone()
@@ -470,9 +538,15 @@ public class GoalOrchestratorTests
     private sealed class FakeStart : IStartExecutionCommandHandler
     {
         public List<Guid> Started { get; } = new();
+public HashSet<Guid> Throw { get; } = new();
 
         public Task<StartExecutionResult> HandleAsync(StartExecutionCommand command, CancellationToken cancellationToken = default)
         {
+            if (Throw.Contains(command.TaskId))
+            {
+                throw new InvalidOperationException("transient");
+            }
+
             Started.Add(command.TaskId);
             return Task.FromResult(new StartExecutionResult { Success = true });
         }
@@ -489,6 +563,32 @@ public class StartGoalCommandHandlerTests
     private static StartGoalCommand Command(params GoalTaskInput[] tasks) =>
         new(Workspace, "make the notes better", "ai", tasks, 100, 20, 0.5m);
 
+
+    [Fact]
+    public async Task Goal_and_tasks_are_saved_in_one_transaction_that_commits_only_on_success()
+    {
+        var store = new CapturingStore();
+        var handler = new StartGoalCommandHandler(new CountingCreate(), store, new StubPolicyStore(), NullLogger<StartGoalCommandHandler>.Instance);
+
+        var result = await handler.HandleAsync(Command(Input("t1"), Input("t2")));
+
+        result.Success.Should().BeTrue();
+        store.Committed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_task_that_cannot_be_created_rolls_everything_back_and_saves_no_goal()
+    {
+        var store = new CapturingStore();
+        var create = new CountingCreate { Error = "boom" };
+        var handler = new StartGoalCommandHandler(create, store, new StubPolicyStore(), NullLogger<StartGoalCommandHandler>.Instance);
+
+        var result = await handler.HandleAsync(Command(Input("t1"), Input("t2")));
+
+        result.Success.Should().BeFalse();
+        store.Committed.Should().BeFalse();
+        store.Added.Should().BeEmpty();
+    }
     [Fact]
     public async Task Creates_the_tasks_and_records_what_each_one_waits_for()
     {
@@ -563,6 +663,16 @@ public class StartGoalCommandHandlerTests
     private sealed class CapturingStore : IGoalStore
     {
         public List<Goal> Added { get; } = new();
+
+        /// <summary>What the last transaction decided: true committed, false rolled back, null never opened.</summary>
+        public bool? Committed { get; private set; }
+
+        public async Task<T> InTransactionAsync<T>(Func<Task<T>> work, Func<T, bool> shouldCommit, CancellationToken cancellationToken = default)
+        {
+            var result = await work();
+            Committed = shouldCommit(result);
+            return result;
+        }
 
         public Task AddAsync(Goal goal, CancellationToken cancellationToken = default)
         {

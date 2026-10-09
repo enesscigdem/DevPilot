@@ -18,6 +18,37 @@ public sealed class EfGoalStore : IGoalStore
         _db = db;
     }
 
+    public async Task<T> InTransactionAsync<T>(Func<Task<T>> work, Func<T, bool> shouldCommit, CancellationToken cancellationToken = default)
+    {
+        // Already inside someone's transaction: that caller decides, nothing to open here.
+        if (_db.Database.CurrentTransaction is not null)
+        {
+            return await work().ConfigureAwait(false);
+        }
+
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var result = await work().ConfigureAwait(false);
+            if (shouldCommit(result))
+            {
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                _db.ChangeTracker.Clear();
+            }
+
+            return result;
+        }
+        catch
+        {
+            _db.ChangeTracker.Clear();
+            throw;
+        }
+    }
+
     public async Task AddAsync(Goal goal, CancellationToken cancellationToken = default)
     {
         _db.Goals.Add(goal);

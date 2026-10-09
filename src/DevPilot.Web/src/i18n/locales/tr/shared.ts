@@ -24,6 +24,7 @@ const shared: Resources["shared"] = {
     approved: "Onaylandı",
     executing: "Çalışıyor",
     merged: "Birleştirildi",
+    completed: "Çalışma tamamlandı",
     failed: "Başarısız",
     rejected: "Reddedildi",
     unknown: "Bilinmiyor",

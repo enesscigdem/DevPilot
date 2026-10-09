@@ -107,7 +107,7 @@ export function TaskRow({ task }: { task: TaskListItem | ApiTask }) {
       case TaskStatus.Executing:
         statusTone = "blue"; statusLabel = i18n.t("shared.taskStatus.executing"); isExecuting = true; break;
       case TaskStatus.Completed:
-        statusTone = "green"; statusLabel = i18n.t("shared.taskStatus.merged"); break;
+        statusTone = "green"; statusLabel = i18n.t("shared.taskStatus.completed"); break;
       case TaskStatus.Failed:
         statusTone = "red"; statusLabel = i18n.t("shared.taskStatus.failed"); break;
       case TaskStatus.Rejected:

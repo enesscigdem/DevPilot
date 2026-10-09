@@ -67,6 +67,13 @@ public sealed class GoalOrchestrator : IGoalOrchestrator
 
         if (phase.Values.All(GoalPhases.IsSettled))
         {
+            // Every try has ended, but a failed task means the goal's work is not delivered. The goal stays active so the
+            // failure remains visible and a retry of that task is picked up again instead of landing on a closed goal.
+            if (phase.Values.Any(p => p == GoalPhase.Failed))
+            {
+                return;
+            }
+
             await _store.SetStatusAsync(goal.Id, GoalStatus.Completed, cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("Goal {GoalId} is complete.", goal.Id);
             return;
@@ -93,6 +100,22 @@ public sealed class GoalOrchestrator : IGoalOrchestrator
         var free = slots - phase.Values.Count(p => p == GoalPhase.Analyzing);
         foreach (var task in ordered.Where(t => phase[t.Key] == GoalPhase.Waiting))
         {
+            // Sharing code with an earlier task only means taking turns, so an ended task frees the one behind it. A real
+            // prerequisite is different: its output is what this task builds on, so a prerequisite that failed or was stopped
+            // blocks it until that task is retried and delivered.
+            var failedPrerequisite = ordered.FirstOrDefault(other =>
+                task.DependsOn.Contains(other.Key, StringComparer.Ordinal) &&
+                phase.TryGetValue(other.Key, out var otherPhase) &&
+                otherPhase is GoalPhase.Failed or GoalPhase.Stopped);
+            if (failedPrerequisite is not null)
+            {
+                await SetNoteIfChangedAsync(
+                    task,
+                    $"Needs “{failedPrerequisite.Title}”, which did not finish. Retry that task to continue.",
+                    ct).ConfigureAwait(false);
+                continue;
+            }
+
             if (!task.BlockedBy.All(key => !phase.TryGetValue(key, out var p) || GoalPhases.IsSettled(p)))
             {
                 continue;
@@ -111,6 +134,7 @@ public sealed class GoalOrchestrator : IGoalOrchestrator
 
             await _store.MarkAnalysisRequestedAsync(task.GoalTaskId, ct).ConfigureAwait(false);
             _analysis.EnqueueAnalysis(task.TaskId);
+            await SetNoteIfChangedAsync(task, null, ct).ConfigureAwait(false);
             phase[task.Key] = GoalPhase.Analyzing;
             free--;
         }
@@ -127,13 +151,14 @@ public sealed class GoalOrchestrator : IGoalOrchestrator
         var active = await _work.CountActiveExecutionsAsync(goal.RepositoryWorkspaceId, ct).ConfigureAwait(false);
         var free = slots - active;
 
-        // Files already being changed by tasks of this goal that have started and not ended.
+        // Files already being changed by tasks of this goal that have started and not ended. A queued task has no run yet, so it
+        // changes nothing and must not clash with itself or with another queued task; the ones started below join this list.
         var inFlight = ordered
-            .Where(t => GoalPhases.IsInFlight(phase[t.Key]))
+            .Where(t => GoalPhases.IsInFlight(phase[t.Key]) && phase[t.Key] != GoalPhase.Queued)
             .Select(t => (Task: t, Files: FilesOf(t)))
             .ToList();
 
-        foreach (var task in ordered.Where(t => phase[t.Key] == GoalPhase.PlanReady))
+        foreach (var task in ordered.Where(t => phase[t.Key] is GoalPhase.PlanReady or GoalPhase.Queued))
         {
             var files = FilesOf(task);
             var clash = inFlight
@@ -154,14 +179,29 @@ public sealed class GoalOrchestrator : IGoalOrchestrator
                 continue;
             }
 
-            var approved = await _approveTask.HandleAsync(new ApproveTaskCommand(task.TaskId), ct).ConfigureAwait(false);
-            if (!approved.Success)
+            // A Queued task is approved but has no run yet: an earlier start was refused or failed. It is started again, not re-approved.
+            if (phase[task.Key] == GoalPhase.PlanReady)
             {
-                await SetNoteIfChangedAsync(task, approved.ErrorMessage ?? "The plan could not be approved.", ct).ConfigureAwait(false);
+                var approved = await _approveTask.HandleAsync(new ApproveTaskCommand(task.TaskId), ct).ConfigureAwait(false);
+                if (!approved.Success)
+                {
+                    await SetNoteIfChangedAsync(task, approved.ErrorMessage ?? "The plan could not be approved.", ct).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
+            StartExecutionResult started;
+            try
+            {
+                started = await _startExecution.HandleAsync(new StartExecutionCommand(task.TaskId), ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Goal {GoalId}: starting task {TaskId} failed; it is retried on the next pass.", goal.Id, task.TaskId);
+                await SetNoteIfChangedAsync(task, "The task could not be started yet; trying again.", ct).ConfigureAwait(false);
                 continue;
             }
 
-            var started = await _startExecution.HandleAsync(new StartExecutionCommand(task.TaskId), ct).ConfigureAwait(false);
             if (!started.Success)
             {
                 await SetNoteIfChangedAsync(task, started.ErrorMessage ?? "The task could not be started.", ct).ConfigureAwait(false);
