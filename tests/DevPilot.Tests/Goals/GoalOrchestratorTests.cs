@@ -47,10 +47,11 @@ internal static class GoalFixtures
         GoalExecutionState? run = null,
         int attempts = 0,
         DateTime? requestedAt = null,
-        string? note = null) =>
+        string? note = null,
+        string[]? dependsOn = null) =>
         new(
             Guid.NewGuid(), key, int.Parse(key[1..]), 1, "medium",
-            areas ?? Array.Empty<string>(), Array.Empty<string>(), blockedBy ?? Array.Empty<string>(),
+            areas ?? Array.Empty<string>(), dependsOn ?? Array.Empty<string>(), blockedBy ?? Array.Empty<string>(),
             attempts, requestedAt, note, Guid.NewGuid(), $"Task {key}", "desc", status, run, impacted ?? Array.Empty<string>());
 
     public static GoalState Goal(Guid workspaceId, params GoalTaskState[] tasks) =>
@@ -182,6 +183,33 @@ public class GoalOrchestratorTests
         _dispatcher.Analyzed.Should().Equal(t2.TaskId);
     }
 
+
+    [Theory]
+    [InlineData(TaskExecutionStatus.Failed)]
+    [InlineData(TaskExecutionStatus.Cancelled)]
+    public async Task A_task_that_needs_a_failed_prerequisite_waits_and_says_why(TaskExecutionStatus end)
+    {
+        var t1 = GoalFixtures.Task("t1", run: GoalFixtures.Run(end));
+        var t2 = GoalFixtures.Task("t2", blockedBy: new[] { "t1" }, dependsOn: new[] { "t1" });
+        var independent = GoalFixtures.Task("t3");
+
+        await Run(t1, t2, independent);
+
+        _dispatcher.Analyzed.Should().Equal(independent.TaskId);
+        _store.Notes[t2.GoalTaskId].Should().Contain("Task t1");
+    }
+
+    [Fact]
+    public async Task A_retried_prerequisite_that_is_merged_releases_the_task_that_needs_it()
+    {
+        var t1 = GoalFixtures.Task("t1", run: GoalFixtures.Run(TaskExecutionStatus.Completed, merge: ExecutionMergeStatus.Merged));
+        var t2 = GoalFixtures.Task("t2", blockedBy: new[] { "t1" }, dependsOn: new[] { "t1" }, note: "old");
+
+        await Run(t1, t2);
+
+        _dispatcher.Analyzed.Should().Equal(t2.TaskId);
+        _store.Notes[t2.GoalTaskId].Should().BeNull();
+    }
     [Fact]
     public async Task A_merged_task_releases_the_one_behind_it_but_an_open_pull_request_does_not()
     {

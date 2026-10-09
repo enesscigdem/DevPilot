@@ -100,6 +100,22 @@ public sealed class GoalOrchestrator : IGoalOrchestrator
         var free = slots - phase.Values.Count(p => p == GoalPhase.Analyzing);
         foreach (var task in ordered.Where(t => phase[t.Key] == GoalPhase.Waiting))
         {
+            // Sharing code with an earlier task only means taking turns, so an ended task frees the one behind it. A real
+            // prerequisite is different: its output is what this task builds on, so a prerequisite that failed or was stopped
+            // blocks it until that task is retried and delivered.
+            var failedPrerequisite = ordered.FirstOrDefault(other =>
+                task.DependsOn.Contains(other.Key, StringComparer.Ordinal) &&
+                phase.TryGetValue(other.Key, out var otherPhase) &&
+                otherPhase is GoalPhase.Failed or GoalPhase.Stopped);
+            if (failedPrerequisite is not null)
+            {
+                await SetNoteIfChangedAsync(
+                    task,
+                    $"Needs “{failedPrerequisite.Title}”, which did not finish. Retry that task to continue.",
+                    ct).ConfigureAwait(false);
+                continue;
+            }
+
             if (!task.BlockedBy.All(key => !phase.TryGetValue(key, out var p) || GoalPhases.IsSettled(p)))
             {
                 continue;
@@ -118,6 +134,7 @@ public sealed class GoalOrchestrator : IGoalOrchestrator
 
             await _store.MarkAnalysisRequestedAsync(task.GoalTaskId, ct).ConfigureAwait(false);
             _analysis.EnqueueAnalysis(task.TaskId);
+            await SetNoteIfChangedAsync(task, null, ct).ConfigureAwait(false);
             phase[task.Key] = GoalPhase.Analyzing;
             free--;
         }
