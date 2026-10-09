@@ -31,6 +31,12 @@ public class DevelopmentTask
     /// <summary>Connection used to report progress back to the issue. Null when the connection was removed.</summary>
     public Guid? ExternalConnectionId { get; set; }
 
+    /// <summary>
+    /// Normalised address of the tracker site the key belongs to (empty when unknown). Together with the key it identifies the
+    /// issue, so the same key on another site is a different issue.
+    /// </summary>
+    public string ExternalOrigin { get; set; } = string.Empty;
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime UpdatedAt { get; set; }

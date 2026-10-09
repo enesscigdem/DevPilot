@@ -101,7 +101,7 @@ public sealed class TrackerConnectionsController : ControllerBase
 
         var issues = result.Data ?? Array.Empty<TrackerIssue>();
         var imported = workspaceId.HasValue && issues.Count > 0
-            ? await _tasks.FindByExternalKeysAsync(workspaceId.Value, ImportTrackerIssuesCommandHandler.JiraSource, issues.Select(i => i.Key.ToUpperInvariant()).ToList(), cancellationToken)
+            ? await _tasks.FindByExternalKeysAsync(workspaceId.Value, ImportTrackerIssuesCommandHandler.JiraSource, TrackerOrigin.Normalize(connection.BaseUrl), issues.Select(i => i.Key.ToUpperInvariant()).ToList(), cancellationToken)
             : new HashSet<string>();
 
         return Ok(issues.Select(i => TrackerIssueResponse.From(i, imported.Contains(i.Key))).ToList());

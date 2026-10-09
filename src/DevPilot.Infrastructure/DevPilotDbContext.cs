@@ -248,8 +248,9 @@ public class DevPilotDbContext : DbContext
             entity.Property(e => e.AcceptanceCriteria).HasMaxLength(4000);
             entity.Property(e => e.ExternalSource).HasMaxLength(50);
             entity.Property(e => e.ExternalKey).HasMaxLength(100);
+            entity.Property(e => e.ExternalOrigin).HasMaxLength(300).HasDefaultValue(string.Empty);
             entity.Property(e => e.ExternalUrl).HasMaxLength(500);
-            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.ExternalSource, e.ExternalKey })
+            entity.HasIndex(e => new { e.RepositoryWorkspaceId, e.ExternalSource, e.ExternalOrigin, e.ExternalKey })
                 .IsUnique()
                 .HasFilter("\"ExternalKey\" IS NOT NULL");
             entity.HasOne(e => e.RepositoryWorkspace)

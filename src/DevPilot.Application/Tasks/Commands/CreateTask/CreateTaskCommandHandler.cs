@@ -72,6 +72,7 @@ public sealed class CreateTaskCommandHandler : ICreateTaskCommandHandler
             ExternalKey = string.IsNullOrWhiteSpace(dto.ExternalKey) ? null : dto.ExternalKey.Trim(),
             ExternalUrl = string.IsNullOrWhiteSpace(dto.ExternalKey) ? null : dto.ExternalUrl?.Trim(),
             ExternalConnectionId = string.IsNullOrWhiteSpace(dto.ExternalKey) ? null : dto.ExternalConnectionId,
+            ExternalOrigin = string.IsNullOrWhiteSpace(dto.ExternalKey) ? string.Empty : (dto.ExternalOrigin ?? string.Empty).Trim(),
             CreatedAt = now,
             UpdatedAt = now,
         };
