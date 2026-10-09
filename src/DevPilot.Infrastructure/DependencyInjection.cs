@@ -173,6 +173,7 @@ public static class DependencyInjection
         services.AddSingleton<IExecutionCancellationRegistry, ExecutionCancellationRegistry>();
         services.AddSingleton<IExecutionHeartbeatService, ExecutionHeartbeatService>();
         services.AddHostedService<ExecutionStartupReconciler>();
+        services.AddHostedService<PendingExecutionWatchdog>();
         services.AddSingleton<DevPilot.Application.Automation.AutomationDecisionLedger>();
         services.AddScoped<DevPilot.Application.Goals.IGoalHistoryReader, DevPilot.Infrastructure.Goals.EfGoalHistoryReader>();
         services.AddScoped<DevPilot.Application.Goals.IGoalPlanner, DevPilot.Application.Goals.GoalPlanner>();
