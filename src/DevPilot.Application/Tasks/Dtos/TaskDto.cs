@@ -55,6 +55,8 @@ public sealed class CreateTaskDto
     public string? ExternalUrl { get; set; }
 
     public Guid? ExternalConnectionId { get; set; }
+
+    public string? ExternalOrigin { get; set; }
 }
 
 public sealed class UpdateTaskDto

@@ -16,6 +16,7 @@ public interface ITaskRepository
     Task<IReadOnlySet<string>> FindByExternalKeysAsync(
         Guid repositoryWorkspaceId,
         string externalSource,
+        string externalOrigin,
         IReadOnlyCollection<string> externalKeys,
         CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlySet<string>>(new HashSet<string>());

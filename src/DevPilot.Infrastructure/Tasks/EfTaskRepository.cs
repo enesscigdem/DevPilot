@@ -35,6 +35,7 @@ public sealed class EfTaskRepository : ITaskRepository
     public async Task<IReadOnlySet<string>> FindByExternalKeysAsync(
         Guid repositoryWorkspaceId,
         string externalSource,
+        string externalOrigin,
         IReadOnlyCollection<string> externalKeys,
         CancellationToken cancellationToken = default)
     {
@@ -42,6 +43,7 @@ public sealed class EfTaskRepository : ITaskRepository
             .AsNoTracking()
             .Where(t => t.RepositoryWorkspaceId == repositoryWorkspaceId
                 && t.ExternalSource == externalSource
+                && t.ExternalOrigin == externalOrigin
                 && t.ExternalKey != null
                 && externalKeys.Contains(t.ExternalKey))
             .Select(t => t.ExternalKey!)

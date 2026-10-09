@@ -88,7 +88,7 @@ public sealed class ImportTrackerIssuesCommandHandler : IImportTrackerIssuesComm
         }
 
         var existing = await _tasks
-            .FindByExternalKeysAsync(command.RepositoryWorkspaceId, JiraSource, keys, cancellationToken)
+            .FindByExternalKeysAsync(command.RepositoryWorkspaceId, JiraSource, TrackerOrigin.Normalize(connection.BaseUrl), keys, cancellationToken)
             .ConfigureAwait(false);
 
         var items = new List<ImportedIssueResult>(keys.Count);
@@ -132,6 +132,7 @@ public sealed class ImportTrackerIssuesCommandHandler : IImportTrackerIssuesComm
                 ExternalKey = issue.Key.ToUpperInvariant(),
                 ExternalUrl = issue.Url,
                 ExternalConnectionId = connection.Id,
+                ExternalOrigin = TrackerOrigin.Normalize(connection.BaseUrl),
             }),
             cancellationToken).ConfigureAwait(false);
 

@@ -370,6 +370,39 @@ public class ImportTrackerIssuesTests
         dto.ExternalConnectionId.Should().Be(_connections.Info.Id);
     }
 
+
+    [Fact]
+    public async Task TheSameKeyFromAnotherJiraSite_IsADifferentIssueAndIsImported()
+    {
+        _tracker.Add("APP-42", "From the second site", null, null);
+        _tasks.Existing.Add("APP-42");
+        _tasks.ExistingOrigin = "https://other-company.atlassian.net";
+
+        var result = await _handler.HandleAsync(Command("APP-42"));
+
+        result.Items.Single().Outcome.Should().Be(ImportOutcome.Imported);
+        _create.Created.Single().ExternalOrigin.Should().Be("https://acme.atlassian.net");
+    }
+
+    [Fact]
+    public async Task TheSameIssueAfterTheConnectionWasRecreated_IsStillRecognised()
+    {
+        _tracker.Add("APP-42", "Already here", null, null);
+        _tasks.Existing.Add("APP-42");
+        _connections.Info = new TrackerConnectionInfo(Guid.NewGuid(), TrackerProviderKind.Jira, "https://ACME.atlassian.net/", "me@acme.com", "new-token");
+
+        var result = await _handler.HandleAsync(Command("APP-42"));
+
+        result.Items.Single().Outcome.Should().Be(ImportOutcome.AlreadyImported);
+    }
+
+    [Theory]
+    [InlineData("https://acme.atlassian.net", "https://acme.atlassian.net")]
+    [InlineData("  https://ACME.atlassian.net/  ", "https://acme.atlassian.net")]
+    [InlineData("https://jira.company.com/jira/", "https://jira.company.com/jira")]
+    [InlineData(null, "")]
+    public void TheOriginIsTheNormalisedSiteAddress(string? baseUrl, string expected) =>
+        TrackerOrigin.Normalize(baseUrl).Should().Be(expected);
     [Fact]
     public async Task AnIssueThatIsAlreadyATask_IsSkippedAndNeverFetched()
     {
@@ -523,8 +556,14 @@ public class ImportTrackerIssuesTests
     {
         public HashSet<string> Existing { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-        public Task<IReadOnlySet<string>> FindByExternalKeysAsync(Guid repositoryWorkspaceId, string externalSource, IReadOnlyCollection<string> externalKeys, CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlySet<string>>(externalKeys.Where(Existing.Contains).ToHashSet(StringComparer.OrdinalIgnoreCase));
+        /// <summary>The site the keys in <see cref="Existing"/> were imported from.</summary>
+        public string ExistingOrigin { get; set; } = "https://acme.atlassian.net";
+
+        public Task<IReadOnlySet<string>> FindByExternalKeysAsync(Guid repositoryWorkspaceId, string externalSource, string externalOrigin, IReadOnlyCollection<string> externalKeys, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlySet<string>>(
+                externalOrigin == TrackerOrigin.Normalize(ExistingOrigin)
+                    ? externalKeys.Where(Existing.Contains).ToHashSet(StringComparer.OrdinalIgnoreCase)
+                    : new HashSet<string>());
 
         public Task AddAsync(DevelopmentTask task, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
