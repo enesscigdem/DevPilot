@@ -11,4 +11,6 @@ public sealed class UpdateTaskStatusResult
     public string? ErrorMessage { get; set; }
 
     public bool NotFound { get; set; }
+
+    public bool Conflict { get; set; }
 }
