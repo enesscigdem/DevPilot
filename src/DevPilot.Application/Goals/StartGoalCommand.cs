@@ -201,6 +201,54 @@ public sealed class StartGoalCommandHandler : IStartGoalCommandHandler
             }
         }
 
+        return ValidateDependencies(command);
+    }
+
+    /// <summary>A dependency must name another task of the same goal, and the dependencies must not wait on each other in a circle.</summary>
+    private static string? ValidateDependencies(StartGoalCommand command)
+    {
+        var dependsOn = command.Tasks.ToDictionary(
+            t => t.Key.Trim(),
+            t => (t.DependsOn ?? new List<string>()).Select(d => d.Trim()).Where(d => d.Length > 0).Distinct().ToList(),
+            StringComparer.Ordinal);
+
+        foreach (var (key, deps) in dependsOn)
+        {
+            foreach (var dep in deps)
+            {
+                if (dep == key)
+                {
+                    return $"Task '{key}' cannot depend on itself.";
+                }
+
+                if (!dependsOn.ContainsKey(dep))
+                {
+                    return $"Task '{key}' depends on '{dep}', which is not a task of this goal.";
+                }
+            }
+        }
+
+        // Repeatedly remove tasks whose dependencies are all gone; anything left waits on a circle.
+        var remaining = dependsOn.ToDictionary(kv => kv.Key, kv => kv.Value.ToHashSet(StringComparer.Ordinal), StringComparer.Ordinal);
+        while (remaining.Count > 0)
+        {
+            var ready = remaining.Where(kv => kv.Value.Count == 0).Select(kv => kv.Key).ToList();
+            if (ready.Count == 0)
+            {
+                return $"Tasks {string.Join(", ", remaining.Keys.Select(k => $"'{k}'"))} wait on each other in a circle.";
+            }
+
+            foreach (var key in ready)
+            {
+                remaining.Remove(key);
+            }
+
+            foreach (var deps in remaining.Values)
+            {
+                deps.ExceptWith(ready);
+            }
+        }
+
         return null;
     }
 

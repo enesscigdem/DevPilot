@@ -134,7 +134,7 @@ export function deriveTaskImpactLifecycle(
       statusLabel = i18n.t("shared.taskStatus.executing")
       statusTone = "blue"
     } else if (task?.status === TaskStatus.Completed) {
-      statusLabel = i18n.t("shared.taskStatus.merged")
+      statusLabel = i18n.t("shared.taskStatus.completed")
       statusTone = "green"
     } else if (task?.status === TaskStatus.Rejected) {
       statusLabel = i18n.t("shared.taskStatus.rejected")

@@ -336,14 +336,25 @@ public class GoalOrchestratorTests
     }
 
     [Fact]
-    public async Task When_every_task_has_ended_the_goal_is_completed()
+    public async Task When_every_task_is_merged_or_stopped_the_goal_is_completed()
+    {
+        await Run(
+            GoalFixtures.Task("t1", run: GoalFixtures.Run(TaskExecutionStatus.Completed, merge: ExecutionMergeStatus.Merged)),
+            GoalFixtures.Task("t2", run: GoalFixtures.Run(TaskExecutionStatus.Cancelled)));
+
+        _store.Statuses.Should().Equal(GoalStatus.Completed);
+    }
+
+    [Fact]
+    public async Task A_failed_task_keeps_the_goal_active_so_a_retry_is_still_followed()
     {
         await Run(
             GoalFixtures.Task("t1", run: GoalFixtures.Run(TaskExecutionStatus.Completed, merge: ExecutionMergeStatus.Merged)),
             GoalFixtures.Task("t2", run: GoalFixtures.Run(TaskExecutionStatus.Failed)));
 
-        _store.Statuses.Should().Equal(GoalStatus.Completed);
+        _store.Statuses.Should().BeEmpty();
     }
+
 
     [Fact]
     public async Task A_cancelled_goal_is_left_alone()

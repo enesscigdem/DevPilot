@@ -124,13 +124,20 @@ public sealed class GitCredentialResolver : IGitCredentialResolver
         string repository,
         CancellationToken cancellationToken = default)
     {
-        var workspace = await _dbContext.RepositoryWorkspaces
+        // Only owner and repository are known here. The same pair on two hosts must not borrow the other host's token.
+        var matches = await _dbContext.RepositoryWorkspaces
             .AsNoTracking()
             .Where(w => w.Owner == owner && w.Repository == repository)
             .OrderByDescending(w => w.UpdatedAt)
-            .FirstOrDefaultAsync(cancellationToken)
+            .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
+        if (matches.Select(w => (w.Provider, w.Host)).Distinct().Count() > 1)
+        {
+            return GitCredentialResult.Failure($"{owner}/{repository} is connected on more than one git host, so the credential target is ambiguous.");
+        }
+
+        var workspace = matches.FirstOrDefault();
         return workspace is null
             ? await ResolveAsync(GitProviderKind.GitHub, "github.com", owner, repository, null, cancellationToken).ConfigureAwait(false)
             : await ResolveForWorkspaceAsync(workspace, cancellationToken).ConfigureAwait(false);

@@ -67,6 +67,13 @@ public sealed class GoalOrchestrator : IGoalOrchestrator
 
         if (phase.Values.All(GoalPhases.IsSettled))
         {
+            // Every try has ended, but a failed task means the goal's work is not delivered. The goal stays active so the
+            // failure remains visible and a retry of that task is picked up again instead of landing on a closed goal.
+            if (phase.Values.Any(p => p == GoalPhase.Failed))
+            {
+                return;
+            }
+
             await _store.SetStatusAsync(goal.Id, GoalStatus.Completed, cancellationToken).ConfigureAwait(false);
             _logger.LogInformation("Goal {GoalId} is complete.", goal.Id);
             return;

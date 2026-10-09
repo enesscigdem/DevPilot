@@ -34,9 +34,9 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
         string owner, string repository, string head, string baseBranch, string title, string body,
         CancellationToken cancellationToken = default)
     {
-        var client = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        var (client, error) = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
         return client is null
-            ? GitHubPullRequestClientResult<GitHubPullRequestDto>.Failure(NoPullRequestApi, isConflict: true)
+            ? GitHubPullRequestClientResult<GitHubPullRequestDto>.Failure(error, isConflict: true)
             : await client.CreatePullRequestAsync(owner, repository, head, baseBranch, title, body, cancellationToken).ConfigureAwait(false);
     }
 
@@ -44,9 +44,9 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
         string owner, string repository, string head, string baseBranch,
         CancellationToken cancellationToken = default)
     {
-        var client = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        var (client, error) = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
         return client is null
-            ? GitHubPullRequestClientResult<IReadOnlyList<GitHubPullRequestDto>>.Failure(NoPullRequestApi, isConflict: true)
+            ? GitHubPullRequestClientResult<IReadOnlyList<GitHubPullRequestDto>>.Failure(error, isConflict: true)
             : await client.ListPullRequestsAsync(owner, repository, head, baseBranch, cancellationToken).ConfigureAwait(false);
     }
 
@@ -54,9 +54,9 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
         string owner, string repository, string branch,
         CancellationToken cancellationToken = default)
     {
-        var client = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        var (client, error) = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
         return client is null
-            ? new GitHubBranchRefResult(false, false, null, NoPullRequestApi)
+            ? new GitHubBranchRefResult(false, false, null, error)
             : await client.GetBranchHeadShaAsync(owner, repository, branch, cancellationToken).ConfigureAwait(false);
     }
 
@@ -64,9 +64,9 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
         string owner, string repository, int pullNumber,
         CancellationToken cancellationToken = default)
     {
-        var client = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        var (client, error) = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
         return client is null
-            ? GitHubPullRequestClientResult<GitHubPullRequestDto>.Failure(NoPullRequestApi, isConflict: true)
+            ? GitHubPullRequestClientResult<GitHubPullRequestDto>.Failure(error, isConflict: true)
             : await client.GetPullRequestAsync(owner, repository, pullNumber, cancellationToken).ConfigureAwait(false);
     }
 
@@ -74,9 +74,9 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
         string owner, string repository, string refSha,
         CancellationToken cancellationToken = default)
     {
-        var client = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        var (client, error) = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
         return client is null
-            ? GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>.Failure(NoPullRequestApi, isConflict: true)
+            ? GitHubPullRequestClientResult<IReadOnlyList<GitHubCheckRunDto>>.Failure(error, isConflict: true)
             : await client.ListCheckRunsForRefAsync(owner, repository, refSha, cancellationToken).ConfigureAwait(false);
     }
 
@@ -84,9 +84,9 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
         string owner, string repository, string refSha,
         CancellationToken cancellationToken = default)
     {
-        var client = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        var (client, error) = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
         return client is null
-            ? GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>.Failure(NoPullRequestApi, isConflict: true)
+            ? GitHubPullRequestClientResult<IReadOnlyList<GitHubCommitStatusDto>>.Failure(error, isConflict: true)
             : await client.ListCommitStatusesForRefAsync(owner, repository, refSha, cancellationToken).ConfigureAwait(false);
     }
 
@@ -95,23 +95,33 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
         string? commitTitle = null, string? commitMessage = null,
         CancellationToken cancellationToken = default)
     {
-        var client = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
+        var (client, error) = await PickAsync(owner, repository, cancellationToken).ConfigureAwait(false);
         return client is null
-            ? GitHubPullRequestClientResult<GitHubMergeResultDto>.Failure(NoPullRequestApi, isConflict: true)
+            ? GitHubPullRequestClientResult<GitHubMergeResultDto>.Failure(error, isConflict: true)
             : await client.MergePullRequestAsync(owner, repository, pullNumber, expectedHeadSha, commitTitle, commitMessage, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<IGitHubPullRequestClient?> PickAsync(string owner, string repository, CancellationToken cancellationToken)
+    /// <summary>
+    /// Picks the client by the workspace's provider. A call only carries owner and repository, so when the same pair is connected on
+    /// more than one host the target is ambiguous and the call is refused instead of guessing from the latest update.
+    /// </summary>
+    private async Task<(IGitHubPullRequestClient? Client, string Error)> PickAsync(string owner, string repository, CancellationToken cancellationToken)
     {
-        var provider = await _dbContext.RepositoryWorkspaces
+        var targets = await _dbContext.RepositoryWorkspaces
             .AsNoTracking()
             .Where(w => w.Owner == owner && w.Repository == repository)
-            .OrderByDescending(w => w.UpdatedAt)
-            .Select(w => (GitProviderKind?)w.Provider)
-            .FirstOrDefaultAsync(cancellationToken)
+            .Select(w => new { w.Provider, w.Host })
+            .Distinct()
+            .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        return (provider ?? GitProviderKind.GitHub) switch
+        if (targets.Count > 1)
+        {
+            return (null, $"{owner}/{repository} is connected on more than one git host, so the pull request target is ambiguous.");
+        }
+
+        var provider = targets.Count == 1 ? targets[0].Provider : GitProviderKind.GitHub;
+        IGitHubPullRequestClient? client = provider switch
         {
             GitProviderKind.GitLab => _gitlab,
             GitProviderKind.AzureDevOps => _azure,
@@ -119,5 +129,7 @@ internal sealed class RoutingPullRequestClient : IGitHubPullRequestClient
             GitProviderKind.Generic => null,
             _ => _github,
         };
+
+        return (client, NoPullRequestApi);
     }
 }
