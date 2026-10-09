@@ -1416,6 +1416,8 @@ export interface AutomationPolicy {
   maxParallelExecutions: number;
   protectedPaths: string[];
   requireGreenCiForMerge: boolean;
+  allowBuildOnlyDelivery: boolean;
+  requireVisualReview: boolean;
   conflictMode: ConflictMode;
 }
 

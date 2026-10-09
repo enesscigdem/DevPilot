@@ -15,7 +15,9 @@ public sealed record AutomationPolicyDto(
     int MaxParallelExecutions,
     IReadOnlyList<string> ProtectedPaths,
     bool RequireGreenCiForMerge,
-    string ConflictMode);
+    string ConflictMode,
+    bool AllowBuildOnlyDelivery,
+    bool RequireVisualReview);
 
 public sealed record UpdateAutomationPolicyRequest(
     AutomationLevel Level,
@@ -25,7 +27,9 @@ public sealed record UpdateAutomationPolicyRequest(
     int MaxParallelExecutions,
     IReadOnlyList<string>? ProtectedPaths,
     bool RequireGreenCiForMerge,
-    ConflictMode? ConflictMode = null);
+    ConflictMode? ConflictMode = null,
+    bool? AllowBuildOnlyDelivery = null,
+    bool? RequireVisualReview = null);
 
 [ApiController]
 [Route("api/repositoryworkspaces/{workspaceId:guid}/automation")]
@@ -96,7 +100,10 @@ public class AutomationController : ControllerBase
                 ProtectedPaths = string.Join('\n', patterns),
                 RequireGreenCiForMerge = request.RequireGreenCiForMerge,
                 // A client that does not send it must not silently switch a repository to the careful mode.
-                ConflictMode = request.ConflictMode ?? ConflictMode.Balanced
+                ConflictMode = request.ConflictMode ?? ConflictMode.Balanced,
+                // A client that does not send these must not loosen the evidence required before automatic delivery.
+                AllowBuildOnlyDelivery = request.AllowBuildOnlyDelivery ?? false,
+                RequireVisualReview = request.RequireVisualReview ?? true
             },
             cancellationToken).ConfigureAwait(false);
 
@@ -114,5 +121,7 @@ public class AutomationController : ControllerBase
             policy.MaxParallelExecutions,
             policy.ProtectedPaths.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             policy.RequireGreenCiForMerge,
-            policy.ConflictMode.ToString());
+            policy.ConflictMode.ToString(),
+            policy.AllowBuildOnlyDelivery,
+            policy.RequireVisualReview);
 }

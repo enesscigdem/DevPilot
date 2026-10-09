@@ -210,6 +210,11 @@ public class TasksController : ControllerBase
                 return NotFound(new { error = result.ErrorMessage ?? "Task not found." });
             }
 
+            if (result.Conflict)
+            {
+                return Conflict(new { error = result.ErrorMessage });
+            }
+
             return BadRequest(new { error = result.ErrorMessage });
         }
 

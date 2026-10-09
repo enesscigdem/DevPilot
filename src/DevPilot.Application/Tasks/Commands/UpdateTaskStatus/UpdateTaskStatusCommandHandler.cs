@@ -50,6 +50,16 @@ public sealed class UpdateTaskStatusCommandHandler : IUpdateTaskStatusCommandHan
             };
         }
 
+        if (!ManualStatusChangePolicy.IsAllowed(task.Status, command.Status))
+        {
+            return new UpdateTaskStatusResult
+            {
+                Success = false,
+                Conflict = true,
+                ErrorMessage = $"A task cannot be moved from {task.Status} to {command.Status} by hand.",
+            };
+        }
+
         task.Status = command.Status;
         task.UpdatedAt = DateTime.UtcNow;
 
