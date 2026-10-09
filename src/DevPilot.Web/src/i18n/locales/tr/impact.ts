@@ -56,7 +56,7 @@ const impact: Resources["impact"] = {
   viewLive: "Canlı çalıştırmayı gör",
   syncingTitle: "Çalıştırma durumu eşitleniyor…",
   readyApproval: "Onayınıza hazır",
-  approvalDesc1: "DevPilot planı şu dalda uygulayacak: ",
+  approvalDesc1: "DevPilot planı, çalışma başladığında oluşturulacak yeni bir dalda uygulayacak",
   approvalDesc2: ". Ardından derleme ve testleri çalıştırıp diff'i inceleme için size geri verecek. Siz olmadan hiçbir şey birleşmez.",
   tooManyA: "Plan ",
   tooManyB: "{{n}} dosya",
