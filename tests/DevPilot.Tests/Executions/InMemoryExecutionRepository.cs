@@ -158,7 +158,7 @@ internal class InMemoryExecutionRepository : IExecutionRepository
         }
         return Task.FromResult(false);
     }
-    public Task<int> ReconcileStaleRunningExecutionsAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
+    public virtual Task<int> ReconcileStaleRunningExecutionsAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
     {
         int count = 0;
         var now = DateTime.UtcNow;
