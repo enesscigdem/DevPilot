@@ -182,9 +182,14 @@ public class TasksController : ControllerBase
 
         if (!result.Success)
         {
-            if (result.Task is null)
+            if (result.NotFound)
             {
                 return NotFound(new { error = result.ErrorMessage ?? "Task not found." });
+            }
+
+            if (result.Conflict)
+            {
+                return Conflict(new { error = result.ErrorMessage });
             }
 
             return BadRequest(new { error = result.ErrorMessage });

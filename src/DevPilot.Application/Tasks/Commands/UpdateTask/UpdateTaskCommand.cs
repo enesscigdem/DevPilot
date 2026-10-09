@@ -11,4 +11,12 @@ public sealed class UpdateTaskResult
     public string? ErrorMessage { get; set; }
 
     public TaskDto? Task { get; set; }
+
+    public bool NotFound { get; set; }
+
+    /// <summary>The task is in a state where its text cannot be changed.</summary>
+    public bool Conflict { get; set; }
+
+    /// <summary>The change made an earlier analysis or approval void; the task has to be analysed and approved again.</summary>
+    public bool ApprovalReset { get; set; }
 }

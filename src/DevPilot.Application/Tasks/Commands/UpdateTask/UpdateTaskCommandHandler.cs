@@ -1,3 +1,4 @@
+using DevPilot.Domain.Enums;
 using DevPilot.Application.Tasks.Dtos;
 using DevPilot.Application.Tasks.Ports;
 using Microsoft.Extensions.Logging;
@@ -52,13 +53,41 @@ public sealed class UpdateTaskCommandHandler : IUpdateTaskCommandHandler
             return new UpdateTaskResult
             {
                 Success = false,
+                NotFound = true,
                 ErrorMessage = "Task not found.",
             };
         }
 
-        task.Title = dto.Title.Trim();
-        task.Description = dto.Description.Trim();
-        task.AcceptanceCriteria = dto.AcceptanceCriteria?.Trim();
+        var title = dto.Title.Trim();
+        var description = dto.Description.Trim();
+        var criteria = dto.AcceptanceCriteria?.Trim();
+        var contentChanged = title != task.Title || description != task.Description || criteria != task.AcceptanceCriteria;
+
+        // The plan and the approval were made for the text that existed then. Text that is being analysed, run or already
+        // delivered stays as it is; text that waits for approval or a run changes only by sending the task back for a new analysis.
+        var approvalReset = false;
+        if (contentChanged)
+        {
+            if (task.Status is DevelopmentTaskStatus.Analyzing or DevelopmentTaskStatus.Executing or DevelopmentTaskStatus.Completed)
+            {
+                return new UpdateTaskResult
+                {
+                    Success = false,
+                    Conflict = true,
+                    ErrorMessage = $"The text of a task in '{task.Status}' status cannot be changed.",
+                };
+            }
+
+            if (task.Status is DevelopmentTaskStatus.AwaitingApproval or DevelopmentTaskStatus.Approved or DevelopmentTaskStatus.Failed)
+            {
+                task.Status = DevelopmentTaskStatus.ReadyForAnalysis;
+                approvalReset = true;
+            }
+        }
+
+        task.Title = title;
+        task.Description = description;
+        task.AcceptanceCriteria = criteria;
         task.Priority = dto.Priority;
         task.UpdatedAt = DateTime.UtcNow;
 
@@ -77,6 +106,7 @@ public sealed class UpdateTaskCommandHandler : IUpdateTaskCommandHandler
         {
             Success = true,
             Task = MapToDto(task, workspace),
+ApprovalReset = approvalReset,
         };
     }
 
@@ -102,7 +132,7 @@ public sealed class UpdateTaskCommandHandler : IUpdateTaskCommandHandler
             return "Description must be at most 10,000 characters.";
         }
 
-        if (!Enum.IsDefined(typeof(DevPilot.Domain.Enums.DevelopmentTaskPriority), dto.Priority))
+        if (!Enum.IsDefined(typeof(DevelopmentTaskPriority), dto.Priority))
         {
             return "Invalid priority value.";
         }
