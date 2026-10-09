@@ -54,6 +54,14 @@ const automation = {
   protectedHeading: "Protected paths",
   protectedHint:
     "One pattern per line. A change touching a match is always left for you. ** matches any folder depth, * matches within one folder.",
+  requireVisual: {
+    label: "Leave interface changes for me to look at",
+    hint: "A change that needs a visual check is not delivered automatically while this is on.",
+  },
+  buildOnly: {
+    label: "Deliver changes that were only built, in repositories without tests",
+    hint: "Off by default. A passing build says little about whether the requested behavior works.",
+  },
   requireCi: {
     label: "Merge only when CI checks passed",
     hint: "A repository without any CI checks is never merged automatically while this is on.",

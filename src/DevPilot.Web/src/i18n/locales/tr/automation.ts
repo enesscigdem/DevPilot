@@ -56,6 +56,14 @@ const automation: Resources["automation"] = {
   protectedHeading: "Korumalı yollar",
   protectedHint:
     "Her satıra bir desen. Bir eşleşmeye dokunan değişiklik her zaman size bırakılır. ** her klasör derinliğini, * tek klasör içini eşler.",
+  requireVisual: {
+    label: "Arayüz değişikliklerini bana bırak",
+    hint: "Bu açıkken görsel kontrol gerektiren bir değişiklik otomatik teslim edilmez.",
+  },
+  buildOnly: {
+    label: "Testi olmayan repolarda yalnızca derlenmiş değişiklikleri teslim et",
+    hint: "Varsayılan olarak kapalı. Derlemenin geçmesi, istenen davranışın çalıştığını pek göstermez.",
+  },
   requireCi: {
     label: "Yalnızca CI kontrolleri geçtiyse merge et",
     hint: "Bu açıkken hiç CI kontrolü olmayan bir repo otomatik merge edilmez.",

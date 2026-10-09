@@ -44,6 +44,15 @@ public class AutomationPolicy
     /// <summary>When true the merge waits for passing CI checks; a repository without checks is never auto-merged.</summary>
     public bool RequireGreenCiForMerge { get; set; } = true;
 
+    /// <summary>
+    /// When true a change whose only gap is a repository without a test suite may still be delivered automatically after the build
+    /// passed. Off by default: a green build says little about whether the requested behavior works.
+    /// </summary>
+    public bool AllowBuildOnlyDelivery { get; set; }
+
+    /// <summary>When true a change that needs a visual check is left for a person instead of being delivered automatically.</summary>
+    public bool RequireVisualReview { get; set; } = true;
+
     public DateTime UpdatedAt { get; set; }
 
     public const string DefaultProtectedPaths =

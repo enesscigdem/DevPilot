@@ -55,10 +55,20 @@ public class AutomationGateTests
     }
 
     [Fact]
-    public void Sensitive_files_are_left_for_a_person_but_verified_ui_changes_are_not()
+    public void Sensitive_files_are_left_for_a_person()
     {
         Delivery(Policy(), sensitive: true).Allowed.Should().BeFalse();
-        Delivery(Policy(), visual: true).Allowed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_change_that_needs_a_visual_check_waits_for_a_person_unless_the_repository_opted_out()
+    {
+        var needs = Delivery(Policy(), visual: true);
+        needs.Allowed.Should().BeFalse();
+        needs.Summary.Should().Contain("interface");
+
+        Delivery(Policy(p => p.RequireVisualReview = false), visual: true).Allowed.Should().BeTrue();
+        Delivery(Policy(), visual: false).Allowed.Should().BeTrue();
     }
 
     [Fact]
@@ -194,13 +204,14 @@ public class AutomationGateTests
     }
 
     [Fact]
-    public void Build_only_change_in_a_repository_without_tests_is_delivered()
+    public void Build_only_change_in_a_repository_without_tests_is_delivered_only_when_the_repository_allows_it()
     {
-        var result = AutomationGate.EvaluateDelivery(
-            Policy(), ExecutionVerificationOutcome.PartiallyVerified, Verdict(buildOnly: true),
+        AutomationGateResult Evaluate(AutomationPolicy policy) => AutomationGate.EvaluateDelivery(
+            policy, ExecutionVerificationOutcome.PartiallyVerified, Verdict(buildOnly: true),
             new[] { File("src/App.tsx") }, hasSensitiveFiles: false, visualReviewRequired: false);
 
-        result.Allowed.Should().BeTrue();
+        Evaluate(Policy()).Allowed.Should().BeFalse("build-only delivery is off until a repository admin opts in");
+        Evaluate(Policy(p => p.AllowBuildOnlyDelivery = true)).Allowed.Should().BeTrue();
     }
 
     [Fact]

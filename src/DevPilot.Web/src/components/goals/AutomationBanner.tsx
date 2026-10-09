@@ -42,6 +42,8 @@ export function AutomationBanner({ workspaceId }: { workspaceId: string }) {
           maxParallelExecutions: policy.maxParallelExecutions,
           protectedPaths: policy.protectedPaths,
           requireGreenCiForMerge: policy.requireGreenCiForMerge,
+          allowBuildOnlyDelivery: policy.allowBuildOnlyDelivery,
+          requireVisualReview: policy.requireVisualReview,
           conflictMode: policy.conflictMode,
         }),
       )

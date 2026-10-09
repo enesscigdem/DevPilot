@@ -42,9 +42,11 @@ public static class AutomationGate
     {
         var reasons = new List<string>();
 
-        // A repository that has no tests cannot be "fully verified". When the build passed and that is the only gap,
+        // A repository that has no tests cannot be "fully verified". Only when the repository explicitly allows it, and the build
+        // passed and that is the only gap,
         // waiting for a person would make automation useless there; every other gate below still applies.
-        var buildOnly = outcome == ExecutionVerificationOutcome.PartiallyVerified &&
+        var buildOnly = policy.AllowBuildOnlyDelivery &&
+                        outcome == ExecutionVerificationOutcome.PartiallyVerified &&
                         verdict is { BuildOnlyNoTestSuite: true };
 
         if (!buildOnly &&
@@ -68,8 +70,10 @@ public static class AutomationGate
             reasons.Add("The change contains sensitive files.");
         }
 
-        // visualReviewRequired is informational only: a UI change that built and verified is delivered without a person.
-        _ = visualReviewRequired;
+        if (visualReviewRequired && policy.RequireVisualReview)
+        {
+            reasons.Add("The change affects the interface and needs a person to look at it.");
+        }
 
         if (changedFiles.Count == 0)
         {

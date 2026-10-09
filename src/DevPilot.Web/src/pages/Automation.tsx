@@ -19,6 +19,8 @@ interface Draft {
   maxParallelExecutions: string
   protectedPaths: string
   requireGreenCiForMerge: boolean
+  allowBuildOnlyDelivery: boolean
+  requireVisualReview: boolean
   conflictMode: ConflictMode
 }
 
@@ -31,6 +33,8 @@ function toDraft(p: AutomationPolicy): Draft {
     maxParallelExecutions: String(p.maxParallelExecutions),
     protectedPaths: p.protectedPaths.join("\n"),
     requireGreenCiForMerge: p.requireGreenCiForMerge,
+    allowBuildOnlyDelivery: p.allowBuildOnlyDelivery,
+    requireVisualReview: p.requireVisualReview,
     conflictMode: p.conflictMode,
   }
 }
@@ -56,6 +60,8 @@ function sameDraft(a: Draft, b: Draft): boolean {
     a.maxParallelExecutions === b.maxParallelExecutions &&
     patternsOf(a.protectedPaths).join("\n") === patternsOf(b.protectedPaths).join("\n") &&
     a.requireGreenCiForMerge === b.requireGreenCiForMerge &&
+    a.allowBuildOnlyDelivery === b.allowBuildOnlyDelivery &&
+    a.requireVisualReview === b.requireVisualReview &&
     a.conflictMode === b.conflictMode
   )
 }
@@ -135,6 +141,8 @@ export function Automation() {
         maxParallelExecutions: limits.parallel!,
         protectedPaths: patternsOf(draft.protectedPaths),
         requireGreenCiForMerge: draft.requireGreenCiForMerge,
+        allowBuildOnlyDelivery: draft.allowBuildOnlyDelivery,
+        requireVisualReview: draft.requireVisualReview,
         conflictMode: draft.conflictMode,
       })
       setPolicy(result)
@@ -271,6 +279,35 @@ export function Automation() {
                     </Field>
                   </div>
 
+
+                  {(draft.level === "AutoPr" || draft.level === "FullAuto") && (
+                    <div className="mt-5 space-y-3">
+                      <label className="flex cursor-pointer items-start gap-2 text-[13px] text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={draft.requireVisualReview}
+                          onChange={(e) => set("requireVisualReview", e.target.checked)}
+                          className="mt-0.5 h-4 w-4 rounded border-border-strong accent-primary"
+                        />
+                        <span>
+                          {t("automation.requireVisual.label")}
+                          <span className="mt-0.5 block text-[11.5px] text-subtle-foreground">{t("automation.requireVisual.hint")}</span>
+                        </span>
+                      </label>
+                      <label className="flex cursor-pointer items-start gap-2 text-[13px] text-foreground">
+                        <input
+                          type="checkbox"
+                          checked={draft.allowBuildOnlyDelivery}
+                          onChange={(e) => set("allowBuildOnlyDelivery", e.target.checked)}
+                          className="mt-0.5 h-4 w-4 rounded border-border-strong accent-primary"
+                        />
+                        <span>
+                          {t("automation.buildOnly.label")}
+                          <span className="mt-0.5 block text-[11.5px] text-subtle-foreground">{t("automation.buildOnly.hint")}</span>
+                        </span>
+                      </label>
+                    </div>
+                  )}
                   {draft.level === "FullAuto" && (
                     <label className="mt-5 flex cursor-pointer items-start gap-2 text-[13px] text-foreground">
                       <input

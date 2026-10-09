@@ -49,6 +49,8 @@ public sealed class EfAutomationPolicyStore : IAutomationPolicyStore
         existing.MaxParallelExecutions = policy.MaxParallelExecutions;
         existing.ProtectedPaths = policy.ProtectedPaths;
         existing.RequireGreenCiForMerge = policy.RequireGreenCiForMerge;
+        existing.AllowBuildOnlyDelivery = policy.AllowBuildOnlyDelivery;
+        existing.RequireVisualReview = policy.RequireVisualReview;
         existing.ConflictMode = policy.ConflictMode;
         existing.UpdatedAt = now;
 
