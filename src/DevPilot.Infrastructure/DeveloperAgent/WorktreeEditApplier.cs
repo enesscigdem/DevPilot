@@ -509,15 +509,19 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         }
 
         var fileName = resolvedSegments[^1];
-        if (SensitiveFileNameExact.Any(s => fileName.Equals(s, StringComparison.OrdinalIgnoreCase)) ||
-            fileName.StartsWith(".env.", StringComparison.OrdinalIgnoreCase) ||
-            SensitiveExtensions.Any(ext => fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase)))
+        if (IsSensitiveFileName(fileName))
         {
             throw new InvalidOperationException($"Access to sensitive configuration/credential file is rejected: '{relativePath}'.");
         }
 
         return string.Join('/', resolvedSegments);
     }
+
+    /// <summary>Credential and key files that neither the edit path nor the repairing model's tools may touch.</summary>
+    public static bool IsSensitiveFileName(string fileName) =>
+        SensitiveFileNameExact.Any(s => fileName.Equals(s, StringComparison.OrdinalIgnoreCase)) ||
+        fileName.StartsWith(".env.", StringComparison.OrdinalIgnoreCase) ||
+        SensitiveExtensions.Any(ext => fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase));
 
     public static string ValidateAndResolvePath(string workspacePath, string relativePath)
     {
@@ -559,59 +563,62 @@ public sealed class WorktreeEditApplier : IWorktreeEditApplier
         return canonicalTarget;
     }
 
+    /// <summary>
+    /// The real location of a path with every link on the way followed, including links in parent folders and for paths that
+    /// do not exist yet (a new file under a linked folder lands where the link points, not where it looks like).
+    /// </summary>
     public static string GetCanonicalRealPath(string path)
     {
         var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath) ?? string.Empty;
+        var segments = fullPath[root.Length..]
+            .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
 
-        if (File.Exists(fullPath) || Directory.Exists(fullPath))
+        var current = root;
+        var remaining = new Stack<string>(segments.Reverse());
+        var followed = 0;
+        while (remaining.Count > 0)
         {
-            try
+            var next = Path.Combine(current, remaining.Pop());
+
+            FileSystemInfo? info = Directory.Exists(next) ? new DirectoryInfo(next) : File.Exists(next) ? new FileInfo(next) : null;
+            FileSystemInfo? target = null;
+            if (info is not null)
             {
-                FileSystemInfo info = File.Exists(fullPath) ? new FileInfo(fullPath) : new DirectoryInfo(fullPath);
-                var target = info.ResolveLinkTarget(returnFinalTarget: true);
-                if (target != null)
+                try
                 {
-                    fullPath = target.FullName;
+                    target = info.ResolveLinkTarget(returnFinalTarget: true);
+                }
+                catch (Exception)
+                {
+                    // A link that cannot be resolved is kept as it is; the containment check that follows still applies.
                 }
             }
-            catch (Exception)
+
+            if (target is null)
             {
-                // Fall back to fullPath if link target resolution fails
+                current = next;
+                continue;
+            }
+
+            // Restart from the link's destination, which may itself sit below further links.
+            if (++followed > 40)
+            {
+                throw new InvalidOperationException($"Too many symbolic links while resolving '{path}'.");
+            }
+
+            var destination = Path.GetFullPath(target.FullName);
+            var destinationRoot = Path.GetPathRoot(destination) ?? string.Empty;
+            current = destinationRoot;
+            foreach (var segment in destination[destinationRoot.Length..]
+                         .Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries)
+                         .Reverse())
+            {
+                remaining.Push(segment);
             }
         }
 
-        // Check parent directory components for symlinks
-        var current = File.Exists(fullPath) ? Path.GetDirectoryName(fullPath) : fullPath;
-        while (!string.IsNullOrEmpty(current) && Directory.Exists(current))
-        {
-            var parent = Path.GetDirectoryName(current);
-            if (string.IsNullOrEmpty(parent) || parent == current || Path.GetPathRoot(current) == current)
-            {
-                break;
-            }
-
-            try
-            {
-                var dirInfo = new DirectoryInfo(current);
-                var target = dirInfo.ResolveLinkTarget(returnFinalTarget: true);
-                if (target != null)
-                {
-                    var relative = Path.GetRelativePath(current, fullPath);
-                    fullPath = Path.GetFullPath(Path.Combine(target.FullName, relative));
-                    current = target.FullName;
-                    parent = Path.GetDirectoryName(current);
-                }
-            }
-            catch (Exception)
-            {
-                // Ignore symlink resolution failures on individual parent directories
-            }
-
-            if (string.IsNullOrEmpty(parent) || parent == current) break;
-            current = parent;
-        }
-
-        return Path.GetFullPath(fullPath);
+        return Path.GetFullPath(current);
     }
 
     public static bool IsSubPath(string basePath, string candidatePath)

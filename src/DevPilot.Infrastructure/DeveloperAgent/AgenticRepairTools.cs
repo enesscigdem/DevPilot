@@ -189,6 +189,7 @@ public sealed class AgenticRepairTools
         }
 
         var entries = Directory.EnumerateFileSystemEntries(full)
+            .Where(path => !IsLink(path))
             .Select(path => (Name: Path.GetFileName(path), IsDir: Directory.Exists(path)))
             .Where(e => !(e.IsDir && SkippedDirectories.Contains(e.Name)))
             .OrderByDescending(e => e.IsDir).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase)
@@ -277,20 +278,27 @@ public sealed class AgenticRepairTools
                 continue;
             }
 
-            foreach (var sub in subdirectories.Where(d => !SkippedDirectories.Contains(Path.GetFileName(d))))
+            // A linked folder may lead out of the worktree, so the search never enters one.
+            foreach (var sub in subdirectories.Where(d => !SkippedDirectories.Contains(Path.GetFileName(d)) && !IsLink(d)))
             {
                 pending.Push(sub);
             }
 
             foreach (var file in files)
             {
-                if (SearchableExtensions.Contains(Path.GetExtension(file)) && new FileInfo(file).Length <= MaxSearchFileBytes)
+                if (SearchableExtensions.Contains(Path.GetExtension(file)) &&
+                    !WorktreeEditApplier.IsSensitiveFileName(Path.GetFileName(file)) &&
+                    !IsLink(file) &&
+                    new FileInfo(file).Length <= MaxSearchFileBytes)
                 {
                     yield return file;
                 }
             }
         }
     }
+
+    private static bool IsLink(string path) =>
+        (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
 
     private string EditFile(AgenticAction action)
     {
@@ -407,6 +415,21 @@ public sealed class AgenticRepairTools
         if (relative.Length == 0)
         {
             relative = ".";
+        }
+
+        // The same rules as the main edit path: no credential files, and no way out of the worktree through a link,
+        // for files that exist and for ones about to be created.
+        if (relative != ".")
+        {
+            try
+            {
+                full = WorktreeEditApplier.ValidateAndResolvePath(_root, relative);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+            {
+                error = $"ERROR: {ex.Message}";
+                return false;
+            }
         }
 
         return true;
