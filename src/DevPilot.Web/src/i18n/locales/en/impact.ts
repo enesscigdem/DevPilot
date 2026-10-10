@@ -54,7 +54,7 @@ const impact = {
   viewLive: "View live execution",
   syncingTitle: "Execution state is syncing…",
   readyApproval: "Ready for your approval",
-  approvalDesc1: "DevPilot will implement the plan on branch ",
+  approvalDesc1: "DevPilot will implement the plan on a new branch created when the run starts",
   approvalDesc2: ", run the build and tests, then hand the diff back for review. Nothing merges without you.",
   tooManyA: "Plan proposes ",
   tooManyB: "{{n}} files",

@@ -7,7 +7,6 @@ import {
   Check,
   ChevronRight,
   FileCode2,
-  GitBranch,
   Play,
   Pencil,
   Sparkles,
@@ -171,7 +170,7 @@ export function TaskImpact() {
       // 1. Fetch task details & active executions in parallel
       const [loadedTask, execs] = await Promise.all([
         getTask(id),
-        getExecutions(activeWorkspaceId).catch(() => []),
+        getExecutions(activeWorkspaceId),
       ])
       setTask(loadedTask)
 
@@ -183,13 +182,9 @@ export function TaskImpact() {
       )
       setActiveExecution(active ?? null)
 
-      // 2. Fetch impact analysis (404 means no analysis yet)
-      try {
-        const loadedAnalysis = await getTaskImpactAnalysis(id)
-        setAnalysis(loadedAnalysis)
-      } catch {
-        setAnalysis(null)
-      }
+      // 2. Fetch impact analysis. Only a 404 means "no analysis yet" (the api returns null for it); any other
+      //    failure is shown as an error rather than passing for an empty state.
+      setAnalysis(await getTaskImpactAnalysis(id))
     } catch (err) {
       setError(err instanceof Error ? err.message : t("impact.errNotFound"))
     } finally {
@@ -242,15 +237,18 @@ export function TaskImpact() {
       try {
         const [updatedTask, execs] = await Promise.all([
           getTask(id).catch(() => null),
-          getExecutions(activeWorkspaceId).catch(() => []),
+          getExecutions(activeWorkspaceId).catch(() => null),
         ])
         if (updatedTask) setTask(updatedTask)
-        const active = execs.find(
-          (e) =>
-            e.developmentTaskId === id &&
-            (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running),
-        )
-        setActiveExecution(active ?? null)
+        // A failed fetch keeps what is shown; it must not read as "the execution ended".
+        if (execs) {
+          const active = execs.find(
+            (e) =>
+              e.developmentTaskId === id &&
+              (e.status === TaskExecutionStatus.Pending || e.status === TaskExecutionStatus.Running),
+          )
+          setActiveExecution(active ?? null)
+        }
       } catch {
         // ignore polling failures
       } finally {
@@ -381,7 +379,6 @@ export function TaskImpact() {
 
   const displayTitle = task?.title || t("impact.untitled")
   const displayId = `TASK-${task?.id.slice(0, 6).toUpperCase()}`
-  const displayBranch = `feature/${task?.title.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 30)}`
 
   const priorityInfo = task
     ? getPriorityToneAndLabel(task.priority)
@@ -454,10 +451,6 @@ export function TaskImpact() {
               <h1 className="truncate text-[15px] font-semibold text-foreground" title={displayTitle}>
                 {displayTitle}
               </h1>
-            </div>
-            <div className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-subtle-foreground min-w-0 truncate">
-              <GitBranch className="h-3 w-3 shrink-0" />
-              <span className="truncate">{displayBranch}</span>
             </div>
           </div>
           <Badge tone={lifecycleState.statusTone} className="shrink-0">
@@ -965,7 +958,7 @@ export function TaskImpact() {
                   </div>
                   <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground break-words">
                     {t("impact.approvalDesc1")}
-                    <span className="font-mono text-foreground break-all">{displayBranch}</span>{t("impact.approvalDesc2")}
+                    {t("impact.approvalDesc2")}
                   </p>
 
                   {realFiles.length > 20 && (

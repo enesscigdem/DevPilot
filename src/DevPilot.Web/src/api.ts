@@ -59,6 +59,14 @@ import type {
 
 const BASE_URL = '/api';
 
+/** An HTTP failure that keeps the status, so callers can tell "not found" from "server error" without reading text. */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -75,7 +83,7 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // ignore parse error
     }
-    throw new Error(message);
+    throw new ApiError(message, response.status);
   }
 
   if (response.status === 204) {
@@ -142,7 +150,7 @@ export async function getTaskImpactAnalysis(id: string): Promise<ImpactAnalysis 
   try {
     return await http<ImpactAnalysis>(`/tasks/${id}/impact-analysis`);
   } catch (err) {
-    if (err instanceof Error && err.message.includes('404')) {
+    if (err instanceof ApiError && err.status === 404) {
       return null;
     }
     throw err;
